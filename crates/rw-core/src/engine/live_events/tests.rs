@@ -197,3 +197,65 @@ fn receiver_retains_ring_credit_after_all_senders_drop() {
     drop(receiver);
     assert_eq!(budget.used(), 0);
 }
+
+#[tokio::test]
+async fn fully_observed_payload_is_released_without_another_publication() {
+    let budget = Budget::new(1024 * 1024);
+    let events = LiveEvents::with_budget(8, Arc::clone(&budget)).expect("channel");
+    let empty = budget.used();
+    events
+        .send(RoutedEvent {
+            target: None,
+            event: durable(0, 64 * 1024),
+        })
+        .expect("no subscribers");
+    assert_eq!(budget.used(), empty, "zero subscribers retain no body");
+    let mut receiver = events
+        .subscribe(ClientId("client".into()))
+        .expect("receiver");
+    let idle = budget.used();
+    events
+        .send(RoutedEvent {
+            target: None,
+            event: durable(1, 64 * 1024),
+        })
+        .expect("send");
+    let Received::Event(held) = receiver.recv().await.expect("receive") else {
+        panic!("payload");
+    };
+    assert!(budget.used() > idle);
+    drop(held);
+    assert_eq!(
+        budget.used(),
+        idle,
+        "a consumed ring slot must not retain its body"
+    );
+    events
+        .send(RoutedEvent {
+            target: None,
+            event: durable(2, 64 * 1024),
+        })
+        .expect("held send");
+    let Received::Event(held) = receiver.recv().await.expect("held receive") else {
+        panic!("payload");
+    };
+    events
+        .send(RoutedEvent {
+            target: None,
+            event: durable(3, 64 * 1024),
+        })
+        .expect("unread send");
+    let with_unread = budget.used();
+    drop(receiver);
+    assert!(
+        budget.used() < with_unread,
+        "last receiver drop releases unread body and identity"
+    );
+    assert!(
+        budget.used() > empty,
+        "returned guard remains charged after receiver drop"
+    );
+    assert_eq!(held.meta().expect("held source").sequence_id, SequenceId(2));
+    drop(held);
+    assert_eq!(budget.used(), empty);
+}

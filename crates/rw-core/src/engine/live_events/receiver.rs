@@ -19,7 +19,7 @@ impl LiveReceiver {
         }
     }
     fn poll(&self) -> Result<Option<Received>, AgentLoopError> {
-        let channel = self
+        let mut channel = self
             .state
             .channel
             .lock()
@@ -41,20 +41,25 @@ impl LiveReceiver {
             let Some(frame) = channel.frames.get(offset) else {
                 return Ok(channel.closed.then_some(Received::Closed));
             };
-            self.subscriber.seen.store(frame.ordinal, Ordering::Release);
-            if frame
+            let received = if frame
                 .target
                 .as_ref()
-                .is_some_and(|target| target != &self.subscriber.client)
+                .is_none_or(|target| target == &self.subscriber.client)
             {
-                continue;
+                Some(
+                    frame
+                        .payload
+                        .as_ref()
+                        .map_or(Received::CatchUp, |event| Received::Event(event.clone())),
+                )
+            } else {
+                None
+            };
+            self.subscriber.seen.store(frame.ordinal, Ordering::Release);
+            channel.reclaim_observed();
+            if received.is_some() {
+                return Ok(received);
             }
-            return Ok(Some(
-                frame
-                    .payload
-                    .as_ref()
-                    .map_or(Received::CatchUp, |event| Received::Event(event.clone())),
-            ));
         }
     }
     pub(in crate::engine) async fn recv(&mut self) -> Result<Received, AgentLoopError> {
@@ -74,5 +79,18 @@ impl LiveReceiver {
             Some(Received::Event(event)) => Ok(event),
             _ => Err(AgentLoopError::Closed),
         }
+    }
+}
+
+impl Drop for LiveReceiver {
+    fn drop(&mut self) {
+        // The departing cursor no longer owns any unread frame. Payload guards
+        // already returned to this caller keep their separate allocation credit.
+        self.subscriber.seen.store(u64::MAX, Ordering::Release);
+        self.state
+            .channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reclaim_observed();
     }
 }

@@ -125,6 +125,22 @@ impl Channel {
             }
         }
     }
+    fn reclaim_observed(&mut self) {
+        let through = self
+            .subscribers
+            .iter()
+            .filter_map(Weak::upgrade)
+            .map(|subscriber| subscriber.seen.load(Ordering::Acquire))
+            .min()
+            .unwrap_or(u64::MAX);
+        while self
+            .frames
+            .front()
+            .is_some_and(|frame| frame.ordinal <= through)
+        {
+            self.frames.pop_front();
+        }
+    }
     fn push(&mut self, frame: Frame) {
         if self.frames.len() == self.capacity
             && let Some(evicted) = self.frames.pop_front()
@@ -136,6 +152,7 @@ impl Channel {
             }
         }
         self.frames.push_back(frame);
+        self.reclaim_observed();
     }
 }
 impl LiveEvents {
