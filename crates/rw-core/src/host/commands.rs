@@ -72,6 +72,27 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::ReadChildState {
+                meta,
+                session_id,
+                target,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let service = session
+                    .subagents()
+                    .ok_or_else(|| HostError::Query("family controls unavailable".into()))?;
+                let snapshot = service.child_state(&session_id, &target).await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ChildStateReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        target,
+                        snapshot,
+                    }],
+                ))
+            }
             ClientCommand::ReadChildControls {
                 meta,
                 session_id,

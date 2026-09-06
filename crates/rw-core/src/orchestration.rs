@@ -297,6 +297,9 @@ pub trait SubagentSession: Send + Sync {
     fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary;
     /// # Errors
     /// Rejects unavailable actors or snapshots exceeding the source admission.
+    async fn child_state(
+        &self,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, OrchestrationError>;
     async fn child_controls(
         &self,
     ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError>;

@@ -719,6 +719,13 @@ impl rw_core::SubagentSession for RecoveryProbeSession {
     fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
         rw_types::family_controls::ChildControlSummary::default()
     }
+    async fn child_state(
+        &self,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, rw_core::OrchestrationError> {
+        Err(rw_core::OrchestrationError::Session(
+            "fixture has no actor controls".into(),
+        ))
+    }
     async fn child_controls(
         &self,
     ) -> Result<rw_types::family_controls::ChildControlsSnapshot, rw_core::OrchestrationError> {

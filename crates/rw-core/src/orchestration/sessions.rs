@@ -137,6 +137,11 @@ impl SubagentSession for WorktreeSubagentSession {
     fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
         self.inner.control_summary()
     }
+    async fn child_state(
+        &self,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, OrchestrationError> {
+        self.inner.child_state().await
+    }
     async fn child_controls(
         &self,
     ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError> {
@@ -421,6 +426,14 @@ pub(super) struct ActorSubagentSession {
 impl SubagentSession for ActorSubagentSession {
     fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
         self.handle.control_summary()
+    }
+    async fn child_state(
+        &self,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, OrchestrationError> {
+        self.handle
+            .live_state()
+            .await
+            .map_err(|error| OrchestrationError::Session(error.to_string()))
     }
     async fn child_controls(
         &self,

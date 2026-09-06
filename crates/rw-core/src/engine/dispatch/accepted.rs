@@ -545,6 +545,7 @@ pub(super) async fn apply_accepted(
         | ClientCommand::GetSessionState { .. }
         | ClientCommand::GetSessionControls { .. }
         | ClientCommand::ReadFamilyControls { .. }
+        | ClientCommand::ReadChildState { .. }
         | ClientCommand::ReadChildControls { .. }
         | ClientCommand::ResolveChildControl { .. }
         | ClientCommand::GetUiCatalog { .. }

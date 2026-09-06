@@ -32,6 +32,11 @@ pub enum ClientCommand {
         #[ts(optional = false)]
         after_revision: Option<SequenceId>,
     },
+    ReadChildState {
+        meta: CommandMeta,
+        session_id: SessionId,
+        target: crate::family_controls::ChildControlTarget,
+    },
     ReadChildControls {
         meta: CommandMeta,
         session_id: SessionId,
@@ -425,6 +430,7 @@ impl ClientCommand {
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
             | Self::ReadFamilyControls { meta, .. }
+            | Self::ReadChildState { meta, .. }
             | Self::ReadChildControls { meta, .. }
             | Self::ResolveChildControl { meta, .. }
             | Self::GetUiCatalog { meta, .. }
@@ -511,6 +517,7 @@ impl ClientCommand {
             | Self::GetSessionState { session_id, .. }
             | Self::GetSessionControls { session_id, .. }
             | Self::ReadFamilyControls { session_id, .. }
+            | Self::ReadChildState { session_id, .. }
             | Self::ReadChildControls { session_id, .. }
             | Self::ResolveChildControl { session_id, .. }
             | Self::GetUiCatalog { session_id, .. }
@@ -588,6 +595,7 @@ impl ClientCommand {
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
             | Self::ReadFamilyControls { meta, .. }
+            | Self::ReadChildState { meta, .. }
             | Self::ReadChildControls { meta, .. }
             | Self::ResolveChildControl { meta, .. }
             | Self::GetUiCatalog { meta, .. }
@@ -696,6 +704,7 @@ read_commands!(
     GetSessionState,
     GetSessionControls,
     ReadFamilyControls,
+    ReadChildState,
     ReadChildControls,
     GetUiCatalog,
     GetUiPanels,

@@ -214,6 +214,21 @@ impl HostSubagentService for HostedSubagentController {
             .family_controls(root)
             .map_err(|error| HostError::Protocol(error.to_string()))
     }
+    async fn child_state(
+        &self,
+        root: &SessionId,
+        target: &rw_types::family_controls::ChildControlTarget,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, HostError> {
+        self.ensure_parent(root)?;
+        let child = self
+            .orchestrator
+            .control_child(root, target)
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        child
+            .child_state()
+            .await
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
     async fn child_controls(
         &self,
         root: &SessionId,

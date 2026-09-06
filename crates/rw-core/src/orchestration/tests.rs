@@ -163,6 +163,13 @@ impl SubagentSession for FakeSession {
     fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
         rw_types::family_controls::ChildControlSummary::default()
     }
+    async fn child_state(
+        &self,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, crate::OrchestrationError> {
+        Err(crate::OrchestrationError::Session(
+            "fixture has no actor controls".into(),
+        ))
+    }
     async fn child_controls(
         &self,
     ) -> Result<rw_types::family_controls::ChildControlsSnapshot, crate::OrchestrationError> {

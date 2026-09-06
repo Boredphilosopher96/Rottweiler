@@ -71,12 +71,21 @@ async fn explicit_root_driver_answers_exact_child_question_without_changing_chil
         })
         .await
         .expect("send");
+    let mut started = None;
     let question_id = loop {
-        if let EngineEvent::QuestionAsked { question_id, .. } = events.recv().await.expect("event")
-        {
-            break question_id;
+        match events.recv().await.expect("event") {
+            EngineEvent::TurnStarted { meta, turn_id, .. } => {
+                started = Some((meta.sequence_id, turn_id));
+            }
+            EngineEvent::QuestionAsked { question_id, .. } => break question_id,
+            _ => {}
         }
     };
+    let state = child.live_state().await.expect("child state");
+    let active = state.active_turn.as_ref().expect("active question turn");
+    let (source, turn_id) = started.expect("durable turn start");
+    assert_eq!(active.turn_id, turn_id);
+    assert_eq!(active.started, Some(source));
     let before = child.child_controls().await.expect("snapshot");
     assert_eq!(before.snapshot.controls.questions.len(), 1);
     assert_eq!(child.control_summary().questions, 1);

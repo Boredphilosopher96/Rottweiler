@@ -215,6 +215,15 @@ impl SubagentSession for DeferredActorSession {
             _ => rw_types::family_controls::ChildControlSummary::default(),
         }
     }
+    async fn child_state(
+        &self,
+    ) -> Result<rw_types::session_state::SessionStateSnapshot, OrchestrationError> {
+        self.live(false)
+            .await?
+            .ok_or_else(closed)?
+            .child_state()
+            .await
+    }
     async fn child_controls(
         &self,
     ) -> Result<rw_types::family_controls::ChildControlsSnapshot, OrchestrationError> {
