@@ -61,10 +61,10 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
-rw-resources = { path = "crates/rw-resources" }
+rw-resources = { version = "0.1.4", path = "crates/rw-resources" }
 redb = "=4.2.0"
 memchr = "2.8.3"
-rw-operation-contract = { path = "crates/rw-operation-contract" }
+rw-operation-contract = { version = "0.1.4", path = "crates/rw-operation-contract" }
 base64 = "0.23.0"
 blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive"] }

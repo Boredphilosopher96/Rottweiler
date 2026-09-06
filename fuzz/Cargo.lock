@@ -1336,6 +1336,7 @@ dependencies = [
  "getrandom 0.4.3",
  "regex",
  "reqwest",
+ "rw-resources",
  "rw-types",
  "schemars",
  "serde",
@@ -1350,6 +1351,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rw-resources"
+version = "0.1.4"
+dependencies = [
+ "rustix",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rw-store"
 version = "0.1.4"
 dependencies = [
@@ -1359,6 +1370,7 @@ dependencies = [
  "redb",
  "rusqlite",
  "rustix",
+ "rw-resources",
  "rw-types",
  "serde",
  "serde_json",
