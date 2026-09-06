@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn required_nullable<T: DeserializeOwned + Serialize + JsonSchema>(
-    value: Value,
+    value: &Value,
     fields: &[&str],
 ) -> TestResult {
     let decoded: T = serde_json::from_value(value.clone())?;
@@ -66,30 +66,30 @@ fn preview() -> Value {
 
 #[test]
 fn transcript_nullable_cursors_and_identities_reject_missing_keys() -> TestResult {
-    required_nullable::<TranscriptView>(view(), &["through"])?;
+    required_nullable::<TranscriptView>(&view(), &["through"])?;
     required_nullable::<TranscriptRead>(
-        json!({"known_view":null,"position":{"type":"latest"},
+        &json!({"known_view":null,"position":{"type":"latest"},
         "max_items":1,"max_bytes":4096}),
         &["known_view"],
     )?;
     required_nullable::<TranscriptItem>(
-        json!({"id":"1","ordinal":"0","revision":"1",
+        &json!({"id":"1","ordinal":"0","revision":"1",
         "agent_turn":null,"content":{"type":"conversation","role":"user","blocks":[],
         "omitted_blocks":false,"source":source()}}),
         &["agent_turn"],
     )?;
     required_nullable::<TranscriptContentPage>(
-        json!({"view":view(),"source":source(),
+        &json!({"view":view(),"source":source(),
         "offset":0,"next_offset":null,"total_bytes":0,"format":"text","text":""}),
         &["next_offset"],
     )?;
     required_nullable::<TranscriptAnchor>(
-        json!({"type":"replaced","requested":"1",
+        &json!({"type":"replaced","requested":"1",
         "replacement":null}),
         &["replacement"],
     )?;
     required_nullable::<TranscriptReadResult>(
-        json!({"type":"catching_up","through":null,
+        &json!({"type":"catching_up","through":null,
         "target":null}),
         &["through", "target"],
     )?;
@@ -99,18 +99,18 @@ fn transcript_nullable_cursors_and_identities_reject_missing_keys() -> TestResul
 #[test]
 fn transcript_nullable_display_fields_reject_missing_keys() -> TestResult {
     required_nullable::<TranscriptContent>(
-        json!({"type":"tool","invocation_id":"host-call",
+        &json!({"type":"tool","invocation_id":"host-call",
         "name":"read","call_index":0,"arguments":preview(),"diff":null,
         "status":{"type":"running"}}),
         &["diff"],
     )?;
     required_nullable::<TranscriptContent>(
-        json!({"type":"shell","command":null,
+        &json!({"type":"shell","command":null,
         "output":null,"active":false,"status":null}),
         &["command", "output", "status"],
     )?;
     required_nullable::<TranscriptSubagentStatus>(
-        json!({"type":"finished","status":"completed",
+        &json!({"type":"finished","status":"completed",
         "result":preview(),"touched_file_count":0,"diff":null}),
         &["diff"],
     )?;
@@ -120,11 +120,11 @@ fn transcript_nullable_display_fields_reject_missing_keys() -> TestResult {
 #[test]
 fn model_and_approval_nullability_does_not_accept_omitted_fields() -> TestResult {
     required_nullable::<ModelSwitchQuestion>(
-        json!({"model":"primary","provider":null}),
+        &json!({"model":"primary","provider":null}),
         &["provider"],
     )?;
     required_nullable::<McpApprovalReview>(
-        json!({"server":"fixture","transport":"stdio",
+        &json!({"server":"fixture","transport":"stdio",
         "endpoint":null,"origin":"user","defer_tools":false,"fingerprint":"fixture",
         "previously_approved":false}),
         &["endpoint"],
@@ -132,7 +132,7 @@ fn model_and_approval_nullability_does_not_accept_omitted_fields() -> TestResult
     let mut capabilities = json!({"tool_calling":true,"vision":false,"thinking":false,
         "cache_behavior":"none","max_context_tokens":null,"max_output_tokens":null});
     required_nullable::<ModelCapabilities>(
-        capabilities.clone(),
+        &capabilities.clone(),
         &["max_context_tokens", "max_output_tokens"],
     )?;
     capabilities["max_context_tokens"] = json!("18446744073709551615");
@@ -185,7 +185,7 @@ fn every_cost_limit_requires_an_explicit_nullable_decimal() -> TestResult {
     for field in COST_LIMITS {
         value[*field] = Value::Null;
     }
-    required_nullable::<CostSnapshot>(value.clone(), COST_LIMITS)?;
+    required_nullable::<CostSnapshot>(&value, COST_LIMITS)?;
     for field in COST_LIMITS {
         value[*field] = json!("18446744073709551615");
     }
@@ -198,5 +198,5 @@ fn every_cost_limit_requires_an_explicit_nullable_decimal() -> TestResult {
 
 #[test]
 fn empty_cache_boundary_requires_its_explicit_source_field() -> TestResult {
-    required_nullable::<CacheBreakpoint>(json!({"after_item_id":null}), &["after_item_id"])
+    required_nullable::<CacheBreakpoint>(&json!({"after_item_id":null}), &["after_item_id"])
 }
