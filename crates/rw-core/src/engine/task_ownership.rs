@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tracing::Instrument;
 
 use super::{AgentLoopError, CancellationToken, SessionActorConfig};
 
@@ -38,12 +39,16 @@ impl ActorTasks {
         work: impl Future<Output = T> + Send + 'static,
     ) -> Result<tokio::task::JoinHandle<T>, AgentLoopError> {
         let guard = self.admit(owners, cancellation)?;
-        Ok(tokio::spawn(async move {
-            let mut guard = guard;
-            let result = work.await;
-            guard.completed = true;
-            result
-        }))
+        let span = tracing::Span::current();
+        Ok(tokio::spawn(
+            async move {
+                let mut guard = guard;
+                let result = work.await;
+                guard.completed = true;
+                result
+            }
+            .instrument(span),
+        ))
     }
 
     /// Blocking work remains registered until the actual worker exits, even when
@@ -55,11 +60,14 @@ impl ActorTasks {
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Result<tokio::task::JoinHandle<T>, AgentLoopError> {
         let guard = self.admit(owners, cancellation)?;
+        let span = tracing::Span::current();
         Ok(tokio::task::spawn_blocking(move || {
-            let mut guard = guard;
-            let result = work();
-            guard.completed = true;
-            result
+            span.in_scope(|| {
+                let mut guard = guard;
+                let result = work();
+                guard.completed = true;
+                result
+            })
         }))
     }
 

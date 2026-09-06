@@ -14,6 +14,7 @@ mod ordered_output;
 pub(in crate::engine) mod plugin_tool;
 mod progress;
 mod provider_calls;
+mod provider_context;
 mod provider_messages;
 mod redaction;
 mod run;

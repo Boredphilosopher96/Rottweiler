@@ -1,6 +1,7 @@
 //! Immutable stable-prefix preparation avoids repeated schema hashing and tokenization.
 use super::{
-    AssembledContext, AssemblyError, AssemblyInput, ContextAssembler, ContextItem, append_region,
+    AssembledContext, AssemblyError, AssemblyInput, ContextAssembler, ContextItem,
+    ContextItemBreakdown, PreparedContextItem,
 };
 use rw_providers::{CacheBreakpointSupport, ToolDefinition};
 use std::collections::HashSet;
@@ -34,9 +35,9 @@ impl PreparedPrefix {
     /// Rejects duplicate item identities across the prefix and all request regions.
     pub fn assemble(
         &self,
-        conversation: Vec<ContextItem>,
-        pins: Vec<ContextItem>,
-        queued: Vec<ContextItem>,
+        conversation: Vec<PreparedContextItem>,
+        pins: Vec<PreparedContextItem>,
+        queued: Vec<PreparedContextItem>,
     ) -> Result<AssembledContext, AssemblyError> {
         let mut seen = self
             .base
@@ -45,25 +46,25 @@ impl PreparedPrefix {
             .map(|item| &item.id)
             .collect::<HashSet<_>>();
         for item in conversation.iter().chain(&pins).chain(&queued) {
-            if !seen.insert(&item.id) {
-                return Err(AssemblyError::DuplicateItemId(item.id.0.clone()));
+            if !seen.insert(&item.item.id) {
+                return Err(AssemblyError::DuplicateItemId(item.item.id.0.clone()));
             }
         }
         drop(seen);
         let mut result = self.base.clone();
-        append_region(
+        append_prepared_region(
             &mut result.turns,
             &mut result.items,
             conversation,
             &mut result.token_totals.conversation,
         );
-        append_region(
+        append_prepared_region(
             &mut result.turns,
             &mut result.items,
             pins,
             &mut result.token_totals.pins,
         );
-        append_region(
+        append_prepared_region(
             &mut result.turns,
             &mut result.items,
             queued,
@@ -76,5 +77,36 @@ impl PreparedPrefix {
             .saturating_add(result.token_totals.pins)
             .saturating_add(result.token_totals.queued);
         Ok(result)
+    }
+}
+
+fn append_prepared_region(
+    turns: &mut Vec<rw_types::Turn>,
+    breakdown: &mut Vec<ContextItemBreakdown>,
+    items: Vec<PreparedContextItem>,
+    region_tokens: &mut u64,
+) {
+    for prepared in items {
+        let item = prepared.item;
+        let assembled_turn_index = if item.evicted {
+            None
+        } else {
+            let index = turns.len();
+            turns.push(item.turn);
+            *region_tokens = region_tokens.saturating_add(prepared.tokens);
+            Some(index)
+        };
+        breakdown.push(ContextItemBreakdown {
+            id: item.id,
+            kind: item.kind,
+            label: item.label,
+            provenance: item.provenance,
+            tokens: prepared.tokens,
+            pinned: item.pinned,
+            evicted: item.evicted,
+            summarized: item.summarized,
+            pruned: item.pruned,
+            assembled_turn_index,
+        });
     }
 }

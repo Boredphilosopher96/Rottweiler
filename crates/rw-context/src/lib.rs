@@ -14,7 +14,8 @@ pub use toon_admission::ToonAllocation;
 pub use assembly::{
     AssembledContext, AssemblyError, AssemblyInput, CacheBreakpoint, CacheBreakpointKind,
     ContextAssembler, ContextItem, ContextItemBreakdown, ContextItemId, ContextItemKind,
-    ContextProvenance, PreparedPrefix, PromptDump, TokenTotals,
+    ContextItemProperties, ContextProvenance, PreparedContextItem, PreparedPrefix, PreparedTurn,
+    PromptDump, TokenTotals,
 };
 pub use budget::{
     BudgetEstimate, BudgetSnapshot, Budgeter, InvalidBudgetSnapshot, OverflowDecision,

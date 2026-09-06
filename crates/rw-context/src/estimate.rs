@@ -52,7 +52,9 @@ impl LocalTokenEstimator {
         })
     }
 
-    fn block(block: &Block) -> u64 {
+    /// Estimate one immutable block, including its provider-neutral framing.
+    #[must_use]
+    pub fn block(block: &Block) -> u64 {
         let body = match block {
             Block::Text { text } => Self::text(text),
             Block::Thinking { content, signature } => {

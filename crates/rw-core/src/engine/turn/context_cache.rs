@@ -1,7 +1,7 @@
 //! Request cache owned by the context working lease, never by the session history.
 use super::context::prompt_turn;
 use crate::engine::recovery::ConversationSource;
-use rw_context::{PreparedPrefix, ToonPromptEncoder};
+use rw_context::{PreparedPrefix, PreparedTurn, ToonPromptEncoder};
 use rw_providers::CacheBreakpointSupport;
 use rw_types::{Block, SequenceId, Turn};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,7 +17,7 @@ struct NormalizedTurn {
     pruned: Vec<u32>,
     incoming: ToonPromptEncoder,
     outgoing: ToonPromptEncoder,
-    turn: Turn,
+    turn: PreparedTurn,
 }
 impl ContextCache {
     /// Sources identify immutable durable values. A changed prune selection or
@@ -27,7 +27,7 @@ impl ContextCache {
         conversation: &[Turn],
         sources: &[ConversationSource],
         pruned: &BTreeMap<String, u64>,
-    ) -> Vec<Turn> {
+    ) -> Vec<PreparedTurn> {
         // Logical order need not be physical sequence order after prefix replacement.
         let selected = sources
             .iter()
@@ -48,7 +48,7 @@ impl ContextCache {
         sequence: SequenceId,
         pruned: &BTreeMap<String, u64>,
         toon: &mut ToonPromptEncoder,
-    ) -> Turn {
+    ) -> PreparedTurn {
         let selected = turn
             .blocks
             .iter()
@@ -81,7 +81,7 @@ impl ContextCache {
             self.normalizations += 1;
         }
         let incoming = *toon;
-        let normalized = prompt_turn(turn, sequence, pruned, toon);
+        let normalized = PreparedTurn::new(prompt_turn(turn, sequence, pruned, toon));
         self.turns.insert(
             sequence.0,
             NormalizedTurn {

@@ -1,3 +1,4 @@
+use super::provider_context::{ProviderContext, Reservation, Selection};
 use crate::engine::AgentTurnStatus;
 use crate::engine::PreparedUserMessage;
 use crate::engine::SessionUsage;
@@ -16,9 +17,7 @@ use crate::engine::turn::accounting::persist_incomplete_budget_caps;
 use crate::engine::turn::command_tools::CommandToolRuntime;
 use crate::engine::turn::command_tools::apply_command_tool_calls;
 use crate::engine::turn::compaction::compact_during_turn;
-use crate::engine::turn::context::assemble_session_context;
 use crate::engine::turn::context::context_snapshot;
-use crate::engine::turn::context::prune_before_provider_request;
 use crate::engine::turn::context::resolved_overflow_policy;
 use crate::engine::turn::hooks::dispatch_hook;
 use crate::engine::turn::hooks::hook_rejection;
@@ -63,7 +62,6 @@ use rw_types::TurnMeta;
 use rw_types::hook_contract::HookInput;
 use rw_types::hook_contract::HookPromptInput;
 use std::collections::BTreeMap;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -262,53 +260,43 @@ pub(super) async fn run_turn(
                     break;
                 }
             };
-        let working_result = if let Some(working) = context_working.take() {
-            super::context_memory::readmit(working, &config, &conversation, &VecDeque::new())
+        let reservation = if let Some(working) = context_working.take() {
+            Reservation::Retained(working)
         } else {
             match super::history_context::reserve_working(&config).await {
-                Ok(reserved) => {
-                    super::context_memory::admit(reserved, &config, &conversation, &VecDeque::new())
+                Ok(reserved) => Reservation::Fresh(reserved),
+                Err(error) => {
+                    send_event(
+                        &signals,
+                        PendingEvent::Error {
+                            message: error.to_string(),
+                        },
+                    );
+                    status = AgentTurnStatus::Failed;
+                    break;
                 }
-                Err(error) => Err(error),
             }
         };
-        let mut working = match working_result {
-            Ok(working) => working,
-            Err(error) => {
-                send_event(
-                    &signals,
-                    PendingEvent::Error {
-                        message: error.to_string(),
-                    },
-                );
-                status = AgentTurnStatus::Failed;
-                break;
-            }
+        let context_worker = ProviderContext {
+            config: &config,
+            tasks: &tasks,
+            signals: &signals,
+            cancellation: &cancellation,
         };
-        if prune_before_provider_request(
-            &working,
-            &conversation,
-            &sources,
-            &context_surgery,
-            &mut pruned_tool_outputs,
-            &signals,
-        )
-        .await
-        .is_err()
+        let (mut working, mut assembled) = match context_worker
+            .assemble(
+                reservation,
+                Selection {
+                    conversation: &mut conversation,
+                    sources: &sources,
+                    surgery: &context_surgery,
+                    pruned: &mut pruned_tool_outputs,
+                },
+                true,
+            )
+            .await
         {
-            status = AgentTurnStatus::Failed;
-            break;
-        }
-        let mut assembled = match assemble_session_context(
-            &config,
-            &working,
-            &conversation,
-            &sources,
-            &VecDeque::new(),
-            &context_surgery,
-            &pruned_tool_outputs,
-        ) {
-            Ok(assembled) => assembled,
+            Ok(prepared) => prepared,
             Err(error) => {
                 send_event(
                     &signals,
@@ -380,34 +368,20 @@ pub(super) async fn run_turn(
                         break;
                     }
                 };
-                working = match super::context_memory::readmit(
-                    working,
-                    &config,
-                    &conversation,
-                    &VecDeque::new(),
-                ) {
-                    Ok(working) => working,
-                    Err(error) => {
-                        send_event(
-                            &signals,
-                            PendingEvent::Error {
-                                message: error.to_string(),
-                            },
-                        );
-                        status = AgentTurnStatus::Failed;
-                        break;
-                    }
-                };
-                assembled = match assemble_session_context(
-                    &config,
-                    &working,
-                    &conversation,
-                    &sources,
-                    &VecDeque::new(),
-                    &context_surgery,
-                    &pruned_tool_outputs,
-                ) {
-                    Ok(assembled) => assembled,
+                (working, assembled) = match context_worker
+                    .assemble(
+                        Reservation::Retained(working),
+                        Selection {
+                            conversation: &mut conversation,
+                            sources: &sources,
+                            surgery: &context_surgery,
+                            pruned: &mut pruned_tool_outputs,
+                        },
+                        false,
+                    )
+                    .await
+                {
+                    Ok(prepared) => prepared,
                     Err(error) => {
                         send_event(
                             &signals,

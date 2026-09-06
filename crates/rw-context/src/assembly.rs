@@ -1,7 +1,9 @@
 //! Stable-prefix context assembly with provenance and cache metadata.
 
 mod prepared;
+mod prepared_turn;
 pub use prepared::PreparedPrefix;
+pub use prepared_turn::{ContextItemProperties, PreparedContextItem, PreparedTurn};
 
 use std::collections::HashSet;
 

@@ -4,8 +4,6 @@ use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::recovery::ConversationSource;
 use crate::engine::session::SessionActorConfig;
-use crate::engine::turn::provider_messages::persist_event;
-use crate::engine::turn::signals::TurnSignal;
 use rw_context::AssembledContext;
 use rw_context::ContextItem as AssemblyContextItem;
 use rw_context::ContextItemId as AssemblyContextItemId;
@@ -41,7 +39,6 @@ use rw_types::context_source::conversation_item;
 use rw_types::{ContextBlockId, SequenceId};
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use tokio::sync::mpsc;
 
 pub(super) fn context_action_state(
     actions: &[ContextSurgeryAction],
@@ -161,7 +158,10 @@ pub(in crate::engine) fn assemble_session_context(
         surgery,
         pruned_tool_outputs,
     );
-    let queued = queued_items(queued);
+    let queued = queued_items(queued)
+        .into_iter()
+        .map(rw_context::PreparedContextItem::new)
+        .collect();
     let support = config
         .model
         .context_metadata(&config.model_alias)
@@ -195,11 +195,11 @@ pub(in crate::engine) fn assemble_session_context(
 
 fn conversation_items(
     conversation: &[Turn],
-    normalized: Vec<Turn>,
+    normalized: Vec<rw_context::PreparedTurn>,
     sources: &[ConversationSource],
     surgery: &[ContextSurgeryAction],
     pruned_tool_outputs: &BTreeMap<String, u64>,
-) -> Vec<AssemblyContextItem> {
+) -> Vec<rw_context::PreparedContextItem> {
     conversation
         .iter()
         .zip(normalized)
@@ -211,7 +211,7 @@ fn conversation_items(
             let pruned = turn.blocks.iter().enumerate().any(|(block_index, block)| {
                 matches!(block, Block::ToolResult { .. } if pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key()))
             });
-            AssemblyContextItem {
+            normalized.into_item(rw_context::ContextItemProperties {
                 id: AssemblyContextItemId(item_id.0),
                 kind: if pinned {
                     AssemblyContextItemKind::Pin
@@ -226,12 +226,11 @@ fn conversation_items(
                         sequence: sequence.0,
                     }
                 },
-                turn: normalized,
                 pinned,
                 evicted,
                 summarized: turn.meta.summary,
                 pruned,
-            }
+            })
         })
         .collect()
 }
@@ -536,14 +535,13 @@ pub(in crate::engine) fn prompt_dump(
     }
 }
 
-pub(super) async fn prune_before_provider_request(
+pub(super) fn prune_plan(
     working: &super::context_memory::ContextWorkingSet,
     conversation: &[Turn],
     sources: &[ConversationSource],
     context_surgery: &[ContextSurgeryAction],
-    pruned_tool_outputs: &mut BTreeMap<String, u64>,
-    signals: &mpsc::UnboundedSender<TurnSignal>,
-) -> Result<(), AgentLoopError> {
+    pruned_tool_outputs: &BTreeMap<String, u64>,
+) -> Result<Vec<PendingEvent>, AgentLoopError> {
     working.validate()?;
     let mut tool_names = BTreeMap::<String, String>::new();
     let mut records = Vec::new();
@@ -579,7 +577,7 @@ pub(super) async fn prune_before_provider_request(
                 item_id: context_id.0.clone(),
                 transcript_index: records.len(),
                 kind: PruneRecordKind::SummaryMarker,
-                tokens: LocalTokenEstimator::turn(prompt_conversation_turn),
+                tokens: prompt_conversation_turn.tokens(),
                 pinned,
             });
             continue;
@@ -589,24 +587,26 @@ pub(super) async fn prune_before_provider_request(
                 item_id: context_id.0.clone(),
                 transcript_index: records.len(),
                 kind: PruneRecordKind::User,
-                tokens: LocalTokenEstimator::turn(prompt_conversation_turn),
+                tokens: prompt_conversation_turn.tokens(),
                 pinned,
             });
         }
-        for (block_index, (block, prompt_block)) in conversation_turn
+        for (block_index, (block, _prompt_block)) in conversation_turn
             .blocks
             .iter()
-            .zip(&prompt_conversation_turn.blocks)
+            .zip(&prompt_conversation_turn.turn().blocks)
             .enumerate()
         {
             let Block::ToolResult { id, .. } = block else {
                 continue;
             };
-            let tokens = LocalTokenEstimator::turn(&Turn {
-                role: Role::Tool,
-                blocks: vec![prompt_block.clone()],
-                meta: TurnMeta::default(),
-            });
+            let tokens = 4_u64.saturating_add(
+                prompt_conversation_turn
+                    .block_tokens(block_index)
+                    .ok_or_else(|| {
+                        AgentLoopError::Persistence("normalized block alignment".into())
+                    })?,
+            );
             let identity = block_source(sequence, block_index);
             let already_pruned = pruned_tool_outputs.contains_key(&identity.key());
             identities.insert(identity.key(), identity);
@@ -631,18 +631,14 @@ pub(super) async fn prune_before_provider_request(
         }
     }
     let plan = Pruner::plan(&records, &PruneConfig::default());
-    for decision in plan.decisions {
-        persist_event(
-            signals,
-            PendingEvent::ToolOutputPruned {
-                source: identities[&decision.output_id],
-                reclaimed_tokens: decision.original_tokens,
-            },
-        )
-        .await?;
-        pruned_tool_outputs.insert(decision.output_id, decision.original_tokens);
-    }
-    Ok(())
+    Ok(plan
+        .decisions
+        .into_iter()
+        .map(|decision| PendingEvent::ToolOutputPruned {
+            source: identities[&decision.output_id],
+            reclaimed_tokens: decision.original_tokens,
+        })
+        .collect())
 }
 
 /// Block counts are bounded below u32 by canonical event admission.
@@ -681,11 +677,16 @@ pub(in crate::engine) fn assemble_full_session_context(
     let normalized = conversation
         .iter()
         .zip(sources)
-        .map(|(turn, source)| prompt_turn(turn, source.sequence, pruned, &mut toon))
+        .map(|(turn, source)| {
+            rw_context::PreparedTurn::new(prompt_turn(turn, source.sequence, pruned, &mut toon))
+        })
         .collect();
     rw_context::ContextAssembler::assemble(rw_context::AssemblyInput {
         stable_prefix: stable_items(config),
-        conversation: conversation_items(conversation, normalized, sources, surgery, pruned),
+        conversation: conversation_items(conversation, normalized, sources, surgery, pruned)
+            .into_iter()
+            .map(rw_context::PreparedContextItem::into_item)
+            .collect(),
         pins: Vec::new(),
         queued: queued_items(queued),
         tools: tool_definitions(config),
