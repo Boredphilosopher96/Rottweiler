@@ -159,15 +159,7 @@ async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
     let root = tempfile::tempdir().expect("root");
     let child = rebind(&factory, root.path()).await;
     let caller_child = child.clone();
-    let caller = tokio::spawn(async move {
-        caller_child
-            .run_turn(
-                "question".into(),
-                CancellationToken::default(),
-                Arc::new(Progress),
-            )
-            .await
-    });
+    let caller = tokio::spawn(async move { caller_child.child_controls().await });
     entered.await.expect("preparation started");
     caller.abort();
     let _ = caller.await;
@@ -250,4 +242,70 @@ fn empty_controls<'a>(
             pending_plan: false,
         })
     })
+}
+
+struct UnpublishedResources {
+    bound: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl crate::SessionResources for UnpublishedResources {
+    fn bind_session(&self, _: crate::PluginSessionBinding) -> Result<(), crate::AgentLoopError> {
+        self.bound.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn shutdown(&self) -> Result<(), crate::AgentLoopError> {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn changed_dormant_source_rejects_publication_and_settles_prepared_resources() {
+    let bound = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicUsize::new(0));
+    let resources = Arc::new(UnpublishedResources {
+        bound: bound.clone(),
+        closed: closed.clone(),
+    });
+    let factory = ActorSubagentSessionFactory::new(|_| unreachable!("rebind only")).with_rebuilder(
+        move |session, root, _| {
+            let mut config = config(
+                root,
+                Arc::new(ScriptedModel::default()),
+                Arc::new(ToolRegistry::new()),
+                PermissionDecision::Allow,
+                builtin_hook_dispatcher().expect("hooks"),
+            );
+            config.session_id = session.clone();
+            config.resources = resources.clone();
+            Box::pin(super::fixtures::history::bind(config))
+        },
+        |session, root| {
+            Box::pin(async move {
+                let mut proof = empty_controls(session, root).await?;
+                proof.through = Some(rw_types::SequenceId(10));
+                Ok(proof)
+            })
+        },
+    );
+    let root = tempfile::tempdir().expect("root");
+    let child = rebind(&factory, root.path()).await;
+    let result = child.child_controls().await;
+    assert!(
+        result
+            .expect_err("changed source must reject")
+            .to_string()
+            .contains("source or registry changed")
+    );
+    assert_eq!(
+        bound.load(Ordering::SeqCst),
+        0,
+        "unqualified actor cannot publish capabilities"
+    );
+    assert_eq!(
+        closed.load(Ordering::SeqCst),
+        1,
+        "prepared resources must settle"
+    );
+    assert!(!child.control_summary().available);
 }
