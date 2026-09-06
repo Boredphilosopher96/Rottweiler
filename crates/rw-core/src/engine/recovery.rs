@@ -44,7 +44,7 @@ pub use read::{
     CanonicalHistory, HistoryMaterializationLimits, MAX_MATERIALIZED_HISTORY_BYTES,
     MAX_MATERIALIZED_HISTORY_DECODE_BYTES, MAX_MATERIALIZED_HISTORY_TURNS, RecoverySnapshot,
 };
-pub use repair::InterruptedTurnRecovery;
+pub use repair::{InterruptedTurnRecovery, RecoveredToolTurn};
 mod pages;
 mod state;
 mod subagents;

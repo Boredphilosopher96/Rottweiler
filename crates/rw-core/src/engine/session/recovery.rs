@@ -47,7 +47,7 @@ pub(in crate::engine) fn interrupted_tool_recovery_events(
 pub(super) struct InterruptedRecoveryEvents {
     turn: Option<u64>,
     events: Vec<PendingEvent>,
-    tool_turn: Option<rw_types::Turn>,
+    tool_turn: Option<crate::engine::recovery::RecoveredToolTurn>,
     completed: Vec<(
         rw_types::ToolCallId,
         rw_types::conversation_input::ToolResultReference,
@@ -108,9 +108,11 @@ impl InterruptedRecoveryEvents {
                 ));
             }
         }
-        if let Some(tool_turn) = self.tool_turn {
-            let logical = rw_types::tool_result_admission::ToolResultAdmission::measure(&tool_turn)
-                .map_err(|error| invalid_repair(&error.to_string()))?;
+        if let Some(crate::engine::recovery::RecoveredToolTurn {
+            turn: tool_turn,
+            logical,
+        }) = self.tool_turn
+        {
             let mut results = Vec::with_capacity(tool_turn.blocks.len());
             for block in tool_turn.blocks {
                 let rw_types::Block::ToolResult { id, .. } = block else {

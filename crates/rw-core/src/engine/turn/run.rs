@@ -218,6 +218,7 @@ pub(super) async fn run_turn(
 
     let mut compacted_source_owner = None;
     let mut context_working = None;
+    let mut pending_tool_owner = None;
     'iterations: for iteration in 0..config.max_turns {
         if cancellation.is_cancelled() {
             status = AgentTurnStatus::Interrupted;
@@ -321,6 +322,8 @@ pub(super) async fn run_turn(
                 break;
             }
         };
+        // The new context working plan now includes the previous result body.
+        drop(pending_tool_owner.take());
         let metadata = config.model.context_metadata(&config.model_alias);
         let compaction = config.model.compaction_config();
         let mut input_estimate = budgeter.estimate(&assembled.turns, &assembled.tools);
@@ -1119,11 +1122,23 @@ pub(super) async fn run_turn(
             blocks: tool_blocks,
             meta: TurnMeta::default(),
         };
-        let Ok(logical) = rw_types::tool_result_admission::ToolResultAdmission::measure(&tool_turn)
-        else {
-            status = AgentTurnStatus::Failed;
-            break;
-        };
+        let (tool_turn, logical, owner) =
+            match super::tool_result_profile::profile(tool_turn, &tasks, &config, &cancellation)
+                .await
+            {
+                Ok(profiled) => profiled,
+                Err(error) => {
+                    send_event(
+                        &signals,
+                        PendingEvent::Error {
+                            message: error.to_string(),
+                        },
+                    );
+                    status = AgentTurnStatus::Failed;
+                    break;
+                }
+            };
+        pending_tool_owner = Some(owner);
         if persist_event(
             &signals,
             PendingEvent::ConversationToolResultsCommitted {

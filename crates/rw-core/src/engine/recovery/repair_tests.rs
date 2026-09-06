@@ -115,9 +115,12 @@ fn committed_provider_call_recovers_its_completed_tool_result() {
         source_start(),
         source_finish(),
     ]);
-    assert_eq!(canonical.tool_turn, audit.interrupted_tool_turn);
+    assert_eq!(
+        canonical.tool_turn.as_ref().map(|value| &value.turn),
+        audit.interrupted_tool_turn.as_ref()
+    );
     assert!(canonical.tools.is_empty());
-    let turn = canonical.tool_turn.expect("provider result");
+    let turn = canonical.tool_turn.expect("provider result").turn;
     assert!(
         matches!(turn.blocks.as_slice(), [Block::ToolResult { is_error: false, output: ToolOutput::Text { text }, .. }] if text == "actual result")
     );
@@ -125,7 +128,10 @@ fn committed_provider_call_recovers_its_completed_tool_result() {
 #[test]
 fn committed_unstarted_provider_call_gets_the_same_repair_from_both_readers() {
     let (audit, canonical) = recover(vec![PendingEvent::TurnStarted { turn: 1 }, provider_call()]);
-    assert_eq!(canonical.tool_turn, audit.interrupted_tool_turn);
+    assert_eq!(
+        canonical.tool_turn.as_ref().map(|value| &value.turn),
+        audit.interrupted_tool_turn.as_ref()
+    );
     assert_eq!(canonical.tools, audit.interrupted_tool_repairs);
     assert_eq!(canonical.tools.len(), 1);
     assert_eq!(

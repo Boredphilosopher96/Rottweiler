@@ -13,12 +13,19 @@ use rw_types::{Block, Role, Turn, TurnMeta};
 pub struct InterruptedTurnRecovery {
     pub turn: u64,
     pub tools: Vec<InterruptedToolRepair>,
-    pub tool_turn: Option<Turn>,
+    pub tool_turn: Option<RecoveredToolTurn>,
     pub completed_results: Vec<(
         rw_types::ToolCallId,
         rw_types::conversation_input::ToolResultReference,
     )>,
     pub assistant_turn: Option<Turn>,
+}
+
+/// Repaired provider IR is profiled under the source worker's allocation owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecoveredToolTurn {
+    pub turn: Turn,
+    pub logical: rw_types::tool_result_admission::ToolResultAdmission,
 }
 
 impl InterruptedTurnInputs {
@@ -89,10 +96,17 @@ impl InterruptedTurnInputs {
             self.pending_starts,
             completed,
         );
+        let tool_turn = repair
+            .tool_turn
+            .map(|turn| {
+                let logical = rw_types::tool_result_admission::ToolResultAdmission::measure(&turn)?;
+                Ok::<_, RecoveryError>(RecoveredToolTurn { turn, logical })
+            })
+            .transpose()?;
         Ok(InterruptedTurnRecovery {
             turn: self.turn,
             tools: repair.tools,
-            tool_turn: repair.tool_turn,
+            tool_turn,
             completed_results,
             assistant_turn: (!assistant.is_empty()).then_some(Turn {
                 role: Role::Assistant,

@@ -54,7 +54,9 @@ impl RecoveryBootstrap {
         let controls = &self.controls;
         let repairs = self.interrupted.as_ref().map_or(Some(0), |repair| {
             sum([
-                heap(&repair.tool_turn),
+                repair.tool_turn.as_ref().map_or(Some(0), |value| {
+                    sum([heap(&value.turn), heap(&value.logical)])
+                }),
                 vector(&repair.completed_results, |(id, result)| {
                     sum([heap(id), heap(result)])
                 }),
@@ -86,7 +88,9 @@ impl RecoveryBootstrap {
     /// Normalize generic repaired tool outputs under an already reserved result allowance.
     pub fn prepare_allocations(&mut self) {
         if let Some(repair) = &mut self.interrupted {
-            repair.tool_turn.prepare_allocations();
+            if let Some(value) = &mut repair.tool_turn {
+                value.turn.prepare_allocations();
+            }
             repair.assistant_turn.prepare_allocations();
             for tool in &mut repair.tools {
                 tool.output.prepare_allocations();

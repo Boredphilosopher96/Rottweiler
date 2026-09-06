@@ -24,7 +24,7 @@ pub struct SessionActorRecovery {
     pub interrupted_turn: Option<u64>,
     pub driver_client_id: Option<ClientId>,
     pub interrupted_tool_repairs: Vec<InterruptedToolRepair>,
-    pub interrupted_tool_turn: Option<Turn>,
+    pub interrupted_tool_turn: Option<crate::engine::recovery::RecoveredToolTurn>,
     pub interrupted_completed_results: Vec<(
         rw_types::ToolCallId,
         rw_types::conversation_input::ToolResultReference,

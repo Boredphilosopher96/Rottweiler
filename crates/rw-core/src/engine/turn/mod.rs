@@ -27,6 +27,7 @@ mod todos;
 mod tool_admission;
 mod tool_execution;
 mod tool_requests;
+mod tool_result_profile;
 mod tool_scheduling;
 pub(super) use accounting::BudgetUsage;
 pub(super) use accounting::build_cost_snapshot;
