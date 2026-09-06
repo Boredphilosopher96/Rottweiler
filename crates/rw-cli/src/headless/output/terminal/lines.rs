@@ -93,10 +93,12 @@ impl Lines {
         true
     }
     fn submit(&mut self, sender: &InputSender) -> io::Result<()> {
-        let bytes = std::mem::replace(&mut self.bytes, Vec::with_capacity(MAX_LINE_BYTES));
-        let line = String::from_utf8(bytes)
+        let line = std::str::from_utf8(&self.bytes)
             .map_err(|_| io::Error::other("REPL input must be valid UTF-8"))?;
-        publish(sender, InputLine::Line(line))
+        let pending = sender.admit_text(line).ok_or_else(|| refusal(sender))?;
+        self.bytes.clear();
+        pending.publish();
+        Ok(())
     }
     pub fn eof(&mut self, sender: &InputSender) -> io::Result<()> {
         if !self.bytes.is_empty() {
@@ -108,14 +110,7 @@ impl Lines {
     }
 }
 fn publish(sender: &InputSender, value: InputLine) -> io::Result<()> {
-    let pending = sender.admit(value).ok_or_else(|| {
-        io::Error::other(
-            sender
-                .failure
-                .message()
-                .unwrap_or("REPL input receiver closed"),
-        )
-    })?;
+    let pending = sender.admit(value).ok_or_else(|| refusal(sender))?;
     pending.publish();
     Ok(())
 }
@@ -127,4 +122,38 @@ fn append(echo: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
     }
     echo.extend_from_slice(bytes);
     Ok(())
+}
+
+fn refusal(sender: &InputSender) -> io::Error {
+    io::Error::other(
+        sender
+            .failure
+            .message()
+            .unwrap_or("REPL input receiver closed"),
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn submitted_lines_reuse_scratch_and_retain_only_exact_text() {
+        let (send, mut receive) = super::super::super::input::channel();
+        let mut lines = Lines::new(false);
+        let scratch = lines.bytes.as_ptr();
+        for text in ["", "short", "é界", "another short line"]
+            .into_iter()
+            .cycle()
+            .take(100)
+        {
+            lines.bytes.extend_from_slice(text.as_bytes());
+            lines.submit(&send).expect("admitted line");
+            assert_eq!(lines.bytes.as_ptr(), scratch);
+            assert_eq!(lines.bytes.capacity(), MAX_LINE_BYTES);
+            let delivery = receive.recv().await.expect("line delivery");
+            assert!(matches!(&delivery.value, InputLine::Line(delivered)
+                if delivered == text && delivered.capacity() == text.len()));
+        }
+    }
 }

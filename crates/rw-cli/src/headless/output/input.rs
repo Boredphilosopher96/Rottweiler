@@ -53,6 +53,35 @@ pub(super) struct InputSender {
 
 impl InputSender {
     pub(super) fn admit(&self, value: InputLine) -> Option<PendingInput> {
+        let heap = match &value {
+            InputLine::Line(text) | InputLine::Error(text) => text.capacity(),
+            _ => 0,
+        };
+        let (slot, permit) = self.reserve(heap)?;
+        Some(PendingInput {
+            slot,
+            delivery: InputDelivery {
+                value,
+                bytes: Some(permit),
+            },
+        })
+    }
+
+    pub(super) fn admit_text(&self, text: &str) -> Option<PendingInput> {
+        let (slot, permit) = self.reserve(text.len())?;
+        Some(PendingInput {
+            slot,
+            delivery: InputDelivery {
+                value: InputLine::Line(text.to_owned()),
+                bytes: Some(permit),
+            },
+        })
+    }
+
+    fn reserve(
+        &self,
+        heap: usize,
+    ) -> Option<(mpsc::OwnedPermit<InputDelivery>, OwnedSemaphorePermit)> {
         let slot = match self.sender.clone().try_reserve_owned() {
             Ok(slot) => slot,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -60,10 +89,6 @@ impl InputSender {
                 return None;
             }
             Err(mpsc::error::TrySendError::Closed(_)) => return None,
-        };
-        let heap = match &value {
-            InputLine::Line(text) | InputLine::Error(text) => text.capacity(),
-            _ => 0,
         };
         let count = heap
             .checked_add(std::mem::size_of::<InputDelivery>())
@@ -73,13 +98,7 @@ impl InputSender {
             self.failure.record(2);
             return None;
         };
-        Some(PendingInput {
-            slot,
-            delivery: InputDelivery {
-                value,
-                bytes: Some(permit),
-            },
-        })
+        Some((slot, permit))
     }
 }
 

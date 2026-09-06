@@ -55,3 +55,34 @@ async fn input_capacity_refusal_precedes_publication() {
     );
     assert_eq!(send.bytes.available_permits(), INPUT_BYTES);
 }
+
+#[tokio::test]
+async fn copied_input_admits_before_allocation_and_holds_exact_credit() {
+    let (send, mut receive) = channel();
+    let text = "small UTF-8 界";
+    let pending = send.admit_text(text).expect("admitted before copy");
+    assert_eq!(
+        INPUT_BYTES - send.bytes.available_permits(),
+        text.len() + std::mem::size_of::<InputDelivery>()
+    );
+    pending.publish();
+    let delivered = receive.recv().await.expect("delivered");
+    assert_eq!(
+        INPUT_BYTES - send.bytes.available_permits(),
+        text.len() + std::mem::size_of::<InputDelivery>()
+    );
+    drop(delivered);
+    assert_eq!(send.bytes.available_permits(), INPUT_BYTES);
+    let held = send
+        .bytes
+        .clone()
+        .try_acquire_many_owned(u32::try_from(INPUT_BYTES).expect("bounded bytes"))
+        .expect("all credit");
+    assert!(send.admit_text(text).is_none());
+    assert_eq!(send.sender.capacity(), INPUT_SLOTS);
+    drop(held);
+    assert!(matches!(
+        receive.recv().await.expect("refusal").value,
+        InputLine::Error(_)
+    ));
+}
