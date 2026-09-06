@@ -116,10 +116,11 @@ async fn run_status(
     )
     .await
     .unwrap_or_else(|_| {
-        panic!(
-            "workflow callback deadline during {argument}; next buffered event: {:?}",
-            futures_util::FutureExt::now_or_never(events.recv())
-        )
+        let mut buffered = Vec::new();
+        while let Some(Ok(event)) = futures_util::FutureExt::now_or_never(events.recv()) {
+            buffered.push(format!("{:?}", event.as_ref()));
+        }
+        panic!("workflow callback deadline during {argument}; buffered events: {buffered:?}")
     })
     .expect("workflow command");
     tokio::time::timeout(Duration::from_secs(5), async {
