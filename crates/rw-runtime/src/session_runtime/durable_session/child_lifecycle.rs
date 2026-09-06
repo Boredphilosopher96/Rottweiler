@@ -100,8 +100,7 @@ impl ChildLifecycleReader {
             .map_err(persistence)?;
         self.sink
             .reads
-            .run((Some(admission), order), move |(admission, order)| {
-                let _order = order;
+            .run((Some(admission), order), move |(admission, _order)| {
                 let admission = admission
                     .take()
                     .ok_or_else(|| persistence("child read already started"))?;

@@ -223,8 +223,8 @@ async fn concurrent_task_query_waits_for_publication_without_blocking_other_sess
     use std::task::Poll;
 
     let (_root, service) = task_query_service();
-    let (published, release, publisher) = withheld_task_publisher(Arc::clone(&service)).await;
-    published.await.expect("index publication held");
+    let (ready_signal, release, publisher) = withheld_task_publisher(Arc::clone(&service)).await;
+    ready_signal.await.expect("index publication held");
     let mut pending: Vec<_> = (0..crate::journal_service::MAX_PROJECTION_WAITERS)
         .map(|_| Box::pin(task_read(Arc::clone(&service))))
         .collect();
@@ -289,7 +289,7 @@ async fn withheld_task_publisher(
     std::sync::mpsc::Sender<()>,
     std::thread::JoinHandle<()>,
 ) {
-    let (published, ready) = tokio::sync::oneshot::channel();
+    let (notify_ready, ready) = tokio::sync::oneshot::channel();
     let (release, hold) = std::sync::mpsc::channel();
     let order = service
         .task_projection_order("same")
@@ -303,7 +303,7 @@ async fn withheld_task_publisher(
         let mut projector =
             rw_core::todo_projection::TodoProjector::open(&lease.view).expect("writer");
         projector.advance(&lease.view).expect("publication");
-        published.send(()).expect("reader waiting");
+        notify_ready.send(()).expect("reader waiting");
         hold.recv().expect("release publication");
         drop(projector);
     });
