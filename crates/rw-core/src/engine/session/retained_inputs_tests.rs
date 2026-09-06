@@ -197,6 +197,17 @@ fn explicit_cancellation_discards_original_and_resumed_unretained_claims() {
 fn retained_source_rejects_duplicate_wrong_phase_and_unclaimed_cross_turn_commits() {
     let cases = [
         vec![retained(), retained()],
+        vec![
+            retained(),
+            PendingEvent::TurnFinished {
+                turn: 1,
+                status: AgentTurnStatus::Completed,
+                usage: Default::default(),
+                cost: Cost::Unavailable {
+                    reason: "fixture".into(),
+                },
+            },
+        ],
         vec![retained(), PendingEvent::TurnStarted { turn: 2 }],
         vec![retained(), terminal(1), commit(2)],
         vec![terminal(1), retained()],
