@@ -21,6 +21,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "sync", "time"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.23"
 tiktoken-rs = "0.12.0"
 
