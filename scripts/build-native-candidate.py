@@ -46,8 +46,8 @@ def build(base: Path, target: Path) -> Path:
             environment["SOURCE_DATE_EPOCH"] = native_candidate.output(["git", "show", "-s", "--format=%ct", "HEAD"], REPO)
         # Separate Cargo invocations keep the WASM helper's dependency features
         # out of the public entrypoint.
-        for package in ("rw-cli", "rw-wasm-host"):
-            run(["scripts/cargo-release.sh", "build", "--locked", "--release", "-p", package], environment)
+        for package, binary in (("rw-cli", "rw"), ("rw-wasm-host", "rottweiler-wasm-host")):
+            run(["scripts/cargo-release.sh", "build", "--locked", "--release", "-p", package, "--bin", binary], environment)
         packages = [package for package in ci_inventory.inventory(REPO)["packages"] if "native_component" in package]
         with contextlib.redirect_stdout(sys.stderr):
             ci_inventory.install(REPO, [package["id"] for package in packages], build_dependencies=True, stdout=sys.stderr)

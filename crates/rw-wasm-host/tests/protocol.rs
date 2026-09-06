@@ -253,8 +253,11 @@ async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
 
 #[tokio::test]
 async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
+    check_trap_retirement(fixture_helper()).await;
+}
+
+async fn check_trap_retirement(helper: rw_tools::ApprovedExecutable) {
     let pool = WasmWorkerPool::with_worker_limit(1).expect("capacity");
-    let helper = fixture_helper();
     let hook = WasmProcessHook::new(
         pool.clone(),
         helper,
@@ -333,4 +336,17 @@ fn prepare_mixed_policy_component() {
         component(r#"{"decision":"block","message":"MIXED_WASM_POLICY"}"#),
     )
     .expect("component fixture output");
+}
+
+/// Executes the product artifact, independently of the harness's unwind profile.
+#[tokio::test]
+#[ignore = "exact native artifact gate; requires ROTTWEILER_WASM_BENCH_RECEIPT"]
+async fn release_helper_preserves_guest_traps_and_exact_byte_contract() {
+    let (helper, receipt) = capacity::release_helper();
+    println!(
+        "release helper bytes={} sha256={}",
+        receipt.bytes, receipt.sha256
+    );
+    capacity::check_byte_oracle(helper.clone()).await;
+    check_trap_retirement(helper).await;
 }

@@ -39,7 +39,7 @@ class CargoReleaseTests(unittest.TestCase):
                 "CARGO_TARGET_DIR": str(target),
             }
             subprocess.run(
-                [str(WRAPPER), "build", "--locked", "--release", "-p", "rw-cli"],
+                [str(WRAPPER), "build", "--locked", "--release", "-p", "rw-cli", "--bin", "rw"],
                 cwd=ROOT,
                 env=env,
                 check=True,
@@ -63,9 +63,9 @@ class CargoReleaseTests(unittest.TestCase):
             with self.subTest(host=host):
                 argv, env, artifact = self.run_fixture(host)
                 self.assertEqual(
-                    argv,
+                    argv[:11],
                     [
-                        "build",
+                        "build" if "apple" in host else "rustc",
                         "--target",
                         host,
                         "--target-dir",
@@ -74,8 +74,15 @@ class CargoReleaseTests(unittest.TestCase):
                         "--release",
                         "-p",
                         "rw-cli",
+                        "--bin",
+                        "rw",
                     ],
                 )
+                if "linux-gnu" in host:
+                    self.assertEqual(argv[11], "--")
+                    self.assertIn("link-arg=-Wl,--no-eh-frame-hdr", argv[12:])
+                else:
+                    self.assertEqual(len(argv), 11)
                 self.assertEqual(env["CARGO_PROFILE_RELEASE_OPT_LEVEL"], optimization)
                 flags = env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") if env["CARGO_ENCODED_RUSTFLAGS"] else []
                 self.assertEqual(flags, [] if "apple" in host else [

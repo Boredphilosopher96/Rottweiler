@@ -51,6 +51,28 @@ pub(super) async fn measure() {
         (2..=20).contains(&rounds),
         "rounds must be between 2 and 20"
     );
+    let (helper, receipt) = release_helper();
+    let workload = Arc::new(Workload::new());
+    println!(
+        "{}",
+        serde_json::json!({
+            "workload":"byte-checked-transform", "helper_sha256":receipt.sha256,"helper_bytes":receipt.bytes,
+            "component_sha256":super::sha256_bytes(&workload.component),
+            "component_bytes":workload.component.len(),"input_bytes":workload.input_bytes,
+            "directive_bytes":workload.output_bytes,"rounds":rounds,
+            "warm_calls":WARM_CALLS,"concurrent_calls":CONCURRENT_CALLS,"concurrent_batches":CONCURRENT_BATCHES,
+            "limits":WasmHookLimits::default(),"cold_calls":2,
+        })
+    );
+    for round in 0..rounds {
+        let order = if round % 2 == 0 { [1, 2] } else { [2, 1] };
+        for workers in order {
+            measure_round(round, workers, &helper, &workload).await;
+        }
+    }
+}
+
+pub(super) fn release_helper() -> (rw_tools::ApprovedExecutable, rw_tools::ExecutableDigest) {
     let receipt_path = std::path::PathBuf::from(
         std::env::var_os("ROTTWEILER_WASM_BENCH_RECEIPT").expect("exact release helper receipt"),
     )
@@ -73,24 +95,7 @@ pub(super) async fn measure() {
         &receipt,
     )
     .expect("approved release helper");
-    let workload = Arc::new(Workload::new());
-    println!(
-        "{}",
-        serde_json::json!({
-            "workload":"byte-checked-transform", "helper_sha256":receipt.sha256,"helper_bytes":receipt.bytes,
-            "component_sha256":super::sha256_bytes(&workload.component),
-            "component_bytes":workload.component.len(),"input_bytes":workload.input_bytes,
-            "directive_bytes":workload.output_bytes,"rounds":rounds,
-            "warm_calls":WARM_CALLS,"concurrent_calls":CONCURRENT_CALLS,"concurrent_batches":CONCURRENT_BATCHES,
-            "limits":WasmHookLimits::default(),"cold_calls":2,
-        })
-    );
-    for round in 0..rounds {
-        let order = if round % 2 == 0 { [1, 2] } else { [2, 1] };
-        for workers in order {
-            measure_round(round, workers, &helper, &workload).await;
-        }
-    }
+    (helper, receipt)
 }
 
 async fn checked_call(dispatcher: &HookDispatcher, workload: &Workload) -> u128 {
@@ -217,11 +222,15 @@ fn worker_rss(pool: &WasmWorkerPool, workers: usize) -> BTreeMap<u32, u64> {
 
 #[tokio::test]
 async fn measurement_guest_checks_exact_input_bytes_and_output() {
+    check_byte_oracle(super::fixture_helper()).await;
+}
+
+pub(super) async fn check_byte_oracle(helper: rw_tools::ApprovedExecutable) {
     let workload = Workload::new();
     let pool = WasmWorkerPool::with_worker_limit(1).expect("pool");
     let hook = WasmProcessHook::new(
         Arc::clone(&pool),
-        super::fixture_helper(),
+        helper,
         manifest(),
         workload.component.clone(),
         WasmHookLimits::default(),

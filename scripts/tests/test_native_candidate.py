@@ -34,7 +34,7 @@ class NativeCandidateFixture:
         self.addCleanup(self.temporary.cleanup)
         self.repo = Path(self.temporary.name) / "repo"
         self.repo.mkdir()
-        for name in ("packages/tui/scripts/native-lifetime-probe.ts", "contracts/opentui-native.json", "patches/opentui/reclaim-native-owners.patch", "Cargo.toml", "rust-toolchain.toml", ".bun-version", "contracts/release-contract.json",
+        for name in ("scripts/native-linux-unwind.ld", "packages/tui/scripts/native-lifetime-probe.ts", "contracts/opentui-native.json", "patches/opentui/reclaim-native-owners.patch", "Cargo.toml", "rust-toolchain.toml", ".bun-version", "contracts/release-contract.json",
                      "packages/tui/package.json", "packages/plugin-sdk/package.json", "packages/plugin-host/package.json", "packages/js-host/package.json"):
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)

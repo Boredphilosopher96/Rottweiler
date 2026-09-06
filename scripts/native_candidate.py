@@ -108,7 +108,7 @@ def build_identity(repo: Path) -> dict:
         "version": version,
         "toolchains": {"rust": rust_identity, "bun": bun_identity, "opentui_native": opentui_native.identity(repo, platform.id)},
         "profile": {"name": "release", "debug": 0,
-                    **native_profile.settings(target),
+                    **native_profile.settings(target, repo),
                     "environment": environment},
         "cargo_configuration": configuration_fingerprints(repo),
     }
@@ -162,7 +162,7 @@ def verify(root: Path, repo: Path, *, expected_identity: dict | None = None) -> 
         raise ValueError("candidate compiler host or target differs from the native platform")
     if identity["profile"]["name"] != "release" or identity["profile"]["debug"] != 0:
         raise ValueError("candidate does not use the native release profile")
-    profile = native_profile.settings(target)
+    profile = native_profile.settings(target, repo)
     if any(identity["profile"].get(key) != value for key, value in profile.items()):
         raise ValueError("candidate code generation differs from the native release profile")
     artifact_bundle.verify(root, identity["source"]["commit"], platform.id)

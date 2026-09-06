@@ -47,7 +47,8 @@ class NativeSizeDiagnosticsTests(unittest.TestCase):
             self.assertEqual(json.loads((self.output / "failure.json").read_text())["identity"], self.identity)
             self.assertEqual(command[:2], ["cargo", "rustc"])
             self.assertEqual(command[command.index("--") + 1:],
-                             ["-C", "link-arg=-Wl,-Map=" + str(self.output / "engine.map")])
+                             ["-C", "link-arg=-Wl,-Map=" + str(self.output / "engine.map"),
+                              *diagnostic.native_profile.final_rustflags(self.identity["target"])])
             self.assertNotIn("--all-features", command)
             self.assertEqual(os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"], "s")
             self.assertEqual(os.environ["CARGO_PROFILE_RELEASE_DEBUG"], "0")

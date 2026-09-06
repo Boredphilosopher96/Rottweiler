@@ -559,16 +559,25 @@ stdout and stderr after owned shutdown.
 `scripts/native_profile.py` owns native release optimization and Rust flags;
 `cargo-release.sh`, candidate identity verification, and the failure-only link-map
 diagnostic consume that same owner. GNU Linux release artifacts use packed
-relative relocations (`DT_RELR`) and do not force native unwind tables. Packed
+relative relocations (`DT_RELR`) and discard static native unwind tables at final link. Packed
 relocations require glibc 2.36 or newer; the current official GNU build image
 already emits a newer glibc ABI requirement. The installer does not provide an
 older-loader compatibility layer. The existing musl path does not enable RELR
 without a separately qualified loader floor.
 
-Release panic behavior remains abort. Removing optional native unwind tables
+Release panic behavior remains abort. The supplemental GNU linker script removes
+`.eh_frame` inputs and disables their lookup header without changing the default
+section layout. Its exact bytes are part of the portable candidate profile; the
+compiler-only flag cannot remove tables from precompiled dependencies.
+Removing static native unwind tables
 reduces distribution bytes but limits native stack walking and panic backtraces;
 it does not disable structured operation tracing or change guest WASM unwind
-metadata. Debug and instrumented builds retain their default stack-walking
-settings. Use those builds for native stack profiling. Release size, startup,
+metadata. Debug builds retain their default stack-walking settings. Optimized
+libtest and instrumentation harnesses use `verification_environment`: the same
+platform optimization level with unwind tables retained, because Cargo libtests
+use panic unwinding independently of the product's abort policy. Their separate
+profile is recorded with harness provenance; artifact behavior is exercised by
+launching the exact receipt-bound product helper. Use unwind-capable builds for
+native stack profiling. Release size, startup,
 and behavioral gates still use the exact verified product artifact, with the
 owned flags in its receipt; product features and size budgets are unchanged.

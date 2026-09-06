@@ -59,7 +59,8 @@ def diagnose(repo: Path, target_dir: Path, output: Path, failed_gate: Path) -> i
     manifest.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
     command = ["cargo", "rustc", "--locked", "--release", "--target", identity["target"],
                "--target-dir", str(target_dir), "-p", "rw-cli", "--bin", "rw", "--",
-               "-C", "link-arg=-Wl,-Map=" + str(output / "engine.map")]
+               "-C", "link-arg=-Wl,-Map=" + str(output / "engine.map"),
+               *native_profile.final_rustflags(identity["target"])]
     document["diagnostic_command"] = command
     manifest.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
     # Match cargo-release.sh and the builder exactly; only this final target's
