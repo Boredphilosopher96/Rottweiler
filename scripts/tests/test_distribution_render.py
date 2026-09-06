@@ -268,7 +268,7 @@ class DistributionRenderTests(unittest.TestCase):
             self.assertIn("Linux-aarch64)", bootstrap_text)
             self.assertIn("rottweiler-1.2.3-linux-aarch64", bootstrap_text)
 
-    def test_head_formula_builds_both_components_but_exposes_only_rw(self) -> None:
+    def test_head_formula_installs_verified_candidate_but_exposes_only_rw(self) -> None:
         formula = REPO / "packaging/homebrew/rottweiler-head.rb"
         text = formula.read_text(encoding="utf-8")
         self.assertIn('head "https://github.com/Boredphilosopher96/Rottweiler.git"', text)
@@ -277,9 +277,11 @@ class DistributionRenderTests(unittest.TestCase):
         self.assertIn('depends_on "binutils" => :build', text)
         self.assertIn('ROTTWEILER_STRIP_BIN: formula_opt_bin("binutils")/"strip"', text)
         self.assertIn("preserve_rpath", text)
-        self.assertIn('"scripts/cargo-release.sh", "build", "--locked", "--release"', text)
-        self.assertIn('libexec.install "packages/js-host/dist/rottweiler-js-host"', text)
-        self.assertIn('libexec.install "#{release_dir}/rottweiler-wasm-host"', text)
+        self.assertIn('"scripts/build-native-candidate.py"', text)
+        self.assertIn('"scripts/native_candidate.py", "path", candidate, "engine"', text)
+        self.assertIn('libexec.install Dir[(engine.dirname/"*").to_s]', text)
+        self.assertNotIn('"scripts/cargo-release.sh", "build"', text)
+        self.assertNotIn('"bun", "run"', text)
         self.assertIn(
             'bin.install_symlink libexec/"rw"',
             text,
