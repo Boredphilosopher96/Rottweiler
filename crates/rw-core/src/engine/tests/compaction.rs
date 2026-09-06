@@ -291,11 +291,17 @@ async fn one_hundred_fifty_turn_compaction_quality_replays_from_recorded_provide
         FixtureRedactor::default(),
     ));
     let recording_root = TempDir::new().expect("recording workspace");
-    let (_recorded_events, recorded_handle) = run(
+    let (recorded_events, recorded_handle) = run(
         recording_root.path(),
         Arc::new(ReplayHarnessModel::new(recorder.clone())),
     )
     .await;
+    assert!(
+        recorded_events.iter().any(|event| matches!(
+            &event.kind, PendingEvent::TextDelta { text, .. } if text == "amber-42"
+        )),
+        "recording must reach the answer after every accounted summary chunk: {recorded_events:?}"
+    );
     drop(recorded_handle);
     recorder.flush().await.expect("provider fixtures flush");
 

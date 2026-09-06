@@ -371,7 +371,7 @@ impl ModelDriver for ReplayHarnessModel {
 
     fn budget_config(&self) -> BudgetConfig {
         BudgetConfig {
-            session_cost_cap_micros_usd: Some(100),
+            session_cost_cap_micros_usd: Some(10_000),
             ..BudgetConfig::default()
         }
     }
