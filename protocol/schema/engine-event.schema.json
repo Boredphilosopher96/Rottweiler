@@ -1689,6 +1689,38 @@
         "agent_turn": {
           "type": "string"
         },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolResultReference"
+          }
+        },
+        "logical": {
+          "$ref": "#/$defs/ToolResultAdmission"
+        },
+        "type": {
+          "type": "string",
+          "const": "conversation_tool_results_committed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "agent_turn",
+        "results",
+        "logical"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "agent_turn": {
+          "type": "string"
+        },
         "turn": {
           "$ref": "#/$defs/Turn"
         },
@@ -8495,7 +8527,7 @@
       ]
     },
     "ContextSelection": {
-      "description": "Explicit sources for user-role context produced by the host.",
+      "description": "Explicit sources for context produced or retained by the host.",
       "oneOf": [
         {
           "type": "object",
@@ -8582,6 +8614,51 @@
             "text"
           ]
         }
+      ]
+    },
+    "ToolResultReference": {
+      "description": "A provider result selects exactly one earlier authoritative completion body.",
+      "type": "object",
+      "properties": {
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "finished_source": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "invocation_id",
+        "finished_source"
+      ]
+    },
+    "ToolResultAdmission": {
+      "type": "object",
+      "properties": {
+        "encoded_bytes": {
+          "type": "string"
+        },
+        "nodes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "string_bytes": {
+          "type": "string"
+        },
+        "depth": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "encoded_bytes",
+        "nodes",
+        "string_bytes",
+        "depth"
       ]
     },
     "UnrestorablePath": {
