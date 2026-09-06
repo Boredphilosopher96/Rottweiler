@@ -409,6 +409,14 @@ fn print_mode_slash_command_finishes_without_waiting_for_a_turn() {
         "headless command stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    for entry in fs::read_dir(run.home.join("tmp")).expect("CLI temporary directory") {
+        let entry = entry.expect("temporary entry");
+        assert!(
+            !entry.path().join("approved-executable").exists(),
+            "normal CLI exit retained an executable snapshot: {}",
+            entry.path().display()
+        );
+    }
     let events = parse_stream(&output.stdout);
     assert!(events.iter().any(|event| matches!(
         event,

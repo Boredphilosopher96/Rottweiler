@@ -99,11 +99,13 @@ impl TestRun {
 
 fn base_command(workspace: &Path, home: &Path) -> Command {
     let home = private_test_directory(home);
+    let temporary = private_test_directory(&home.join("tmp"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_rw"));
     command
         .env_clear()
         .current_dir(workspace)
         .env("HOME", &home)
+        .env("TMPDIR", temporary)
         .env("ROTTWEILER_HOME", &home);
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
