@@ -121,22 +121,6 @@ impl RpcWriter {
             .map_err(|_| ())
     }
 
-    pub(super) fn try_send(&self, frame: RpcFrame) -> Result<(), ()> {
-        let prepared = PreparedFrame::new(frame)?;
-        let count = u32::try_from(prepared.bytes).map_err(|_| ())?;
-        let permit = Arc::clone(&self.control_bytes)
-            .try_acquire_many_owned(count)
-            .map_err(|_| ())?;
-        let bytes = self.encode(prepared)?;
-        self.control
-            .try_send(QueuedFrame {
-                bytes,
-                _permit: permit,
-                written: None,
-            })
-            .map_err(|_| ())
-    }
-
     /// Waits for the actual pipe write so its producer's terminal control frame
     /// cannot overtake earlier body data when control traffic has priority.
     pub(super) async fn send_data(&self, frame: RpcFrame) -> Result<(), ()> {
@@ -221,7 +205,6 @@ mod tests {
         let mut pending_data = Box::pin(writer.send_data(response(2)));
         assert!(futures_util::poll!(&mut pending_control).is_pending());
         assert!(futures_util::poll!(&mut pending_data).is_pending());
-        assert!(writer.try_send(response(3)).is_err());
         assert_eq!(writer.encodings.load(Ordering::Relaxed), 0);
         drop(control);
         pending_control.await.unwrap();
