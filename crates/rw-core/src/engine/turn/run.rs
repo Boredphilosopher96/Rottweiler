@@ -261,7 +261,39 @@ pub(super) async fn run_turn(
                     break;
                 }
             };
+        let reserved = match super::history_context::reserve_working(&config).await {
+            Ok(reserved) => reserved,
+            Err(error) => {
+                send_event(
+                    &signals,
+                    PendingEvent::Error {
+                        message: error.to_string(),
+                    },
+                );
+                status = AgentTurnStatus::Failed;
+                break;
+            }
+        };
+        let mut working = match super::context_memory::admit(
+            reserved,
+            &config,
+            &conversation,
+            &VecDeque::new(),
+        ) {
+            Ok(working) => working,
+            Err(error) => {
+                send_event(
+                    &signals,
+                    PendingEvent::Error {
+                        message: error.to_string(),
+                    },
+                );
+                status = AgentTurnStatus::Failed;
+                break;
+            }
+        };
         if prune_before_provider_request(
+            &working,
             &conversation,
             &sources,
             &context_surgery,
@@ -276,6 +308,7 @@ pub(super) async fn run_turn(
         }
         let mut assembled = match assemble_session_context(
             &config,
+            &working,
             &conversation,
             &sources,
             &VecDeque::new(),
@@ -354,8 +387,27 @@ pub(super) async fn run_turn(
                         break;
                     }
                 };
+                working = match super::context_memory::admit(
+                    working.map(|_| ()),
+                    &config,
+                    &conversation,
+                    &VecDeque::new(),
+                ) {
+                    Ok(working) => working,
+                    Err(error) => {
+                        send_event(
+                            &signals,
+                            PendingEvent::Error {
+                                message: error.to_string(),
+                            },
+                        );
+                        status = AgentTurnStatus::Failed;
+                        break;
+                    }
+                };
                 assembled = match assemble_session_context(
                     &config,
+                    &working,
                     &conversation,
                     &sources,
                     &VecDeque::new(),

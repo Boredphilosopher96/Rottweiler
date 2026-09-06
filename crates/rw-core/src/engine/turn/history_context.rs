@@ -53,11 +53,14 @@ pub(in crate::engine) async fn assemble_view(
 ) -> Result<HistoryRead<CurrentContext>, AgentLoopError> {
     let through = view.through();
     let page = read_view(&view).await?;
+    let reserved = view.reserve_working_set()?;
     tasks
         .spawn_blocking(
             Arc::clone(&config),
             rw_tools::CancellationToken::default(),
             move || {
+                let working =
+                    super::context_memory::admit(reserved, &config, &page.turns, &queued)?;
                 let surgery = page
                     .context_actions
                     .iter()
@@ -66,13 +69,14 @@ pub(in crate::engine) async fn assemble_view(
                     .collect::<Vec<_>>();
                 let assembled = super::context::assemble_session_context(
                     &config,
+                    &working,
                     &page.turns,
                     &page.sources,
                     &queued,
                     &surgery,
                     &page.pruned_tool_outputs,
                 )?;
-                Ok(page.map(|page| CurrentContext {
+                Ok(page.retain(working).map(|page| CurrentContext {
                     through,
                     conversation: page.turns,
                     sources: page.sources,
@@ -100,4 +104,14 @@ pub(super) async fn current_sources(
         ));
     }
     view.conversation_sources(0..turns as u64).await
+}
+
+pub(super) async fn reserve_working(
+    config: &SessionActorConfig,
+) -> Result<HistoryRead<()>, AgentLoopError> {
+    config
+        .history
+        .capture_history()
+        .await?
+        .reserve_working_set()
 }

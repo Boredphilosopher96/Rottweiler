@@ -8,6 +8,8 @@ pub mod estimate;
 pub mod prune;
 pub mod spend;
 pub mod toon;
+mod toon_admission;
+pub use toon_admission::ToonAllocation;
 
 pub use assembly::{
     AssembledContext, AssemblyError, AssemblyInput, CacheBreakpoint, CacheBreakpointKind,

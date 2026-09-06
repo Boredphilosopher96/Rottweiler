@@ -52,3 +52,5 @@ mod tool_order;
 mod ui_actions;
 
 mod citations;
+
+mod context_allocation;

@@ -4,6 +4,7 @@ mod command_tools;
 mod compaction;
 mod completion_hooks;
 mod context;
+pub(in crate::engine) mod context_memory;
 pub(in crate::engine) mod history_compaction;
 pub(in crate::engine) mod history_context;
 mod hooks;

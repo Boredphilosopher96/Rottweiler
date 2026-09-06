@@ -5,7 +5,6 @@ use crate::engine::projection::ContextSurgeryAction;
 use crate::engine::recovery::ConversationSource;
 use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::provider_messages::persist_event;
-use crate::engine::turn::provider_messages::tool_definition;
 use crate::engine::turn::signals::TurnSignal;
 use rw_context::AssembledContext;
 use rw_context::AssemblyInput;
@@ -75,22 +74,26 @@ pub(super) fn prompt_tool_output(
     }
     match output {
         ToolOutput::Text { .. } => output.clone(),
-        ToolOutput::Structured { value } => toon.encode(value).map_or_else(
-            |_| output.clone(),
-            |encoded| ToolOutput::Text {
-                text: encoded.prompt_text,
-            },
-        ),
+        ToolOutput::Structured { value } => toon
+            .encode_bounded(value, super::context_memory::TOON_WORKING_BYTES)
+            .map_or_else(
+                |_| output.clone(),
+                |encoded| ToolOutput::Text {
+                    text: encoded.prompt_text,
+                },
+            ),
         ToolOutput::Mixed { parts } => ToolOutput::Mixed {
             parts: parts
                 .iter()
                 .map(|part| match part {
-                    ToolOutputPart::Structured { value } => toon.encode(value).map_or_else(
-                        |_| part.clone(),
-                        |encoded| ToolOutputPart::Text {
-                            text: encoded.prompt_text,
-                        },
-                    ),
+                    ToolOutputPart::Structured { value } => toon
+                        .encode_bounded(value, super::context_memory::TOON_WORKING_BYTES)
+                        .map_or_else(
+                            |_| part.clone(),
+                            |encoded| ToolOutputPart::Text {
+                                text: encoded.prompt_text,
+                            },
+                        ),
                     ToolOutputPart::Text { .. } | ToolOutputPart::Image { .. } => part.clone(),
                 })
                 .collect(),
@@ -132,12 +135,14 @@ pub(in crate::engine) fn prompt_turn(
 #[tracing::instrument(target = "rw_performance", level = "trace", name = "context.assemble", skip_all, fields(session_id = config.session_id.0.as_str(), turns = conversation.len()))]
 pub(in crate::engine) fn assemble_session_context(
     config: &SessionActorConfig,
+    working: &super::context_memory::ContextWorkingSet,
     conversation: &[Turn],
     sources: &[ConversationSource],
     queued: &VecDeque<String>,
     surgery: &[ContextSurgeryAction],
     pruned_tool_outputs: &BTreeMap<String, u64>,
 ) -> Result<AssembledContext, AgentLoopError> {
+    working.validate()?;
     if conversation.len() != sources.len() {
         return Err(AgentLoopError::Persistence(
             "context source alignment".into(),
@@ -230,9 +235,12 @@ pub(in crate::engine) fn assemble_session_context(
         queued,
         tools: config
             .tools
-            .descriptors()
-            .into_iter()
-            .map(tool_definition)
+            .descriptor_refs()
+            .map(|tool| rw_providers::ToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: normalized_json_copy(&tool.input_schema),
+            })
             .collect(),
         cache_support: metadata
             .cache_breakpoints
@@ -480,12 +488,14 @@ pub(in crate::engine) fn prompt_dump(
 }
 
 pub(super) async fn prune_before_provider_request(
+    working: &super::context_memory::ContextWorkingSet,
     conversation: &[Turn],
     sources: &[ConversationSource],
     context_surgery: &[ContextSurgeryAction],
     pruned_tool_outputs: &mut BTreeMap<String, u64>,
     signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> Result<(), AgentLoopError> {
+    working.validate()?;
     let mut tool_names = BTreeMap::<String, String>::new();
     let mut records = Vec::new();
     let mut identities = BTreeMap::new();
@@ -592,5 +602,20 @@ pub(in crate::engine) fn block_source(sequence: SequenceId, block_index: usize) 
     ContextBlockId {
         sequence,
         block_index: u32::try_from(block_index).expect("admitted canonical block index"),
+    }
+}
+
+fn normalized_json_copy(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(normalized_json_copy).collect())
+        }
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), normalized_json_copy(value)))
+                .collect(),
+        ),
+        value => value.clone(),
     }
 }

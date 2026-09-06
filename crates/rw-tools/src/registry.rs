@@ -1351,6 +1351,11 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Inspect immutable declarations without first cloning their JSON schemas.
+    pub fn descriptor_refs(&self) -> impl Iterator<Item = &ToolDescriptor> {
+        self.tools.values().map(|registered| &registered.descriptor)
+    }
+
     #[must_use]
     pub fn descriptors(&self) -> Vec<ToolDescriptor> {
         self.tools
