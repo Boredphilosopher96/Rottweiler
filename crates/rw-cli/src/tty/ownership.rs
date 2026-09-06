@@ -290,7 +290,15 @@ impl Retirement {
                     if let Some(send) = send.take() {
                         let _ = send.send(Err(failure(error.to_string(), true)));
                     }
-                    return;
+                    if !matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::PermissionDenied
+                    ) {
+                        return;
+                    }
+                    owner.cancelled.store(true, Ordering::Release);
                 }
                 Ok(false) => {}
             }
@@ -315,7 +323,11 @@ impl Drop for Retirement {
             let _ = owner.begin_stop(true);
             // Failed wait, missing runtime, panic, or aborted owner: retain actual
             // child, IO handles, terminal authority and charged process capacity.
-            std::mem::forget(owner);
+            tracing::error!(
+                process_group = Pid::as_raw(owner.group),
+                "PTY owner quarantined without physical settlement proof"
+            );
+            let _ = Box::leak(Box::new(owner));
         }
     }
 }

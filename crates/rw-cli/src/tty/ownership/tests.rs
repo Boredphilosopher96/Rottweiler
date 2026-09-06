@@ -139,3 +139,81 @@ async fn unproven_spawn_or_wait_never_publishes_shell_ended() {
         assert_eq!(ended.load(Ordering::SeqCst), 0);
     }
 }
+
+#[derive(Debug)]
+struct DelayedWait {
+    child: std::process::Child,
+    unavailable: Arc<std::sync::atomic::AtomicBool>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+impl portable_pty::ChildKiller for DelayedWait {
+    fn kill(&mut self) -> io::Result<()> {
+        self.child.kill()
+    }
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        portable_pty::ChildKiller::clone_killer(&self.child)
+    }
+}
+impl portable_pty::Child for DelayedWait {
+    fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "controlled wait permission",
+            ));
+        }
+        self.child.try_wait().map(|status| status.map(Into::into))
+    }
+    fn wait(&mut self) -> io::Result<portable_pty::ExitStatus> {
+        self.child.wait().map(Into::into)
+    }
+    fn process_id(&self) -> Option<u32> {
+        Some(self.child.id())
+    }
+}
+impl Drop for DelayedWait {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+#[tokio::test]
+async fn transient_failed_proof_preserves_actual_owner_until_later_reap() {
+    use std::{os::unix::process::CommandExt as _, sync::atomic::AtomicBool};
+    let child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exec sleep 30"])
+        .process_group(0)
+        .spawn()
+        .expect("real child");
+    let group = rustix::process::Pid::from_raw(i32::try_from(child.id()).expect("PID range"))
+        .expect("group");
+    let unavailable = Arc::new(AtomicBool::new(true));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let credit =
+        rw_resources::try_acquire(rw_resources::ResourceClass::Process).expect("process credit");
+    let mut owner = super::ProcessOwner::new(
+        Box::new(DelayedWait {
+            child,
+            unavailable: unavailable.clone(),
+            dropped: dropped.clone(),
+        }),
+        credit,
+    );
+    let error = owner.wait().await.expect_err("typed missing proof");
+    assert!(super::is_unsettled(&error));
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "failed proof retains actual child"
+    );
+    unavailable.store(false, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("eventual proof retires actual owner");
+    assert!(matches!(
+        rustix::process::test_kill_process_group(group),
+        Err(rustix::io::Errno::SRCH)
+    ));
+}
