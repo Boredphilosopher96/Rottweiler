@@ -137,19 +137,25 @@ impl LaunchBytes {
     }
 
     fn immutable_roots(&self) -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        if let Self::Native { executable, code } = self {
-            if let CodeView::Attested(code) = code {
-                roots.push(code.root().to_path_buf());
+        match self {
+            Self::Native { executable, code } => {
+                let mut roots = Vec::new();
+                if let CodeView::Attested(code) = code {
+                    roots.push(code.root().to_path_buf());
+                }
+                if cfg!(target_os = "macos") {
+                    roots.push(executable.path().to_path_buf());
+                }
+                // Preparation source is a separately authorized read view,
+                // not an immutable snapshot. Existing output grants remain
+                // governed by its owner; executable bytes stay protected.
+                roots
             }
-            if cfg!(target_os = "macos") {
-                roots.push(executable.path().to_path_buf());
-            }
+            #[cfg(target_os = "linux")]
+            Self::Preparation { .. } => Vec::new(),
+            #[cfg(test)]
+            Self::Harness { .. } => Vec::new(),
         }
-        // Preparation source is a separately authorized read view, not an
-        // immutable captured code snapshot. Its existing output grants remain
-        // governed by the preparation owner; executable bytes stay protected.
-        roots
     }
 
     pub(super) fn read_roots(&self) -> Vec<PathBuf> {
