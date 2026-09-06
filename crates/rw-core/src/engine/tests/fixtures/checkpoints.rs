@@ -272,16 +272,18 @@ impl MutationCheckpointCoordinator for OrderedRewindCoordinator {
 }
 
 pub(in crate::engine::tests) struct InitRecordingCheckpoints {
-    pub(in crate::engine::tests) delay: Duration,
+    pub(in crate::engine::tests) begin_entered: tokio::sync::Notify,
+    begin_release: Option<Arc<tokio::sync::Notify>>,
     pub(in crate::engine::tests) scopes: Mutex<Vec<MutationScope>>,
     pub(in crate::engine::tests) turns: Mutex<Vec<u64>>,
     pub(in crate::engine::tests) outcomes: Mutex<Vec<MutationCheckpointOutcome>>,
 }
 
 impl InitRecordingCheckpoints {
-    pub(in crate::engine::tests) fn new(delay: Duration) -> Self {
+    pub(in crate::engine::tests) fn new(begin_release: Option<Arc<tokio::sync::Notify>>) -> Self {
         Self {
-            delay,
+            begin_entered: tokio::sync::Notify::new(),
+            begin_release,
             scopes: Mutex::new(Vec::new()),
             turns: Mutex::new(Vec::new()),
             outcomes: Mutex::new(Vec::new()),
@@ -304,7 +306,10 @@ impl MutationCheckpointCoordinator for InitRecordingCheckpoints {
     ) -> Result<MutationCheckpoint, AgentLoopError> {
         self.turns.lock().expect("init turns").push(agent_turn);
         self.scopes.lock().expect("init scopes").push(scope.clone());
-        tokio::time::sleep(self.delay).await;
+        self.begin_entered.notify_one();
+        if let Some(release) = &self.begin_release {
+            release.notified().await;
+        }
         Ok(MutationCheckpoint {
             id: Some(tool_call_id.to_owned()),
         })

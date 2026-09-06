@@ -108,7 +108,7 @@ async fn commands_share_the_public_registry_and_events_round_trip() {
 }
 
 #[tokio::test]
-async fn initialization_acks_before_scan_and_checkpoints_every_generated_path() {
+async fn initialization_acks_while_checkpoint_is_held_and_captures_every_generated_path() {
     let root = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(root.path().join("packages/one")).expect("package directory");
     std::fs::write(
@@ -129,7 +129,8 @@ async fn initialization_acks_before_scan_and_checkpoints_every_generated_path() 
             InitActionCommand(InitDepth::Deep),
         )
         .expect("init command");
-    let checkpoints = Arc::new(InitRecordingCheckpoints::new(Duration::from_millis(100)));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let checkpoints = Arc::new(InitRecordingCheckpoints::new(Some(release.clone())));
     let mut actor_config = config(
         root.path(),
         model,
@@ -143,13 +144,21 @@ async fn initialization_acks_before_scan_and_checkpoints_every_generated_path() 
         .await
         .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
+    let (acknowledged, ()) = timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            handle.send_message("/deep-init"),
+            checkpoints.begin_entered.notified()
+        )
+    })
+    .await
+    .expect("acknowledgement must not wait for checkpoint completion");
     assert_eq!(
-        timeout(Duration::from_millis(16), handle.send_message("/deep-init"))
-            .await
-            .expect("initialization acknowledgement deadline")
-            .expect("initialization acknowledgement"),
+        acknowledged.expect("initialization acknowledgement"),
         MessageDisposition::Command
     );
+    assert!(!root.path().join("AGENTS.md").exists());
+    assert!(checkpoints.outcomes.lock().expect("outcomes").is_empty());
+    release.notify_one();
     let completed = next_matching(
         &mut events,
         |kind| matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "deep-init"),
@@ -189,7 +198,7 @@ async fn failed_initialization_reports_failed_checkpoint_without_partial_writes(
             InitActionCommand(InitDepth::Root),
         )
         .expect("init command");
-    let checkpoints = Arc::new(InitRecordingCheckpoints::new(Duration::ZERO));
+    let checkpoints = Arc::new(InitRecordingCheckpoints::new(None));
     let mut actor_config = config(
         root.path(),
         Arc::new(ScriptedModel::default()),
