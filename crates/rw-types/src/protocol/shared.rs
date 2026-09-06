@@ -934,6 +934,8 @@ pub struct ContextItemState {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct CacheBreakpoint {
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<ContextItemId>")]
     pub after_item_id: Option<ContextItemId>,
 }
 

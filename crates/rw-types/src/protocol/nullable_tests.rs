@@ -1,5 +1,7 @@
 //! Nullable wire values must remain explicit across Rust and generated schemas.
-use super::{CostSnapshot, McpApprovalReview, ModelCapabilities, ModelSwitchQuestion, Usage};
+use super::{
+    CacheBreakpoint, CostSnapshot, McpApprovalReview, ModelCapabilities, ModelSwitchQuestion, Usage,
+};
 use crate::transcript::{
     TranscriptAnchor, TranscriptContent, TranscriptContentPage, TranscriptItem, TranscriptRead,
     TranscriptReadResult, TranscriptSubagentStatus, TranscriptView,
@@ -192,4 +194,9 @@ fn every_cost_limit_requires_an_explicit_nullable_decimal() -> TestResult {
         value
     );
     Ok(())
+}
+
+#[test]
+fn empty_cache_boundary_requires_its_explicit_source_field() -> TestResult {
+    required_nullable::<CacheBreakpoint>(json!({"after_item_id":null}), &["after_item_id"])
 }
