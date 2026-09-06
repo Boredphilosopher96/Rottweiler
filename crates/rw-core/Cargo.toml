@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Only the core unit-test executable installs the counting allocator.
+allocation-measurement = []
+
 [dependencies]
 rw-resources.workspace = true
 async-stream = "0.3.6"
@@ -45,6 +49,7 @@ rustix.workspace = true
 [dev-dependencies]
 hyper.workspace = true
 hyper-util.workspace = true
+stats_alloc = "=0.1.10"
 tempfile = "3.23"
 tower-service = "0.3.3"
 

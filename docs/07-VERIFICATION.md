@@ -238,6 +238,32 @@ configuration, parser asset materialization, mounting, paint, and input delivery
 These observations attribute latency; acceptance still measures the complete
 process-to-interactive interval with diagnostics disabled.
 
+Context assembly has separate timing and allocation test executables. Prebuild
+the release `rw-core` library tests with `cargo test --release -p rw-core --lib
+--no-run --message-format=json`; retain the emitted executable path and hash.
+Prebuild another executable with `--features allocation-measurement`. Only the
+second test executable installs an instrumented system allocator; it emits no
+latency samples. Production libraries and executables do not install it.
+
+On a quiet host, run the first executable with the exact ignored test
+`engine::tests::context_cache::measure_incremental_context_against_full_assembly`,
+and the instrumented executable with
+`engine::tests::context_cache::measure_context_allocation_volume`. Use
+`--exact --ignored --nocapture --test-threads=1`. Select row sizes with
+`ROTTWEILER_CONTEXT_MEASURE_VALUE_BYTES=128`, `512`, and `2048`; each workload has
+128 tool turns and 16 structured rows per turn. The records include actual
+serialized source bytes, request bytes and hash, profile, instrumentation, five
+warmups and 500 samples per implementation. `ROTTWEILER_CONTEXT_MEASURE_MODE`
+selects `paired`, `cached`, or `full`; paired order alternates, with byte-identical
+request validation outside measurement. Cached/full runs use separate processes
+for peak RSS, and full runs never retain an unused normalization cache.
+
+Retain raw samples and executable/source/toolchain identity. Report nearest-rank
+p99 separately from allocation calls and requested bytes. Allocation bytes include
+reallocation growth; they are neither copied bytes nor resident memory. Observe
+peak RSS separately with platform-correct units. The context kernel excludes
+provider I/O, storage and process startup; it does not qualify turn latency alone.
+
 Each headless sample owns a separate process group, a five-second deadline, and
 64 KiB per output stream. A timeout or output flood kills that group and reaps
 the leader before the gate returns. Evidence records the active phase and each

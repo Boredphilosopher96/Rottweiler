@@ -173,95 +173,22 @@ fn incremental_context_matches_full_requests_across_source_and_configuration_cha
     }
 }
 
-/// Run only on a quiet host; emits raw paired samples for external p99 analysis.
+mod measurement;
+
+/// Run without allocator instrumentation on an otherwise quiet host.
+#[cfg(not(feature = "allocation-measurement"))]
 #[test]
-#[ignore = "paired context CPU measurements require a quiet host"]
+#[ignore = "context timing requires a quiet host and explicit workload"]
 fn measure_incremental_context_against_full_assembly() {
-    let root = tempfile::tempdir().expect("root");
-    let config = fixture(root.path(), 2);
-    let conversation = (0..128).map(output).collect::<Vec<_>>();
-    let sources = (1..=128).map(source).collect::<Vec<_>>();
-    let queued = VecDeque::new();
-    let pruned = BTreeMap::new();
-    let mut working = admit(
-        super::fixtures::history::working_allowance(()),
-        &config,
-        &conversation,
-        &sources,
-        &queued,
-    )
-    .expect("working");
-    let mode = std::env::var("ROTTWEILER_CONTEXT_MEASURE_MODE").unwrap_or_else(|_| "paired".into());
-    assert!(matches!(mode.as_str(), "paired" | "cached" | "full"));
-    if mode != "full" {
-        drop(
-            assemble_session_context(
-                &config,
-                &working,
-                &conversation,
-                &sources,
-                &queued,
-                &[],
-                &pruned,
-            )
-            .expect("warm"),
-        );
-    }
-    for sample in 0..200 {
-        for cached in if sample % 2 == 0 {
-            [true, false]
-        } else {
-            [false, true]
-        } {
-            if (mode == "cached" && !cached) || (mode == "full" && cached) {
-                continue;
-            }
-            let started = std::time::Instant::now();
-            let full_working = if cached {
-                working = readmit(working, &config, &conversation, &sources, &queued)
-                    .expect("cached profile");
-                None
-            } else {
-                Some(
-                    admit(
-                        super::fixtures::history::working_allowance(()),
-                        &config,
-                        &conversation,
-                        &sources,
-                        &queued,
-                    )
-                    .expect("full profile"),
-                )
-            };
-            let result = if cached {
-                assemble_session_context(
-                    &config,
-                    &working,
-                    &conversation,
-                    &sources,
-                    &queued,
-                    &[],
-                    &pruned,
-                )
-            } else {
-                assemble_full_session_context(
-                    &config,
-                    &conversation,
-                    &sources,
-                    &queued,
-                    &[],
-                    &pruned,
-                )
-            }
-            .expect("assembly");
-            std::hint::black_box(&result);
-            std::hint::black_box(&full_working);
-            eprintln!(
-                "context_sample,{sample},{cached},{}",
-                started.elapsed().as_nanos()
-            );
-        }
-    }
+    measurement::run();
+}
+
+/// Allocation volume uses its own process; these samples contain no timing claims.
+#[cfg(feature = "allocation-measurement")]
+#[test]
+#[ignore = "allocation volume requires a single isolated test process"]
+fn measure_context_allocation_volume() {
+    measurement::run();
 }
 
 #[test]
