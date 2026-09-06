@@ -213,6 +213,23 @@ fn generate_typescript() -> Result<String, XtaskError> {
         ),
         ("MAX_CLIENT_CONTROLS", rw_types::MAX_CLIENT_CONTROLS),
         (
+            "MAX_CLIENT_URGENT_CONTROLS",
+            rw_types::MAX_CLIENT_URGENT_CONTROLS,
+        ),
+        ("MAX_COMMAND_BODY_BYTES", rw_types::MAX_COMMAND_BODY_BYTES),
+        (
+            "MAX_CONTROL_RETAINED_BYTES",
+            rw_types::MAX_CONTROL_RETAINED_BYTES,
+        ),
+        (
+            "MAX_URGENT_CONTROL_RETAINED_BYTES",
+            rw_types::MAX_URGENT_CONTROL_RETAINED_BYTES,
+        ),
+        (
+            "MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES",
+            rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES,
+        ),
+        (
             "MAX_UI_CONTRIBUTIONS",
             rw_types::extension_ui::MAX_UI_CONTRIBUTIONS,
         ),

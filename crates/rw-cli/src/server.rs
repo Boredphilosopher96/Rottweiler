@@ -40,7 +40,7 @@ use tokio::{
 // roughly 13.4 MiB before the bounded JSON envelope, so the command transport
 // must be at least as large as the protocol's already-bounded SSE envelope.
 const REQUEST_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-const COMMAND_BODY_LIMIT: usize = 16 * 1024 * 1024;
+const COMMAND_BODY_LIMIT: usize = rw_types::MAX_COMMAND_BODY_BYTES;
 const PROVIDER_API_KEY_BODY_LIMIT: usize = 16 * 1024;
 const PROVIDER_API_KEY_LIMIT: usize = 8 * 1024;
 const MAX_PROVIDER_API_KEY_ATTEMPTS: usize = 256;

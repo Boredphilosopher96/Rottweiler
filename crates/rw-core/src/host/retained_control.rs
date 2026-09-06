@@ -8,7 +8,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const UNIT: usize = 1024;
 const NORMAL_REPLY_UNITS: u32 = 4 * 1024;
-const URGENT_REPLY_UNITS: u32 = 64;
 
 #[derive(Debug)]
 pub(super) struct CompletionBudget {
@@ -37,7 +36,11 @@ impl CompletionBudget {
         key: &(ClientId, RequestId),
     ) -> Option<CompletionReservation> {
         let (pool, units) = if command.is_urgent() {
-            (&self.urgent, URGENT_REPLY_UNITS)
+            (
+                &self.urgent,
+                u32::try_from(rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT)
+                    .expect("urgent completion units fit u32"),
+            )
         } else {
             (&self.normal, NORMAL_REPLY_UNITS)
         };

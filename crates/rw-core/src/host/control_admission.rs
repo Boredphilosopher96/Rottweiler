@@ -41,9 +41,15 @@ impl Default for ControlAdmission {
                 32 * 1024 * 1024,
                 rw_types::MAX_CLIENT_CONTROLS,
                 8,
-                16 * 1024 * 1024,
+                rw_types::MAX_CONTROL_RETAINED_BYTES,
             ),
-            urgent: Lane::new(8, 1024 * 1024, 2, 2, 64 * 1024),
+            urgent: Lane::new(
+                8,
+                1024 * 1024,
+                rw_types::MAX_CLIENT_URGENT_CONTROLS,
+                2,
+                rw_types::MAX_URGENT_CONTROL_RETAINED_BYTES,
+            ),
         }
     }
 }

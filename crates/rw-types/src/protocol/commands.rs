@@ -772,6 +772,16 @@ impl CommandReply {
 pub const MAX_CLIENT_READS: usize = 2;
 /// Concurrent ordinary semantic controls admitted for one authenticated client.
 pub const MAX_CLIENT_CONTROLS: usize = 8;
+/// Concurrent urgent controls admitted independently for one authenticated client.
+pub const MAX_CLIENT_URGENT_CONTROLS: usize = 2;
+/// Maximum encoded HTTP command body, including inline attachment encoding.
+pub const MAX_COMMAND_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Retained Rust command allocation admitted in the ordinary control lane.
+pub const MAX_CONTROL_RETAINED_BYTES: usize = 16 * 1024 * 1024;
+/// Retained Rust command allocation admitted in the urgent control lane.
+pub const MAX_URGENT_CONTROL_RETAINED_BYTES: usize = 64 * 1024;
+/// Reserved Rust completion allocation for each admitted urgent control.
+pub const MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES: usize = 64 * 1024;
 
 /// Maximum encoded command reply, including its envelope.
 pub const MAX_COMMAND_REPLY_BYTES: usize = 8 * 1024 * 1024;
