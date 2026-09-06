@@ -51,7 +51,7 @@ use rw_core::{
     ProviderLoginCancellation, ProviderModelCatalogSource, SessionDescriptor, SessionFactory,
     SessionId, TranscriptFormat, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
     WorkspaceFilePreview, WorkspaceStatus, begin_provider_login, builtin_command_registry,
-    merge_model_catalog_provider, project_session_events, retain_model_catalog_provider,
+    merge_model_catalog_provider, retain_model_catalog_provider,
 };
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;

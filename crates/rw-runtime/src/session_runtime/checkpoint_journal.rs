@@ -1,4 +1,3 @@
-use super::durable_session::validate_session_event_envelopes;
 use super::runtime_options::MAX_WORKSPACE_ROOTS;
 use super::session_metadata::validate_session_id;
 use super::session_selection::checkpoint_root;
@@ -7,8 +6,6 @@ use crate::journal_service::JournalService;
 use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
-use rw_core::EngineEvent;
-use rw_core::project_session_events;
 use rw_store::checkpoint::CheckpointStore;
 use serde::Deserialize;
 use serde::Serialize;
@@ -245,21 +242,12 @@ pub(crate) fn load_session_workspace_roots(
     session_id: &str,
 ) -> Result<Vec<PathBuf>> {
     let root = checkpoint_root(storage_root, workspace, session_id);
-    let lease = journal_service.capture(session_id)?;
-    let envelopes = lease
-        .view
-        .collect_bounded::<EngineEvent>(
-            crate::history::MAX_HISTORY_BYTES,
-            crate::history::MAX_HISTORY_EVENTS,
-        )
-        .map_err(|error| miette!("session event log could not load: {error}"))?;
-    let events = validate_session_event_envelopes(envelopes)?;
-    let projected = project_session_events(&events)
-        .map_err(|error| miette!("session workspace generation could not project: {error}"))?;
-    if projected.workspace_generation == 0 {
+    let generation =
+        crate::mode_recovery::current_workspace_generation(journal_service, session_id)?;
+    if generation == 0 {
         return Ok(vec![workspace.to_path_buf()]);
     }
-    let roots = load_checkpoint_root_generation_exact(&root, projected.workspace_generation)?
+    let roots = load_checkpoint_root_generation_exact(&root, generation)?
         .map(|entry| entry.roots)
         .ok_or_else(|| {
             miette!("durable workspace event generation is absent from the local root journal")

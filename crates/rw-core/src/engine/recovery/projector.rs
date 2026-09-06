@@ -53,6 +53,25 @@ impl CanonicalRecovery {
         recovery.head()?;
         Ok(recovery)
     }
+    /// Build the exact selected fork prefix in its own bounded derived owner.
+    /// It cannot move or invalidate the live actor's canonical checkpoint.
+    /// # Errors
+    /// Rejects unsafe/concurrent storage and invalid canonical source or mode data.
+    pub fn for_fork(
+        source: &JournalReadView,
+        modes: &ModeRegistry,
+        inherited_journal_through: Option<SequenceId>,
+    ) -> Result<Self, RecoveryError> {
+        Ok(Self {
+            index: RecoveryIndex::rebuild(
+                source,
+                rw_store::session::recovery_index::RecoveryProjection::Fork,
+                VERSION,
+            )?,
+            fingerprint: registry_fingerprint(modes),
+            inherited_journal_through,
+        })
+    }
     /// Explicitly reset only derived recovery state before incremental rebuild.
     ///
     /// # Errors

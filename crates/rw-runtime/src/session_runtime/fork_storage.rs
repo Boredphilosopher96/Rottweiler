@@ -22,7 +22,6 @@ use miette::miette;
 use rw_core::ClientId;
 use rw_core::EngineEvent;
 use rw_core::SequenceId;
-use rw_core::project_session_events;
 use rw_store::session::SessionEventLog;
 use rw_store::session::SessionStoreError;
 use rw_types::SessionId;
@@ -47,76 +46,39 @@ pub(crate) fn fork_hosted_session_storage(
     validate_session_id(parent_session_id)?;
     validate_session_id(child_session_id)?;
     let parent_metadata = load_session_metadata(storage_root, parent_session_id, workspace)?;
-    let lease = journal_service.capture(parent_session_id)?;
-    let (parent_events, _) = crate::history::load_events_from_view(
-        &lease.view,
+    let route = crate::mode_recovery::fork_route(
+        journal_service,
         parent_session_id,
-        crate::history::MAX_HISTORY_BYTES,
+        through_turn,
+        through_sequence,
+        include_idle_tail,
     )?;
-    let through_sequence = if include_idle_tail {
-        through_sequence
-    } else if through_turn == 0 {
-        None
-    } else {
-        Some(
-            parent_events
-                .iter()
-                .rev()
-                .find_map(|event| match &event.event {
-                    EngineEvent::TurnFinished { turn_id, .. }
-                        if turn_id.0.parse::<u64>().ok() == Some(through_turn) =>
-                    {
-                        Some(event.sequence)
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| miette!("fork turn is not a durable completed boundary"))?,
-        )
-    };
-    let prefix_end = through_sequence
-        .map(|sequence| {
-            usize::try_from(sequence.0)
-                .map_err(|_| miette!("fork sequence cannot be represented"))?
-                .checked_add(1)
-                .ok_or_else(|| miette!("fork sequence cannot be represented"))
-        })
-        .transpose()?;
-    let prefix = prefix_end.map_or(Ok(&[][..]), |end| {
-        parent_events
-            .get(..end)
-            .ok_or_else(|| miette!("fork sequence is beyond the durable parent tail"))
-    })?;
-    if prefix
-        .iter()
-        .enumerate()
-        .any(|(index, event)| event.sequence.0 != index as u64)
-    {
-        return Err(miette!("fork parent envelope sequence is not contiguous"));
-    }
-    let prefix_events = prefix
-        .iter()
-        .map(|event| event.event.clone())
-        .collect::<Vec<_>>();
-    // This preliminary projection reads only the non-policy workspace
-    // generation needed to locate the historical root set. The registry-aware
-    // projection below validates all mode semantics before any child path is
-    // created or event is written.
-    let workspace_projection = project_session_events(&prefix_events)
-        .map_err(|error| miette!("fork prefix projection failed: {error}"))?;
+    let through_sequence = route.through;
+    let selected = route
+        .lease
+        .view
+        .prefix_through(through_sequence)
+        .into_diagnostic()?;
     let source_checkpoint_root = checkpoint_root(storage_root, workspace, parent_session_id);
     let target_checkpoint_root = checkpoint_root(storage_root, workspace, child_session_id);
     if target_checkpoint_root.exists() {
         return Err(miette!("fork target checkpoint root already exists"));
     }
-    let fork_roots = load_checkpoint_root_generation_exact(
-        &source_checkpoint_root,
-        workspace_projection.workspace_generation,
-    )?
-    .filter(|generation| generation.committed)
-    .map(|generation| generation.roots)
-    .ok_or_else(|| miette!("fork workspace-root generation is unavailable"))?;
-    let projected = crate::mode_recovery::project(&prefix_events, mode_registry)
-        .map_err(|error| miette!("fork mode projection failed: {error}"))?;
+    let fork_roots =
+        load_checkpoint_root_generation_exact(&source_checkpoint_root, route.workspace_generation)?
+            .filter(|generation| generation.committed)
+            .map(|generation| generation.roots)
+            .ok_or_else(|| miette!("fork workspace-root generation is unavailable"))?;
+    let projected = crate::mode_recovery::validate_fork(
+        &selected,
+        mode_registry,
+        parent_metadata
+            .inherited_journal_through
+            .filter(|inherited| through_sequence.is_some_and(|cut| *inherited <= cut)),
+    )?;
+    if projected.workspace_generation != route.workspace_generation {
+        return Err(miette!("fork routing and canonical workspace disagree"));
+    }
     let mapping = CheckpointRootMapping {
         version: CHECKPOINT_ROOTS_VERSION,
         generations: vec![CheckpointRootGeneration {
@@ -143,7 +105,7 @@ pub(crate) fn fork_hosted_session_storage(
             storage_root,
             parent_session_id,
             child_session_id,
-            &lease.view,
+            &route.lease.view,
             through_sequence,
             move |mut event| {
                 let meta = event.meta_mut().ok_or(SessionStoreError::CorruptEvent(

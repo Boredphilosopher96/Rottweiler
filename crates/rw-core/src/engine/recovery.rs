@@ -32,6 +32,8 @@ mod projector;
 mod read;
 pub use input::materialize_conversation_event;
 mod receipts;
+mod routing;
+pub use routing::SessionRoutingIndex;
 mod reduce;
 mod repair;
 pub use read::{

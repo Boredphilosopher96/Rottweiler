@@ -136,68 +136,31 @@ impl RuntimeSessionFactory {
                 "fork parent workspace does not match its operation".to_owned(),
             ));
         }
-        let lease = self
-            .journal_service
-            .capture(&request.parent.session_id.0)
-            .map_err(|error| HostError::Persistence(error.to_string()))?;
-        let (envelopes, _) = crate::history::load_events_from_view(
-            &lease.view,
-            &request.parent.session_id.0,
-            crate::history::MAX_HISTORY_BYTES,
-        )
-        .map_err(|error| HostError::Persistence(error.to_string()))?;
         let fork_turn = request
             .at_turn
             .0
             .parse::<u64>()
-            .map_err(|_| HostError::Persistence("fork turn is invalid".to_owned()))?;
-        let boundary = if request.include_idle_tail {
-            request.through_sequence
-        } else if fork_turn == 0 {
-            None
-        } else {
-            Some(
-                envelopes
-                    .iter()
-                    .rev()
-                    .find_map(|envelope| match &envelope.event {
-                        EngineEvent::TurnFinished { turn_id, .. }
-                            if *turn_id == request.at_turn =>
-                        {
-                            Some(envelope.sequence)
-                        }
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        HostError::Persistence("fork turn boundary is unavailable".to_owned())
-                    })?,
-            )
-        };
-        let inherited_count = boundary.map_or(Ok(0_usize), |sequence| {
-            usize::try_from(sequence.0)
-                .map_err(|_| HostError::Persistence("fork boundary is invalid".to_owned()))?
-                .checked_add(1)
-                .ok_or_else(|| HostError::Persistence("fork boundary is invalid".to_owned()))
-        })?;
-        let inherited = envelopes.get(..inherited_count).ok_or_else(|| {
-            HostError::Persistence("fork boundary exceeds its event log".to_owned())
-        })?;
-        let inherited_events = inherited
-            .iter()
-            .map(|envelope| envelope.event.clone())
-            .collect::<Vec<_>>();
-        // This generic pass consumes only the non-policy workspace generation
-        // required to locate the historical extension roots. Mutation-capable
-        // state is accepted only after the registry-aware pass below.
-        let workspace_projection = project_session_events(&inherited_events)
-            .map_err(|_| HostError::Persistence("fork event projection failed".to_owned()))?;
+            .map_err(|_| HostError::Persistence("fork turn is invalid".into()))?;
+        let route = crate::mode_recovery::fork_route(
+            &self.journal_service,
+            &request.parent.session_id.0,
+            fork_turn,
+            request.through_sequence,
+            request.include_idle_tail,
+        )
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
+        let selected = route
+            .lease
+            .view
+            .prefix_through(route.through)
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
         let roots = crate::session_runtime::load_checkpoint_roots_exact(
             &crate::session_runtime::checkpoint_root(
                 &self.options.storage_root,
                 workspace,
                 &request.parent.session_id.0,
             ),
-            workspace_projection.workspace_generation,
+            route.workspace_generation,
         )
         .map_err(|_| HostError::Persistence("fork root generation is unavailable".to_owned()))?
         .ok_or_else(|| {
@@ -213,10 +176,21 @@ impl RuntimeSessionFactory {
             self.options.dangerously_trust,
         )
         .map_err(|_| HostError::Persistence("fork mode registry is unavailable".to_owned()))?;
-        let validated = crate::mode_recovery::compose_and_project(&catalog, &inherited_events)
-            .map_err(|_| HostError::Persistence("fork mode projection failed".to_owned()))?;
-        let recovered = validated.recovered;
-        let modes = validated.modes;
+        let modes = rw_ext::compose_mode_registry(&catalog)
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        let recovered = crate::mode_recovery::validate_fork(
+            &selected,
+            &modes,
+            metadata
+                .inherited_journal_through
+                .filter(|inherited| route.through.is_some_and(|cut| *inherited <= cut)),
+        )
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
+        if recovered.workspace_generation != route.workspace_generation {
+            return Err(HostError::Persistence(
+                "fork routing and canonical workspace disagree".into(),
+            ));
+        }
         let roots_digest =
             blake3::hash(&serde_json::to_vec(&roots).map_err(|_| {
                 HostError::Persistence("fork roots could not serialize".to_owned())
