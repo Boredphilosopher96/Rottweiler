@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use super::*;
 use rw_types::{EventMeta, SequenceId, SessionId, TurnId};
 
