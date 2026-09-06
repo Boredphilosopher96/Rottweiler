@@ -53,9 +53,9 @@ fn install_activation_trace() {
 }
 
 fn fixture_helper() -> rw_tools::ApprovedExecutable {
-    install_activation_trace();
     static IDENTITY: std::sync::OnceLock<(std::path::PathBuf, rw_tools::ExecutableDigest)> =
         std::sync::OnceLock::new();
+    install_activation_trace();
     let (path, digest) = IDENTITY.get_or_init(|| {
         let path = Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host"))
             .canonicalize()

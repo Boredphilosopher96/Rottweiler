@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 from journal_observer import observed_envelopes, session_journals
+from m4_transcript import fixture_turns
 from release_contract import load_contract
 
 TUI_ROLE = load_contract(pathlib.Path(__file__).resolve().parents[3] / "contracts/release-contract.json").js_host_roles["tui"]
@@ -1076,22 +1077,7 @@ def canonical_durable_transcript(
         if not event_log.is_dir():
             raise RuntimeError(f"remote durable transcript is missing: {event_log}")
 
-    turns: list[dict[str, object]] = []
-    for envelope in observed_envelopes(event_log):
-        event = envelope.get("event")
-        if not isinstance(event, dict) or event.get("type") != "conversation_turn_committed":
-            continue
-        turn = event.get("turn")
-        if not isinstance(turn, dict):
-            raise RuntimeError("durable conversation event omitted its typed turn")
-        role = turn.get("role")
-        blocks = turn.get("blocks")
-        if not isinstance(role, str) or not isinstance(blocks, list):
-            raise RuntimeError("durable conversation turn has an invalid protocol shape")
-        # Session ids, sequence ids, timestamps, and provider bookkeeping are
-        # intentionally excluded; role and provider-neutral blocks are the
-        # canonical transcript bytes both local and remote clients must share.
-        turns.append({"role": role, "blocks": blocks})
+    turns = fixture_turns(observed_envelopes(event_log))
     canonical = json.dumps(
         turns, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")

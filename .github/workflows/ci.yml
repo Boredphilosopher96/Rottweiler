@@ -130,6 +130,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
       ROTTWEILER_CREDENTIAL_BACKEND: file
     strategy:
       fail-fast: false
@@ -240,6 +241,8 @@ jobs:
 
   linux-candidate-build:
     name: Build native Linux candidate
+    env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -294,6 +297,8 @@ jobs:
 
   macos-candidate-build:
     name: Build native macOS candidate
+    env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
     runs-on: macos-15
     timeout-minutes: 45
     outputs:
@@ -344,6 +349,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
       ROTTWEILER_CREDENTIAL_BACKEND: file
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -376,6 +382,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_PERF_SMOKE: 1
     strategy:
@@ -414,6 +421,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_M4_SKIP_PERFORMANCE: 1
       ROTTWEILER_M4_SKIP_SUPERVISOR: 1
