@@ -98,6 +98,8 @@ jobs:
 
   linux-candidate-build:
     name: Build native Linux candidate
+    env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -115,7 +117,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ". -> target/native-candidate"
-          key: native-candidate
+          key: native-rust-artifacts
       - name: Build and enforce native component sizes
         id: candidate
         run: >-
@@ -143,6 +145,8 @@ jobs:
 
   macos-candidate-build:
     name: Build native macOS candidate
+    env:
+      ROTTWEILER_NATIVE_CACHE_DIR: ${{ runner.temp }}/rottweiler-native-cache
     runs-on: macos-15
     timeout-minutes: 45
     outputs:
@@ -160,7 +164,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ". -> target/native-candidate"
-          key: native-candidate
+          key: native-rust-artifacts
       - name: Build and enforce native component sizes
         id: candidate
         run: >-
