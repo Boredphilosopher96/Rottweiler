@@ -496,6 +496,11 @@ pub trait HostSubagentService: Send + Sync + 'static {
         &self,
         root: &SessionId,
     ) -> Result<rw_types::family_controls::FamilyControlsSnapshot, HostError>;
+    async fn child_read_scope(
+        &self,
+        root: &SessionId,
+        target: &rw_types::family_controls::ChildControlTarget,
+    ) -> Result<rw_types::family_controls::ChildReadScopeResult, HostError>;
     async fn child_state(
         &self,
         root: &SessionId,

@@ -187,6 +187,19 @@ impl JournalService {
         self.capture_admitted(session, permit)
     }
 
+    /// Move one exclusively held read credit to the next source in a serial query.
+    pub(crate) fn retarget(
+        &self,
+        source: JournalReadLease,
+        session: &str,
+    ) -> Result<JournalReadLease> {
+        let JournalReadLease { view, _permit } = source;
+        drop(view);
+        let permit = Arc::try_unwrap(_permit)
+            .map_err(|_| miette!("serial source query retained a previous read view"))?;
+        self.capture_admitted(session, permit)
+    }
+
     fn capture_admitted(
         &self,
         session: &str,

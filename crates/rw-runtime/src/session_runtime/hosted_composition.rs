@@ -951,6 +951,7 @@ pub(crate) async fn compose_hosted_actor(
     })
     .map_err(display_agent_error)?;
     let subagents: Arc<dyn HostSubagentService> = Arc::new(HostedSubagentController {
+        journals: Arc::clone(&options.journal_service),
         parent: handle.clone(),
         orchestrator,
     });

@@ -1,6 +1,6 @@
 use rw_types::family_controls::{
     ChildControlHop, ChildControlResponse, ChildControlSummary, ChildControlTarget,
-    ChildControlsSnapshot, FamilyControlRow, FamilyControlsSnapshot,
+    ChildControlsSnapshot, ChildReadScopeResult, FamilyControlRow, FamilyControlsSnapshot,
 };
 use rw_types::session_children::{
     SessionChildState, SessionChildrenResult, SessionChildrenSnapshot,
@@ -462,6 +462,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::conversation_input::InputSelection);
     declaration!(rw_types::conversation_input::ContextSelection);
     declaration!(ChildControlsSnapshot);
+    declaration!(ChildReadScopeResult);
     declaration!(ChildControlResponse);
 
     declaration!(SessionStateSnapshot);

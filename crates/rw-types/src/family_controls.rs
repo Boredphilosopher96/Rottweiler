@@ -172,3 +172,21 @@ mod tests {
         );
     }
 }
+
+/// Bounded canonical ancestry resolution does not block live control reads.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChildReadScopeResult {
+    Ready {
+        scope: crate::session_read::SessionReadScope,
+    },
+    CatchingUp {
+        session_id: SessionId,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
+        through: Option<SequenceId>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
+        target: Option<SequenceId>,
+    },
+}

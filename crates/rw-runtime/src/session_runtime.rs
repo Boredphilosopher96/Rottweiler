@@ -11,6 +11,7 @@ mod declarative_hooks;
 mod deferred_network;
 mod durable_session;
 mod extension_discovery;
+mod family_read_scope;
 mod folder_trust;
 mod fork_storage;
 mod headless_lifetime;

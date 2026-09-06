@@ -32,6 +32,11 @@ pub enum ClientCommand {
         #[ts(optional = false)]
         after_revision: Option<SequenceId>,
     },
+    ResolveChildReadScope {
+        meta: CommandMeta,
+        session_id: SessionId,
+        target: crate::family_controls::ChildControlTarget,
+    },
     ReadChildState {
         meta: CommandMeta,
         session_id: SessionId,
@@ -430,6 +435,7 @@ impl ClientCommand {
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
             | Self::ReadFamilyControls { meta, .. }
+            | Self::ResolveChildReadScope { meta, .. }
             | Self::ReadChildState { meta, .. }
             | Self::ReadChildControls { meta, .. }
             | Self::ResolveChildControl { meta, .. }
@@ -517,6 +523,7 @@ impl ClientCommand {
             | Self::GetSessionState { session_id, .. }
             | Self::GetSessionControls { session_id, .. }
             | Self::ReadFamilyControls { session_id, .. }
+            | Self::ResolveChildReadScope { session_id, .. }
             | Self::ReadChildState { session_id, .. }
             | Self::ReadChildControls { session_id, .. }
             | Self::ResolveChildControl { session_id, .. }
@@ -595,6 +602,7 @@ impl ClientCommand {
             | Self::GetSessionState { meta, .. }
             | Self::GetSessionControls { meta, .. }
             | Self::ReadFamilyControls { meta, .. }
+            | Self::ResolveChildReadScope { meta, .. }
             | Self::ReadChildState { meta, .. }
             | Self::ReadChildControls { meta, .. }
             | Self::ResolveChildControl { meta, .. }
@@ -704,6 +712,7 @@ read_commands!(
     GetSessionState,
     GetSessionControls,
     ReadFamilyControls,
+    ResolveChildReadScope,
     ReadChildState,
     ReadChildControls,
     GetUiCatalog,

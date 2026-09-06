@@ -134,6 +134,7 @@ impl ChildActorTemplate {
 }
 
 pub(super) struct HostedSubagentController {
+    pub(super) journals: Arc<crate::journal_service::JournalService>,
     pub(super) parent: rw_core::SessionHandle,
     pub(super) orchestrator: SubagentOrchestrator,
 }
@@ -213,6 +214,26 @@ impl HostSubagentService for HostedSubagentController {
         self.orchestrator
             .family_controls(root)
             .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+    async fn child_read_scope(
+        &self,
+        root: &SessionId,
+        target: &rw_types::family_controls::ChildControlTarget,
+    ) -> Result<rw_types::family_controls::ChildReadScopeResult, HostError> {
+        self.ensure_parent(root)?;
+        self.orchestrator
+            .control_child(root, target)
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        let result = super::family_read_scope::resolve(
+            Arc::clone(&self.journals),
+            root.clone(),
+            target.clone(),
+        )
+        .await?;
+        self.orchestrator
+            .control_child(root, target)
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        Ok(result)
     }
     async fn child_state(
         &self,

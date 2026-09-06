@@ -61,6 +61,7 @@ pub(super) fn is_host_command(command: &ClientCommand) -> bool {
             | ClientCommand::GetSessionState { .. }
             | ClientCommand::GetSessionControls { .. }
             | ClientCommand::ReadFamilyControls { .. }
+            | ClientCommand::ResolveChildReadScope { .. }
             | ClientCommand::ReadChildState { .. }
             | ClientCommand::ReadChildControls { .. }
             | ClientCommand::ResolveChildControl { .. }

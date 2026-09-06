@@ -72,6 +72,27 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::ResolveChildReadScope {
+                meta,
+                session_id,
+                target,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let service = session.subagents().ok_or_else(|| {
+                    HostError::Query("family source capability unavailable".into())
+                })?;
+                let result = service.child_read_scope(&session_id, &target).await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ChildReadScopeReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        target,
+                        result,
+                    }],
+                ))
+            }
             ClientCommand::ReadChildState {
                 meta,
                 session_id,

@@ -65,6 +65,12 @@ pub enum EngineEvent {
         session_id: SessionId,
         snapshot: crate::family_controls::FamilyControlsSnapshot,
     },
+    ChildReadScopeReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        target: crate::family_controls::ChildControlTarget,
+        result: crate::family_controls::ChildReadScopeResult,
+    },
     ChildStateReady {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -768,6 +774,7 @@ impl EngineEvent {
             | Self::SessionStateReady { meta, .. }
             | Self::SessionControlsReady { meta, .. }
             | Self::FamilyControlsReady { meta, .. }
+            | Self::ChildReadScopeReady { meta, .. }
             | Self::ChildStateReady { meta, .. }
             | Self::ChildControlsReady { meta, .. }
             | Self::UiCatalogReady { meta, .. }
@@ -897,6 +904,7 @@ impl EngineEvent {
             | Self::SessionStateReady { .. }
             | Self::SessionControlsReady { .. }
             | Self::FamilyControlsReady { .. }
+            | Self::ChildReadScopeReady { .. }
             | Self::ChildStateReady { .. }
             | Self::ChildControlsReady { .. }
             | Self::UiCatalogReady { .. }
@@ -1010,6 +1018,7 @@ impl EngineEvent {
             | Self::SessionStateReady { .. }
             | Self::SessionControlsReady { .. }
             | Self::FamilyControlsReady { .. }
+            | Self::ChildReadScopeReady { .. }
             | Self::ChildStateReady { .. }
             | Self::ChildControlsReady { .. }
             | Self::UiCatalogReady { .. }
