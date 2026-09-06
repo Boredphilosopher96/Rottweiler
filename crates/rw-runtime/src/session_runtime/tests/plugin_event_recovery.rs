@@ -47,7 +47,7 @@ async fn sdk_event_process_crash_replays_only_the_unacknowledged_delivery() {
     )
     .expect("private storage");
     let workspace = workspace.canonicalize().expect("canonical workspace");
-    configure_plugin(root.path(), &storage, &workspace, "event-recovery").await;
+    configure_plugin(root.path(), &storage, &workspace, "event-recovery", &[]).await;
     let first =
         compose_fixture_session(&storage, &workspace, "event-recovery-session", false).await;
     assert!(matches!(

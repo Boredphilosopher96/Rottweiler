@@ -198,6 +198,7 @@ async fn sdk_child_provider_state_and_panels_have_private_generations_on_reopen(
         &storage,
         &workspace,
         "child-namespace",
+        &["example.com"],
     )
     .await;
     let parent = super::plugin_command_session::compose_fixture_session(

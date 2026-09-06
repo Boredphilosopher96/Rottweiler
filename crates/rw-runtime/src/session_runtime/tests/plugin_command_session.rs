@@ -59,7 +59,13 @@ async fn bundle_fixture(
     )
 }
 
-pub(super) async fn configure_plugin(root: &Path, storage: &Path, workspace: &Path, fixture: &str) {
+pub(super) async fn configure_plugin(
+    root: &Path,
+    storage: &Path,
+    workspace: &Path,
+    fixture: &str,
+    allowed_domains: &[&str],
+) {
     let package = workspace.join("fixture");
     std::fs::create_dir(&package).expect("package");
     let (bun, manifest) = bundle_fixture(&package, fixture).await;
@@ -73,7 +79,7 @@ pub(super) async fn configure_plugin(root: &Path, storage: &Path, workspace: &Pa
     std::fs::create_dir(&project).expect("project settings");
     let config_path = project.join("plugins.toml");
     let settings = serde_json::json!({"plugins":[{
-        "name":manifest.name, "argv":[bun, package.join("plugin.js")], "cwd":package, "manifest":manifest_path
+        "name":manifest.name, "argv":[bun, package.join("plugin.js")], "cwd":package, "manifest":manifest_path, "allowed_domains":allowed_domains
     }]});
     std::fs::write(
         &config_path,
@@ -108,7 +114,7 @@ async fn sdk_command_controls_state_and_panel_reenter_the_live_actor() {
     .expect("private storage");
     let workspace = workspace.canonicalize().expect("workspace identity");
     std::fs::write(workspace.join("broker.txt"), "broker owned bytes").expect("broker input");
-    configure_plugin(root.path(), &storage, &workspace, "command-session").await;
+    configure_plugin(root.path(), &storage, &workspace, "command-session", &[]).await;
     let runtime =
         compose_fixture_session(&storage, &workspace, "command-session-actor", false).await;
     let outcome = tokio::time::timeout(
