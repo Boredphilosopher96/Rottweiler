@@ -21,6 +21,7 @@ import {
   formatToolArguments,
   presentableUnifiedDiff
 } from "../render"
+import { interactionFingerprint, type InteractionSelection } from "../interaction-selection"
 import type { QuestionProjection, RottweilerState, ToolProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { KNOWN_TOOL_DISPLAY_NAMES, permissionRuntimeMode, toolDisplayName } from "./panel-labels"
@@ -48,9 +49,12 @@ export class InteractionPanelRenderable extends BoxRenderable {
   #theme: RottweilerTheme
   #treeSitterClient: TreeSitterClient | undefined
   #terminalHeight: number
+  #selectionSource: readonly unknown[] | null = null
+  #selectionFingerprint: string | null = null
 
   override destroy(): void {
     this.#activeTool = null; this.#activeQuestion = null; this.#activePlan = null; this.#diff = null
+    this.#selectionSource = null; this.#selectionFingerprint = null
     super.destroy()
   }
 
@@ -130,6 +134,29 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.add(this.select)
   }
 
+  captureSelection(): InteractionSelection | null {
+    if (!this.visible || this.#selectionFingerprint === null) return null
+    const selected = this.select.getSelectedOption()
+    return { fingerprint: this.#selectionFingerprint, index: Math.max(0, this.select.options.indexOf(selected!)) }
+  }
+
+  restoreSelection(selection: InteractionSelection): boolean {
+    if (!this.visible || this.#selectionFingerprint !== selection.fingerprint) return false
+    if (!this.usesComposer && selection.index >= this.select.options.length) return false
+    if (!this.usesComposer) this.select.setSelectedIndex(selection.index)
+    return true
+  }
+
+  #retainSelection(source: readonly unknown[]): number {
+    const previous = this.captureSelection()
+    if (this.#selectionSource === null || source.length !== this.#selectionSource.length
+      || source.some((value, index) => value !== this.#selectionSource![index])) {
+      this.#selectionFingerprint = interactionFingerprint(source)
+      this.#selectionSource = source
+    }
+    return previous?.fingerprint === this.#selectionFingerprint ? previous.index : 0
+  }
+
   /** Free-text questions deliberately use the composer as the dock input. */
   get usesComposer(): boolean {
     return this.visible && this.#activeQuestion?.questions[0]?.response_kind === "text"
@@ -157,6 +184,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       this.#removeDiff()
       this.visible = false
       this.height = 0
+      this.#selectionSource = null; this.#selectionFingerprint = null
       return
     }
     const tool = Object.values(state.tools).find((candidate) => candidate.status === "awaiting_approval")
@@ -181,9 +209,11 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#removeDiff()
     this.visible = false
     this.height = 0
+    this.#selectionSource = null; this.#selectionFingerprint = null
   }
 
   #showTool(tool: ToolProjection, permissionMode: PermissionModeDescriptor | null, allowPermissionChanges: boolean): void {
+    const selected = this.#retainSelection(["approval", tool.invocationId, tool.turnId, tool.name, tool.args, tool.capabilities, tool.rationale, tool.diff, permissionMode, allowPermissionChanges])
     this.#activeTool = tool
     this.#activeQuestion = null
     this.#activePlan = null
@@ -216,7 +246,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
           : [{ name: "Stop asking for safe actions", description: "Switch this session to auto-safe mode", value: "auto_safe_mode" }]),
         { name: "Deny", description: "Do not run the tool", value: "deny" },
       ]
-    this.select.setSelectedIndex(0)
+    this.select.setSelectedIndex(Math.min(selected, Math.max(0, this.select.options.length - 1)))
     if (diff !== null) {
       if (this.#diff === null) {
         const filetype = filetypeForPath(diff.path)
@@ -251,6 +281,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
 
   #showQuestion(question: QuestionProjection): void {
     this.#activeTool = null
+    const selected = this.#retainSelection(["question", question.questionId, question.turnId, question.questions])
     this.#activeQuestion = question
     this.#activePlan = null
     this.#removeDiff()
@@ -266,7 +297,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.select.visible = !freeText
     this.#layout(freeText ? 4 : 0)
     if (!freeText) {
-      this.select.setSelectedIndex(0)
+      this.select.setSelectedIndex(Math.min(selected, Math.max(0, this.select.options.length - 1)))
       this.select.focus()
     }
   }
@@ -274,6 +305,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
   #showPlan(plan: PlanArtifact): void {
     this.#activeTool = null
     this.#activeQuestion = null
+    const selected = this.#retainSelection(["plan", plan])
     this.#activePlan = plan
     this.#removeDiff()
     this.visible = true
@@ -286,7 +318,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       { name: "Reject plan", description: "Stay in Plan mode", value: "reject" },
     ]
     this.#layout()
-    this.select.setSelectedIndex(0)
+    this.select.setSelectedIndex(Math.min(selected, Math.max(0, this.select.options.length - 1)))
     this.select.focus()
   }
 
