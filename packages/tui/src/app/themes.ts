@@ -77,6 +77,7 @@ export class ThemeUiController {
   }
 
   async #confirmTheme(theme: RottweilerTheme): Promise<void> {
+    using replyAllocation = this.#host.requests.allocate()
     const interaction = this.#host.pickerController.interaction
     if (!interaction?.active || this.#pending !== null) return
     const pending = this.#pending = {}
@@ -85,7 +86,7 @@ export class ThemeUiController {
       const outcome = await this.#host.requests.emit({
         type: "set_setting", meta: this.#host.requests.meta(), session_id: this.#host.sessionId,
         key: "ui.theme", value: theme.name,
-      })
+      }, replyAllocation)
       if (!interaction.active || this.#pending !== pending) return
       this.#pending = null
       if (outcome?.type !== "accepted") {

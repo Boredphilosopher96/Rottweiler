@@ -73,6 +73,7 @@ export class SubmissionController {
     content: string,
     attachments: readonly Attachment[],
   ): Promise<boolean> {
+    using replyAllocation = this.host.requests.allocate()
     const scope = this.#scope
     this.host.sessions.clearRewind()
     this.clearComposerNotice()
@@ -122,7 +123,7 @@ export class SubmissionController {
           session_id: this.host.sessionId,
           subagent_id: subagentId,
           content,
-        })
+        }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
       } catch (error) {
         if (!this.#live(scope)) return false
@@ -170,7 +171,7 @@ export class SubmissionController {
         session_id: this.host.sessionId,
         question_id: textQuestion.questionId,
         answers: [{ question_id: textQuestion.questionId, values: [content] }],
-      })
+      }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
       if (outcome?.type !== "accepted") {
         this.host.projectRejection(outcome)
@@ -249,7 +250,7 @@ export class SubmissionController {
         type: "get_session_review",
         meta,
         session_id: this.host.sessionId,
-      })
+      }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
       if (outcome?.type !== "accepted") {
         this.host.reviewOpen = false
@@ -269,7 +270,7 @@ export class SubmissionController {
       session_id: this.host.sessionId,
       content,
       attachments: [...attachments],
-    })
+    }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
     if (outcome?.type !== "accepted") {
       this.host.projectRejection(outcome)
@@ -282,6 +283,7 @@ export class SubmissionController {
     content: string,
     attachments: readonly Attachment[],
   ): Promise<boolean> {
+    using replyAllocation = this.host.requests.allocate()
     const scope = this.#scope
     const command = content.slice(1).trim()
     if (command.length === 0 || attachments.length > 0) return false
@@ -296,7 +298,7 @@ export class SubmissionController {
       meta: this.host.requests.meta(),
       session_id: this.host.sessionId,
       command,
-    })
+    }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
     if (outcome?.type !== "accepted") {
       this.clearPendingShellTimer()
@@ -312,6 +314,7 @@ export class SubmissionController {
   }
 
   async submitApproval(tool: ToolProjection, decision: ApprovalDecision): Promise<void> {
+    using replyAllocation = this.host.requests.allocate()
     const scope = this.#scope
     try {
       if (tool.status !== "awaiting_approval" || tool.toolCallId === null) throw new Error("tool approval requires an authoritative pending approval")
@@ -323,7 +326,7 @@ export class SubmissionController {
         invocation_id: tool.invocationId,
         decision,
         binding: approvalBinding(tool.diff),
-      })
+      }, replyAllocation)
       if (!this.#live(scope)) return
       if (outcome?.type === "rejected") {
         this.host.projectRejection(outcome)
@@ -349,7 +352,7 @@ export class SubmissionController {
   }
 
   answer(question: QuestionProjection, values: readonly string[]): void {
-    this.host.requests.emit({
+    this.host.requests.dispatch({
       type: "answer_question",
       meta: this.host.requests.meta(),
       session_id: this.host.sessionId,
@@ -359,7 +362,7 @@ export class SubmissionController {
   }
 
   reviewPlan(decision: PlanDecision): void {
-    this.host.requests.emit({
+    this.host.requests.dispatch({
       type: "approve_plan",
       meta: this.host.requests.meta(),
       session_id: this.host.sessionId,
@@ -373,6 +376,7 @@ export class SubmissionController {
     currentHash: string,
     decision: "accept" | "revert",
   ): Promise<void> {
+    using replyAllocation = this.host.requests.allocate()
     const scope = this.#scope
     if (this.host.ui.state.shell.active) {
       this.host.projectError(
@@ -392,7 +396,7 @@ export class SubmissionController {
         path,
         decision,
         current_hash: currentHash,
-      })
+      }, replyAllocation)
       if (!this.#live(scope)) return
       if (outcome?.type === "rejected") {
         this.host.projectRejection(outcome)
@@ -419,6 +423,7 @@ export class SubmissionController {
   }
 
   async requestFork(atTurn: string | null): Promise<boolean> {
+    using replyAllocation = this.host.requests.allocate()
     const scope = this.#scope
     const meta = this.host.requests.meta()
     this.host.requests.trackFork(meta.request_id)
@@ -428,7 +433,7 @@ export class SubmissionController {
       session_id: this.host.sessionId,
       at_turn: atTurn,
       operation_id: crypto.randomUUID(),
-    })
+    }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
     if (outcome === null || outcome?.type === "rejected") {
       this.host.requests.discardFork(meta.request_id)

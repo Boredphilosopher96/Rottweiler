@@ -166,11 +166,11 @@ export class ChildUiController {
     if (this.#host.state.replay.active) return
     this.#subagentListError = null
     const meta = this.#host.requests.issue("subagents")
-    void this.#host.requests.emit({
+    void this.#host.requests.consume({
       type: "list_subagents",
       meta,
       session_id: this.#host.sessionId,
-    }).then((outcome) => {
+    }, (outcome) => {
       if (
         outcome?.type === "rejected" &&
         this.#host.requests.matches("subagents", meta.request_id)
@@ -391,6 +391,7 @@ export class ChildUiController {
   }
 
   async interruptSubagent(subagentId: string): Promise<void> {
+    using replyAllocation = this.#host.requests.allocate()
     const scope = this.#scope
     let outcome: void | CommandOutcome | null
     try {
@@ -399,7 +400,7 @@ export class ChildUiController {
         meta: this.#host.requests.meta(),
         session_id: this.#host.sessionId,
         subagent_id: subagentId,
-      })
+      }, replyAllocation)
       if (scope !== this.#scope) return
     } catch (error) {
       if (scope !== this.#scope) return
@@ -430,6 +431,7 @@ export class ChildUiController {
   }
 
   async closeSubagent(subagentId: string): Promise<void> {
+    using replyAllocation = this.#host.requests.allocate()
     const scope = this.#scope
     let outcome: void | CommandOutcome | null
     try {
@@ -438,7 +440,7 @@ export class ChildUiController {
         meta: this.#host.requests.meta(),
         session_id: this.#host.sessionId,
         subagent_id: subagentId,
-      })
+      }, replyAllocation)
       if (scope !== this.#scope) return
     } catch (error) {
       if (scope !== this.#scope) return

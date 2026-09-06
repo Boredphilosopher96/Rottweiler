@@ -1,3 +1,4 @@
+import { ClientAllocationOwner } from "../src/client-allocation"
 import { expect, test } from "bun:test"
 import { ClientCache } from "../src/history/cache"
 import type { HistoryCacheValue } from "../src/history/controller"
@@ -67,7 +68,7 @@ test("action settlement holds an old panel source across close and limits comman
   await settle()
   let finish!: () => void
   let submitted = 0
-  const action = new UiActionController({ allowed: () => true, changed: () => {}, failed: () => {}, execute: async (_session, request) => {
+  const action = new UiActionController({ allocations: new ClientAllocationOwner(), allowed: () => true, changed: () => {}, failed: () => {}, execute: async (_session, request) => {
     submitted++
     expect(request).toEqual({ owner: panels.panels[0]!.presentation.owner, contribution_id: "result", action_id: "inspect", target: { surface: "panel", revision: 1 } })
     await new Promise<void>(resolve => { finish = resolve })
@@ -120,7 +121,7 @@ test("unchanged panel revisions preserve prepared model identity and failed acti
   catalog.refresh()
   await settle()
   expect(catalog.snapshot.panels[0]!.model).toBe(model)
-  const action = new UiActionController({ allowed: () => { throw new Error("retired authority") },
+  const action = new UiActionController({ allocations: new ClientAllocationOwner(), allowed: () => { throw new Error("retired authority") },
     changed: () => {}, failed: () => {}, execute: async () => { throw new Error("must not dispatch") },
   })
   const lease = catalog.pinPanel(uiIdentity(model.presentation))!

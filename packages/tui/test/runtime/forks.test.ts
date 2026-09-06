@@ -40,7 +40,7 @@ describe("runtime forks", () => {
         session_id: "fork-parent",
         at_turn: "7",
         operation_id: "first-operation",
-      }),
+      }, { admit() {} }),
     ).toEqual({ type: "accepted" })
     const firstFork = firstClient.commands.find((command) => command.type === "fork")
     expect(firstFork?.type).toBe("fork")
@@ -63,7 +63,7 @@ describe("runtime forks", () => {
         session_id: "fork-parent",
         at_turn: "8",
         operation_id: "different-operation",
-      }),
+      }, { admit() {} }),
     ).toBeNull()
     expect(secondClient.commands.some((command) => command.type === "fork")).toBeFalse()
     expect(
@@ -77,7 +77,7 @@ describe("runtime forks", () => {
         session_id: "fork-parent",
         at_turn: "7",
         operation_id: "first-operation",
-      }),
+      }, { admit() {} }),
     ).toEqual({ type: "accepted" })
     const secondFork = secondClient.commands.find((command) => command.type === "fork")
     expect(secondFork?.type).toBe("fork")
@@ -138,7 +138,7 @@ describe("runtime forks", () => {
       session_id: "fork-parent",
       at_turn: null,
       operation_id: "fork-operation",
-    })
+    }, { admit() {} })
     expect(outcome).toEqual({ type: "accepted" })
     expect(client.forkSignalAborted).toBeFalse()
     while (app.sessionId !== "fork-child") await Bun.sleep(1)
@@ -186,7 +186,7 @@ describe("runtime forks", () => {
       at_turn: "3",
       operation_id: "capacity-operation",
     })
-    expect(await runtime.sendCommand(command("capacity-request"))).toMatchObject({
+    expect(await runtime.sendCommand(command("capacity-request"), { admit() {} })).toMatchObject({
       type: "rejected",
       error: { code: "session_capacity" },
     })
@@ -194,7 +194,7 @@ describe("runtime forks", () => {
     if (firstFork?.type !== "fork") throw new Error("capacity fork command missing")
     expect(files.reads.get("/private/pending-forks/fork-parent.json")).not.toBe("")
 
-    expect(await runtime.sendCommand(command("capacity-retry"))).toEqual({
+    expect(await runtime.sendCommand(command("capacity-retry"), { admit() {} })).toEqual({
       type: "accepted",
     })
     const forks = client.commands.filter((candidate) => candidate.type === "fork")

@@ -34,8 +34,9 @@ export class UiContributionController {
     this.#host = host
     this.#catalog = new UiCatalogController(reader, cache, () => this.rebind())
     this.#actions = new UiActionController({
+      allocations: cache.allocations,
       allowed: lease => host.writable && lease.sessionId === host.sessionId && this.#catalog.current(lease.model.presentation),
-      execute: (session, request) => host.requests.emit({ type: "invoke_ui_action", meta: host.requests.meta(), session_id: session, request }),
+      execute: (session, request, allocation) => host.requests.emit({ type: "invoke_ui_action", meta: host.requests.meta(), session_id: session, request }, allocation),
       changed: () => this.rebind(), failed: message => { this.#error = boundedUiText(message, 256); this.rebind() },
     })
   }

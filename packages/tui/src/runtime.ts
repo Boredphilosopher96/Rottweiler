@@ -372,7 +372,7 @@ export class TuiEngineRuntime {
     }
   }
 
-  async sendCommand(command: ClientCommand): Promise<CommandOutcome | null> {
+  async sendCommand(command: ClientCommand, allocation: ReplyAllocation): Promise<CommandOutcome | null> {
     try {
       await this.#ready
       if (!this.#driverReady || this.#subscriptionController === null) {
@@ -400,6 +400,7 @@ export class TuiEngineRuntime {
       const outcome = await this.#postCommand(
         dispatched,
         fork ? this.#controller.signal : this.#subscriptionController.signal,
+        allocation,
       )
       if (fork) {
         if (
@@ -491,6 +492,7 @@ export class TuiEngineRuntime {
    * fallback when the transport is unavailable.
    */
   async shutdownHost(timeoutMs = HOST_SHUTDOWN_TIMEOUT_MS): Promise<boolean> {
+    using shutdownAllocation = this.#allocations.reserve("decoding", 0)
     if (this.#config.replayMode || this.#controller.signal.aborted) return false
     const controller = new AbortController()
     const timer = setTimeout(
@@ -500,7 +502,7 @@ export class TuiEngineRuntime {
     try {
       const outcome = await this.#postCommand(
         { type: "shutdown_host", meta: this.#meta() },
-        controller.signal,
+        controller.signal, shutdownAllocation,
       )
       return outcome?.type === "accepted"
     } catch {
@@ -641,6 +643,7 @@ export class TuiEngineRuntime {
           getLastSeenSequence: () => this.#requiredApp().state.lastSequence,
           requestId: this.#requestId,
           onReconnect: async () => {
+            using reconnectAllocation = this.#allocations.reserve("decoding", 0)
             if (this.#config.replayMode) {
               return
             }
@@ -650,7 +653,7 @@ export class TuiEngineRuntime {
                 meta: this.#meta(),
                 session_id: sessionId,
               },
-              subscriptionController.signal,
+              subscriptionController.signal, reconnectAllocation,
             )
             if (takeover?.type === "rejected") {
               throw new EngineRuntimeError(
@@ -791,6 +794,8 @@ export class TuiEngineRuntime {
   }
 
   async #prepareSession(sessionId: string, signal: AbortSignal): Promise<void> {
+    using resumeAllocation = this.#allocations.reserve("decoding", 0)
+    using takeoverAllocation = this.#allocations.reserve("decoding", 0)
     let delay = SESSION_PREPARE_INITIAL_DELAY_MS
     let attempt = 0
     while (!signal.aborted) {
@@ -802,7 +807,7 @@ export class TuiEngineRuntime {
           last_seen_sequence: null,
           role: "observer",
         },
-        signal,
+        signal, resumeAllocation,
       )
       if (resume.type === "accepted") {
         if (this.#config.replayMode) {
@@ -814,7 +819,7 @@ export class TuiEngineRuntime {
             meta: this.#meta(),
             session_id: sessionId,
           },
-          signal,
+          signal, takeoverAllocation,
         )
         if (takeover.type === "accepted") {
           return
@@ -861,6 +866,7 @@ export class TuiEngineRuntime {
   }
 
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
+    using projectionAllocation = this.#allocations.reserve("decoding", 0)
     const commands: ClientCommand[] = [
       { type: "list_models", refresh: false, meta: this.#meta(), session_id: sessionId },
       { type: "list_modes", meta: this.#meta(), session_id: sessionId },
@@ -883,7 +889,7 @@ export class TuiEngineRuntime {
         return
       }
       try {
-        await this.#postCommand(command, signal)
+        await this.#postCommand(command, signal, projectionAllocation)
       } catch (error) {
         if (signal.aborted || isAbortError(error)) {
           return
@@ -895,18 +901,15 @@ export class TuiEngineRuntime {
     }
   }
 
-  async #postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
+  async #postCommand(command: ClientCommand, signal: AbortSignal | undefined, allocation: ReplyAllocation): Promise<CommandOutcome> {
     const generation = this.#sessionGeneration
     const lifetime = signal === undefined ? this.#controller.signal : AbortSignal.any([signal, this.#controller.signal])
     lifetime.throwIfAborted()
-    const claim = this.#allocations.reserve("decoding", 0)
-    try {
-    const reply = await this.#client.postCommand(command, lifetime, { admit: bytes => claim.resize(bytes) })
+    const reply = await this.#client.postCommand(command, lifetime, allocation)
     if (reply.type === "read" && generation === this.#sessionGeneration && !lifetime.aborted) {
       for (const event of reply.events) this.#requiredApp().handleEvent(event)
     }
     return reply.outcome
-    } finally { claim.release() }
   }
 
   async #readSession(

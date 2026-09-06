@@ -12,8 +12,8 @@ const setup = await createTestRenderer({ width: 100, height: 28, useThread: fals
 const runtime = await createEngineRuntimeFromEnvironment()
 if (runtime === null) throw new Error("supervised engine runtime was not configured")
 const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader,
-  onCommand(command) {
-    return runtime.sendCommand(command)
+  onCommand(command, allocation) {
+    return runtime.sendCommand(command, allocation)
   },
 })
 setup.renderer.root.add(app)

@@ -24,6 +24,7 @@ export interface RottweilerAppOptions {
   readonly clientId?: string
   readonly onCommand?: (
     command: ClientCommand,
+    allocation: ReplyAllocation,
   ) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
   readonly onProviderApiKey?: (
     provider: string,

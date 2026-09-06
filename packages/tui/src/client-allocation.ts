@@ -22,6 +22,8 @@ export type ClientAllocationDomain = keyof typeof CLIENT_ALLOCATION_LIMITS
 export interface ClientAllocationLease {
   readonly bytes: number
   resize(bytes: number): void
+  admit(bytes: number): void
+  [Symbol.dispose](): void
   release(): void
 }
 
@@ -56,7 +58,7 @@ export class ClientAllocationOwner {
       this.#bytes += change; this.#peak = Math.max(this.#peak, this.#bytes); held = next
     }
     resize(bytes)
-    return { get bytes() { return held }, resize,
-      release: () => { if (!active) return; resize(0); active = false } }
+    const release = () => { if (!active) return; resize(0); active = false }
+    return { get bytes() { return held }, resize, admit: resize, release, [Symbol.dispose]: release }
   }
 }

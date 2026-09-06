@@ -310,7 +310,7 @@ export class InputUiController {
     switch (action) {
       case "cycle_agent_mode": {
         const mode: ModeId = nextModeId(this.#host.state.mode, this.#host.state.modes)
-        this.#host.requests.emit({
+        this.#host.requests.dispatch({
           type: "switch_mode",
           meta: this.#host.requests.meta(),
           session_id: this.#host.sessionId,
@@ -642,6 +642,7 @@ export class InputUiController {
   }
 
   async interruptActiveResponse(subagentId: string | null = this.#interruptSubagentId): Promise<void> {
+    using replyAllocation = this.#host.requests.allocate()
     if (subagentId !== null) {
       this.#interruptSubagentId = null
       await this.#host.children.interruptSubagent(subagentId)
@@ -651,7 +652,7 @@ export class InputUiController {
       type: "interrupt",
       meta: this.#host.requests.meta(),
       session_id: this.#host.sessionId,
-    })
+    }, replyAllocation)
     if (outcome === null) {
       this.#host.projectError(
         "interrupt_unavailable",

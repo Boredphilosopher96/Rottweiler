@@ -266,7 +266,7 @@ describe("runtime lifecycle", () => {
       session_id: "session-startup-race",
       content: "do not reject this race",
       attachments: [],
-    })
+    }, { admit() {} })
     await Promise.resolve()
     expect(client.commands.map((command) => command.type)).toEqual(["resume_session"])
 
@@ -329,7 +329,7 @@ describe("runtime lifecycle", () => {
         session_id: "session-slow-catalog",
         content: "stay responsive",
         attachments: [],
-      }),
+      }, { admit() {} }),
     ).toEqual({ type: "accepted" })
     expect(client.commands.at(-1)?.type).toBe("send_message")
     await runtime.stop()

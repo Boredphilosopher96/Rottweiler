@@ -1,3 +1,5 @@
+import { type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
+import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { EngineEvent } from "./protocol"
 import {
   PROTOCOL_VERSION,
@@ -71,11 +73,12 @@ export type ProjectionCommand =
 type RequestMeta = ClientCommand["meta"]
 
 interface ProjectionRequestBrokerOptions {
+  readonly allocations: ClientAllocationOwner
   readonly clientId: () => string
   readonly sessionId: () => string
   readonly requestId: () => string
   readonly replayActive: () => boolean
-  readonly emit: (command: ClientCommand) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
+  readonly emit: (command: ClientCommand, allocation: ReplyAllocation) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
   readonly onProjectionFailure: (
     kind: ProjectionKind,
     type: ClientCommand["type"],
@@ -373,8 +376,20 @@ export class ProjectionRequestBroker {
     return meta.request_id
   }
 
-  async emit(command: ClientCommand): Promise<void | CommandOutcome | null> {
-    return this.#options.emit(command)
+  allocate(): ClientAllocationLease { return this.#options.allocations.reserve("decoding", 0) }
+
+  async emit(command: ClientCommand, allocation: ReplyAllocation): Promise<void | CommandOutcome | null> {
+    return this.#options.emit(command, allocation)
+  }
+
+  /** Input handlers that ignore results still own decoding through rejection projection. */
+  dispatch(command: ClientCommand): void {
+    void this.#emitProjectionCommand(command.type, command, command.meta.request_id)
+  }
+
+  async consume(command: ClientCommand, consume: (outcome: void | CommandOutcome | null) => void | Promise<void>): Promise<void> {
+    using allocation = this.allocate()
+    await consume(await this.emit(command, allocation))
   }
 
   #trackCommand(command: ProjectionCommand, requestId: string): void {
@@ -470,8 +485,9 @@ export class ProjectionRequestBroker {
     command: ClientCommand,
     requestId: string,
   ): Promise<void> {
+    using allocation = this.allocate()
     try {
-      const outcome = await this.emit(command)
+      const outcome = await this.emit(command, allocation)
       if (outcome?.type === "rejected") {
         this.#handleFailure(type, requestId, outcome, outcome.error.message, "rejected")
       } else if (outcome === null) {

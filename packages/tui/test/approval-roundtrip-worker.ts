@@ -13,8 +13,8 @@ if (reportFile === undefined) throw new Error("ROTTWEILER_TEST_REPORT_FILE is re
 const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
 let runtime: TuiEngineRuntime | null = null
 const app = createRottweilerApp(setup.renderer, { sessionReader: emptySessionReader,
-  onCommand(command) {
-    return runtime?.sendCommand(command) ?? null
+  onCommand(command, allocation) {
+    return runtime?.sendCommand(command, allocation) ?? null
   },
 })
 setup.renderer.root.add(app)

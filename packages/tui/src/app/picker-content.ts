@@ -503,7 +503,7 @@ export class PickerContentController {
               this.host.pickerController.refresh()
               return
             }
-            this.host.requests.emit({
+            this.host.requests.dispatch({
               type: "switch_mode",
               meta: this.host.requests.meta(),
               session_id: this.host.sessionId,

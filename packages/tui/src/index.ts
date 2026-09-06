@@ -270,9 +270,9 @@ async function main(): Promise<void> {
         return runtime.sessionReader.content(target, read, signal, allocation)
       },
     },
-    onCommand: async (command) => {
+    onCommand: async (command, allocation) => {
       const bootstrap = await runtimeBootstrap
-      return (await bootstrap.runtime?.sendCommand(command)) ?? null
+      return (await bootstrap.runtime?.sendCommand(command, allocation)) ?? null
     },
     onProviderApiKey: async (provider, apiKey, allocation) => {
       const bootstrap = await runtimeBootstrap

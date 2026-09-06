@@ -76,7 +76,7 @@ describe("runtime subscriptions", () => {
         request_id: "ui-request",
       },
       session_id: "session-runtime",
-    })
+    }, { admit() {} })
     expect(client.commands.at(-1)?.type).toBe("get_context")
   })
 
@@ -170,7 +170,7 @@ describe("runtime subscriptions", () => {
         session_id: "session-replay",
         content: "do not mutate replay",
         attachments: [],
-      }),
+      }, { admit() {} }),
     ).toBeNull()
     expect(client.commands).toEqual([])
 

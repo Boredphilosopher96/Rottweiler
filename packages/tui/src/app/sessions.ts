@@ -256,6 +256,7 @@ export class SessionUiController {
     outputPath: string,
     force: boolean,
   ): Promise<void> {
+    using replyAllocation = this.#host.requests.allocate()
     if (this.#host.state.replay.active) return
     const meta = this.#host.requests.meta()
     const pending: PendingExport = {
@@ -273,7 +274,7 @@ export class SessionUiController {
         format,
         output_path: outputPath,
         force,
-      })
+      }, replyAllocation)
       if (outcome?.type === "rejected" && this.#pendingExport?.requestId === meta.request_id) {
         this.#handleExportRejection(outcome, pending)
       } else if (outcome === null && this.#pendingExport?.requestId === meta.request_id) {
@@ -341,6 +342,7 @@ export class SessionUiController {
   }
 
   async createSession(): Promise<void> {
+    using replyAllocation = this.#host.requests.allocate()
     if (this.#host.state.replay.active) {
       this.#host.projectError(
         "new_session_unavailable_in_replay",
@@ -366,7 +368,7 @@ export class SessionUiController {
         meta,
         cwd,
         model: null,
-      })
+      }, replyAllocation)
       if (this.#pendingSessionCreateRequestId !== meta.request_id) return
       if (outcome?.type === "rejected") {
         this.#pendingSessionCreateRequestId = null
@@ -443,6 +445,7 @@ export class SessionUiController {
   }
 
   async #startRewindIntent(turn: TimelineChoice, action: TimelineAction): Promise<void> {
+    using replyAllocation = this.#host.requests.allocate()
     if (this.#host.state.replay.active || this.#host.draftScope !== "parent" || this.#retrying) return
     this.clearRewind()
     const request = new AbortController()
@@ -462,7 +465,7 @@ export class SessionUiController {
       this.#rewindRead = null
       const outcome = await this.#host.requests.emit({ type: "rewind", meta, session_id: turn.view.session_id,
         target: { type: "source", expected_through: turn.view.through, source: turn.sequenceId,
-          turn_id: turn.agentTurn, position: action === "rewind" ? "through" : "before" } })
+          turn_id: turn.agentTurn, position: action === "rewind" ? "through" : "before" } }, replyAllocation)
       if (this.#pendingRewindIntent !== intent) return
       if (outcome?.type !== "accepted") {
         this.clearRewind()

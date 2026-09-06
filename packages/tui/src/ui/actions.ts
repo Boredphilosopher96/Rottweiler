@@ -1,3 +1,5 @@
+import type { ClientAllocationOwner } from "../client-allocation"
+import type { ReplyAllocation } from "../transport/reply-allocation"
 import type { CommandOutcome, UiActionRequest } from "../protocol"
 import type { UiSurfaceModel } from "./presentation"
 
@@ -9,8 +11,9 @@ export interface UiActionLease {
   release(): void
 }
 interface UiActionOptions {
+  readonly allocations: ClientAllocationOwner
   readonly allowed: (lease: UiActionLease) => boolean
-  readonly execute: (session: string, request: UiActionRequest) => Promise<void | CommandOutcome | null>
+  readonly execute: (session: string, request: UiActionRequest, allocation: ReplyAllocation) => Promise<void | CommandOutcome | null>
   readonly changed: () => void
   readonly failed: (message: string) => void
 }
@@ -25,6 +28,7 @@ export class UiActionController {
   reset(): void { this.#scope = {} }
 
   async invoke(lease: UiActionLease, id: string): Promise<boolean> {
+    using allocation = this.#options.allocations.reserve("decoding", 0)
     const scope = this.#scope
     let admitted = false
     try {
@@ -37,7 +41,7 @@ export class UiActionController {
       const result = await this.#options.execute(lease.sessionId, {
         owner: presentation.owner, contribution_id: presentation.descriptor.id,
         action_id: id, target: lease.target,
-      })
+      }, allocation)
       if (scope !== this.#scope) return result?.type === "accepted"
       if (result?.type === "rejected") this.#options.failed(result.error.message)
       else if (result?.type !== "accepted") this.#options.failed("The engine did not acknowledge the action.")

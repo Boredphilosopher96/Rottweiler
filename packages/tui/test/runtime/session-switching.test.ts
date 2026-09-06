@@ -55,7 +55,7 @@ describe("runtime session-switching", () => {
       session_id: "session-old",
       content: "stale",
       attachments: [],
-    })
+    }, { admit() {} })
     expect(oldCommand).toBeNull()
 
     const finalSwitch = runtime.switchSession("session-new")
@@ -181,7 +181,7 @@ describe("runtime session-switching", () => {
           request_id: "blocked-after-rejection",
         },
         session_id: "session-old",
-      }),
+      }, { admit() {} }),
     ).toBeNull()
     expect(
       client.subscriptions.some(

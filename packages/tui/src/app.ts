@@ -249,11 +249,12 @@ export class RottweilerApp extends BoxRenderable {
         }
       })
     this.#projectionRequests = new ProjectionRequestBroker({
+      allocations: this.historyCache.allocations,
       clientId: () => this.#options.clientId,
       sessionId: () => this.#sessionId,
       requestId: () => this.#options.requestId(),
       replayActive: () => this.#state.replay.active,
-      emit: (command) => this.#options.onCommand?.(command),
+      emit: (command, allocation) => this.#options.onCommand?.(command, allocation),
       onProjectionFailure: (kind, _type, _requestId, message) => {
         this.#recordProjectionFailure(kind, message)
       },
