@@ -31,6 +31,13 @@ fn approve_helper(path: &std::path::Path) -> rw_tools::ApprovedExecutable {
     .expect("approved fixture executable")
 }
 
+fn fixture_helper() -> rw_tools::ApprovedExecutable {
+    static HELPER: std::sync::OnceLock<rw_tools::ApprovedExecutable> = std::sync::OnceLock::new();
+    HELPER
+        .get_or_init(|| approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host"))))
+        .clone()
+}
+
 fn manifest() -> PluginManifest {
     PluginManifest {
         name: "helper-test".to_owned(),
@@ -93,7 +100,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
     let pool = WasmWorkerPool::new();
     let hook = WasmProcessHook::new(
         pool.clone(),
-        approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host"))),
+        fixture_helper(),
         manifest(),
         component(r#"{"decision":"transform","change":{"hook":"pre_tool","name":"read","arguments":{"safe":true}}}"#),
         WasmHookLimits::default(),
@@ -128,7 +135,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
 #[tokio::test]
 async fn helper_rejects_malformed_components_and_recovers() {
     let pool = WasmWorkerPool::new();
-    let helper = approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")));
+    let helper = fixture_helper();
     let invalid = WasmProcessHook::new(
         pool.clone(),
         helper.clone(),
@@ -154,7 +161,7 @@ async fn helper_rejects_malformed_components_and_recovers() {
 #[tokio::test]
 async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
     let pool = WasmWorkerPool::with_worker_limit(2).expect("capacity");
-    let helper = approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")));
+    let helper = fixture_helper();
     let bytes = component(r#"{"decision":"continue"}"#);
     let first = WasmProcessHook::new(
         pool.clone(),
@@ -199,7 +206,7 @@ async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
 #[tokio::test]
 async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
     let pool = WasmWorkerPool::with_worker_limit(1).expect("capacity");
-    let helper = approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")));
+    let helper = fixture_helper();
     let hook = WasmProcessHook::new(
         pool.clone(),
         helper,
