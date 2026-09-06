@@ -339,7 +339,11 @@ impl Drop for NativeJob {
         if let Some(state) = self.state.get_mut().take() {
             // A failed or cancelled cleanup retains the actual child, authority,
             // output workers, and capacity until this process exits.
-            std::mem::forget(state);
+            tracing::error!(
+                process_id = state.child.id(),
+                "native command owner quarantined without settlement proof"
+            );
+            let _ = Box::leak(Box::new(state));
         }
     }
 }
