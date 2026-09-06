@@ -81,15 +81,16 @@ fn legal_reference_sources_exceeding_window_bytes_fragment_without_body_loss() {
         expected_hash.update(&encoded);
     }
     drop(expected);
-    append(
-        &mut journal,
-        vec![
-            PendingEvent::TurnStarted { turn: 1 },
-            accepted,
-            commit,
-            terminal(1),
-        ],
-    );
+    // Each accepted fact has its own bounded transaction, as in the actor.
+    // Combining both near-limit records would exceed the batch/segment ceiling.
+    for pending in [
+        PendingEvent::TurnStarted { turn: 1 },
+        accepted,
+        commit,
+        terminal(1),
+    ] {
+        append(&mut journal, vec![pending]);
+    }
     let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("owner");
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let history = recovery

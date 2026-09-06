@@ -133,7 +133,7 @@ impl RecoveryProjection {
     const fn directory_name(self) -> &'static str {
         match self {
             Self::Conversation => "recovery",
-            Self::Fork => "fork-recovery",
+            Self::Fork => "fork_recovery",
             Self::Routing => "routing",
             Self::Tasks => "tasks",
             Self::Subagents => "subagents",
