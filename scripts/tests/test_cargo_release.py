@@ -77,6 +77,10 @@ class CargoReleaseTests(unittest.TestCase):
                     ],
                 )
                 self.assertEqual(env["CARGO_PROFILE_RELEASE_OPT_LEVEL"], optimization)
+                flags = env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") if env["CARGO_ENCODED_RUSTFLAGS"] else []
+                self.assertEqual(flags, [] if "apple" in host else [
+                    "-C", "force-unwind-tables=no", "-C", "link-arg=-Wl,-z,pack-relative-relocs"])
+                self.assertEqual(env["CARGO_PROFILE_RELEASE_DEBUG"], "0")
                 self.assertEqual(artifact.name, "release")
                 self.assertEqual(artifact.parent.name, host)
                 self.assertEqual(Path(env["CARGO_TARGET_DIR"]), artifact.parents[1])

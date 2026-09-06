@@ -29,8 +29,7 @@ done
 target=$(rustc -vV | sed -n 's/^host: //p')
 
 case "$target" in
-  *-apple-darwin) optimization=3 ;;
-  *-linux-gnu|*-linux-musl) optimization=s ;;
+  *-apple-darwin|*-linux-gnu|*-linux-musl) ;;
   *)
     echo "cargo-release: unsupported release target: $target" >&2
     exit 2
@@ -61,5 +60,5 @@ if [ "$has_release" != 1 ]; then
   exit 2
 fi
 
-export CARGO_PROFILE_RELEASE_OPT_LEVEL=$optimization
-exec cargo build --target "$target" --target-dir "$target_root" "$@"
+# One owner supplies the exact profile to Cargo, receipts, and diagnostics.
+exec python3 "$(dirname "$0")/native_profile.py" "$target" build --target "$target" --target-dir "$target_root" "$@"

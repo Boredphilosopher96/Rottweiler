@@ -15,6 +15,7 @@ import shutil
 
 import ci_evidence
 import native_candidate
+import native_profile
 
 
 def describe(path: Path) -> dict:
@@ -64,8 +65,7 @@ def diagnose(repo: Path, target_dir: Path, output: Path, failed_gate: Path) -> i
     # Match cargo-release.sh and the builder exactly; only this final target's
     # rustc arguments change. Dependent crates retain their existing build graph.
     os.environ["CARGO_TARGET_DIR"] = str(target_dir)
-    os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"] = identity["profile"]["opt_level"]
-    os.environ["CARGO_PROFILE_RELEASE_DEBUG"] = "0"
+    os.environ.update(native_profile.environment(identity["target"], dict(os.environ)))
     if not os.environ.get("SOURCE_DATE_EPOCH"):
         os.environ["SOURCE_DATE_EPOCH"] = native_candidate.output(
             ["git", "show", "-s", "--format=%ct", "HEAD"], repo)

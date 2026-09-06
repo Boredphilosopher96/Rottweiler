@@ -51,6 +51,8 @@ class NativeSizeDiagnosticsTests(unittest.TestCase):
             self.assertNotIn("--all-features", command)
             self.assertEqual(os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"], "s")
             self.assertEqual(os.environ["CARGO_PROFILE_RELEASE_DEBUG"], "0")
+            self.assertEqual(os.environ["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")[-4:],
+                             ["-C", "force-unwind-tables=no", "-C", "link-arg=-Wl,-z,pack-relative-relocs"])
             self.engine.write_bytes(b"\x7fELFdiagnostic artifact")
             (self.output / "engine.map").write_text("actual linker map")
             return 0

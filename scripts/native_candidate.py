@@ -13,6 +13,7 @@ import tomllib
 
 import artifact_bundle
 import opentui_native
+import native_profile
 from release_contract import load_contract, validate_build, verify_archive
 
 RECEIPT = "build.json"
@@ -107,7 +108,7 @@ def build_identity(repo: Path) -> dict:
         "version": version,
         "toolchains": {"rust": rust_identity, "bun": bun_identity, "opentui_native": opentui_native.identity(repo, platform.id)},
         "profile": {"name": "release", "debug": 0,
-                    "opt_level": "3" if platform.system == "Darwin" else "s",
+                    **native_profile.settings(target),
                     "environment": environment},
         "cargo_configuration": configuration_fingerprints(repo),
     }
@@ -161,8 +162,9 @@ def verify(root: Path, repo: Path, *, expected_identity: dict | None = None) -> 
         raise ValueError("candidate compiler host or target differs from the native platform")
     if identity["profile"]["name"] != "release" or identity["profile"]["debug"] != 0:
         raise ValueError("candidate does not use the native release profile")
-    if identity["profile"]["opt_level"] != ("3" if platform.system == "Darwin" else "s"):
-        raise ValueError("candidate optimization differs from the native release profile")
+    profile = native_profile.settings(target)
+    if any(identity["profile"].get(key) != value for key, value in profile.items()):
+        raise ValueError("candidate code generation differs from the native release profile")
     artifact_bundle.verify(root, identity["source"]["commit"], platform.id)
     release_root = contract.archive_root(identity["version"], platform.id)
     expected_paths = {member.id: f"{release_root}/{member.path}" for member in platform.archive_members}

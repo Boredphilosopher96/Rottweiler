@@ -15,6 +15,7 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import artifact_bundle
 import native_candidate
+import native_profile
 from release_contract import load_contract
 
 spec = importlib.util.spec_from_file_location("candidate_package", SCRIPTS / "package-release.py")
@@ -55,6 +56,7 @@ class NativeCandidateFixture:
             "profile": {"name": "release", "debug": 0, "opt_level": "3" if self.platform.system == "Darwin" else "s", "environment": {}},
             "cargo_configuration": {},
         }
+        self.identity["profile"].update(native_profile.settings(self.identity["target"]))
         self.identity["toolchains"]["rust"] += "\nhost: " + self.identity["target"]
         self.stage = self.root / self.contract.archive_root(self.identity["version"], self.platform.id)
         for member in self.platform.archive_members:
@@ -131,6 +133,16 @@ class NativeCandidateTests(NativeCandidateFixture, unittest.TestCase):
         self.identity["profile"]["debug"] = 1
         self.publish()
         with self.assertRaisesRegex(ValueError, "release profile"):
+            native_candidate.verify(self.root, self.repo)
+
+    def test_missing_or_changed_native_flags_cannot_pass_receipt_verification(self):
+        self.identity["profile"].pop("rustflags")
+        self.publish()
+        with self.assertRaisesRegex(ValueError, "code generation"):
+            native_candidate.verify(self.root, self.repo)
+        self.identity["profile"]["rustflags"] = ["-C", "force-unwind-tables=yes"]
+        self.publish()
+        with self.assertRaisesRegex(ValueError, "code generation"):
             native_candidate.verify(self.root, self.repo)
 
     def test_symlinked_receipt_is_rejected(self):

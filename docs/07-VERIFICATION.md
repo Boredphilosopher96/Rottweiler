@@ -546,3 +546,23 @@ state rather than a notification backlog. The runtime embedding acceptance uses
 an isolated process with stdin closed: it captures events, chooses a question
 answer, resumes durable state, interrupts a pending question, and verifies empty
 stdout and stderr after owned shutdown.
+
+
+### Native Linux code generation
+
+`scripts/native_profile.py` owns native release optimization and Rust flags;
+`cargo-release.sh`, candidate identity verification, and the failure-only link-map
+diagnostic consume that same owner. GNU Linux release artifacts use packed
+relative relocations (`DT_RELR`) and do not force native unwind tables. Packed
+relocations require glibc 2.36 or newer; the current official GNU build image
+already emits a newer glibc ABI requirement. The installer does not provide an
+older-loader compatibility layer. The existing musl path does not enable RELR
+without a separately qualified loader floor.
+
+Release panic behavior remains abort. Removing optional native unwind tables
+reduces distribution bytes but limits native stack walking and panic backtraces;
+it does not disable structured operation tracing or change guest WASM unwind
+metadata. Debug and instrumented builds retain their default stack-walking
+settings. Use those builds for native stack profiling. Release size, startup,
+and behavioral gates still use the exact verified product artifact, with the
+owned flags in its receipt; product features and size budgets are unchanged.
