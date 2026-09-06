@@ -119,7 +119,7 @@ impl TranscriptProjector {
             .verified_page::<EngineEvent>(after, limits)
             .map_err(TranscriptIndexError::from)?;
         let mut claims = claim_page(&verified, &checkpoint)?;
-        let page = &verified.page;
+        let page = verified.page();
         let mut overlay = BatchRows {
             index: &self.index,
             rows: BTreeMap::new(),
@@ -181,7 +181,7 @@ impl TranscriptProjector {
                 .checked_sub(1)
                 .map(SequenceId);
             let advance = verified
-                .proof
+                .proof()
                 .advance(before.prefix, applied_cursor)
                 .map_err(TranscriptIndexError::from)?;
             self.index.apply(
@@ -193,7 +193,7 @@ impl TranscriptProjector {
             )?;
         } else {
             verified
-                .proof
+                .proof()
                 .verify_prefix(before.prefix)
                 .map_err(TranscriptIndexError::from)?;
         }
@@ -490,7 +490,7 @@ fn finish_rewind(
     checkpoint.state.next_ordinal = total_rows;
     checkpoint.state.active_turn = Some(pending.target);
     checkpoint.state.tail.reset(sequence.0);
-    page.proof
+    page.proof()
         .prefix_through(Some(sequence))
         .map_err(|error| TranscriptIndexError::from(error).into())
 }

@@ -51,7 +51,7 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
                 },
             )
             .into_diagnostic()?;
-        let page = &verified.page;
+        let page = verified.page();
         let checkpoint = rw_core::recovery::InputClaimCheckpoint::decode(
             &projection.input_claims,
             projection.source,

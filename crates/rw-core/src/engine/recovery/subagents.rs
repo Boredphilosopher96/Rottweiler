@@ -99,7 +99,7 @@ impl SubagentLifecycleIndex {
             },
         )?;
         let mut rows = BatchRows::new(read);
-        for envelope in &page.page.events {
+        for envelope in &page.page().events {
             let mut next = head.clone();
             rows.begin_event();
             reduce::apply(&mut next, &mut rows, envelope.sequence, &envelope.event)?;
@@ -120,7 +120,7 @@ impl SubagentLifecycleIndex {
             return Ok(false);
         }
         let proof = page
-            .proof
+            .proof()
             .advance(previous, head.next.checked_sub(1).map(SequenceId))?;
         self.index.apply(
             &proof,

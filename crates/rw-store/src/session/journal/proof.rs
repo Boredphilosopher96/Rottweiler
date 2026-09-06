@@ -12,13 +12,39 @@ const MAX_PROOF_SEGMENTS: usize = 8;
 const MAX_PROOF_EVENTS: usize = 256;
 
 /// A bounded raw page and the exact prefix cuts validated while reading it.
+/// Decoded records remain immutable for the lifetime of their evidence.
+///
+/// ```compile_fail
+/// use rw_store::session::journal::VerifiedJournalPage;
+/// fn replace_record(page: &mut VerifiedJournalPage<u64>) {
+///     page.page().events.clear();
+/// }
+/// ```
 pub struct VerifiedJournalPage<T> {
     /// Decoded cursor-exclusive events; may stop at proof resource bounds.
-    pub page: SessionEventPage<T>,
+    page: SessionEventPage<T>,
     /// Evidence for the initial cursor and each returned event cursor.
-    pub proof: JournalPageProof,
+    proof: JournalPageProof,
     /// Actual payload I/O and decoded records.
-    pub metrics: JournalReadMetrics,
+    metrics: JournalReadMetrics,
+}
+
+impl<T> VerifiedJournalPage<T> {
+    /// Borrow decoded records without allowing replacement under their source proof.
+    #[must_use]
+    pub const fn page(&self) -> &SessionEventPage<T> {
+        &self.page
+    }
+    /// Borrow the immutable proof computed with these exact decoded records.
+    #[must_use]
+    pub const fn proof(&self) -> &JournalPageProof {
+        &self.proof
+    }
+    /// Actual I/O performed while producing the page and its proof.
+    #[must_use]
+    pub const fn metrics(&self) -> &JournalReadMetrics {
+        &self.metrics
+    }
 }
 
 /// An immutable, descriptor-bound prefix transition validated by the journal owner.

@@ -21,9 +21,9 @@ fn verified_page_covers_initial_and_every_processed_cut_without_rereading() {
     let verified = view
         .verified_page::<u64>(Some(SequenceId(4)), limits(10))
         .expect("page");
-    assert_eq!(verified.page.events.len(), 10);
-    assert_eq!(verified.metrics.segments_read, 1);
-    assert_eq!(verified.metrics.bytes_read, view.total_bytes());
+    assert_eq!(verified.page().events.len(), 10);
+    assert_eq!(verified.metrics().segments_read, 1);
+    assert_eq!(verified.metrics().bytes_read, view.total_bytes());
     let previous = view
         .prefix_through(Some(SequenceId(4)))
         .expect("previous")
@@ -33,7 +33,7 @@ fn verified_page_covers_initial_and_every_processed_cut_without_rereading() {
             .prefix_through(Some(SequenceId(sequence)))
             .expect("expected");
         let advance = verified
-            .proof
+            .proof()
             .advance(previous, Some(SequenceId(sequence)))
             .expect("proof");
         assert_eq!(advance.next().prefix_identity(), expected.prefix_identity());
@@ -48,21 +48,31 @@ fn verified_page_covers_initial_and_every_processed_cut_without_rereading() {
             usize::try_from(sequence).expect("small cursor") + 1
         );
     }
-    assert!(verified.proof.prefix_through(Some(SequenceId(3))).is_err());
-    assert!(verified.proof.prefix_through(Some(SequenceId(15))).is_err());
+    assert!(
+        verified
+            .proof()
+            .prefix_through(Some(SequenceId(3)))
+            .is_err()
+    );
+    assert!(
+        verified
+            .proof()
+            .prefix_through(Some(SequenceId(15)))
+            .is_err()
+    );
     let later = verified
-        .proof
+        .proof()
         .prefix_through(Some(SequenceId(10)))
         .expect("later");
     assert!(
         verified
-            .proof
+            .proof()
             .advance(later.prefix_identity(), Some(SequenceId(9)))
             .is_err()
     );
     let mut wrong = previous;
     wrong.digest[0] ^= 1;
-    assert!(verified.proof.verify_prefix(wrong).is_err());
+    assert!(verified.proof().verify_prefix(wrong).is_err());
 }
 
 #[test]
@@ -73,11 +83,11 @@ fn empty_tail_proof_preserves_full_origin_with_no_payload_io() {
         .read_view()
         .verified_page::<u64>(None, limits(10))
         .expect("empty");
-    assert!(empty.page.events.is_empty());
-    assert_eq!(empty.metrics.bytes_read, 0);
+    assert!(empty.page().events.is_empty());
+    assert_eq!(empty.metrics().bytes_read, 0);
     assert_eq!(
         empty
-            .proof
+            .proof()
             .prefix_through(None)
             .expect("empty cut")
             .prefix_identity(),
@@ -88,10 +98,10 @@ fn empty_tail_proof_preserves_full_origin_with_no_payload_io() {
     let tail = view
         .verified_page::<u64>(view.last_sequence(), limits(10))
         .expect("tail");
-    assert!(tail.page.events.is_empty());
-    assert_eq!(tail.metrics.bytes_read, 0);
+    assert!(tail.page().events.is_empty());
+    assert_eq!(tail.metrics().bytes_read, 0);
     let recovered = tail
-        .proof
+        .proof()
         .prefix_through(view.last_sequence())
         .expect("tail cut");
     assert_eq!(recovered.prefix_identity(), view.prefix_identity());
@@ -114,9 +124,9 @@ fn proof_event_and_descriptor_bounds_return_truthful_partial_pages() {
         .read_view()
         .verified_page::<u64>(None, limits(300))
         .expect("bounded page");
-    assert_eq!(page.page.events.len(), 256);
-    assert_eq!(page.page.next_cursor, Some(SequenceId(255)));
-    assert!(page.page.has_more);
+    assert_eq!(page.page().events.len(), 256);
+    assert_eq!(page.page().next_cursor, Some(SequenceId(255)));
+    assert!(page.page().has_more);
     let mut segments = SegmentedJournal::open(root.path(), "segments").expect("segments");
     for n in 0..10 {
         segments
@@ -135,12 +145,12 @@ fn proof_event_and_descriptor_bounds_return_truthful_partial_pages() {
             },
         )
         .expect("descriptor bound");
-    assert_eq!(page.metrics.segments_read, 8);
-    assert_eq!(page.page.events.len(), 8);
-    assert!(page.page.has_more);
+    assert_eq!(page.metrics().segments_read, 8);
+    assert_eq!(page.page().events.len(), 8);
+    assert!(page.page().has_more);
     assert_eq!(
-        page.proof
-            .prefix_through(page.page.next_cursor)
+        page.proof()
+            .prefix_through(page.page().next_cursor)
             .expect("last cut")
             .last_sequence(),
         Some(SequenceId(7))
@@ -161,7 +171,7 @@ fn page_proof_retains_descriptor_across_rotation_and_detects_later_corruption_on
         .expect("rotate");
     drop(journal);
     let advance = page
-        .proof
+        .proof()
         .advance(JournalPrefixIdentity::empty(), Some(SequenceId(4)))
         .expect("advance after rotation");
     assert_eq!(
@@ -181,7 +191,7 @@ fn page_proof_retains_descriptor_across_rotation_and_detects_later_corruption_on
         .write_at(b"!", 0)
         .expect("corrupt pinned descriptor");
     assert!(
-        page.proof
+        page.proof()
             .advance(JournalPrefixIdentity::empty(), Some(SequenceId(4)))
             .is_ok()
     );

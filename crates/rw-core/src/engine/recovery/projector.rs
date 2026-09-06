@@ -174,7 +174,7 @@ impl CanonicalRecovery {
         )?;
         let mut rows = BatchRows::new(read);
         let mut interpreted = 0;
-        for envelope in &page.page.events {
+        for envelope in &page.page().events {
             if envelope
                 .event
                 .meta()
@@ -204,7 +204,7 @@ impl CanonicalRecovery {
             return Ok(progress(&head, 0, source));
         }
         let through = head.next_sequence.checked_sub(1).map(SequenceId);
-        let advance = page.proof.advance(previous, through)?;
+        let advance = page.proof().advance(previous, through)?;
         let lookups: Vec<_> = rows.lookups.into_values().collect();
         let mutations: Vec<_> = rows.changes.into_values().collect();
         self.index.apply(

@@ -60,14 +60,14 @@ impl SessionRoutingIndex {
             },
         )?;
         let mut rows = BatchRows::new(read);
-        for envelope in &page.page.events {
+        for envelope in &page.page().events {
             apply(&mut head, &mut rows, envelope.sequence, &envelope.event)?;
             if head.rewind.is_some() {
                 break;
             }
         }
         let through = head.next.checked_sub(1).map(SequenceId);
-        let proof = page.proof.advance(previous, through)?;
+        let proof = page.proof().advance(previous, through)?;
         self.index.apply(
             &proof,
             &encode(&head, MAX_RECOVERY_HEAD_BYTES)?,

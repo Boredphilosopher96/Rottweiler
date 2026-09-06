@@ -68,7 +68,7 @@ impl TodoProjector {
             },
         )?;
         let mut boundaries = BTreeMap::new();
-        for envelope in &page.page.events {
+        for envelope in &page.page().events {
             apply(
                 &mut head,
                 &read,
@@ -84,7 +84,7 @@ impl TodoProjector {
             return Ok(false);
         }
         let advance = page
-            .proof
+            .proof()
             .advance(previous, head.next.checked_sub(1).map(SequenceId))?;
         self.index.apply(
             &advance,

@@ -113,9 +113,9 @@ impl<'a> InputClaimPage<'a> {
         checkpoint: InputClaimCheckpoint,
     ) -> Result<Self, RecoveryError> {
         checkpoint.validate()?;
-        let first = page.page.events.first().map_or_else(
+        let first = page.page().events.first().map_or_else(
             || {
-                page.page
+                page.page()
                     .next_cursor
                     .map_or(Some(0), |cursor| cursor.0.checked_add(1))
             },
@@ -125,8 +125,8 @@ impl<'a> InputClaimPage<'a> {
             return Err(RecoveryError::Invalid("input page starting watermark"));
         }
         let advance = page
-            .proof
-            .advance(checkpoint.identity(), page.page.next_cursor)?;
+            .proof()
+            .advance(checkpoint.identity(), page.page().next_cursor)?;
         Ok(Self {
             page,
             source: Arc::new(advance.next().clone()),
@@ -138,7 +138,7 @@ impl<'a> InputClaimPage<'a> {
     /// # Errors
     /// Rejects an invalid phase, repeated claim or mismatched event envelope.
     pub fn next_event(&mut self) -> Result<Option<ClaimedInputEvent<'a>>, RecoveryError> {
-        let Some(envelope) = self.page.page.events.get(self.position) else {
+        let Some(envelope) = self.page.page().events.get(self.position) else {
             return Ok(None);
         };
         if envelope
@@ -170,7 +170,7 @@ impl<'a> InputClaimPage<'a> {
         Ok(InputClaimCheckpoint {
             prefix: self
                 .page
-                .proof
+                .proof()
                 .prefix_through(through)?
                 .prefix_identity()
                 .into(),

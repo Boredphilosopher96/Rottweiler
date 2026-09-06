@@ -192,7 +192,7 @@ pub(super) fn project_session(
     let page = source
         .verified_page::<EngineEvent>(None, rw_store::session::SessionEventPageLimits::default())
         .expect("source page");
-    assert!(!page.page.has_more, "fixture is one bounded page");
+    assert!(!page.page().has_more, "fixture is one bounded page");
     let mut claims = rw_core::recovery::InputClaimPage::new(
         &page,
         rw_core::recovery::InputClaimCheckpoint::default(),
