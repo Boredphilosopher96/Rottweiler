@@ -144,12 +144,12 @@ fn finish(output: &mut Option<OutputRequest>) {
     if let Some(OutputRequest {
         message,
         done,
-        _slot,
+        _slot: slot,
         ..
     }) = output.take()
     {
         drop(message);
-        drop(_slot);
+        drop(slot);
         let _ = done.send(Ok(()));
     }
 }

@@ -343,8 +343,8 @@ pub(super) async fn run_repl(
                             diff_hash: diff.diff_hash.clone(),
                         }),
                     });
-                    if announce {
-                        if !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? { return Ok(last_status); }
+                    if announce && !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? {
+                        return Ok(last_status);
                     }
                 }
                 if let EngineEvent::QuestionAsked {
@@ -363,8 +363,8 @@ pub(super) async fn run_repl(
                             .map(|option| option.label.clone())
                             .collect(),
                     });
-                    if announce {
-                        if !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? { return Ok(last_status); }
+                    if announce && !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? {
+                        return Ok(last_status);
                     }
                 }
                 if let EngineEvent::PlanSubmitted { .. } = event.as_ref() {
@@ -375,8 +375,9 @@ pub(super) async fn run_repl(
                     interactions.retain(|interaction| matches!(interaction, PendingInteraction::Plan));
                     if !display_next_interaction(actor, &mut interrupts, &mut printer, &mut interactions).await? { return Ok(last_status); }
                 }
-                if let Some(message) = repl_event_message(event.as_ref(), format)? {
-                    if !print_ordered(actor, &mut interrupts, &mut printer, &mut interactions, message).await? { return Ok(last_status); }
+                if let Some(message) = repl_event_message(event.as_ref(), format)?
+                    && !print_ordered(actor, &mut interrupts, &mut printer, &mut interactions, message).await? {
+                    return Ok(last_status);
                 }
             }
         }

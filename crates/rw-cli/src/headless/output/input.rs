@@ -55,7 +55,7 @@ impl InputSender {
     pub(super) fn admit(&self, value: InputLine) -> Option<PendingInput> {
         let heap = match &value {
             InputLine::Line(text) | InputLine::Error(text) => text.capacity(),
-            _ => 0,
+            InputLine::Eof => 0,
         };
         let (slot, permit) = self.reserve(heap)?;
         Some(PendingInput {
