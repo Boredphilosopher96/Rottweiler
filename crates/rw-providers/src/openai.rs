@@ -186,7 +186,7 @@ impl OpenAiCompatibleProvider {
         self.apply_configured_headers(&mut headers)?;
         material.apply_openai(&mut headers)?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let _network_lease = crate::http::network_admission()?;
+        let network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(endpoint)
@@ -205,7 +205,7 @@ impl OpenAiCompatibleProvider {
         let chunks = response.bytes_stream();
         let wire_mode = self.config.wire_mode;
         let stream = async_stream::try_stream! {
-            let _network_owner = _network_lease;
+            let _network_owner = network_lease;
             let mut chunks = chunks;
             let mut decoder = SseDecoder::default();
             let mut state = OpenAiState::new(wire_mode);

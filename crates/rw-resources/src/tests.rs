@@ -70,3 +70,11 @@ fn process_pools_are_shared_by_class_and_independent_between_classes() {
         pool(ResourceClass::Network)
     ));
 }
+
+#[test]
+fn unproven_settlement_cannot_return_execution_capacity() {
+    let pool = Pool::new(1, 1);
+    pool.try_acquire().expect("physical owner").quarantine();
+    assert!(matches!(pool.try_acquire(), Err(AdmissionError::Busy)));
+    assert_eq!(pool.execution.available_permits(), 0);
+}

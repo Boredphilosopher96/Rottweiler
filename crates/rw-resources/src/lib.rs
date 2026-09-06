@@ -37,7 +37,15 @@ pub enum AdmissionError {
 /// Dropping a caller future is not a settlement boundary for detached work.
 #[derive(Debug)]
 pub struct ResourceLease {
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
+}
+
+impl ResourceLease {
+    /// Permanently withdraw capacity when physical settlement cannot be proved.
+    /// A process restart is required to restore this quarantined capacity.
+    pub fn quarantine(self) {
+        self.permit.forget();
+    }
 }
 
 struct Pool {
@@ -55,7 +63,7 @@ impl Pool {
         self.execution
             .clone()
             .try_acquire_owned()
-            .map(|permit| ResourceLease { _permit: permit })
+            .map(|permit| ResourceLease { permit })
             .map_err(|error| {
                 if matches!(error, tokio::sync::TryAcquireError::Closed) {
                     AdmissionError::Closed
@@ -80,7 +88,7 @@ impl Pool {
             () = cancelled => Err(AdmissionError::Cancelled),
             result = self.execution.clone().acquire_owned() => {
                 drop(waiting);
-                result.map(|permit| ResourceLease { _permit: permit }).map_err(|_| AdmissionError::Closed)
+                result.map(|permit| ResourceLease { permit }).map_err(|_| AdmissionError::Closed)
             }
         }
     }
