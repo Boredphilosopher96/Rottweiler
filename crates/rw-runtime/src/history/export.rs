@@ -32,7 +32,7 @@ pub(super) fn render(
                 events: JsonEvents<'a>,
             }
             serde_json::to_writer_pretty(
-                output.writer().into_diagnostic()?,
+                &mut output.writer().into_diagnostic()?,
                 &Document {
                     schema_version: 1,
                     session_id: session,
@@ -232,7 +232,8 @@ fn html_section(output: &mut Output, section: &TranscriptSection) -> Result<()> 
 
 pub(super) fn pretty(value: &Value) -> Result<String> {
     let mut output = Output::new(super::MAX_RENDERED_BYTES);
-    serde_json::to_writer_pretty(output.writer().into_diagnostic()?, value).into_diagnostic()?;
+    serde_json::to_writer_pretty(&mut output.writer().into_diagnostic()?, value)
+        .into_diagnostic()?;
     output.text().into_diagnostic()
 }
 
