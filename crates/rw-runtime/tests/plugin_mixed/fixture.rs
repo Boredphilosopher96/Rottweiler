@@ -147,7 +147,7 @@ fn source_package(workspace: &Path) -> PathBuf {
     directory(&package.join("src"));
     write_json(
         &package.join("package.json"),
-        &serde_json::json!({"name":"mixed-source","version":"1.0.0","type":"module","dependencies":{}}),
+        &serde_json::json!({"name":"mixed-source","version":"1.0.0","type":"module","dependencies":{"@rottweiler/plugin":env!("CARGO_PKG_VERSION")}}),
     );
     fs::write(package.join("bun.lock"), r#"{"packages":{}}"#).expect("empty dependency lock");
     write_json(
