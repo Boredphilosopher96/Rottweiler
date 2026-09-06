@@ -1,4 +1,5 @@
-import { SessionControlReader } from "./runtime-controls"
+import { SessionSnapshotReader } from "./runtime-snapshots"
+import { MAX_SESSION_CONTROLS_PREPARED_BYTES, MAX_SESSION_STATE_PREPARED_BYTES, MAX_SESSION_CHILDREN_PREPARED_BYTES } from "../../../protocol/types"
 import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
@@ -151,7 +152,8 @@ export class EngineRuntimeError extends Error {
  * synchronous; durable cursor persistence is coalesced in the background.
  */
 export class TuiEngineRuntime {
-  readonly #controls = new SessionControlReader(
+  readonly #controls = new SessionSnapshotReader(
+    MAX_SESSION_CONTROLS_PREPARED_BYTES,
     async (sessionId, signal, allocation) => {
       const generation = this.#sessionGeneration
       const reply = await this.#client.postCommand({ type: "get_session_controls", meta: this.#meta(), session_id: sessionId }, signal, allocation)
@@ -178,7 +180,71 @@ export class TuiEngineRuntime {
     },
   )
 
+  readonly #metadata = new SessionSnapshotReader(
+    MAX_SESSION_STATE_PREPARED_BYTES,
+    async (sessionId, signal, allocation) => {
+      const generation = this.#sessionGeneration
+      const reply = await this.#client.postCommand({ type: "get_session_state", meta: this.#meta(), session_id: sessionId }, signal, allocation)
+      signal.throwIfAborted()
+      if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
+      const event = reply.type === "read" ? reply.events[0] : undefined
+      if (reply.outcome.type === "rejected" || reply.type !== "read" || reply.events.length !== 1
+        || event?.type !== "session_state_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("session metadata reply is missing its session-bound result")
+      }
+      return event
+    },
+    event => {
+      const app = this.#requiredApp(), before = app.state.recovery
+      app.handleEvent(event)
+      return app.state.recovery !== before && app.state.recovery.compaction?.stale !== true
+    },
+    (error, sessionId) => {
+      if (sessionId !== this.#sessionId) return
+      const app = this.#requiredApp()
+      app.setState({ ...app.state, errors: [...app.state.errors.slice(-63), {
+        category: "protocol", code: "session_metadata_unavailable", message: safeErrorMessage(error), retryable: true,
+      }] })
+    },
+  )
+
+  readonly #children = new SessionSnapshotReader(
+    MAX_SESSION_CHILDREN_PREPARED_BYTES,
+    async (sessionId, signal, allocation) => {
+      const generation = this.#sessionGeneration
+      const reply = await this.#client.postCommand({ type: "read_session_children", meta: this.#meta(), session_id: sessionId, scope: { type: "session" } }, signal, allocation)
+      signal.throwIfAborted()
+      if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
+      const event = reply.type === "read" ? reply.events[0] : undefined
+      if (reply.outcome.type === "rejected" || reply.type !== "read" || reply.events.length !== 1
+        || event?.type !== "session_children_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("children reply is missing its session-bound result")
+      }
+      return event
+    },
+    event => {
+      const app = this.#requiredApp(), before = app.state.recovery.children
+      app.handleEvent(event)
+      return app.state.recovery.children !== before
+    },
+    (error, sessionId) => {
+      if (sessionId !== this.#sessionId) return
+      const app = this.#requiredApp()
+      app.setState({ ...app.state, errors: [...app.state.errors.slice(-63), {
+        category: "protocol", code: "session_children_unavailable", message: safeErrorMessage(error), retryable: true,
+      }] })
+    },
+  )
+
   readonly sessionReader: SessionReader = {
+    children: async ({ sessionId, scope }, signal, allocation) => {
+      const reply = await this.#readSession({ type: "read_session_children", meta: this.#meta(), session_id: sessionId, scope }, signal, allocation)
+      const event = reply.events[0]
+      if (reply.events.length !== 1 || event?.type !== "session_children_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("children reply is missing its session-bound result")
+      }
+      return event.result
+    },
     tail: async ({ sessionId, scope }, read, signal, allocation) => {
       const reply = await this.#readSession({ type: "read_transcript_tail", meta: this.#meta(), session_id: sessionId, scope, read }, signal, allocation)
       const event = reply.events[0]
@@ -318,7 +384,7 @@ export class TuiEngineRuntime {
       }
     } finally {
       await this.#handoff?.close()
-    await this.#controls.settle()
+    await Promise.all([this.#controls.settle(), this.#metadata.settle(), this.#children.settle()])
     }
   }
 
@@ -428,7 +494,7 @@ export class TuiEngineRuntime {
     this.#transitionController?.abort(this.#controller.signal.reason)
     this.#subscriptionController?.abort(this.#controller.signal.reason)
     await this.#handoff?.close()
-    await this.#controls.settle()
+    await Promise.all([this.#controls.settle(), this.#metadata.settle(), this.#children.settle()])
   }
 
   /**
@@ -655,6 +721,10 @@ export class TuiEngineRuntime {
             const previousGap = bound.state.connection.gap
             const previousSequence = bound.state.lastSequence
             bound.handleEvent(event)
+            if (event.type === "conversation_rewound") void this.#children.refresh(sessionId, subscriptionController.signal)
+            if (!this.#config.replayMode && bound.state.recovery.compaction?.stale === true) {
+              void this.#metadata.refresh(sessionId, subscriptionController.signal)
+            }
             if (event.type === "session_replay_completed" || event.type === "session_history_ready") finishInitialReplayBatch()
             const nextGap = bound.state.connection.gap
             if (nextGap === null) {
@@ -769,6 +839,8 @@ export class TuiEngineRuntime {
 
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
     void this.#controls.refresh(sessionId, signal)
+    void this.#metadata.refresh(sessionId, signal)
+    void this.#children.refresh(sessionId, signal)
     const commands: ClientCommand[] = [
       { type: "list_models", refresh: false, meta: this.#meta(), session_id: sessionId },
       { type: "list_modes", meta: this.#meta(), session_id: sessionId },
@@ -815,7 +887,7 @@ export class TuiEngineRuntime {
   }
 
   async #readSession(
-    command: Extract<ClientCommand, { type: "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
+    command: Extract<ClientCommand, { type: "read_session_children" | "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
     signal: AbortSignal,
     allocation?: ReplyAllocation,
   ): Promise<Extract<CommandReply, { type: "read" }>> {

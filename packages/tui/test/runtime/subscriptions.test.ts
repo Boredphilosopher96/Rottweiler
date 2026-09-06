@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { PROTOCOL_VERSION } from "../../src/protocol"
+import { PROTOCOL_VERSION, type ClientCommand } from "../../src/protocol"
 import {
   TuiEngineRuntime,
   systemRuntimeFiles
@@ -215,13 +215,18 @@ describe("runtime subscriptions", () => {
         .filter((command) => command.type === "list_commands").length === 1,
     )
 
+    // Recovery readers share a four-per-second admission cadence across reconnects.
+    await waitFor(() => client.commands.slice(beforeReconnect).some(command => command.type === "read_session_children"), 1000)
     const reconnectedTypes = client.commands
       .slice(beforeReconnect)
       .map((command) => command.type)
-    expect(reconnectedTypes).toEqual([
+    expect(reconnectedTypes[0]).toBe("take_driver")
+    expect([...reconnectedTypes].sort()).toEqual(([
       "take_driver",
       "list_models",
       "get_session_controls",
+      "get_session_state",
+      "read_session_children",
       "list_modes",
       "list_sessions",
       "get_context",
@@ -232,7 +237,7 @@ describe("runtime subscriptions", () => {
       "list_runtime_services",
       "list_permissions",
       "list_commands",
-    ])
+    ] satisfies ClientCommand["type"][]).sort())
     expect(reconnectedTypes).not.toContain("resume_session")
     expect(reconnectedTypes).not.toContain("send_message")
 

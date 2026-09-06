@@ -20,6 +20,7 @@ async function childHarness(activity: "running" | "idle", sourceReader?: import(
   const app = createRottweilerApp(harness.renderer, {
     sessionId: "parent", treeSitterClient: new MockTreeSitterClient(),
     sessionReader: {
+      children: emptySessionReader.children,
       tail: emptySessionReader.tail,
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),

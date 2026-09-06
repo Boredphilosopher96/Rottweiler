@@ -1,3 +1,4 @@
+import { emptyChildrenFence, type ChildrenFence } from "./children-recovery"
 import { restoreCompaction, type CompactionFence } from "./compaction-recovery"
 import type { EngineEvent, SessionStateSnapshot, TranscriptTailIdentity } from "../protocol"
 import { MAX_SESSION_STATE_BYTES, MAX_SESSION_STATE_PREPARED_BYTES } from "../../../../protocol/types"
@@ -18,6 +19,7 @@ export interface TailReplayFence {
   readonly invocations: Readonly<Record<string, string>>
 }
 export interface RecoveryProjection {
+  readonly children: ChildrenFence
   readonly compaction: CompactionFence | null
   readonly metadataThrough: string | null
   readonly metadataObservedThrough: string | null
@@ -25,7 +27,7 @@ export interface RecoveryProjection {
   readonly tail: TailReplayFence | null
 }
 export function emptyRecovery(): RecoveryProjection {
-  return { compaction: null, metadataThrough: null, metadataObservedThrough: null, activeTurnSource: null, tail: null }
+  return { children: emptyChildrenFence(), compaction: null, metadataThrough: null, metadataObservedThrough: null, activeTurnSource: null, tail: null }
 }
 
 /** A scalar snapshot does not authorize skipping durable display or interaction state. */

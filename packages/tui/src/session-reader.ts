@@ -1,3 +1,4 @@
+import type { SessionChildrenResult } from "../../../protocol/types"
 import type { TailRead } from "./history/live-tail"
 import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { TranscriptContentPage, TranscriptContentRead, TranscriptRead, TranscriptReadResult, TodoReadResult, UiCatalog, UiPanels, SessionReadScope, SessionReadAncestor } from "./protocol"
@@ -22,6 +23,7 @@ export function descendantSessionRead(parent: SessionReadTarget, child: SessionR
 /** Read-only capability shared by live sessions and the offline historical view. */
 export interface SessionReader {
   tail: TailRead
+  children(target: SessionReadTarget, signal: AbortSignal, allocation: ReplyAllocation): Promise<SessionChildrenResult>
   uiCatalog(sessionId: string, signal: AbortSignal): Promise<UiCatalog>
   uiPanels(sessionId: string, signal: AbortSignal): Promise<UiPanels>
   todos(target: SessionReadTarget, signal: AbortSignal): Promise<TodoReadResult>

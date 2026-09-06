@@ -1,3 +1,4 @@
+import { restoreChildren, coveredChildren, observeChildren } from "./children-recovery"
 import { contextUsage } from "./context-usage"
 import { compactionProgress, observeCompaction } from "./compaction-recovery"
 import { coveredTailDelta, preserveTail } from "./tail-recovery"
@@ -150,8 +151,8 @@ export function reduceWireEvent(
     }
     : withCursor
 
-  const applied = coveredTail ? ready : observeCompaction(applyKnownEvent(ready, event, sequenceText, activeSessionId), event, sequenceText)
-  const projected = preserveMetadata(state, preserveTail(state, applied, event, sequenceText), event, sequenceText)
+  const applied = (coveredTail || (coveredChildren(state, event, sequenceText) && event.type !== "conversation_rewound")) ? ready : observeCompaction(applyKnownEvent(ready, event, sequenceText, activeSessionId), event, sequenceText)
+  const projected = observeChildren(state, preserveMetadata(state, preserveTail(state, applied, event, sequenceText), event, sequenceText), event, sequenceText)
   if (coveredControl) return preserveSnapshotControls(state, projected, event)
   return isControlEvent(event) ? { ...projected, controls: { ...projected.controls, observedThrough: sequenceText } } : projected
 }
@@ -185,7 +186,7 @@ function applyKnownEvent(
     case "transcript_content_ready":
       return state
     case "session_children_ready":
-      return state
+      return (activeSessionId !== null && event.session_id !== activeSessionId) || event.result.type !== "ready" ? state : restoreChildren(state, event.result.snapshot)
     case "session_state_ready":
       return activeSessionId !== null && event.session_id !== activeSessionId ? state : readSessionState(state, event.session_id, event.snapshot)
     case "session_controls_ready":

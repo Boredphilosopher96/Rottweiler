@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { MAX_PENDING_QUESTION_REQUESTS, MAX_SESSION_CONTROLS_PREPARED_BYTES } from "../../../protocol/types"
 import { PROTOCOL_VERSION, type EngineEvent, type SessionControlsSnapshot } from "../src/protocol"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
-import { SessionControlReader } from "../src/runtime-controls"
+import { SessionSnapshotReader } from "../src/runtime-snapshots"
 
 const meta = (sequence: string) => ({ protocol_version: PROTOCOL_VERSION, session_id: "s", sequence_id: sequence, emitted_at: "2026-01-01T00:00:00Z" })
 const question = { question_id: "q", turn_id: "1", questions: [{ id: "q", prompt: "Choose", response_kind: "text" as const, options: [] }] }
@@ -56,7 +56,7 @@ test("control admission rejects duplicate and oversized source payloads before r
 
 test("control reader coalesces demand and holds decoding ownership until cancelled work settles", async () => {
   const applied: string[] = [], started: string[] = [], settle: Array<() => void> = []
-  const reader = new SessionControlReader(async (sessionId, _signal, allocation) => {
+  const reader = new SessionSnapshotReader(MAX_SESSION_CONTROLS_PREPARED_BYTES, async (sessionId, _signal, allocation) => {
     started.push(sessionId)
     allocation.admit(MAX_SESSION_CONTROLS_PREPARED_BYTES)
     await new Promise<void>(resolve => settle.push(resolve))
@@ -70,7 +70,7 @@ test("control reader coalesces demand and holds decoding ownership until cancell
   reader.refresh("new", next.signal)
   expect(started).toEqual(["old"])
   settle[0]?.()
-  await Bun.sleep(0)
+  while (started.length < 2) await Bun.sleep(1)
   expect(started).toEqual(["old", "new"])
   settle[1]?.()
   await completion
@@ -79,7 +79,7 @@ test("control reader coalesces demand and holds decoding ownership until cancell
 
 test("control reader rejects excess decoder reservation without applying a payload", async () => {
   const errors: unknown[] = [], applied: EngineEvent[] = []
-  const reader = new SessionControlReader(async (_session, _signal, allocation) => {
+  const reader = new SessionSnapshotReader(MAX_SESSION_CONTROLS_PREPARED_BYTES, async (_session, _signal, allocation) => {
     allocation.admit(MAX_SESSION_CONTROLS_PREPARED_BYTES + 1)
     return ready(snapshot("1"))
   }, event => { applied.push(event); return true }, error => errors.push(error))
@@ -91,7 +91,7 @@ test("control reader rejects excess decoder reservation without applying a paylo
 test("a snapshot losing the durable race is retried by the same bounded owner", async () => {
   const controller = new AbortController()
   let reads = 0, active = 0, peak = 0
-  const reader = new SessionControlReader(async () => {
+  const reader = new SessionSnapshotReader(MAX_SESSION_CONTROLS_PREPARED_BYTES, async () => {
     active++; peak = Math.max(peak, active)
     await Bun.sleep(0)
     active--; reads++

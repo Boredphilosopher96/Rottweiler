@@ -1,3 +1,4 @@
+import { MAX_CHILD_TASK_PREVIEW_BYTES } from "../../../../protocol/types"
 import {
   type EngineEvent
 } from "../protocol"
@@ -7,7 +8,7 @@ import {
   type RottweilerState
 } from "./model"
 
-export const MAX_SUBAGENT_TASK_BYTES = 1_024
+export const MAX_SUBAGENT_TASK_BYTES = MAX_CHILD_TASK_PREVIEW_BYTES
 
 export const MAX_TERMINAL_SUBAGENT_HISTORY = 128
 
