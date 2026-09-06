@@ -171,7 +171,7 @@ async fn action(
 }
 
 async fn complete_tool_action(handle: &rw_core::SessionHandle, expected: &serde_json::Value) {
-    let (presentation, reads, invocation_id) = run_status(handle, "status").await;
+    let (presentation, reads, invocation_id) = run_status(handle, "summary").await;
     assert_eq!(reads, 0, "tool action preparation reuses the input receipt");
     let state = handle
         .plugin_session_capability("task-workflow")

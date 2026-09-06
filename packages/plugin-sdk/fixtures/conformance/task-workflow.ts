@@ -48,6 +48,7 @@ const plugin = definePlugin({
         if (value === undefined) throw new Error("committed task is absent")
         const summary = await session.callTool("task_summary", {})
         if (summary.is_error) throw new Error("task summary failed")
+        if (action === "summary") return { summary: true }
         const revision = await push.publishPanel("task", value)
         return { revision }
       },
