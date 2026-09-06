@@ -42,14 +42,7 @@ async fn qualify_cold_actor_source_history() {
     }
     let mut fixtures = Vec::with_capacity(SIZES.len());
     for count in SIZES {
-        let root = tempfile::tempdir().expect("fixture");
-        std::fs::create_dir(root.path().join("workspace")).expect("workspace");
-        let storage = root.path().join("state");
-        crate::storage_root::initialize_private_storage_root(&storage).expect("private storage");
-        let info = source::seed(&storage, count);
-        let encoded = serde_json::to_vec(&info).expect("expected sources");
-        assert!(encoded.len() < 16 * 1024);
-        std::fs::write(root.path().join("expected.json"), encoded).expect("oracle");
+        let (root, info) = fixture(count);
         println!(
             "history_acceptance {}",
             serde_json::json!({"phase":"seed_complete","conversations":count,"source_events":info.next_sequence,"source_bytes":info.journal_bytes,"accepted_input_body_bytes":info.input_body_bytes,"seed_batch_max_events":16,"seed_is_timed":false})
@@ -102,6 +95,32 @@ async fn qualify_cold_actor_source_history() {
         }
     }
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_history_oracles_match_actual_actor_reopen() {
+    let (root, info) = fixture(100);
+    sample(
+        root.path(),
+        &info,
+        "first_index_build_and_actor_activation",
+        0,
+        false,
+    )
+    .await;
+    sample(root.path(), &info, "same_process_index_reopen", 0, false).await;
+}
+
+fn fixture(count: u64) -> (tempfile::TempDir, Expected) {
+    let root = tempfile::tempdir().expect("fixture");
+    std::fs::create_dir(root.path().join("workspace")).expect("workspace");
+    let storage = root.path().join("state");
+    crate::storage_root::initialize_private_storage_root(&storage).expect("private storage");
+    let info = source::seed(&storage, count);
+    let encoded = serde_json::to_vec(&info).expect("expected sources");
+    assert!(encoded.len() < 16 * 1024);
+    std::fs::write(root.path().join("expected.json"), encoded).expect("oracle");
+    (root, info)
+}
+
 fn expected(root: &Path) -> Expected {
     let bytes = std::fs::read(root.join("expected.json")).expect("seeded oracle");
     assert!(bytes.len() < 16 * 1024);
