@@ -93,7 +93,9 @@ fn blocked_print(format: &str) {
         }
         assert!(
             Instant::now() < deadline,
-            "print {format} did not settle while stdout was full"
+            "print {format} did not settle while stdout was full; physical stdout flags: {:?}, original: {:?}",
+            fcntl_getfl(&observed_output),
+            original_output_flags
         );
         thread::sleep(Duration::from_millis(10));
     }

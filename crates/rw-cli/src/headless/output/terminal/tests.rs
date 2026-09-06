@@ -380,3 +380,44 @@ async fn output_only_preserves_stdout_and_stderr_without_prompt_or_input() {
     assert_eq!(normal, "héllo\n");
     assert_eq!(diagnostic, "error\n");
 }
+
+#[tokio::test]
+async fn output_cancellation_releases_physical_work_before_actor_acknowledgement() {
+    let (stdout, _blocked_peer) = UnixStream::pair().expect("stdout");
+    let active = Arc::new(Semaphore::new(1));
+    let (_, _, mut terminal) = Terminal::spawn_mode(
+        super::Descriptors::Output {
+            stdout: duplicate(&stdout).expect("stdout"),
+            stderr: duplicate(&stdout).expect("stderr"),
+        },
+        active.clone().try_acquire_owned().expect("admission"),
+        || {},
+    )
+    .await
+    .expect("output owner");
+    {
+        let writing = terminal.print("x".repeat(1024 * 1024));
+        tokio::pin!(writing);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut writing)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(terminal.output_slot.available_permits(), 0);
+    terminal.cancel();
+    // Model an actor acknowledgement that cannot yet complete. The writer
+    // must retire without polling close or releasing its credit in the caller.
+    let (release, waiting) = tokio::sync::oneshot::channel::<()>();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while active.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("physical output settles independently of actor acknowledgement");
+    assert_eq!(terminal.output_slot.available_permits(), 1);
+    release.send(()).expect("actor acknowledgement");
+    waiting.await.expect("owned actor completion");
+    terminal.close().await.expect("observe physical settlement");
+}

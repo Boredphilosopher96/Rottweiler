@@ -211,8 +211,13 @@ impl Terminal {
             .map_err(|_| miette!("headless terminal output failed"))?
             .into_diagnostic()
     }
-    pub(super) async fn close(&mut self) -> Result<()> {
+    /// Request physical settlement immediately, independently of actor admission.
+    /// The request bytes and worker permits remain owned until `close` proves it.
+    pub(super) fn cancel(&self) {
         self.wake.cancel();
+    }
+    pub(super) async fn close(&mut self) -> Result<()> {
+        self.cancel();
         if let Some(finished) = self.finished.as_mut() {
             let result = finished.await;
             self.finished = None;
