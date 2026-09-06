@@ -134,9 +134,16 @@ fn repeated_crash_repair_claims_one_accepted_body_without_duplicate_markers() {
     );
     // Only the original source contains the attachment; every retry is metadata.
     let source = journal.read_view();
-    let events = source
+    let page = source
         .page::<EngineEvent>(None, Default::default())
-        .expect("events")
+        .expect("events");
+    let attachment_bytes = "retained attachment\n".len() * 1024;
+    assert!(page.page_bytes < u64::try_from(2 * attachment_bytes).expect("fixture bytes"));
+    eprintln!(
+        "retained_input attempts=4 accepted_bodies=1 attachment_bytes={attachment_bytes} journal_record_bytes={}",
+        page.page_bytes
+    );
+    let events = page
         .events
         .into_iter()
         .map(|row| row.event)
