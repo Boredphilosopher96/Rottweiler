@@ -192,7 +192,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         for relative in ("crates/rw-cli/tests/perf_gate.sh", "scripts/native_candidate.py",
-                         "scripts/opentui_native.py", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
+                         "scripts/opentui_native.py", "scripts/native_profile.py", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
             destination = fixture.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / relative, destination)
