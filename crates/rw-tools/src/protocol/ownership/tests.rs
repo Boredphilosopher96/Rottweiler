@@ -57,7 +57,12 @@ async fn proven_settlement_consumes_identity_and_is_idempotent() {
 #[tokio::test]
 async fn failed_reap_retains_every_physical_owner() {
     let (mut owner, child) = physical(None);
-    rustix::process::kill_process(pid(child), rustix::process::Signal::KILL).expect("kill fixture");
+    owner
+        .0
+        .as_mut()
+        .expect("physical owner")
+        .signal()
+        .expect("signal fixture");
     rustix::process::waitpid(Some(pid(child)), rustix::process::WaitOptions::empty())
         .expect("external wait")
         .expect("reaped");
