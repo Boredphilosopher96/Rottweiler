@@ -1,11 +1,12 @@
-import { ClientAllocationError } from "../client-allocation"
+import { MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES } from "../../../../protocol/types"
+import { ClientAllocationError, ClientAllocationOwner } from "../client-allocation"
 import type { ReplyAllocation } from "./reply-allocation"
 import { EngineProtocolError, EngineTransportError } from "./errors"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import validateCommandReply from "../../../../protocol/command-reply-validator.js"
 import { CLIENT_COMMAND_LANE, CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
 import { boundedJson } from "./json"
-import { ClientReadAdmission } from "./read-admission"
+import { ClientCommandAdmission } from "./command-admission"
 import type { ClientCommand, CommandReply, EngineEvent } from "../protocol"
 import {
   DEFAULT_BACKOFF_POLICY,
@@ -25,6 +26,7 @@ import {
 } from "./types"
 
 export interface EngineTransportOptions {
+  readonly allocations?: ClientAllocationOwner
   readonly diagnostics?: ClientDiagnostics | undefined
   readonly socketPath: string
   readonly bootstrapToken: string | BootstrapTokenProvider
@@ -61,6 +63,7 @@ interface ActiveEventStream {
 }
 
 export class EngineHttpSseClient {
+  readonly allocations: ClientAllocationOwner
   readonly #diagnostics: ClientDiagnostics | undefined
   readonly #socketPath: string
   readonly #bootstrapToken: BootstrapTokenProvider
@@ -73,7 +76,7 @@ export class EngineHttpSseClient {
   readonly #scheduler: BackoffScheduler
   readonly #sse: SseParserOptions
   readonly #fetch: typeof fetch
-  readonly #reads: ClientReadAdmission
+  readonly #commands: ClientCommandAdmission
   #clientAuth: ClientAuth | null = null
   #clientAuthRequest: Promise<ClientAuth> | null = null
   #activeEventStream: ActiveEventStream | null = null
@@ -85,8 +88,9 @@ export class EngineHttpSseClient {
     if (typeof options.bootstrapToken === "string" && options.bootstrapToken.length === 0) {
       throw new TypeError("engine bootstrap token must not be empty")
     }
+    this.allocations = options.allocations ?? new ClientAllocationOwner()
     this.#diagnostics = options.diagnostics
-    this.#reads = new ClientReadAdmission(options.diagnostics)
+    this.#commands = new ClientCommandAdmission(options.diagnostics, this.allocations)
     this.#socketPath = options.socketPath
     this.#bootstrapToken =
       typeof options.bootstrapToken === "string"
@@ -105,17 +109,24 @@ export class EngineHttpSseClient {
   }
 
   postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply> {
-    return this.#reads.run(command, signal, (request, lifetime) => this.#postCommand(request, lifetime, allocation))
+    return this.#commands.run(command, signal, (request, lifetime, prepare) => this.#postCommand(request, lifetime, allocation, prepare))
   }
 
-  async #postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply> {
+  async #postCommand(command: ClientCommand, signal: AbortSignal | undefined, allocation: ReplyAllocation | undefined, prepare: (authenticated: ClientCommand) => void): Promise<CommandReply> {
     signal?.throwIfAborted()
-    const auth = await this.#ensureClientAuth(signal, allocation)
+    const replyAllocation = CLIENT_COMMAND_LANE[command.type] === "urgent" ? {
+      admit(bytes: number) {
+        if (bytes > MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES * 32) throw new EngineProtocolError("urgent reply allocation exceeds its allowance")
+        allocation?.admit(bytes)
+      },
+    } : allocation
+    const auth = await this.#ensureClientAuth(signal, replyAllocation)
     signal?.throwIfAborted()
     const authenticatedCommand: ClientCommand = {
       ...command,
       meta: { ...command.meta, client_id: auth.clientId },
     }
+    prepare(authenticatedCommand)
     const response = await this.#fetch(this.#url(this.#commandPath), {
       unix: this.#socketPath,
       method: "POST",
@@ -135,7 +146,7 @@ export class EngineHttpSseClient {
       await response.body?.cancel()
       throw new EngineProtocolError("engine command reply must use application/json")
     }
-    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal, allocation)
+    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal, replyAllocation)
     const validatedAt = this.#diagnostics?.start()
     try {
       if (!validateCommandReply(reply)) {

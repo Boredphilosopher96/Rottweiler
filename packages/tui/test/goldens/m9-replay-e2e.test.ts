@@ -40,7 +40,7 @@ test("authenticated observer reads semantic pages without replaying lifetime eve
     sessionId: SESSION_ID, lastSeenSequence: null, lastSeenFile: null, replayMode: true,
   }, new EngineHttpSseClient({ socketPath: engine.socketPath, bootstrapToken: engine.bootstrapToken, diagnostics }), undefined,
   () => `m9-runtime-${nextRequest++}`)
-  const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader, diagnostics,
+  const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader, allocations: runtime.allocations, diagnostics,
     sessionId: SESSION_ID, replaySessionId: SESSION_ID, treeSitterClient: treeSitter })
   setup.renderer.root.add(app)
   runtime.bind(app)

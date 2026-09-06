@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { ClientDiagnostics } from "../src/client-diagnostics"
 import { MAX_CLIENT_READS, PROTOCOL_VERSION, type ClientCommand, type CommandReply } from "../src/protocol"
-import { ClientReadAdmission, MAX_CLIENT_READ_REQUEST_BYTES, MAX_RETAINED_CLIENT_READS } from "../src/transport/read-admission"
+import { ClientCommandAdmission, MAX_CLIENT_READ_REQUEST_BYTES, MAX_RETAINED_CLIENT_READS } from "../src/transport/command-admission"
 
 const accepted: CommandReply = { type: "read", outcome: { type: "accepted" }, events: [] }
 const meta = (id: string) => ({ protocol_version: PROTOCOL_VERSION, client_id: "client", request_id: id })
@@ -21,7 +21,7 @@ const tick = async () => { await Promise.resolve(); await Promise.resolve() }
 
 describe("shared client read admission", () => {
   test("distinct features share the generated ceiling and FIFO while mutations bypass it", async () => {
-    const queue = new ClientReadAdmission()
+    const queue = new ClientCommandAdmission()
     const host = pending()
     const commands: ClientCommand[] = [read("sessions"), { type: "list_models", refresh: false, meta: meta("context"), session_id: "s" },
       { type: "list_runtime_services", meta: meta("services"), session_id: "s" },
@@ -47,7 +47,7 @@ describe("shared client read admission", () => {
   })
 
   test("queued cancellation reclaims admission and a running abort waits for executor settlement", async () => {
-    const queue = new ClientReadAdmission()
+    const queue = new ClientCommandAdmission()
     const host = pending()
     const scope = new AbortController()
     const running = [0, 1].map(id => queue.run(read(String(id)), scope.signal, host.execute))
@@ -70,7 +70,7 @@ describe("shared client read admission", () => {
   })
 
   test("request count and bytes remain bounded and recover after cancellation", async () => {
-    const queue = new ClientReadAdmission()
+    const queue = new ClientCommandAdmission()
     const host = pending()
     const scope = new AbortController()
     const tasks = Array.from({ length: MAX_RETAINED_CLIENT_READS }, (_, id) =>
@@ -83,7 +83,7 @@ describe("shared client read admission", () => {
     for (const reply of host.replies.values()) reply.resolve(accepted)
     await settled
     expect(queue.usage).toEqual({ active: 0, queued: 0, bytes: 0 })
-    const large: ClientCommand = { type: "search_sessions", meta: meta("large"), query: "\u0000".repeat(20_000), limit: 1 }
+    const large: ClientCommand = { type: "search_sessions", meta: meta("large"), query: "\u0000".repeat(30_000), limit: 1 }
     const first = queue.run(large, undefined, host.execute)
     const charged = queue.usage.bytes
     expect(charged).toBeLessThanOrEqual(MAX_CLIENT_READ_REQUEST_BYTES)
@@ -96,7 +96,7 @@ describe("shared client read admission", () => {
   })
 
   test("queued request identity and nested payload are captured before caller mutation", async () => {
-    const queue = new ClientReadAdmission()
+    const queue = new ClientCommandAdmission()
     const host = pending()
     const blockers = ["a", "b"].map(id => queue.run(read(id), undefined, host.execute))
     const command = { type: "search_sessions", meta: meta("original"), query: "original query", limit: 1 } satisfies ClientCommand
@@ -114,7 +114,7 @@ describe("shared client read admission", () => {
   })
 
   test("pre-aborted reads and synchronous executor failures cannot strand a slot", async () => {
-    const queue = new ClientReadAdmission()
+    const queue = new ClientCommandAdmission()
     let called = false
     await expect(queue.run(read("aborted"), AbortSignal.abort(), async () => { called = true; return accepted })).rejects.toThrow()
     expect(called).toBe(false)
@@ -125,7 +125,7 @@ describe("shared client read admission", () => {
   test("opt-in queue timing attributes admission delay without retaining payloads", async () => {
     let now = 0
     const diagnostics = new ClientDiagnostics(() => now)
-    const queue = new ClientReadAdmission(diagnostics)
+    const queue = new ClientCommandAdmission(diagnostics)
     const host = pending()
     const requests = ["a", "b", "c"].map(id => queue.run(read(id), undefined, host.execute))
     now = 40

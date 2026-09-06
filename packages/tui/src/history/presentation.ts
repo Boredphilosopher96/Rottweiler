@@ -1,3 +1,5 @@
+import { ClientCache } from "./cache"
+import type { ClientAllocationOwner } from "../client-allocation"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import { HistoryController, type HistorySnapshot } from "./controller"
 import type { SessionReader, SessionReadTarget } from "../session-reader"
@@ -13,13 +15,13 @@ export class HistoryPresentation {
   #disposed = false
   #nextReadAt = 0
 
-  constructor(reader: Pick<SessionReader, "page" | "content">, changed: (snapshot: HistorySnapshot) => void, diagnostics?: ClientDiagnostics) {
+  constructor(reader: Pick<SessionReader, "page" | "content">, changed: (snapshot: HistorySnapshot) => void, diagnostics?: ClientDiagnostics, allocations?: ClientAllocationOwner) {
     this.#diagnostics = diagnostics
     this.#changed = changed
     this.controller = new HistoryController(reader, () => {
       this.#changed(this.controller.snapshot)
       this.#schedule()
-    }, undefined, diagnostics)
+    }, new ClientCache(undefined, allocations), diagnostics)
   }
 
   present(target: SessionReadTarget): void {

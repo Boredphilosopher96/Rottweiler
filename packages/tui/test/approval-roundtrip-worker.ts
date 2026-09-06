@@ -18,7 +18,7 @@ const app = createRottweilerApp(setup.renderer, { sessionReader: emptySessionRea
   },
 })
 setup.renderer.root.add(app)
-runtime = await createEngineRuntimeFromEnvironment()
+runtime = await createEngineRuntimeFromEnvironment({ allocations: app.historyCache.allocations })
 if (runtime === null) throw new Error("supervised engine runtime was not configured")
 runtime.bind(app)
 const running = runtime.start()

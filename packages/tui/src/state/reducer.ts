@@ -189,6 +189,9 @@ function applyKnownEvent(
       return (activeSessionId !== null && event.session_id !== activeSessionId) || event.result.type !== "ready" ? state : restoreChildren(state, event.result.snapshot)
     case "session_state_ready":
       return activeSessionId !== null && event.session_id !== activeSessionId ? state : readSessionState(state, event.session_id, event.snapshot)
+    case "family_controls_ready":
+    case "child_controls_ready":
+      return state
     case "session_controls_ready":
       return activeSessionId !== null && event.session_id !== activeSessionId ? state : readControls(state, event.snapshot)
     case "tool_approval_resolved": {

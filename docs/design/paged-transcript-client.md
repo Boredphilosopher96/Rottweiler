@@ -57,11 +57,13 @@ Measurements are wall-clock durations. Nested stages are not additive, and async
 
 See [Terminal workspace](terminal-workspace.md) for interaction and visual ownership.
 
-## Client read admission
+## Client command admission
 
-The HTTP transport owns one FIFO for every direct read, including history, catalogs, workspace inspection, and service views. `MAX_CLIENT_READS` is generated from the Rust protocol owner and limits active reads through complete reply-body consumption and validation. Actor controls and mutations bypass this FIFO.
+The HTTP transport owns one FIFO for ordinary direct reads, including history, catalogs, workspace inspection, and service views. `MAX_CLIENT_READS` is generated from the Rust protocol owner and limits active reads through complete reply-body consumption and validation. Conditional read watches use a separate source-classified, single-request lane so an idle watch leaves both ordinary read slots available. Actor controls and mutations bypass this FIFO and have independent source-owned ordinary and urgent count limits.
 
 Active and waiting requests share a 32-entry, 1 MiB retained-request allowance. Admission measures a bounded JSON traversal before cloning the request; the charge covers the immutable snapshot and worst-case JSON escaping and encoding. Caller mutation cannot change an admitted request. Queue overflow rejects the request without dispatch. Aborting a waiting request removes it immediately; an active request retains admission until its HTTP operation settles. Runtime stop and session changes abort their owned reads.
+
+The application, runtime and HTTP transport share one allocation owner created before any request. Immutable request capture, authenticated envelope construction and JSON encoding reserve outbound credit before copying or fetching. The request lease remains held through HTTP response consumption, including cancellation settlement. The caller owns decoded mutation outcomes through its final asynchronous continuation. Aggregate normal credit leaves protected capacity for the admitted urgent request and reply window; normal memory pressure cannot consume that capacity. Admission refusal preserves the previous draft and mounted projection.
 
 Opt-in local diagnostics record `read_queue_age` in fixed counters and histogram buckets. Measurements contain no command names, session IDs, or payloads.
 

@@ -1,3 +1,4 @@
+import type { ClientAllocationOwner } from "../client-allocation"
 import type { ReplyAllocation } from "../transport/reply-allocation"
 import { type ThemeMode, type TreeSitterClient } from "@opentui/core"
 import type { ClientDiagnostics } from "../client-diagnostics"
@@ -16,6 +17,7 @@ import { type RottweilerState } from "../state"
 import { type RottweilerTheme } from "../theme"
 
 export interface RottweilerAppOptions {
+  readonly allocations?: ClientAllocationOwner
   readonly diagnostics?: ClientDiagnostics | undefined
   readonly sessionReader: SessionReader
   readonly initialEvent?: EngineEvent

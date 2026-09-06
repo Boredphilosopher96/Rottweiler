@@ -15,7 +15,7 @@ const treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
 treeSitter.setMockResult({ highlights: [] })
 const runtime = await createEngineRuntimeFromEnvironment()
 if (runtime === null) throw new Error("replay CLI worker requires an engine runtime")
-const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader,
+const app = createRottweilerApp(setup.renderer, { sessionReader: runtime.sessionReader, allocations: runtime.allocations,
   sessionId,
   replaySessionId: sessionId,
   treeSitterClient: treeSitter,

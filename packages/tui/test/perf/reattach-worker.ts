@@ -58,7 +58,7 @@ class WorkerApp implements RuntimeApp {
 
 const app = new WorkerApp()
 
-const runtime = await createEngineRuntimeFromEnvironment()
+const runtime = await createEngineRuntimeFromEnvironment({ allocations: app.historyCache.allocations })
 if (runtime === null) {
   throw new Error("reattach worker requires an engine runtime")
 }

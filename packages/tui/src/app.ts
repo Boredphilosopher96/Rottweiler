@@ -238,7 +238,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#history = new HistoryPresentation(options.sessionReader, snapshot => {
       if (!this.#destroyed && this.transcript !== undefined) this.transcript.setHistory(snapshot)
-    }, options.diagnostics)
+    }, options.diagnostics, options.allocations)
     this.#allocations = new ProjectionAllocations(this.historyCache.allocations)
     this.#bootstrap = new BootstrapPresentation(state => { this.#presentation.resume(); this.setState(state) })
     this.#document = new DocumentController(options.sessionReader, this.#history.controller.cache, snapshot => {

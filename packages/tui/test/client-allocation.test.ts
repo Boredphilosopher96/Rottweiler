@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { ClientAllocationOwner, type ClientAllocationDomain } from "../src/client-allocation"
 import { ClientCache } from "../src/history/cache"
 import { ComposerDraftStore } from "../src/composer-drafts"
-const limits: Record<ClientAllocationDomain, number> = { live: 4096, decoding: 4096, history: 4096, drafts: 4096, controls: 4096, metadata: 4096, children: 4096, tasks: 4096 }
+const limits: Record<ClientAllocationDomain, number> = { outbound: 4096, urgent: 4096, live: 4096, decoding: 4096, history: 4096, drafts: 4096, controls: 4096, metadata: 4096, children: 4096, tasks: 4096 }
 
 test("history and retained snapshots compete for one aggregate allocation owner", () => {
   const owner = new ClientAllocationOwner(limits, 5000)
@@ -37,7 +37,7 @@ test("allocation release and refused growth preserve exact charges", () => {
 test("aggregate refusal preserves the resident revision and unrelated eviction candidates", () => {
   const owner = new ClientAllocationOwner(limits, 2000), cache = new ClientCache<unknown>({ bytes: 4096, entries: 8 }, owner)
   expect(cache.insert("body", { text: "original" })).toBe(true)
-  const claim = owner.reserve("metadata", 2000 - owner.usage.bytes)
+  const claim = owner.reserve("metadata", owner.normalCapacity - owner.usage.bytes)
   expect(cache.insert("body", { text: "replacement".repeat(30) })).toBe(false)
   const original = cache.lease("body")!
   expect(original.value).toEqual({ text: "original" })
@@ -77,9 +77,9 @@ test("cancelled draft reads and submissions hold aggregate credit until their ac
 test("draft handoff admits old and incoming data together and transfers its lease atomically", () => {
   const owner = new ClientAllocationOwner(limits, 2000), drafts = new ComposerDraftStore(4096, 8, owner)
   expect(drafts.set("parent", { content: "old", attachments: [] })).toBe(true)
-  const old = drafts.usage.bytes, history = owner.reserve("history", 2000 - old)
+  const old = drafts.usage.bytes, history = owner.reserve("history", owner.normalCapacity - old)
   expect(drafts.replace([{ scope: "parent", draft: { content: "new", attachments: [] } }])).toBe(false)
-  expect(owner.usage.bytes).toBe(2000)
+  expect(owner.usage.bytes).toBe(owner.normalCapacity)
   expect(drafts.get("parent").content).toBe("old")
   history.release()
   expect(drafts.replace([{ scope: "parent", draft: { content: "new", attachments: [] } }])).toBe(true)
@@ -87,5 +87,22 @@ test("draft handoff admits old and incoming data together and transfers its leas
   const submission = drafts.submit("parent")!
   expect(submission.draft.content).toBe("new")
   submission.settle(true)
+  expect(owner.usage.bytes).toBe(0)
+})
+
+
+test("urgent credit cannot move into full ordinary capacity and refused transfer is atomic", () => {
+  const owner = new ClientAllocationOwner(limits, 4096)
+  const normal = owner.reserve("outbound", owner.normalCapacity)
+  const urgent = owner.reserve("urgent", owner.urgentCapacity)
+  expect(owner.usage.bytes).toBe(owner.maximumBytes)
+  expect(() => urgent.moveTo("decoding")).toThrow("admission")
+  expect(owner.usage.domains.urgent).toBe(owner.urgentCapacity)
+  expect(urgent.bytes).toBe(owner.urgentCapacity)
+  normal.release()
+  urgent.moveTo("decoding")
+  expect(owner.usage.domains.urgent).toBe(0)
+  expect(owner.usage.domains.decoding).toBe(owner.urgentCapacity)
+  urgent.release()
   expect(owner.usage.bytes).toBe(0)
 })

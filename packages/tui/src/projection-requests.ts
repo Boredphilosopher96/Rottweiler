@@ -1,4 +1,4 @@
-import { type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
+import { commandReplyDomain, type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
 import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { EngineEvent } from "./protocol"
 import {
@@ -378,7 +378,8 @@ export class ProjectionRequestBroker {
 
   allocate(): ClientAllocationLease { return this.#options.allocations.reserve("decoding", 0) }
 
-  async emit(command: ClientCommand, allocation: ReplyAllocation): Promise<void | CommandOutcome | null> {
+  async emit(command: ClientCommand, allocation: ClientAllocationLease): Promise<void | CommandOutcome | null> {
+    allocation.moveTo(commandReplyDomain(command.type))
     return this.#options.emit(command, allocation)
   }
 

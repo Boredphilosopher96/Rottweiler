@@ -1,5 +1,4 @@
-import type { ClientAllocationOwner } from "../client-allocation"
-import type { ReplyAllocation } from "../transport/reply-allocation"
+import type { ClientAllocationOwner, ClientAllocationLease } from "../client-allocation"
 import type { CommandOutcome, UiActionRequest } from "../protocol"
 import type { UiSurfaceModel } from "./presentation"
 
@@ -13,7 +12,7 @@ export interface UiActionLease {
 interface UiActionOptions {
   readonly allocations: ClientAllocationOwner
   readonly allowed: (lease: UiActionLease) => boolean
-  readonly execute: (session: string, request: UiActionRequest, allocation: ReplyAllocation) => Promise<void | CommandOutcome | null>
+  readonly execute: (session: string, request: UiActionRequest, allocation: ClientAllocationLease) => Promise<void | CommandOutcome | null>
   readonly changed: () => void
   readonly failed: (message: string) => void
 }

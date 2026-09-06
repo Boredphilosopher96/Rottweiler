@@ -99,7 +99,7 @@ test("repeated rejected stream appends leave no allocation debt in the retained 
   const first = { buffer }
   graph.replace([first], [])
   const retained = owner.usage.bytes, objects = graph.retainedObjects
-  const blocker = owner.reserve("live", owner.maximumBytes - retained - 4096)
+  const blocker = owner.reserve("live", owner.normalCapacity - retained - 4096)
   for (let index = 0; index < 100; index++) {
     const rejected = { buffer: buffer.append({ stream: "stderr", chunk: "x".repeat(8192) }) }
     expect(() => graph.replace([rejected], [first])).toThrow("admission")

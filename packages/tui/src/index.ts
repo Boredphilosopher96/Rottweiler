@@ -153,8 +153,10 @@ async function main(): Promise<void> {
   const { createEngineRuntimeFromEnvironment } = runtimeModule
   const { reduceRottweilerState, transportDisconnected } = stateModule
 
+  const { ClientAllocationOwner } = await import("./client-allocation")
+  const allocations = new ClientAllocationOwner()
   const runtimeBootstrap: Promise<RuntimeBootstrap> = createEngineRuntimeFromEnvironment({
-    diagnostics,
+    allocations, diagnostics,
     onDriverReady: () => {
       const marker = process.env.ROTTWEILER_DRIVER_READY_MARKER
       if (marker !== undefined && marker.length > 0) {
@@ -219,6 +221,7 @@ async function main(): Promise<void> {
   })
   const terminalHandover = createTerminalHandover(renderer)
   const app = appModule.createRottweilerApp(renderer, {
+    allocations,
     diagnostics,
     ...(configuredSession === undefined || configuredSession.length === 0
       ? {}

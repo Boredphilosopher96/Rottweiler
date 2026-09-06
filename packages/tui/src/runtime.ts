@@ -1,4 +1,4 @@
-import { ClientAllocationOwner } from "./client-allocation"
+import { ClientAllocationOwner, commandReplyDomain } from "./client-allocation"
 import { collectSessionBootstrap, type SessionBootstrap } from "./runtime-bootstrap"
 import { TailChanged } from "./history/live-tail"
 import type { ClientCache } from "./history/cache"
@@ -70,6 +70,7 @@ export interface RuntimeApp {
 }
 
 export interface RuntimeEngineClient {
+  readonly allocations?: ClientAllocationOwner
   postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply>
   submitProviderApiKey?(
     sessionId: string,
@@ -88,6 +89,7 @@ export interface RuntimeEngineClient {
 }
 
 export interface CreateEngineRuntimeOptions {
+  readonly allocations?: ClientAllocationOwner
   readonly diagnostics?: ClientDiagnostics | undefined
   readonly environment?: EngineRuntimeEnvironment
   readonly files?: RuntimeFileSystem
@@ -161,6 +163,8 @@ export class EngineRuntimeError extends Error {
  */
 export class TuiEngineRuntime {
   #allocations = new ClientAllocationOwner()
+  readonly #fixedAllocations: boolean
+  get allocations(): ClientAllocationOwner { return this.#allocations }
   readonly #metadata = new SessionSnapshotReader(
     () => this.#allocations,
     MAX_SESSION_STATE_PREPARED_BYTES,
@@ -307,7 +311,11 @@ export class TuiEngineRuntime {
     requestId: () => string = () => crypto.randomUUID(),
     sleep: RuntimeSleep = abortableSleep,
     onDriverReady?: (sessionId: string) => void,
+    allocations?: ClientAllocationOwner,
   ) {
+    if (allocations !== undefined && client.allocations !== undefined && allocations !== client.allocations) throw new EngineRuntimeError("runtime and transport require one allocation owner")
+    this.#fixedAllocations = allocations !== undefined || client.allocations !== undefined
+    this.#allocations = allocations ?? client.allocations ?? this.#allocations
     this.#config = config
     this.#sessionId = config.sessionId
     this.#client = client
@@ -341,6 +349,7 @@ export class TuiEngineRuntime {
     if (this.#app !== null && this.#app !== app) {
       throw new EngineRuntimeError("engine runtime is already bound to an application")
     }
+    if (this.#fixedAllocations && this.#allocations !== app.historyCache.allocations) throw new EngineRuntimeError("runtime and application require one allocation owner")
     if (this.#allocations !== app.historyCache.allocations && this.#allocations.usage.bytes !== 0) throw new EngineRuntimeError("cannot bind an application while unbound decoding is active")
     this.#allocations = app.historyCache.allocations
     this.#app = app
@@ -494,7 +503,7 @@ export class TuiEngineRuntime {
    * fallback when the transport is unavailable.
    */
   async shutdownHost(timeoutMs = HOST_SHUTDOWN_TIMEOUT_MS): Promise<boolean> {
-    using shutdownAllocation = this.#allocations.reserve("decoding", 0)
+    using shutdownAllocation = this.#allocations.reserve(commandReplyDomain("shutdown_host"), 0)
     if (this.#config.replayMode || this.#controller.signal.aborted) return false
     const controller = new AbortController()
     const timer = setTimeout(
@@ -645,7 +654,7 @@ export class TuiEngineRuntime {
           getLastSeenSequence: () => this.#requiredApp().state.lastSequence,
           requestId: this.#requestId,
           onReconnect: async () => {
-            using reconnectAllocation = this.#allocations.reserve("decoding", 0)
+            using reconnectAllocation = this.#allocations.reserve(commandReplyDomain("take_driver"), 0)
             if (this.#config.replayMode) {
               return
             }
@@ -796,8 +805,8 @@ export class TuiEngineRuntime {
   }
 
   async #prepareSession(sessionId: string, signal: AbortSignal): Promise<void> {
-    using resumeAllocation = this.#allocations.reserve("decoding", 0)
-    using takeoverAllocation = this.#allocations.reserve("decoding", 0)
+    using resumeAllocation = this.#allocations.reserve(commandReplyDomain("resume_session"), 0)
+    using takeoverAllocation = this.#allocations.reserve(commandReplyDomain("take_driver"), 0)
     let delay = SESSION_PREPARE_INITIAL_DELAY_MS
     let attempt = 0
     while (!signal.aborted) {
@@ -988,9 +997,11 @@ export async function createEngineRuntimeFromEnvironment(
   if (config === null) {
     return null
   }
+  const allocations = options.allocations ?? new ClientAllocationOwner()
   const client =
     options.client ??
     new EngineHttpSseClient({
+      allocations,
       diagnostics: options.diagnostics,
       socketPath: config.socketPath,
       bootstrapToken: async () => {
@@ -1009,6 +1020,7 @@ export async function createEngineRuntimeFromEnvironment(
     options.requestId,
     options.sleep,
     options.onDriverReady,
+    allocations,
   )
 }
 
