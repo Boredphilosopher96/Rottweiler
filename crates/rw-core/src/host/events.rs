@@ -75,7 +75,7 @@ impl EngineHost {
                     tokio::select! {
                         () = send.closed() => return,
                         host = subscription.receiver.recv() => match host {
-                            Some(event) => if send.send(Ok(event.for_subscription(&lease))).await.is_err() { return; },
+                            Some(event) => if !send_result(&send, Ok(event.for_subscription(&lease))).await { return; },
                             None => return,
                         },
                         event = session_events.recv() => match event {
@@ -100,7 +100,7 @@ impl EngineHost {
                                 }
                             }
                             Err(error) => {
-                                let _ = send.send(Err(HostError::from(error))).await;
+                                let _ = send_result(&send, Err(HostError::from(error))).await;
                                 return;
                             }
                         }
@@ -111,7 +111,7 @@ impl EngineHost {
                     tokio::select! {
                         () = send.closed() => return,
                         event = subscription.receiver.recv() => match event {
-                            Some(event) => if send.send(Ok(event.for_subscription(&lease))).await.is_err() { return; },
+                            Some(event) => if !send_result(&send, Ok(event.for_subscription(&lease))).await { return; },
                             None => return,
                         },
                     }
@@ -180,5 +180,26 @@ async fn send_encoded(
         .await
         .map(|event| event.for_subscription(lease));
     let valid = encoded.is_ok();
-    send.send(encoded).await.is_ok() && valid
+    send_result(send, encoded).await && valid
 }
+
+// A full transport queue is retained work, never an acknowledgement. Once its
+// fixed stall deadline expires, retire the forwarding task and close its stream;
+// do not wait for space to enqueue another failure behind the stalled payload.
+async fn send_result(
+    send: &mpsc::Sender<Result<HostEvent, HostError>>,
+    event: Result<HostEvent, HostError>,
+) -> bool {
+    match tokio::time::timeout(HOST_EVENT_STALL_TIMEOUT, send.send(event)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            tracing::warn!("host event subscription closed after transport delivery stalled");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "events/tests.rs"]
+mod tests;
