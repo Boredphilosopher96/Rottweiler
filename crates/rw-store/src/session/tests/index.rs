@@ -416,7 +416,7 @@ fn missing_or_contradictory_search_triggers_require_a_derived_rebuild() {
 
 fn checkpoint(session: &str, next: u64) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
-        "prefix": { "next_sequence": next, "digest": [0; 32].as_slice() },
+        "prefix": { "next_sequence": next, "digest": ([0; 32].as_slice()) },
         "claims": {
             "session": if next == 0 { None } else { Some(session) },
             "next_sequence": next, "active": null, "pending": [],
