@@ -214,6 +214,17 @@ Provider plugins record and replay normalized provider events through
 `WireMode::NormalizedReplay`; plugin-specific wire bytes are outside the
 recording contract.
 
+Host callbacks reserve their declared response envelope before starting effects.
+A shared 64 MiB allowance covers reply construction, decoded values, and redaction
+scratch. Each method uses its source contract for the encoded ceiling, so a tool
+can call back into state without reserving a maximum content page at every level.
+Typed source owners move into admitted CPU workers for encoding and structural
+validation; decoded replies retain their owners through redaction and transfer
+to the byte-bounded RPC writer. Redaction reserves each replacement's working
+allocation before constructing it. Cancelling a waiter cannot release a worker's
+memory or transfer its allowance to an error frame. The complete RPC envelope
+must fit the frame limit; oversized replies fail without truncation.
+
 ### SDKs
 
 Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second. The dependency-leaf `rw-plugin-protocol` crate owns the public wire version, methods, limits, envelopes, manifest grammar, and DTOs. Its checked-in TypeScript, schema, and fixture projections are generated and CI-checked. The release workflow publishes the version-matched TypeScript package through npm trusted publishing, then proves an unmodified clean scaffold can install it from the public registry. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source.
