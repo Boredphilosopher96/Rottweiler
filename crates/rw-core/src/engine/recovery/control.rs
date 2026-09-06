@@ -183,29 +183,7 @@ impl CanonicalHistory {
         reader.selection(control, &mut result)?;
         reader.workspace_and_plans(control, &mut result)?;
         reader.messages(control, &mut result)?;
-        for selected in &control.questions {
-            let PendingEvent::QuestionAsked {
-                turn,
-                question_id,
-                question,
-            } = reader.event(selected.sequence)?
-            else {
-                return Err(RecoveryError::Invalid("question source selector"));
-            };
-            if turn != selected.agent_turn
-                || question_id.0 != selected.id
-                || question.id != question_id
-            {
-                return Err(RecoveryError::Invalid("question source identity"));
-            }
-            rw_types::question_admission::validate_question(&question)
-                .map_err(RecoveryError::Limit)?;
-            result.pending_questions.push(RecoveredQuestion {
-                agent_turn: turn,
-                question_id,
-                question,
-            });
-        }
+        reader.questions(control, &mut result)?;
         for (id, sequence) in &head.plugin_statuses {
             let PendingEvent::PluginStatusChanged { plugin_id, status } =
                 reader.event(*sequence)?
@@ -319,6 +297,37 @@ struct ControlReader<'a> {
     limit: u64,
 }
 impl ControlReader<'_> {
+    fn questions(
+        &mut self,
+        control: &super::RecoveryControl,
+        result: &mut RecoveryControlPayloads,
+    ) -> Result<(), RecoveryError> {
+        for selected in &control.questions {
+            let PendingEvent::QuestionAsked {
+                turn,
+                question_id,
+                question,
+            } = self.event(selected.sequence)?
+            else {
+                return Err(RecoveryError::Invalid("question source selector"));
+            };
+            if turn != selected.agent_turn
+                || question_id.0 != selected.id
+                || question.id != question_id
+            {
+                return Err(RecoveryError::Invalid("question source identity"));
+            }
+            rw_types::question_admission::validate_question(&question)
+                .map_err(RecoveryError::Limit)?;
+            result.pending_questions.push(RecoveredQuestion {
+                agent_turn: turn,
+                question_id,
+                question,
+            });
+        }
+        Ok(())
+    }
+
     fn messages(
         &mut self,
         control: &super::RecoveryControl,

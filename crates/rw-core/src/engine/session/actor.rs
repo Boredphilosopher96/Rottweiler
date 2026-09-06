@@ -100,7 +100,7 @@ impl SessionActor {
         let retained = Arc::clone(&config);
         let task_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            if AssertUnwindSafe(run_actor(
+            if AssertUnwindSafe(Box::pin(run_actor(
                 config,
                 recovered,
                 resume_inputs,
@@ -113,7 +113,7 @@ impl SessionActor {
                     mode_registry,
                     shutdown: task_shutdown.clone(),
                 },
-            ))
+            )))
             .catch_unwind()
             .await
             .is_err()
