@@ -304,7 +304,12 @@ fn readable_transcript_groups_conversation_tools_plans_and_accounting() {
         ),
     ];
 
-    let sections = transcript_sections(&events).expect("readable transcript");
+    let mut sections = Vec::new();
+    export::visit_sections(events.into_iter().map(Ok), MAX_RENDERED_BYTES, |section| {
+        sections.push(section);
+        Ok(())
+    })
+    .expect("readable transcript");
     assert_eq!(
         sections
             .iter()

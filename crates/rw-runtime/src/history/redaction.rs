@@ -2,74 +2,128 @@
 use rw_providers::FixtureRedactor;
 use serde_json::Value;
 
-pub(super) fn redact_export_value(value: Value, redactor: &FixtureRedactor) -> Value {
+use super::output::Output;
+use std::io;
+
+pub(super) fn redact_export_value(
+    mut value: Value,
+    redactor: &FixtureRedactor,
+    limit: usize,
+) -> io::Result<Value> {
+    let mut retained = string_capacity(&value).ok_or_else(redaction_limit)?;
+    if retained > limit {
+        return Err(redaction_limit());
+    }
+    redact_value(&mut value, redactor, limit, &mut retained)?;
+    Ok(value)
+}
+fn string_capacity(value: &Value) -> Option<usize> {
     match value {
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| {
-                    let lowered = key.to_ascii_lowercase();
-                    let sensitive = [
-                        "token",
-                        "password",
-                        "secret",
-                        "api_key",
-                        "authorization",
-                        "credential",
-                        "signature",
-                    ]
-                    .iter()
-                    .any(|marker| lowered.contains(marker));
-                    if sensitive {
-                        (key, Value::String("[REDACTED]".to_owned()))
-                    } else {
-                        (key, redact_export_value(value, redactor))
-                    }
-                })
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(|value| redact_export_value(value, redactor))
-                .collect(),
-        ),
-        Value::String(value) => Value::String(redact_export_string(&value, redactor)),
-        other => other,
+        Value::String(value) => Some(value.capacity()),
+        Value::Array(values) => values
+            .iter()
+            .try_fold(0_usize, |n, value| n.checked_add(string_capacity(value)?)),
+        Value::Object(values) => values.iter().try_fold(0_usize, |n, (key, value)| {
+            n.checked_add(key.capacity())?
+                .checked_add(string_capacity(value)?)
+        }),
+        _ => Some(0),
     }
 }
-
-fn redact_export_string(value: &str, redactor: &FixtureRedactor) -> String {
-    let value = redactor.redact_text(value);
-    let value = redact_embedded_paths(&value);
-    let value = redact_embedded_known_secrets(&value);
-    value
-        .split_inclusive(char::is_whitespace)
-        .map(|part| {
-            let token = part.trim_end_matches(char::is_whitespace);
-            let suffix = &part[token.len()..];
-            if looks_like_secret(token) {
-                format!("[REDACTED]{suffix}")
-            } else {
-                part.to_owned()
+fn redact_value(
+    value: &mut Value,
+    redactor: &FixtureRedactor,
+    limit: usize,
+    retained: &mut usize,
+) -> io::Result<()> {
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                let lowered = key.to_ascii_lowercase();
+                let sensitive = [
+                    "token",
+                    "password",
+                    "secret",
+                    "api_key",
+                    "authorization",
+                    "credential",
+                    "signature",
+                ]
+                .iter()
+                .any(|marker| lowered.contains(marker));
+                if sensitive {
+                    let previous = string_capacity(value).ok_or_else(redaction_limit)?;
+                    let next = retained
+                        .checked_sub(previous)
+                        .and_then(|n| n.checked_add("[REDACTED]".len()))
+                        .filter(|n| *n <= limit)
+                        .ok_or_else(redaction_limit)?;
+                    *value = Value::String("[REDACTED]".to_owned());
+                    *retained = next;
+                } else {
+                    redact_value(value, redactor, limit, retained)?;
+                }
             }
-        })
-        .collect()
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_value(value, redactor, limit, retained)?;
+            }
+        }
+        Value::String(value) => {
+            let others = retained
+                .checked_sub(value.capacity())
+                .ok_or_else(redaction_limit)?;
+            let replacement = redact_export_string(value, redactor, limit - others)?;
+            *retained = others
+                .checked_add(replacement.capacity())
+                .filter(|n| *n <= limit)
+                .ok_or_else(redaction_limit)?;
+            *value = replacement;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+fn redaction_limit() -> io::Error {
+    io::Error::other("history redaction allocation admission exceeded")
 }
 
-fn redact_embedded_paths(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
+fn redact_export_string(
+    value: &str,
+    redactor: &FixtureRedactor,
+    limit: usize,
+) -> io::Result<String> {
+    let value = redactor.redact_text_bounded(value, limit)?;
+    let value = redact_embedded_paths(&value, limit)?;
+    let value = redact_embedded_known_secrets(&value, limit)?;
+    let mut output = Output::new(limit);
+    for part in value.split_inclusive(char::is_whitespace) {
+        let token = part.trim_end_matches(char::is_whitespace);
+        let suffix = &part[token.len()..];
+        if looks_like_secret(token) {
+            output.push("[REDACTED]")?;
+            output.push(suffix)?;
+        } else {
+            output.push(part)?;
+        }
+    }
+    output.text()
+}
+
+fn redact_embedded_paths(value: &str, limit: usize) -> io::Result<String> {
+    let mut output = Output::new(limit);
     let mut cursor = 0;
     while cursor < value.len() {
         let Some(start) = next_absolute_path_start(value, cursor) else {
-            output.push_str(&value[cursor..]);
+            output.push(&value[cursor..])?;
             break;
         };
-        output.push_str(&value[cursor..start]);
-        output.push_str("[REDACTED_PATH]");
+        output.push(&value[cursor..start])?;
+        output.push("[REDACTED_PATH]")?;
         cursor = absolute_path_end(value, start);
     }
-    output
+    output.text()
 }
 
 fn next_absolute_path_start(value: &str, cursor: usize) -> Option<usize> {
@@ -179,12 +233,13 @@ fn absolute_path_end(value: &str, start: usize) -> usize {
         .map_or(value.len(), |(offset, _)| start + offset)
 }
 
-fn redact_embedded_known_secrets(value: &str) -> String {
+fn redact_embedded_known_secrets(value: &str, limit: usize) -> io::Result<String> {
     redact_matching_spans(
         value,
         &["github_pat_", "ghp_", "sk-", "AKIA"],
         "[REDACTED]",
         looks_like_secret,
+        limit,
     )
 }
 
@@ -193,8 +248,9 @@ fn redact_matching_spans(
     markers: &[&str],
     replacement: &str,
     predicate: impl Fn(&str) -> bool,
-) -> String {
-    let mut output = String::with_capacity(value.len());
+    limit: usize,
+) -> io::Result<String> {
+    let mut output = Output::new(limit);
     let mut cursor = 0;
     while cursor < value.len() {
         let next = markers
@@ -206,20 +262,20 @@ fn redact_matching_spans(
             })
             .min_by_key(|(offset, _)| *offset);
         let Some((start, marker)) = next else {
-            output.push_str(&value[cursor..]);
+            output.push(&value[cursor..])?;
             break;
         };
-        output.push_str(&value[cursor..start]);
+        output.push(&value[cursor..start])?;
         let end = span_end(value, start + marker.len());
         let candidate = &value[start..end];
         if predicate(candidate) {
-            output.push_str(replacement);
+            output.push(replacement)?;
         } else {
-            output.push_str(candidate);
+            output.push(candidate)?;
         }
         cursor = end;
     }
-    output
+    output.text()
 }
 
 fn span_end(value: &str, after_marker: usize) -> usize {
