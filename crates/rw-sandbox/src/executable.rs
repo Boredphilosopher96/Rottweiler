@@ -157,6 +157,10 @@ impl ApprovedExecutable {
             .open(&launch_path)
             .map_err(invalid)?;
         identity::verify_copy(approved, source, &mut executable)?;
+        // The execution path must match the canonical private path granted by
+        // the sandbox, without asking the worker to traverse temp-dir aliases.
+        #[cfg(not(target_os = "linux"))]
+        let launch_path = launch_path.canonicalize().map_err(invalid)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;

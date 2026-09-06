@@ -104,3 +104,20 @@ fn running_image_capture_reuses_one_owned_snapshot() {
     assert_eq!(first.launch_path(), second.launch_path());
     assert_ne!(first.launch_path(), first.installation_path());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn private_executable_launch_path_matches_its_canonical_sandbox_grant() {
+    let (_directory, approved) = fixture();
+    let executable = crate::ApprovedExecutable::from_artifact(&approved).expect("snapshot");
+    let launch = executable.launch().expect("launch owner");
+    let path = launch.path().to_path_buf();
+    assert_eq!(path, path.canonicalize().expect("canonical snapshot"));
+    drop(executable);
+    assert!(
+        path.exists(),
+        "physical launch retains the private snapshot"
+    );
+    drop(launch);
+    assert!(!path.exists(), "last owner removes the private snapshot");
+}
