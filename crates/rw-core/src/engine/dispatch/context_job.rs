@@ -299,17 +299,19 @@ pub(in crate::engine) async fn finish(
                 let _ = reply.send(Err(invalid("context command driver changed")));
                 return;
             }
-            let Output::Context(snapshot) = &*output else {
+            let (value, _source_owner) = output.into_parts();
+            let Output::Context(snapshot) = value else {
                 let _ = reply.send(Err(invalid("context command result mismatch")));
                 return;
             };
+            let message = crate::engine::commands::render_context_snapshot(&snapshot);
             send_connection_event(
                 events,
                 &meta.client_id,
                 EngineEvent::ContextSnapshotReady {
                     meta: query_meta(state, &meta),
                     session_id: state.session_id.clone(),
-                    snapshot: snapshot.clone(),
+                    snapshot,
                 },
             );
             let previous = state.transient_cause.replace(meta.request_id);
@@ -319,7 +321,7 @@ pub(in crate::engine) async fn finish(
                 &config.event_sink,
                 PendingEvent::CommandFinished {
                     name: "context".into(),
-                    message: crate::engine::commands::render_context_snapshot(snapshot),
+                    message,
                     unrestorable_paths: Vec::new(),
                 },
             )
