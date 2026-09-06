@@ -57,7 +57,7 @@ impl Pool {
             .try_acquire_owned()
             .map(|permit| ResourceLease { _permit: permit })
             .map_err(|error| {
-                if error.is_closed() {
+                if matches!(error, tokio::sync::TryAcquireError::Closed) {
                     AdmissionError::Closed
                 } else {
                     AdmissionError::Busy
@@ -69,7 +69,7 @@ impl Pool {
         cancelled: impl Future<Output = ()>,
     ) -> Result<ResourceLease, AdmissionError> {
         let waiting = self.waiting.clone().try_acquire_owned().map_err(|error| {
-            if error.is_closed() {
+            if matches!(error, tokio::sync::TryAcquireError::Closed) {
                 AdmissionError::Closed
             } else {
                 AdmissionError::QueueFull
