@@ -82,20 +82,9 @@ pub struct ExtensionToolOutcome {
 /// Counts encoded bytes without allocating an intermediate JSON document.
 #[must_use]
 pub fn within_json_limit(value: &impl Serialize, limit: usize) -> bool {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_sub(bytes.len())
-                .ok_or_else(|| std::io::Error::other("tool byte limit"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    serde_json::to_writer(Counter(limit), value).is_ok()
+    crate::json_encoding::JsonWriter::count(limit)
+        .serialize(value)
+        .is_ok()
 }
 
 #[cfg(test)]

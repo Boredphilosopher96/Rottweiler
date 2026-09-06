@@ -8,7 +8,6 @@ use rw_types::{
     },
 };
 use serde_json::Value;
-use std::io::{self, Write};
 
 /// Charges the unique batch payload before its bounded preparation copies are made.
 /// Provider/command decoders independently own their incoming frame allocations.
@@ -96,27 +95,11 @@ fn measure(value: &Value) -> Result<(usize, usize), String> {
     Ok((encoded, prepared))
 }
 fn encoded_bytes(value: &impl serde::Serialize, limit: usize) -> Result<usize, String> {
-    let mut counter = Counter { bytes: 0, limit };
-    serde_json::to_writer(&mut counter, value)
+    let mut counter = rw_types::json_encoding::JsonWriter::count(limit);
+    counter
+        .serialize(value)
         .map_err(|_| "tool payload byte admission".to_owned())?;
-    Ok(counter.bytes)
-}
-struct Counter {
-    bytes: usize,
-    limit: usize,
-}
-impl Write for Counter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.bytes = self
-            .bytes
-            .checked_add(bytes.len())
-            .filter(|n| *n <= self.limit)
-            .ok_or_else(|| io::Error::other("argument admission"))?;
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    Ok(counter.written())
 }
 
 #[cfg(test)]

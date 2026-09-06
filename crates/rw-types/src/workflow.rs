@@ -123,20 +123,9 @@ pub fn valid_workflow_name(name: &str) -> bool {
 /// # Errors
 /// Returns an error when a result cannot be encoded within its per-step allowance.
 pub fn workflow_outcome_bytes(outcome: &WorkflowTaskOutcome) -> Result<usize, String> {
-    struct Count(usize);
-    impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > MAX_STEP_ARTIFACT_BYTES.saturating_sub(self.0) {
-                return Err(std::io::Error::other("workflow artifact limit"));
-            }
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    serde_json::to_writer(&mut count, outcome).map_err(|error| error.to_string())?;
-    Ok(count.0)
+    let mut count = crate::json_encoding::JsonWriter::count(MAX_STEP_ARTIFACT_BYTES);
+    count
+        .serialize(outcome)
+        .map_err(|error| error.to_string())?;
+    Ok(count.written())
 }

@@ -168,27 +168,11 @@ pub fn validate_state_key(key: &str) -> Result<(), ExtensionStateError> {
 /// # Errors
 /// Rejects values whose serialized representation exceeds the value bound.
 pub fn state_value_bytes(value: &Value) -> Result<usize, ExtensionStateError> {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_add(bytes.len())
-                .ok_or_else(|| std::io::Error::other("extension state byte count overflow"))?;
-            if self.0 > MAX_EXTENSION_STATE_VALUE_BYTES {
-                return Err(std::io::Error::other("extension state value exceeds limit"));
-            }
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value)
+    let mut counter = crate::json_encoding::JsonWriter::count(MAX_EXTENSION_STATE_VALUE_BYTES);
+    counter
+        .serialize(value)
         .map_err(|_| ExtensionStateError("serialized value exceeds byte limit"))?;
-    Ok(counter.0)
+    Ok(counter.written())
 }
 
 #[cfg(test)]

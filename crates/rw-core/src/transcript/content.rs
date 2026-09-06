@@ -6,7 +6,6 @@ use rw_types::transcript::{
 };
 use rw_types::{Block, EngineEvent, Role, ToolOutput, Turn};
 use serde::{Serialize, Serializer, ser::SerializeSeq};
-use std::io::{self, Write};
 
 /// One owned canonical body. Runtime admission must charge its retained capacity.
 pub struct TranscriptDocument {
@@ -193,50 +192,16 @@ impl TranscriptDocument {
     }
 
     fn json(value: &impl Serialize, max_bytes: usize) -> Result<Self, TranscriptProjectionError> {
-        let mut writer = CappedJson {
-            bytes: Vec::new(),
-            max_bytes,
-        };
-        serde_json::to_writer(&mut writer, value)?;
-        let text = String::from_utf8(writer.bytes)
-            .map_err(|_| invalid("serialized content is not UTF-8"))?;
+        let mut bytes = Vec::new();
+        rw_types::json_encoding::JsonWriter::buffer(&mut bytes, max_bytes, 4096)
+            .map_err(|_| invalid("content allocation limit"))?
+            .serialize(value)?;
+        let text =
+            String::from_utf8(bytes).map_err(|_| invalid("serialized content is not UTF-8"))?;
         Ok(Self {
             text,
             format: TranscriptPreviewFormat::Json,
         })
-    }
-}
-
-struct CappedJson {
-    bytes: Vec<u8>,
-    max_bytes: usize,
-}
-impl Write for CappedJson {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let needed = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .filter(|needed| *needed <= self.max_bytes)
-            .ok_or_else(|| io::Error::other("content allocation limit"))?;
-        if needed > self.bytes.capacity() {
-            let target = self
-                .bytes
-                .capacity()
-                .max(4096)
-                .saturating_mul(2)
-                .max(needed)
-                .min(self.max_bytes);
-            self.bytes.reserve_exact(target - self.bytes.len());
-            if self.bytes.capacity() > self.max_bytes {
-                return Err(io::Error::other("content allocation limit"));
-            }
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 

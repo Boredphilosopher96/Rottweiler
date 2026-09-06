@@ -8,7 +8,6 @@ use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{self, Write};
 use ts_rs::TS;
 
 pub const MAX_SESSION_CONTROLS_BYTES: usize = 7 * 1024 * 1024;
@@ -76,27 +75,11 @@ pub fn validate_plan(plan: &PlanArtifact) -> Result<(), &'static str> {
 /// # Errors
 /// Rejects serialization failure or an over-limit payload.
 pub fn encoded_size(value: &impl Serialize, limit: usize) -> Result<usize, &'static str> {
-    let mut counter = LimitedSize { bytes: 0, limit };
-    serde_json::to_writer(&mut counter, value)
+    let mut counter = crate::json_encoding::JsonWriter::count(limit);
+    counter
+        .serialize(value)
         .map_err(|_| "control payload exceeds byte admission")?;
-    Ok(counter.bytes)
-}
-struct LimitedSize {
-    bytes: usize,
-    limit: usize,
-}
-impl Write for LimitedSize {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.bytes = self
-            .bytes
-            .checked_add(bytes.len())
-            .filter(|size| *size <= self.limit)
-            .ok_or_else(|| io::Error::other("control byte limit"))?;
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    Ok(counter.written())
 }
 
 #[cfg(test)]

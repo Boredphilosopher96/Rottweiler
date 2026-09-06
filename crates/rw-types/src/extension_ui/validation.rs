@@ -177,25 +177,9 @@ pub(super) fn encoded_bytes<T: Serialize + ?Sized>(
     value: &T,
     limit: usize,
 ) -> Result<usize, UiContractError> {
-    struct Counter {
-        count: usize,
-        limit: usize,
-    }
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.count = self
-                .count
-                .checked_add(bytes.len())
-                .filter(|count| *count <= self.limit)
-                .ok_or_else(|| std::io::Error::other("presentation byte budget"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Counter { count: 0, limit };
-    serde_json::to_writer(&mut counter, value)
+    let mut counter = crate::json_encoding::JsonWriter::count(limit);
+    counter
+        .serialize(value)
         .map_err(|_| UiContractError("serialized byte budget"))?;
-    Ok(counter.count)
+    Ok(counter.written())
 }

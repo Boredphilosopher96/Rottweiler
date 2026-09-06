@@ -6,10 +6,7 @@ use crate::engine::{
     session::SessionActorConfig,
 };
 use rw_types::{Block, ToolOutput, ToolOutputPart, Turn, allocation::PrepareAllocation};
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    io::Write,
-};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Default)]
 pub(super) struct Profiles {
@@ -119,10 +116,12 @@ fn turn_profile(turn: &Turn) -> Result<Profile, AgentLoopError> {
 }
 fn stable_profile(config: &SessionActorConfig) -> Result<Profile, AgentLoopError> {
     let mut profile = Profile::default();
-    let mut encoded = Counter(0);
+    let mut encoded = rw_types::json_encoding::JsonWriter::count(usize::MAX);
     for turn in &config.initial_session_context {
         profile.add(turn_profile(turn)?)?;
-        serde_json::to_writer(&mut encoded, turn).map_err(|_| invalid("context prefix size"))?;
+        encoded
+            .serialize(turn)
+            .map_err(|_| invalid("context prefix size"))?;
     }
     for tool in config.tools.descriptor_refs() {
         add(
@@ -133,9 +132,11 @@ fn stable_profile(config: &SessionActorConfig) -> Result<Profile, AgentLoopError
                 .and_then(|bytes| bytes.checked_add(tool.input_schema.prepared_bytes()?)),
         )?;
         add(&mut profile.metadata, Some(1024))?;
-        serde_json::to_writer(&mut encoded, tool).map_err(|_| invalid("tool schema size"))?;
+        encoded
+            .serialize(tool)
+            .map_err(|_| invalid("tool schema size"))?;
     }
-    profile.encoded = encoded.0;
+    profile.encoded = encoded.written();
     Ok(profile)
 }
 fn output_plan(
@@ -174,17 +175,4 @@ fn add(total: &mut usize, bytes: Option<usize>) -> Result<(), AgentLoopError> {
         .checked_add(bytes.ok_or_else(|| invalid("context allocation profile"))?)
         .ok_or_else(|| invalid("context allocation overflow"))?;
     Ok(())
-}
-struct Counter(usize);
-impl Write for Counter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 = self
-            .0
-            .checked_add(bytes.len())
-            .ok_or_else(|| std::io::Error::other("context size overflow"))?;
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }

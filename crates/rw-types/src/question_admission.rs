@@ -1,6 +1,5 @@
 //! Admission for canonical unresolved question payloads.
 use crate::{Question, allocation::PrepareAllocation};
-use std::io::{self, Write};
 
 pub const MAX_PENDING_QUESTION_REQUESTS: usize = 64;
 pub const MAX_QUESTION_BYTES: usize = 64 * 1024;
@@ -39,7 +38,8 @@ pub fn validate_question(question: &Question) -> Result<(), &'static str> {
             return Err("question option values must be nonempty and unique");
         }
     }
-    serde_json::to_writer(LimitedSize(0), question)
+    crate::json_encoding::JsonWriter::count(MAX_QUESTION_BYTES)
+        .serialize(question)
         .map_err(|_| "question serialized payload exceeds admission")
 }
 /// # Errors
@@ -60,21 +60,6 @@ pub fn validate_answer(question: &Question, answer: &crate::Answer) -> Result<()
         return Err("answer must select a displayed option");
     }
     Ok(())
-}
-
-struct LimitedSize(usize);
-impl Write for LimitedSize {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 = self
-            .0
-            .checked_add(bytes.len())
-            .filter(|bytes| *bytes <= MAX_QUESTION_BYTES)
-            .ok_or_else(|| io::Error::other("question byte limit"))?;
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
