@@ -89,7 +89,10 @@ session-local state, then settles services. Dropping a client or a cleanup waite
 requests that same independently owned shutdown; it cannot cancel cleanup.
 
 The headless REPL accepts UTF-8 lines up to 128 KiB, including a final partial line
-at EOF. CR, LF and CRLF delimit lines. Its terminal input supports erase, Ctrl-U,
+at EOF. CR, LF and CRLF delimit lines. Erase removes one Unicode codepoint;
+erase and Ctrl-U print the complete retained draft at a fresh prompt on a new
+line, without assuming character widths or the cursor position after engine
+output. Its terminal input supports erase, Ctrl-U,
 Ctrl-C and Ctrl-D; rich editing, history and undo belong to OpenTUI. Noncanonical
 terminal mode prevents silent kernel line truncation. One polling worker owns
 and restores terminal mode and descriptor flags. Fixed line/echo buffers and

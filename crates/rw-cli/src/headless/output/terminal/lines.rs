@@ -52,13 +52,12 @@ impl Lines {
                 4 if self.interactive => self.eof(sender)?,
                 8 | 127 if self.interactive => {
                     if self.erase() {
-                        append(echo, b"\x08 \x08")?;
+                        self.reprint(echo)?;
                     }
                 }
                 21 if self.interactive => {
-                    while self.erase() {
-                        append(echo, b"\x08 \x08")?;
-                    }
+                    self.bytes.clear();
+                    self.reprint(echo)?;
                 }
                 _ => {
                     if self.interactive && byte < 32 && byte != b'\t' {
@@ -79,6 +78,18 @@ impl Lines {
             }
         }
         Ok(())
+    }
+    fn reprint(&self, echo: &mut Vec<u8>) -> io::Result<()> {
+        // A fresh line avoids assuming cell widths, soft wrapping or the cursor
+        // position after concurrent engine output. Erase removes one codepoint.
+        let required = b"\r\nrw> ".len().saturating_add(self.bytes.len());
+        if echo.len().saturating_add(required) > MAX_ECHO_BYTES {
+            return Err(io::Error::other(
+                "REPL terminal output is congested; input was refused",
+            ));
+        }
+        append(echo, b"\r\nrw> ")?;
+        append(echo, &self.bytes)
     }
     fn erase(&mut self) -> bool {
         let Some(last) = self.bytes.pop() else {
@@ -155,5 +166,34 @@ mod tests {
             assert!(matches!(&delivery.value, InputLine::Line(delivered)
                 if delivered == text && delivered.capacity() == text.len()));
         }
+    }
+    #[tokio::test]
+    async fn erase_reprints_exact_draft_without_terminal_width_assumptions() {
+        let (send, mut receive) = super::super::super::input::channel();
+        let (interrupts, _) = tokio::sync::watch::channel(());
+        let mut lines = Lines::new(true);
+        let mut echo = Vec::with_capacity(MAX_ECHO_BYTES);
+        lines
+            .push("e\u{301}界\t".as_bytes(), &send, &mut echo, &interrupts)
+            .expect("text");
+        echo.clear();
+        for expected in ["e\u{301}界", "e\u{301}", "e", ""] {
+            lines
+                .push(&[127], &send, &mut echo, &interrupts)
+                .expect("erase codepoint");
+            assert_eq!(echo, format!("\r\nrw> {expected}").as_bytes());
+            echo.clear();
+        }
+        lines
+            .push("界e\u{301}".as_bytes(), &send, &mut echo, &interrupts)
+            .expect("draft");
+        echo.clear();
+        lines
+            .push(&[21, b'\n'], &send, &mut echo, &interrupts)
+            .expect("clear line");
+        assert_eq!(echo, b"\r\nrw> \r\nrw> ");
+        assert!(
+            matches!(receive.recv().await.expect("empty line").value, InputLine::Line(text) if text.is_empty())
+        );
     }
 }
