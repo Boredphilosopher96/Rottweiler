@@ -74,9 +74,10 @@ impl CheckpointOperation {
         let mut file = File::open(path)?;
         let length = usize::try_from(file.metadata()?.len())
             .map_err(|_| CheckpointError::OperationLimit("32 MiB metadata"))?;
-        if length > MAX_METADATA_BYTES
-            || length > self.read.max_source.saturating_sub(self.read.source)
-        {
+        if length > MAX_METADATA_BYTES {
+            return Err(CheckpointError::OperationLimit("32 MiB metadata"));
+        }
+        if length > self.read.max_source.saturating_sub(self.read.source) {
             return Err(CheckpointError::OperationLimit(
                 "checkpoint source metadata bytes",
             ));
