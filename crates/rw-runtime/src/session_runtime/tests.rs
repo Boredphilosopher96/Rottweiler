@@ -309,6 +309,7 @@ use tempfile::tempdir;
 use url::Url;
 
 mod checkpoints;
+mod child_plugin_sessions;
 mod extensions;
 mod model_initialization;
 mod native_search;
