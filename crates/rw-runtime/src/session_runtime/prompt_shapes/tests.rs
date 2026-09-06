@@ -105,15 +105,25 @@ fn profile_decoding_requires_the_complete_contract_and_admits_structure_first() 
 fn encoded_profile_writer_bounds_capacity_across_large_incremental_writes() {
     use std::io::Write as _;
     let limit = rw_store::prompt_shapes::MAX_PROFILE_BYTES;
-    let mut writer = super::BoundedWriter(Vec::new());
-    writer
-        .write_all(&vec![b'a'; limit * 3 / 4])
-        .expect("first chunk");
-    writer
-        .write_all(&vec![b'b'; limit / 4])
-        .expect("second chunk");
-    assert_eq!(writer.0.len(), limit);
-    assert!(writer.0.capacity() <= limit);
-    assert!(writer.write_all(b"overflow").is_err());
-    assert!(writer.0.capacity() <= limit);
+    let mut bytes = Vec::new();
+    {
+        let mut writer = rw_types::json_encoding::JsonWriter::buffer(&mut bytes, limit, 0)
+            .expect("bounded profile");
+        writer
+            .write_all(&vec![b'a'; limit * 3 / 4])
+            .expect("first chunk");
+        writer
+            .write_all(&vec![b'b'; limit / 4])
+            .expect("second chunk");
+        assert_eq!(writer.written(), limit);
+    }
+    assert!(bytes.capacity() <= limit);
+    assert!(
+        rw_types::json_encoding::JsonWriter::buffer(&mut bytes, limit, 0)
+            .expect("bounded append")
+            .write_all(b"overflow")
+            .is_err()
+    );
+    assert_eq!(bytes.len(), limit);
+    assert!(bytes.capacity() <= limit);
 }
