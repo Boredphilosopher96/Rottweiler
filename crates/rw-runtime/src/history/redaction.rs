@@ -1,20 +1,30 @@
 //! Redaction policy for explicit, bounded history exports.
 use rw_providers::FixtureRedactor;
+use rw_types::allocation::AllocationPlan;
 use serde_json::Value;
 
 use super::output::Output;
 use std::io;
 
 pub(super) fn redact_export_value(
-    mut value: Value,
+    value: Value,
     redactor: &FixtureRedactor,
     limit: usize,
 ) -> io::Result<Value> {
-    let mut retained = string_capacity(&value).ok_or_else(redaction_limit)?;
-    if retained > limit {
+    let plan = AllocationPlan::new(value).map_err(|_| redaction_limit())?;
+    if plan.bytes() > limit {
         return Err(redaction_limit());
     }
-    redact_value(&mut value, redactor, limit, &mut retained)?;
+    let mut retained = string_capacity(plan.value()).ok_or_else(redaction_limit)?;
+    let containers = plan
+        .bytes()
+        .checked_sub(retained)
+        .ok_or_else(redaction_limit)?;
+    let string_limit = limit.checked_sub(containers).ok_or_else(redaction_limit)?;
+    // The caller retains the admitted decoded source through normalization.
+    // Container credit remains reserved even if a sensitive subtree is removed.
+    let mut value = plan.prepare().into_inner();
+    redact_value(&mut value, redactor, string_limit, &mut retained)?;
     Ok(value)
 }
 fn string_capacity(value: &Value) -> Option<usize> {

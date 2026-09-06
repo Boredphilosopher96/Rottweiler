@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used)]
 use super::*;
+use rw_types::allocation::PrepareAllocation as _;
 
 #[test]
 fn export_redaction_handles_delimiter_attached_paths_and_secrets() {
@@ -80,5 +81,6 @@ fn redaction_expansion_and_aggregate_strings_reserve_before_replacement() {
         "[REDACTED_PATH]"
     );
     let value = serde_json::json!(["/a", "/b"]);
-    assert!(redact_export_value(value, &redactor, 20).is_err());
+    let limit = value.prepared_bytes().expect("source value admission") + 20;
+    assert!(redact_export_value(value, &redactor, limit).is_err());
 }
