@@ -76,7 +76,8 @@ import { contextPanelHasContent } from "./ui-presentation"
 
 export type { PresentationFrameScheduler } from "./presentation"
 
-interface PendingPresentationEvent {
+type PendingPresentationEvent = { readonly kind: "display"; readonly next: RottweilerState } | {
+  readonly kind: "effect"
   readonly event: EngineEvent
   readonly eventRecord: Record<string, unknown>
   readonly commandRequestId: string | null
@@ -761,7 +762,7 @@ export class RottweilerApp extends BoxRenderable {
     // observe every accepted event even when its presentation waits for a frame.
     this.#state = next
     this.#presentation.enqueue(
-      { event, eventRecord, commandRequestId, previous, next },
+      deferPresentationForEvent(event) ? { kind: "display", next } : { kind: "effect", event, eventRecord, commandRequestId, previous, next },
       deferPresentationForEvent(event),
     )
     this.#todos.event(event)
@@ -772,7 +773,7 @@ export class RottweilerApp extends BoxRenderable {
     // Historical events have already been reduced into durable state. Retain
     // only the newest projection while replaying so the queue cannot pin every
     // immutable intermediate transcript (or re-run historical UI effects).
-    this.#presentation.suspend(true)
+    this.#presentation.suspend()
   }
 
   endInitialReplayBatch(): void {
@@ -791,6 +792,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #afterPresentedEvent(item: PendingPresentationEvent): void {
+    if (item.kind === "display") return
     const { event, eventRecord, commandRequestId, previous, next } = item
     if (
       event.type === "command_descriptors_listed" &&

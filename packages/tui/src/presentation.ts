@@ -21,7 +21,7 @@ export class PresentationController<T> {
   #frameHandle: unknown | null = null
   #presenting = false
   #suspended = false
-  #coalesceWhileSuspended = false
+  #pendingDisplay = false
   #lastFlushAt = performance.now() - 16
 
   constructor(options: PresentationControllerOptions<T>) {
@@ -30,11 +30,14 @@ export class PresentationController<T> {
 
   enqueue(item: T, deferToFrame: boolean): void {
     this.#queuedAt ??= this.#options.diagnostics?.start()
-    if (this.#suspended && this.#coalesceWhileSuspended) {
+    if (this.#suspended) {
       this.#queue = [item]
+      this.#pendingDisplay = deferToFrame
       return
     }
-    this.#queue.push(item)
+    if (deferToFrame && this.#pendingDisplay && this.#queue.length > 0) this.#queue[this.#queue.length - 1] = item
+    else this.#queue.push(item)
+    this.#pendingDisplay = deferToFrame
     if (this.#suspended) return
     if (deferToFrame) this.#scheduleFrame()
     else this.flush()
@@ -63,6 +66,7 @@ export class PresentationController<T> {
     this.#queuedAt = undefined
     const pending = this.#queue
     this.#queue = []
+    this.#pendingDisplay = false
     const dirty = this.#dirty
     this.#dirty = false
     this.#presenting = true
@@ -80,20 +84,19 @@ export class PresentationController<T> {
     this.#queuedAt = undefined
     this.#cancelFrame()
     this.#queue = []
+    this.#pendingDisplay = false
     this.#dirty = false
   }
 
-  suspend(coalesce = false): void {
+  suspend(): void {
     this.#suspended = true
-    this.#coalesceWhileSuspended = coalesce
-    if (coalesce && this.#queue.length > 1) this.#queue = [this.#queue.at(-1)!]
+    if (this.#queue.length > 1) this.#queue = [this.#queue.at(-1)!]
     this.#cancelFrame()
   }
 
   resume(): void {
     if (!this.#suspended) return
     this.#suspended = false
-    this.#coalesceWhileSuspended = false
     this.flush()
   }
 
@@ -124,84 +127,12 @@ export class PresentationController<T> {
   }
 }
 
-const IMMEDIATE_PRESENTATION_EVENTS = new Set<EngineEvent["type"]>([
-  "command_acknowledged",
-  "context_snapshot_ready",
-  "cost_snapshot_ready",
-  "session_review_ready",
-  "session_review_updated",
-  "prompt_dump_ready",
-  "session_replay_completed",
-  "session_history_ready",
-  "session_forked",
-  "session_exported",
-  "sessions_listed",
-  "subagents_listed",
-  "command_descriptors_listed",
-  "models_listed",
-  "modes_listed",
-  "settings_listed",
-  "permissions_listed",
-  "mcp_servers_listed",
-  "runtime_services_listed",
-  "workspace_files_found",
-  "workspace_roots_changed",
-  "workspace_status_ready",
-  "sessions_search_ready",
-  "workspace_file_preview_ready",
-  "workspace_diff_ready",
-  "host_shutdown",
-  "ui_notification",
-  "conversation_rewound",
-  "conversation_turn_committed",
-  "tool_approval_needed",
-  "question_asked",
-  "question_answered",
-  "tool_call_started",
-  "tool_call_finished",
-  "tool_diff_ready",
-  "tool_output_pruned",
-  "turn_started",
-  "turn_finished",
-  "user_message_accepted",
-  "message_queued",
-  "queued_message_removed",
-  "queued_messages_cleared",
-  "user_shell_state_changed",
-  "command_finished",
-  "mode_changed",
-  "model_changed",
-  "model_context_cleared",
-  "driver_changed",
-  "permission_mode_changed",
-  "budget_status_changed",
-  "context_item_pinned",
-  "context_item_evicted",
-  "compaction_started",
-  "compaction_finished",
-  "compaction_failed",
-  "compaction_attempt_started",
-  "compaction_attempt_finished",
-  "plan_submitted",
-  "plan_reviewed",
-  "subagent_spawned",
-  "subagent_finished",
-  "provider_configured",
-  "provider_activation_finished",
-  "provider_auth_started",
-  "provider_auth_finished",
-  "mcp_server_approval_reviewed",
-  "plugin_message_injected",
-  "plugin_status_changed",
-  "session_created",
-  "session_title_updated",
-  "guard_triggered",
-  "hook_failed",
-  "error",
+/** Only state-only updates can replace a pending frame; all control/read effects present immediately. */
+const DISPLAY_ONLY_EVENTS = new Set<EngineEvent["type"]>([
+  "text_delta", "thinking_delta", "citation_delta", "tool_output_delta", "tool_progress",
+  "compaction_text_delta", "compaction_thinking_delta", "subagent_progress", "context_usage_updated",
 ])
 
-export function deferPresentationForEvent(
-  event: { readonly type: EngineEvent["type"] },
-): boolean {
-  return !IMMEDIATE_PRESENTATION_EVENTS.has(event.type)
+export function deferPresentationForEvent(event: { readonly type: EngineEvent["type"] }): boolean {
+  return DISPLAY_ONLY_EVENTS.has(event.type)
 }
