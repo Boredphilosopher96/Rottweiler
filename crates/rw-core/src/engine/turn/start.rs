@@ -233,6 +233,7 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         .filter(|first| first.checked_add(messages.len() as u64).is_some())
         .map(rw_types::SequenceId)
         .ok_or_else(|| AgentLoopError::Persistence("input source sequence overflow".into()))?;
+    let opening_commit_start = first_accepted.0 + messages.len() as u64;
     let mut opening_conversation = Vec::new();
     let opening_events = prepare_turn_opening(
         turn,
@@ -303,7 +304,14 @@ pub(in crate::engine) async fn start_turn_with_overrides(
                 drop(page);
                 super::history_compaction::compact(
                     history,
-                    opening_conversation,
+                    opening_conversation
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, turn)| super::context_commits::RetainedUser {
+                            turn,
+                            source: rw_types::SequenceId(opening_commit_start + index as u64),
+                        })
+                        .collect(),
                     &config,
                     &cancellation,
                     &signals,

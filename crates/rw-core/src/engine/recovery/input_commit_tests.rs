@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![allow(clippy::expect_used)]
 use super::{
-    CanonicalRecovery, HistoryMaterializationLimits, materialize_input_event,
+    CanonicalRecovery, HistoryMaterializationLimits, materialize_conversation_event,
     tests::{append, catch_up, event, terminal},
 };
 use crate::engine::PendingEvent;
@@ -69,7 +69,10 @@ fn referenced_input_has_one_attachment_body_and_identical_recovery_and_display()
             .map(|(index, pending)| event(index as u64, pending))
             .collect::<Vec<_>>();
         let audit = crate::engine::project_session_events(&events).expect("audit");
-        assert_eq!(audit.conversation, [expected.clone()]);
+        assert_eq!(
+            audit.conversation.as_slice(),
+            std::slice::from_ref(&expected)
+        );
         append(&mut journal, pending);
         let source = journal.read_view();
         let modes = ModeRegistry::builtins().expect("modes");
@@ -113,7 +116,7 @@ fn referenced_input_has_one_attachment_body_and_identical_recovery_and_display()
 }
 
 fn assert_display(source: &rw_store::session::journal::JournalReadView, commit: &EngineEvent) {
-    let resolved = materialize_input_event(source, commit).expect("resolve display");
+    let resolved = materialize_conversation_event(source, commit).expect("resolve display");
     let mut projector = crate::transcript::TranscriptProjector::open(source).expect("transcript");
     while projector.advance(source).expect("advance display").has_more {}
     let rows = projector.index().page(0, 8, 128 * 1024).expect("rows");
@@ -141,6 +144,10 @@ fn assert_display(source: &rw_store::session::journal::JournalReadView, commit: 
 #[test]
 fn input_commit_rejects_wrong_forward_consumed_and_redundant_sources() {
     let cases = [
+        vec![PendingEvent::ConversationTurnCommitted {
+            agent_turn: 1,
+            turn: super::tests::text(rw_types::Role::User, "embedded bypass"),
+        }],
         vec![commit(0, InputSelection::Accepted {})],
         vec![commit(2, InputSelection::Accepted {})],
         vec![commit(

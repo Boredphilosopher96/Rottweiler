@@ -4,7 +4,7 @@ use super::{
     accounting::{BudgetUsage, SessionAccountingFallback, cost_units},
     compaction::execute_compaction,
     history_context,
-    provider_messages::{persist_conversation_turn, persist_event},
+    provider_messages::persist_event,
     signals::TurnSignal,
 };
 use crate::engine::{
@@ -32,7 +32,7 @@ fn invalid(message: &str) -> AgentLoopError {
 #[allow(clippy::too_many_arguments)]
 pub(in crate::engine) async fn compact(
     history: Arc<dyn SessionHistoryView>,
-    suffix: Vec<Turn>,
+    suffix: Vec<super::context_commits::RetainedUser>,
     config: &SessionActorConfig,
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
@@ -66,11 +66,31 @@ pub(in crate::engine) async fn compact(
         {
             summary.carry.push(rw_context::auto_continue_turn());
         }
-        summary.carry.extend(suffix);
+        let suffix_start = summary.carry.len();
+        let selected = config.history.capture_history().await?;
+        let mut suffix_sources = Vec::with_capacity(suffix.len());
+        for value in suffix {
+            let source = selected.source_turn(value.source).await?;
+            let (_, source) = source
+                .as_ref()
+                .ok_or_else(|| invalid("compaction suffix source is not effective"))?;
+            suffix_sources.push(source.clone());
+            summary.carry.push(value.turn);
+        }
         check_carry(&summary.carry, &summary.pins)?;
         let mut committed = Vec::with_capacity(summary.carry.len());
-        for value in &summary.carry {
-            committed.push(persist_conversation_turn(signals, turn, value).await?);
+        for (ordinal, value) in summary.carry.iter().enumerate() {
+            let source = summary
+                .pins
+                .iter()
+                .find(|pin| pin.ordinal == ordinal)
+                .map(|pin| &pin.source)
+                .or_else(|| {
+                    ordinal
+                        .checked_sub(suffix_start)
+                        .and_then(|index| suffix_sources.get(index))
+                });
+            committed.push(super::context_commits::commit(signals, turn, value, source).await?);
         }
         for pin in summary.pins {
             let sequence = committed
@@ -203,6 +223,9 @@ fn check_carry(turns: &Vec<Turn>, pins: &[CarryPin]) -> Result<(), AgentLoopErro
     if pins.len() > MAX_PINS
         || turns
             .prepared_bytes()
+            .and_then(|bytes| {
+                bytes.checked_add(pins.len().checked_mul(std::mem::size_of::<CarryPin>())?)
+            })
             .is_none_or(|bytes| bytes > CARRY_BYTES)
     {
         return Err(invalid(
@@ -308,6 +331,7 @@ impl Summary {
                 self.pins.push(CarryPin {
                     ordinal: self.carry.len(),
                     order: action.effective_after_agent_turn,
+                    source: source.clone(),
                 });
             }
             self.carry.push(value);
@@ -366,11 +390,20 @@ impl Summary {
         self.pins = execution
             .remapped_pins
             .into_iter()
-            .map(|ordinal| CarryPin {
-                ordinal,
-                order: turn,
+            .map(|(ordinal, item)| {
+                let previous = item
+                    .0
+                    .strip_prefix("carry:")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .and_then(|position| self.pins.iter().find(|pin| pin.ordinal == position))
+                    .ok_or_else(|| invalid("rolling compaction pin source"))?;
+                Ok(CarryPin {
+                    ordinal,
+                    order: turn,
+                    source: previous.source.clone(),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, AgentLoopError>>()?;
         check_carry(&self.carry, &self.pins)?;
         Ok(())
     }
@@ -379,6 +412,7 @@ impl Summary {
 struct CarryPin {
     ordinal: usize,
     order: u64,
+    source: crate::engine::recovery::ConversationSource,
 }
 
 pub(super) fn apply_pruning(

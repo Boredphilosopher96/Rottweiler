@@ -136,8 +136,10 @@ impl TranscriptProjector {
                     "envelope/event sequence mismatch",
                 ));
             }
-            let resolved = crate::recovery::materialize_input_event(view, &envelope.event)
-                .map_err(|_| TranscriptProjectionError::Invalid("accepted conversation source"))?;
+            let resolved = crate::recovery::materialize_conversation_event(view, &envelope.event)
+                .map_err(|_| {
+                TranscriptProjectionError::Invalid("accepted conversation source")
+            })?;
             match project_transcript_event(&resolved, &checkpoint.state, &overlay)? {
                 TranscriptEventProjection::Update {
                     state,

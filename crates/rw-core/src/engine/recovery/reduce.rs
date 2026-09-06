@@ -45,30 +45,15 @@ pub(super) fn reduce(
     }
     head.session_id = Some(meta.session_id.clone());
     let sequence = meta.sequence_id;
-    if let EngineEvent::ConversationInputCommitted {
-        agent_turn,
-        accepted_source,
-        ..
-    } = event
-    {
-        if !head
-            .control
-            .accepted
-            .iter()
-            .any(|input| input.agent_turn == *agent_turn && input.sequence == *accepted_source)
-        {
-            return Err(RecoveryError::Invalid(
-                "input is not pending in the effective turn",
-            ));
-        }
-    }
-    let materialized = super::input::materialize_input_event(source, event)?;
+    let body_source = super::context_selection::validate(head, event, rows)?;
+    let materialized = super::input::materialize_conversation_event(source, event)?;
     let Some(kind) = recovered_pending_event(&materialized)? else {
         head.next_sequence += 1;
         return Ok(());
     };
     match kind {
-        PendingEvent::ConversationInputCommitted { .. } => {
+        PendingEvent::ConversationInputCommitted { .. }
+        | PendingEvent::ConversationContextCommitted { .. } => {
             return Err(RecoveryError::Invalid("unresolved input commit"));
         }
         PendingEvent::BudgetStatus { .. } => head.latest_budget = Some(sequence),
@@ -107,20 +92,17 @@ pub(super) fn reduce(
                 head,
                 rows,
                 sequence,
+                body_source,
                 agent_turn,
                 TurnSourceKind::Committed,
                 &turn,
             )?;
             if head.compacting.is_none() {
-                if turn.role == Role::User
+                if let EngineEvent::ConversationInputCommitted {
+                    accepted_source, ..
+                } = event
                     && let Some(index) = head.control.accepted.iter().position(|accepted| {
-                        accepted.agent_turn == agent_turn
-                            && match event {
-                                EngineEvent::ConversationInputCommitted {
-                                    accepted_source, ..
-                                } => accepted.sequence == *accepted_source,
-                                _ => true,
-                            }
+                        accepted.agent_turn == agent_turn && accepted.sequence == *accepted_source
                     })
                 {
                     head.control.accepted.remove(index);
@@ -358,6 +340,7 @@ pub(super) fn reduce(
                 head,
                 rows,
                 sequence,
+                sequence,
                 head.control.next_turn.saturating_sub(1),
                 TurnSourceKind::Shell,
                 &turn,
@@ -566,6 +549,7 @@ fn append_turn(
     head: &mut RecoveryHead,
     rows: &mut BatchRows,
     sequence: SequenceId,
+    body_source: SequenceId,
     agent_turn: u64,
     kind: TurnSourceKind,
     turn: &Turn,
@@ -618,6 +602,7 @@ fn append_turn(
         &ConversationSource {
             has_resolved_model,
             sequence,
+            body_source,
             kind,
             agent_turn,
             role: turn.role.clone(),

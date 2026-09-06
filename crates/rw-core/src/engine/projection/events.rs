@@ -93,6 +93,14 @@ pub(in crate::engine) fn recovered_pending_event(
             title: title.clone(),
             message: message.clone(),
         },
+        EngineEvent::ConversationContextCommitted {
+            agent_turn,
+            selection,
+            ..
+        } => PendingEvent::ConversationContextCommitted {
+            agent_turn: *agent_turn,
+            selection: selection.clone(),
+        },
         EngineEvent::ConversationInputCommitted {
             agent_turn,
             accepted_source,

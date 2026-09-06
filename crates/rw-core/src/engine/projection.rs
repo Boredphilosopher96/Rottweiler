@@ -150,8 +150,8 @@ pub(super) fn review_path_is_valid(value: &str) -> bool {
 
 /// Projects an ordered durable event log into actor resume state.
 ///
-/// Full conversation commit events are authoritative. Accepted user messages
-/// are retained as a fallback only when a crash occurred before their commit.
+/// User conversation resolves exact accepted-input or host-context selectors.
+/// Uncommitted accepted messages remain available to interrupted-input repair.
 ///
 /// # Errors
 ///
@@ -209,7 +209,7 @@ type ProjectedRewindArchive = (
 /// Incremental core projection. Callers release each raw journal page after
 /// folding it; this state owns semantic recovery data, not raw events.
 #[derive(Clone, Debug)]
-pub struct SessionProjector {
+struct SessionProjector {
     conversation: Vec<Turn>,
     title: Option<String>,
     conversation_agent_turns: Vec<u64>,
@@ -298,32 +298,11 @@ impl Default for SessionProjector {
 }
 
 impl SessionProjector {
-    /// Folds one durable event using the runtime's exact mode definitions.
-    ///
-    /// # Errors
-    /// Rejects identity, sequence, mode and durable state-machine violations.
-    pub fn push_with_modes(
-        self,
-        event: &EngineEvent,
-        modes: &ModeRegistry,
-    ) -> Result<Self, SessionProjectionError> {
-        self.push_resolving(event, |mode, fingerprint| {
-            let definition = modes
-                .get(&mode.0)
-                .ok_or_else(|| SessionProjectionError::InvalidMode(mode.0.clone()))?;
-            if fingerprint != &definition.semantic_fingerprint() {
-                return Err(SessionProjectionError::ModeDefinitionChanged(
-                    mode.0.clone(),
-                ));
-            }
-            Ok(mode_permission_base(definition))
-        })
-    }
-
     #[allow(clippy::match_same_arms, clippy::too_many_lines)]
     fn push_resolving(
         self,
         event: &EngineEvent,
+        resolved: &EngineEvent,
         mut resolve_mode: impl FnMut(&ModeId, &String) -> Result<SessionMode, SessionProjectionError>,
     ) -> Result<Self, SessionProjectionError> {
         let Self {
@@ -395,48 +374,35 @@ impl SessionProjector {
                 });
             }
             last_sequence = Some(meta.sequence_id);
-            let Some(kind) = recovered_pending_event(event)? else {
-                break 'event;
-            };
-            let input_source = if let PendingEvent::ConversationInputCommitted {
+            if let EngineEvent::ConversationInputCommitted {
+                agent_turn,
                 accepted_source,
                 ..
-            } = &kind
+            } = event
+            {
+                if !uncommitted_users.get(agent_turn).is_some_and(|pending| {
+                    pending.iter().any(|(source, _)| source == accepted_source)
+                }) {
+                    return Err(SessionProjectionError::InvalidInput(
+                        "input is not pending in this turn",
+                    ));
+                }
+            }
+            let Some(kind) = recovered_pending_event(resolved)? else {
+                break 'event;
+            };
+            let input_source = if let EngineEvent::ConversationInputCommitted {
+                accepted_source,
+                ..
+            } = event
             {
                 Some(*accepted_source)
             } else {
                 None
             };
-            let kind = match kind {
-                PendingEvent::ConversationInputCommitted {
-                    agent_turn,
-                    accepted_source,
-                    selection,
-                } => {
-                    let (_, message) = uncommitted_users
-                        .get(&agent_turn)
-                        .and_then(|pending| {
-                            pending
-                                .iter()
-                                .find(|(source, _)| *source == accepted_source)
-                        })
-                        .ok_or(SessionProjectionError::InvalidInput(
-                            "input is not pending in this turn",
-                        ))?;
-                    let content =
-                        crate::engine::recovery::input::selected_text(&message.content, &selection)
-                            .map_err(|_| {
-                                SessionProjectionError::InvalidInput("redundant transformed text")
-                            })?;
-                    PendingEvent::ConversationTurnCommitted {
-                        agent_turn,
-                        turn: message.turn(content.to_owned()),
-                    }
-                }
-                event => event,
-            };
             match &kind {
-                PendingEvent::ConversationInputCommitted { .. } => {
+                PendingEvent::ConversationInputCommitted { .. }
+                | PendingEvent::ConversationContextCommitted { .. } => {
                     return Err(SessionProjectionError::InvalidInput("unresolved input"));
                 }
                 PendingEvent::ProviderCallAccounted { .. } => {}
@@ -505,9 +471,9 @@ impl SessionProjector {
                     }
                     if turn.role == Role::User
                         && let Some(pending) = uncommitted_users.get_mut(agent_turn)
-                        && let Some(index) = pending.iter().position(|(source, _)| {
-                            input_source.is_none_or(|expected| expected == *source)
-                        })
+                        && let Some(index) = pending
+                            .iter()
+                            .position(|(source, _)| input_source == Some(*source))
                     {
                         pending.remove(index);
                     }
@@ -1104,54 +1070,15 @@ impl SessionProjector {
     }
 }
 
-/// Rebuilds semantic recovery state while retaining only one bounded raw page.
-///
-/// # Errors
-/// Rejects corrupt/mismatched pages and any durable projection violation.
-pub async fn project_session_read_view(
-    view: Arc<dyn SessionEventReadView>,
-    session_id: &SessionId,
-    modes: &ModeRegistry,
-) -> Result<SessionRecoveredState, AgentLoopError> {
-    let mut projector = SessionProjector::default();
-    let mut cursor = None;
-    while cursor != view.last_sequence() {
-        let page = view
-            .read_page(cursor, SessionReplayLimits::default())
-            .await?;
-        session::validate_gap(cursor, &page, session_id)?;
-        if page.is_empty() {
-            return Err(AgentLoopError::Persistence(
-                "recovery page did not advance".to_owned(),
-            ));
-        }
-        cursor = page
-            .last()
-            .and_then(EngineEvent::meta)
-            .map(|meta| meta.sequence_id);
-        if cursor.is_some_and(|cursor| view.last_sequence().is_none_or(|tail| cursor > tail)) {
-            return Err(AgentLoopError::Persistence(
-                "recovery page exceeded its captured tail".to_owned(),
-            ));
-        }
-        for event in page {
-            projector = projector
-                .push_with_modes(&event, modes)
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        }
-    }
-    projector
-        .finish()
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))
-}
-
 fn project_session_events_resolving_mode(
     events: &[EngineEvent],
     mut resolve_mode: impl FnMut(&ModeId, &String) -> Result<SessionMode, SessionProjectionError>,
 ) -> Result<SessionRecoveredState, SessionProjectionError> {
     let mut projector = SessionProjector::default();
     for event in events {
-        projector = projector.push_resolving(event, &mut resolve_mode)?;
+        let resolved = crate::engine::recovery::input::materialize_audit_event(events, event)
+            .map_err(|_| SessionProjectionError::InvalidInput("conversation source"))?;
+        projector = projector.push_resolving(event, &resolved, &mut resolve_mode)?;
     }
     projector.finish()
 }

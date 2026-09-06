@@ -145,10 +145,12 @@ pub(super) async fn apply_accepted(
                 state.sequence.map_or(0, |sequence| sequence + 1) + durable.len() as u64,
             );
             let item_id = rw_types::context_source::conversation_item(plan_source);
-            if let Some(turn) = context_turn.clone() {
-                durable.push(PendingEvent::ConversationTurnCommitted {
+            if context_turn.is_some() {
+                durable.push(PendingEvent::ConversationContextCommitted {
                     agent_turn: state.completed_turns,
-                    turn,
+                    selection: rw_types::conversation_input::ContextSelection::PlanReview {
+                        source: rw_types::SequenceId(plan_source.0 - 1),
+                    },
                 });
             }
             if let Some(definition) = execute_definition {

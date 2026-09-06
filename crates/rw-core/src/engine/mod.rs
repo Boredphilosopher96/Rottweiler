@@ -87,8 +87,8 @@ pub use commands::{
 };
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
-    SessionProjectionError, SessionProjector, SessionRecoveredState, project_session_events,
-    project_session_events_with_modes, project_session_read_view,
+    SessionProjectionError, SessionRecoveredState, project_session_events,
+    project_session_events_with_modes,
 };
 use session::ActorState;
 pub use session::{

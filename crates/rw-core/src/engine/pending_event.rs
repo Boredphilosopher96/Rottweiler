@@ -71,6 +71,10 @@ pub(super) enum PendingEvent {
         usage: Option<SessionUsage>,
         cost: Option<Cost>,
     },
+    ConversationContextCommitted {
+        agent_turn: u64,
+        selection: rw_types::conversation_input::ContextSelection,
+    },
     ConversationInputCommitted {
         agent_turn: u64,
         accepted_source: SequenceId,
@@ -315,7 +319,8 @@ impl PendingEvent {
             | Self::BudgetStatus { turn, .. }
             | Self::QuestionAsked { turn, .. }
             | Self::QuestionAnswered { turn, .. } => Some(*turn),
-            Self::ConversationInputCommitted { agent_turn, .. }
+            Self::ConversationContextCommitted { agent_turn, .. }
+            | Self::ConversationInputCommitted { agent_turn, .. }
             | Self::ConversationTurnCommitted { agent_turn, .. } => Some(*agent_turn),
             _ => None,
         }
@@ -364,6 +369,14 @@ impl PendingEvent {
                 title,
                 usage: usage.map(Into::into),
                 cost,
+            },
+            Self::ConversationContextCommitted {
+                agent_turn,
+                selection,
+            } => EngineEvent::ConversationContextCommitted {
+                meta,
+                agent_turn,
+                selection,
             },
             Self::ConversationInputCommitted {
                 agent_turn,

@@ -14,7 +14,7 @@ use crate::engine::turn::hooks::dispatch_hook;
 use crate::engine::turn::hooks::mark_unsettled;
 use crate::engine::turn::hooks::report_hook_failures;
 use crate::engine::turn::provider_calls;
-use crate::engine::turn::provider_messages::persist_conversation_turn;
+
 use crate::engine::turn::provider_messages::persist_event;
 use crate::engine::turn::provider_messages::send_compaction_progress;
 use crate::engine::turn::signals::CompactionProgressKind;
@@ -47,7 +47,7 @@ pub(super) struct CompactionExecution {
     pub(super) usage: SessionUsage,
     pub(super) cost: Cost,
     pub(super) reclaimed_tokens: u64,
-    pub(super) remapped_pins: Vec<usize>,
+    pub(super) remapped_pins: Vec<(usize, rw_types::ContextItemId)>,
     pub(super) auto_continue: bool,
     pub(super) hard_stop: bool,
     pub(super) failed_attempt_cost_micros: u64,
@@ -500,8 +500,11 @@ pub(super) async fn execute_compaction(
     let new_tokens = compacted.iter().fold(0_u64, |total, turn| {
         total.saturating_add(LocalTokenEstimator::turn(turn))
     });
-    let remapped_pins = (0..plan.ordered_pins.len())
-        .map(|index| index.saturating_add(1))
+    let remapped_pins = plan
+        .ordered_pins
+        .iter()
+        .enumerate()
+        .map(|(index, pin)| (index + 1, rw_types::ContextItemId(pin.item_id.clone())))
         .collect();
     Ok(CompactionExecution {
         conversation: compacted,
@@ -541,7 +544,7 @@ pub(in crate::engine) async fn compact_during_turn(
 ) -> Result<(u64, u64, u64, bool), AgentLoopError> {
     let view = config.history.capture_history().await?;
     if super::history_compaction::requires_streaming(&view, config, instructions.as_deref())? {
-        let suffix = overflow_suffix(conversation, &reason)?;
+        let suffix = overflow_suffix(conversation, &reason, &view).await?;
         let (page, spend) = super::history_compaction::compact(
             view,
             suffix,
@@ -594,7 +597,16 @@ pub(in crate::engine) async fn compact_during_turn(
             false,
         )
         .await?;
-        publish_compaction(execution, conversation, surgery, config, signals, turn).await
+        publish_compaction(
+            execution,
+            &page,
+            conversation,
+            surgery,
+            config,
+            signals,
+            turn,
+        )
+        .await
     }
     .await;
     match transaction {
@@ -613,26 +625,32 @@ pub(in crate::engine) async fn compact_during_turn(
     }
 }
 
-fn overflow_suffix(
+async fn overflow_suffix(
     conversation: &[Turn],
     reason: &CompactionReason,
-) -> Result<Vec<Turn>, AgentLoopError> {
-    Ok(if *reason == CompactionReason::ProviderOverflow {
-        vec![
-            conversation
-                .iter()
-                .rev()
-                .find(|turn| turn.role == Role::User && !turn.meta.synthetic)
-                .ok_or_else(|| {
-                    AgentLoopError::InvalidConfiguration(
-                        "provider overflow requires a user turn".into(),
-                    )
-                })?
-                .clone(),
-        ]
-    } else {
-        Vec::new()
-    })
+    view: &std::sync::Arc<dyn crate::engine::recovery::SessionHistoryView>,
+) -> Result<Vec<super::context_commits::RetainedUser>, AgentLoopError> {
+    if *reason != CompactionReason::ProviderOverflow {
+        return Ok(Vec::new());
+    }
+    let (ordinal, value) = conversation
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, value)| value.role == Role::User && !value.meta.synthetic)
+        .ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration("provider overflow requires a user turn".into())
+        })?;
+    let sources = view
+        .conversation_sources(ordinal as u64..ordinal as u64 + 1)
+        .await?;
+    let source = sources
+        .first()
+        .ok_or_else(|| AgentLoopError::Persistence("overflow user source".into()))?;
+    Ok(vec![super::context_commits::RetainedUser {
+        turn: value.clone(),
+        source: source.sequence,
+    }])
 }
 
 fn compaction_input(
@@ -668,6 +686,7 @@ fn compaction_input(
 }
 async fn publish_compaction(
     execution: CompactionExecution,
+    page: &crate::engine::recovery::ConversationPage,
     conversation: &mut Vec<Turn>,
     surgery: &mut Vec<ContextSurgeryAction>,
     config: &SessionActorConfig,
@@ -675,11 +694,36 @@ async fn publish_compaction(
     turn: u64,
 ) -> Result<(u64, u64, u64, bool), AgentLoopError> {
     let mut committed = Vec::with_capacity(execution.conversation.len());
-    for compacted_turn in &execution.conversation {
-        committed.push(persist_conversation_turn(signals, turn, compacted_turn).await?);
+    for (ordinal, compacted_turn) in execution.conversation.iter().enumerate() {
+        let source = if compacted_turn.role != Role::User {
+            None
+        } else if let Some((_, item)) = execution
+            .remapped_pins
+            .iter()
+            .find(|(position, _)| *position == ordinal)
+        {
+            Some(super::context_commits::selected_source(
+                item,
+                &page.sources,
+            )?)
+        } else if compacted_turn == &rw_context::auto_continue_turn() {
+            None
+        } else {
+            let position = page
+                .turns
+                .iter()
+                .rposition(|value| value == compacted_turn)
+                .ok_or_else(|| {
+                    AgentLoopError::Persistence("compaction replay user source".into())
+                })?;
+            Some(page.sources[position].clone())
+        };
+        committed.push(
+            super::context_commits::commit(signals, turn, compacted_turn, source.as_ref()).await?,
+        );
     }
     surgery.clear();
-    for ordinal in &execution.remapped_pins {
+    for (ordinal, _) in &execution.remapped_pins {
         let source = committed
             .get(*ordinal)
             .ok_or_else(|| AgentLoopError::Persistence("compaction pin position".into()))?;

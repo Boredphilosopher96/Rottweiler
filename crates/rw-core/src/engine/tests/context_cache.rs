@@ -28,6 +28,7 @@ use std::{
 pub(super) fn source(sequence: u64) -> ConversationSource {
     ConversationSource {
         sequence: SequenceId(sequence),
+        body_source: SequenceId(sequence),
         has_resolved_model: false,
         kind: TurnSourceKind::Committed,
         agent_turn: 1,

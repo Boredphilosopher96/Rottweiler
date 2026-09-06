@@ -74,8 +74,11 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
         index
             .apply_page(expected, &projection, |writer| {
                 for envelope in &page.events {
-                    let event = rw_core::recovery::materialize_input_event(source, &envelope.event)
-                        .map_err(|_| SessionStoreError::CorruptEvent("accepted search input"))?;
+                    let event =
+                        rw_core::recovery::materialize_conversation_event(source, &envelope.event)
+                            .map_err(|_| {
+                                SessionStoreError::CorruptEvent("accepted search input")
+                            })?;
                     documents(writer, &event)?;
                 }
                 Ok(())

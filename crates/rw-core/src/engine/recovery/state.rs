@@ -55,6 +55,8 @@ pub enum TurnSourceKind {
 pub struct ConversationSource {
     pub has_resolved_model: bool,
     pub sequence: SequenceId,
+    /// Terminal immutable body selector; retained compaction references never chain.
+    pub body_source: SequenceId,
     pub kind: TurnSourceKind,
     pub agent_turn: u64,
     pub role: rw_types::Role,

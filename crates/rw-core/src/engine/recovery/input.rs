@@ -4,51 +4,189 @@ use rw_store::session::{SessionEventPageLimits, journal::JournalReadView};
 use rw_types::{EngineEvent, Turn, conversation_input::InputSelection};
 use std::borrow::Cow;
 
+#[derive(Clone, Copy)]
+enum EventSource<'a> {
+    Journal(&'a JournalReadView),
+    Audit(&'a [EngineEvent]),
+}
+
 /// Resolve only the input reference; all other events remain borrowed. The returned
 /// materialization preserves the commit's identity and is never appended to a journal.
 /// The caller's source-read allowance owns the accepted decode and resulting IR.
 ///
 /// # Errors
 /// Rejects missing, forward, foreign-session, wrong-turn, or redundant text selectors.
-pub fn materialize_input_event<'a>(
+pub fn materialize_conversation_event<'a>(
     source: &JournalReadView,
     event: &'a EngineEvent,
 ) -> Result<Cow<'a, EngineEvent>, RecoveryError> {
-    let EngineEvent::ConversationInputCommitted {
-        meta,
-        agent_turn,
-        accepted_source,
-        ..
-    } = event
-    else {
-        return Ok(Cow::Borrowed(event));
+    materialize(EventSource::Journal(source), event)
+}
+
+pub(in crate::engine) fn materialize_audit_event<'a>(
+    source: &[EngineEvent],
+    event: &'a EngineEvent,
+) -> Result<Cow<'a, EngineEvent>, RecoveryError> {
+    materialize(EventSource::Audit(source), event)
+}
+
+fn materialize<'a>(
+    source: EventSource<'_>,
+    event: &'a EngineEvent,
+) -> Result<Cow<'a, EngineEvent>, RecoveryError> {
+    let (meta, agent_turn, turn) = match event {
+        EngineEvent::ConversationInputCommitted {
+            meta,
+            agent_turn,
+            accepted_source,
+            ..
+        } => {
+            let accepted = read_source(source, *accepted_source, meta)?;
+            (meta, *agent_turn, resolve_input(event, &accepted)?)
+        }
+        EngineEvent::ConversationContextCommitted {
+            meta,
+            agent_turn,
+            selection,
+        } => (meta, *agent_turn, resolve_context(source, meta, selection)?),
+        EngineEvent::ConversationTurnCommitted { turn, .. }
+            if turn.role == rw_types::Role::User =>
+        {
+            return Err(RecoveryError::Invalid(
+                "user conversation requires an explicit input or context source",
+            ));
+        }
+        _ => return Ok(Cow::Borrowed(event)),
     };
-    if *accepted_source >= meta.sequence_id {
+    Ok(Cow::Owned(EngineEvent::ConversationTurnCommitted {
+        meta: meta.clone(),
+        agent_turn,
+        turn,
+    }))
+}
+
+fn read_source(
+    source: EventSource<'_>,
+    selected: rw_types::SequenceId,
+    owner: &rw_types::EventMeta,
+) -> Result<EngineEvent, RecoveryError> {
+    if selected >= owner.sequence_id {
         return Err(RecoveryError::Invalid(
-            "accepted input must precede its commit",
+            "conversation source must precede its commit",
         ));
     }
     let limits = SessionEventPageLimits::default();
-    let accepted = source
-        .page::<EngineEvent>(
-            accepted_source.0.checked_sub(1).map(rw_types::SequenceId),
-            SessionEventPageLimits {
-                max_page_events: 1,
-                max_page_bytes: limits.max_line_bytes as u64 + 1,
-                ..limits
-            },
-        )?
-        .events
-        .into_iter()
-        .next()
-        .ok_or(RecoveryError::Invalid("missing accepted input source"))?
-        .event;
-    let turn = resolve_input(event, &accepted)?;
-    Ok(Cow::Owned(EngineEvent::ConversationTurnCommitted {
-        meta: meta.clone(),
-        agent_turn: *agent_turn,
-        turn,
-    }))
+    let event = match source {
+        EventSource::Journal(source) => {
+            source
+                .page::<EngineEvent>(
+                    selected.0.checked_sub(1).map(rw_types::SequenceId),
+                    SessionEventPageLimits {
+                        max_page_events: 1,
+                        max_page_bytes: limits.max_line_bytes as u64 + 1,
+                        ..limits
+                    },
+                )?
+                .events
+                .into_iter()
+                .next()
+                .ok_or(RecoveryError::Invalid("missing conversation source"))?
+                .event
+        }
+        EventSource::Audit(events) => events
+            .binary_search_by_key(&selected.0, |event| {
+                event.meta().map_or(u64::MAX, |meta| meta.sequence_id.0)
+            })
+            .ok()
+            .and_then(|index| events.get(index))
+            .cloned()
+            .ok_or(RecoveryError::Invalid("missing audit conversation source"))?,
+    };
+    if event.meta().is_none_or(|meta| {
+        meta.sequence_id != selected
+            || meta.session_id != owner.session_id
+            || meta.protocol_version != owner.protocol_version
+    }) {
+        return Err(RecoveryError::Invalid("conversation source identity"));
+    }
+    Ok(event)
+}
+
+fn resolve_context(
+    source: EventSource<'_>,
+    meta: &rw_types::EventMeta,
+    selection: &rw_types::conversation_input::ContextSelection,
+) -> Result<Turn, RecoveryError> {
+    use rw_types::conversation_input::ContextSelection;
+    match selection {
+        ContextSelection::Continuation {} => Ok(rw_context::auto_continue_turn()),
+        ContextSelection::PlanReview { source: review } => {
+            if review.0.checked_add(1) != Some(meta.sequence_id.0) {
+                return Err(RecoveryError::Invalid(
+                    "plan context must follow its review",
+                ));
+            }
+            let EngineEvent::PlanReviewed {
+                artifact,
+                decision,
+                revisions,
+                ..
+            } = read_source(source, *review, meta)?
+            else {
+                return Err(RecoveryError::Invalid("plan context source"));
+            };
+            crate::engine::projection::plan_review_context_turn(
+                &artifact,
+                decision,
+                revisions.as_deref(),
+            )
+            .ok_or(RecoveryError::Invalid(
+                "plan review has no conversation context",
+            ))
+        }
+        ContextSelection::Retained {
+            selected_source,
+            body_source,
+        } => {
+            if body_source > selected_source || selected_source >= &meta.sequence_id {
+                return Err(RecoveryError::Invalid("retained context source order"));
+            }
+            let body = read_source(source, *body_source, meta)?;
+            if matches!(
+                body,
+                EngineEvent::ConversationContextCommitted {
+                    selection: ContextSelection::Retained { .. },
+                    ..
+                }
+            ) {
+                return Err(RecoveryError::Invalid(
+                    "retained context must point to a terminal body source",
+                ));
+            }
+            let resolved = materialize(source, &body)?;
+            match resolved.as_ref() {
+                EngineEvent::ConversationTurnCommitted { turn, .. }
+                    if turn.role == rw_types::Role::User =>
+                {
+                    Ok(turn.clone())
+                }
+                EngineEvent::UserShellStateChanged {
+                    command,
+                    active: false,
+                    status: Some(status),
+                    captured_output,
+                    ..
+                } => Ok(crate::engine::projection::shell_context_turn(
+                    command.as_deref().unwrap_or_default(),
+                    *status,
+                    captured_output.as_deref(),
+                )),
+                _ => Err(RecoveryError::Invalid(
+                    "retained context must select user context",
+                )),
+            }
+        }
+    }
 }
 
 pub(super) fn resolve_input(

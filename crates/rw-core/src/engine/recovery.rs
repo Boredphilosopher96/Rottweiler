@@ -10,6 +10,7 @@ pub use accounting::{
 };
 mod capability;
 pub use capability::{HistoryRead, SessionHistory, SessionHistoryView};
+mod context_selection;
 mod context_state;
 mod control;
 mod prompts;
@@ -29,7 +30,7 @@ pub(in crate::engine) mod input;
 mod maintenance;
 mod projector;
 mod read;
-pub use input::materialize_input_event;
+pub use input::materialize_conversation_event;
 mod receipts;
 mod reduce;
 mod repair;
@@ -121,3 +122,6 @@ mod prompt_tests;
 
 #[cfg(test)]
 mod input_commit_tests;
+
+#[cfg(test)]
+mod context_selection_tests;
