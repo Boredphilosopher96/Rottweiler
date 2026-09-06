@@ -1425,6 +1425,27 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "accepted_source": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "type": {
+          "type": "string",
+          "const": "user_message_retained"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "accepted_source"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "agent_turn": {
           "type": "string"
         },
