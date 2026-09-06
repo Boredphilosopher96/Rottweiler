@@ -69,13 +69,7 @@ impl SessionSubscription {
             self.read = Some(tokio::spawn(
                 async move {
                     let page = view
-                        .read_page(
-                            after,
-                            SessionReplayLimits {
-                                max_events: 256,
-                                max_bytes: 16 * 1024 * 1024,
-                            },
-                        )
+                        .read_page(after, SessionReplayLimits::live_delivery())
                         .await?;
                     validate_gap(after, &page, &session)?;
                     if page.is_empty()

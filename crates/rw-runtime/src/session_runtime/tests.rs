@@ -1139,3 +1139,5 @@ fn checkpoint_two_edits(store: &CheckpointStore, session: &str, workspace: &Path
         std::fs::write(workspace.join("file.txt"), format!("{prefix}-{suffix}")).expect("edit");
     }
 }
+
+mod live_delivery;

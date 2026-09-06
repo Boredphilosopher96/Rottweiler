@@ -70,7 +70,7 @@ impl SessionEventDelivery {
             .bytes()
             .checked_add(descriptors)
             .ok_or(AgentLoopError::EventDeliverySaturated)?;
-        if plan.bytes() > 64 * 1024 * 1024 {
+        if plan.bytes() > rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES {
             return Err(AgentLoopError::EventDeliverySaturated);
         }
         let event = PayloadEvents::Replay(plan.prepare());
@@ -89,11 +89,11 @@ impl SessionEventDelivery {
 pub(super) struct LiveEvents {
     state: Arc<State>,
     budget: Arc<Budget>,
-    _ring_credit: Arc<Credit>,
 }
 struct State {
     channel: Mutex<Channel>,
     changed: Notify,
+    _ring_credit: Credit,
 }
 struct Channel {
     frames: VecDeque<Frame>,
@@ -153,7 +153,6 @@ impl LiveEvents {
         let ring_credit = budget.reserve(capacity * 512 + MAX_SESSION_SUBSCRIPTIONS * 64)?;
         Ok(Self {
             budget,
-            _ring_credit: Arc::new(ring_credit),
             state: Arc::new(State {
                 channel: Mutex::new(Channel {
                     frames: VecDeque::with_capacity(capacity),
@@ -163,6 +162,7 @@ impl LiveEvents {
                     closed: false,
                 }),
                 changed: Notify::new(),
+                _ring_credit: ring_credit,
             }),
         })
     }

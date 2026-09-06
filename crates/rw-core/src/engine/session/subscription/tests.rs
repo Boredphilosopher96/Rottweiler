@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use super::*;
 use crate::engine::live_events::LiveEvents;
 use crate::engine::{
@@ -91,7 +92,11 @@ async fn slow_big_event_consumer_recovers_exact_final_source_without_another_sen
         );
         if sequence == 8 {
             assert!(matches!(event.as_ref(), EngineEvent::TurnFinished { .. }));
-        } else if let EngineEvent::Error { message, .. } = event.as_ref() {
+        } else if let EngineEvent::Error {
+            error: rw_types::EngineError { message, .. },
+            ..
+        } = event.as_ref()
+        {
             assert_eq!(message, &format!("{sequence}:{}", "x".repeat(128 * 1024)));
         } else {
             panic!("wrong event");
@@ -122,9 +127,89 @@ async fn replay_admits_single_legal_record_larger_than_default_eight_megabyte_pa
     .await;
     events.close();
     let event = subscription.recv().await.expect("large event source");
-    assert!(matches!(event.as_ref(), EngineEvent::Error { message, .. } if message == &body));
+    assert!(
+        matches!(event.as_ref(), EngineEvent::Error { error: rw_types::EngineError { message, .. }, .. } if message == &body)
+    );
     assert!(matches!(
         subscription.recv().await,
         Err(AgentLoopError::Closed)
     ));
+}
+
+#[derive(Debug)]
+struct GatedView {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+    finished: Arc<tokio::sync::Semaphore>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl SessionEventReadView for GatedView {
+    fn last_sequence(&self) -> Option<SequenceId> {
+        Some(SequenceId(0))
+    }
+    async fn read_page(
+        &self,
+        after: Option<SequenceId>,
+        limits: SessionReplayLimits,
+    ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+        assert!(after.is_none());
+        assert_eq!(limits.max_events, 256);
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.entered.add_permits(1);
+        self.release.acquire().await.expect("release gate").forget();
+        self.finished.add_permits(1);
+        Ok(vec![stamp(
+            0,
+            PendingEvent::Error {
+                message: "source".into(),
+            },
+        )])
+    }
+}
+fn gated_subscription() -> (SessionSubscription, Arc<GatedView>) {
+    let events = LiveEvents::with_limit(1, 8192).expect("live channel");
+    let sink: Arc<dyn SessionEventSink> = Arc::new(NoopSessionEventSink::default());
+    let mut subscription = subscribe(&events, sink);
+    let view = Arc::new(GatedView {
+        entered: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        finished: Arc::new(tokio::sync::Semaphore::new(0)),
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    });
+    subscription.replay = Some(view.clone());
+    subscription.initial_tail = Some(SequenceId(0));
+    subscription.needs_initial_replay = true;
+    (subscription, view)
+}
+
+#[tokio::test]
+async fn cancelled_recv_preserves_exact_owned_replay_task_for_next_poll() {
+    let (mut subscription, view) = gated_subscription();
+    tokio::select! {
+        result = subscription.recv() => panic!("read must wait: {result:?}"),
+        entered = view.entered.acquire() => entered.expect("read entered").forget(),
+    }
+    assert_eq!(view.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    view.release.add_permits(1);
+    let event = subscription.recv().await.expect("same read resumes");
+    assert_eq!(event.meta().expect("source").sequence_id, SequenceId(0));
+    assert_eq!(view.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn dropped_subscription_keeps_started_source_read_owned_until_completion() {
+    let (mut subscription, view) = gated_subscription();
+    tokio::select! {
+        result = subscription.recv() => panic!("read must wait: {result:?}"),
+        entered = view.entered.acquire() => entered.expect("read entered").forget(),
+    }
+    drop(subscription);
+    view.release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), view.finished.acquire())
+        .await
+        .expect("owned read finishes after caller loss")
+        .expect("finished")
+        .forget();
+    assert_eq!(view.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

@@ -1,11 +1,10 @@
 //! One record and one returned page share a bounded typed decode allowance.
-use super::{MAX_SEGMENT_BYTES, SessionStoreError};
+use super::{MAX_JOURNAL_DECODE_BYTES, MAX_SEGMENT_BYTES, SessionStoreError};
 use rw_types::{
     EngineEvent,
     allocation::DecodeAllocation,
     json_structure::{JsonStructureLimits, preflight_json},
 };
-pub(super) const MAX_PAGE_DECODE_BYTES: usize = 64 * 1024 * 1024;
 
 pub(in crate::session) fn preflight_record<T: DecodeAllocation>(
     line: &[u8],
@@ -27,7 +26,7 @@ pub(in crate::session) fn preflight_record<T: DecodeAllocation>(
         .ok_or(SessionStoreError::CorruptEvent(
             "journal decode charge overflow",
         ))?;
-    if charge > MAX_PAGE_DECODE_BYTES {
+    if charge > MAX_JOURNAL_DECODE_BYTES {
         return Err(SessionStoreError::CorruptEvent(
             "journal record exceeds decoded allocation admission",
         ));

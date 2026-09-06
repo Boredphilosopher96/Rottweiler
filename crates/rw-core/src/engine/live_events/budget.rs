@@ -4,7 +4,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-pub(super) const MAX_REPLAY_BYTES: usize = (2 * 64 + 16) * 1024 * 1024 + 16 * 1024;
+pub(super) const MAX_REPLAY_BYTES: usize = 2 * rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES
+    + rw_store::session::journal::MAX_JOURNAL_APPEND_BYTES
+    + 16 * 1024;
 static LIVE: OnceLock<Arc<Budget>> = OnceLock::new();
 static REPLAY: OnceLock<Arc<Budget>> = OnceLock::new();
 static SUBSCRIPTIONS: OnceLock<Arc<Budget>> = OnceLock::new();
@@ -74,30 +76,41 @@ pub(super) fn live() -> Arc<Budget> {
 // the journal writer's commit credits.
 pub(super) async fn replay() -> Result<Credit, AgentLoopError> {
     let budget = REPLAY.get_or_init(|| Budget::new(4 * MAX_REPLAY_BYTES));
-    if let Ok(credit) = budget.reserve(MAX_REPLAY_BYTES) {
-        return Ok(credit);
-    }
     budget
-        .waiters
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-            (count < 64).then_some(count + 1)
-        })
-        .map_err(|_| AgentLoopError::EventDeliverySaturated)?;
-    let _waiter = Waiter(budget);
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let changed = budget.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if let Ok(credit) = budget.reserve(MAX_REPLAY_BYTES) {
-                return credit;
-            }
-            changed.await;
-        }
-    })
-    .await
-    .map_err(|_| AgentLoopError::EventDeliverySaturated)
+        .reserve_wait(MAX_REPLAY_BYTES, std::time::Duration::from_secs(30))
+        .await
 }
+impl Budget {
+    async fn reserve_wait(
+        self: &Arc<Self>,
+        bytes: usize,
+        deadline: std::time::Duration,
+    ) -> Result<Credit, AgentLoopError> {
+        if let Ok(credit) = self.reserve(bytes) {
+            return Ok(credit);
+        }
+        self.waiters
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < 64).then_some(count + 1)
+            })
+            .map_err(|_| AgentLoopError::EventDeliverySaturated)?;
+        let _waiter = Waiter(self);
+        tokio::time::timeout(deadline, async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if let Ok(credit) = self.reserve(bytes) {
+                    return credit;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .map_err(|_| AgentLoopError::EventDeliverySaturated)
+    }
+}
+
 struct Waiter<'a>(&'a Budget);
 impl Drop for Waiter<'_> {
     fn drop(&mut self) {
@@ -106,4 +119,40 @@ impl Drop for Waiter<'_> {
 }
 pub(super) fn subscription() -> Result<Credit, AgentLoopError> {
     SUBSCRIPTIONS.get_or_init(|| Budget::new(512)).reserve(1)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn cancelled_or_expired_admission_refunds_waiter_without_allocating_a_result() {
+        let budget = Budget::new(1024);
+        let held = budget.reserve(1024).expect("retain full result");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                budget.reserve_wait(1024, Duration::from_secs(30))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(budget.waiters.load(Ordering::Acquire), 0);
+        assert_eq!(budget.used(), 1024);
+        assert!(matches!(
+            budget.reserve_wait(1024, Duration::from_millis(10)).await,
+            Err(AgentLoopError::EventDeliverySaturated)
+        ));
+        assert_eq!(budget.waiters.load(Ordering::Acquire), 0);
+        drop(held);
+        assert!(
+            budget
+                .reserve_wait(1024, Duration::from_millis(10))
+                .await
+                .is_ok()
+        );
+        assert_eq!(budget.used(), 0);
+    }
 }

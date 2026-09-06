@@ -25,7 +25,11 @@ use std::{
 };
 
 const SEGMENT_TARGET_BYTES: usize = 1024 * 1024;
-const MAX_SEGMENT_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum encoded append/segment bytes, including every JSONL newline.
+pub const MAX_JOURNAL_APPEND_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum structurally admitted decoded allocations in a record or returned page.
+pub const MAX_JOURNAL_DECODE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SEGMENT_BYTES: usize = MAX_JOURNAL_APPEND_BYTES;
 const MAX_SEGMENTS: usize = 65_536;
 
 /// One immutable segment boundary is a sparse sequence-index entry.
@@ -1141,7 +1145,7 @@ impl JournalReadView {
                     break 'segments;
                 }
                 let charge = decode::preflight_record::<T>(line)?;
-                if charge > decode::MAX_PAGE_DECODE_BYTES - decode_bytes {
+                if charge > MAX_JOURNAL_DECODE_BYTES - decode_bytes {
                     break 'segments;
                 }
                 decode_bytes += charge;
@@ -1272,7 +1276,7 @@ impl JournalReadView {
                     break 'segments;
                 }
                 let charge = decode::preflight_record::<T>(line)?;
-                if charge > decode::MAX_PAGE_DECODE_BYTES - decode_bytes {
+                if charge > MAX_JOURNAL_DECODE_BYTES - decode_bytes {
                     break 'segments;
                 }
                 decode_bytes += charge;

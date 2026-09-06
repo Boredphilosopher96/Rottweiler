@@ -13,6 +13,18 @@ pub struct SessionReplayLimits {
     pub max_bytes: usize,
 }
 
+impl SessionReplayLimits {
+    /// A bounded delivery page admitting every legal journal record, including
+    /// its JSONL delimiter. Storage independently enforces decoded allocation.
+    #[must_use]
+    pub const fn live_delivery() -> Self {
+        Self {
+            max_events: 256,
+            max_bytes: rw_store::session::journal::MAX_JOURNAL_APPEND_BYTES,
+        }
+    }
+}
+
 impl Default for SessionReplayLimits {
     fn default() -> Self {
         Self {

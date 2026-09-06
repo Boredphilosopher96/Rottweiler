@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use super::*;
 use crate::engine::PendingEvent;
 use rw_types::{CommandAckMeta, CommandOutcome, EventMeta, PROTOCOL_VERSION, SessionId};
@@ -180,4 +181,19 @@ async fn retained_ack_by_one_consumer_cannot_hide_eviction_from_another() {
         stalled.recv().await,
         Err(AgentLoopError::EventDeliverySaturated)
     ));
+}
+
+#[test]
+fn receiver_retains_ring_credit_after_all_senders_drop() {
+    let budget = Budget::new(64 * 1024);
+    let events = LiveEvents::with_budget(8, Arc::clone(&budget)).expect("channel");
+    let receiver = events
+        .subscribe(ClientId("client".into()))
+        .expect("receiver");
+    let retained = budget.used();
+    events.close();
+    drop(events);
+    assert_eq!(budget.used(), retained);
+    drop(receiver);
+    assert_eq!(budget.used(), 0);
 }

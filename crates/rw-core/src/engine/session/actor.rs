@@ -169,7 +169,8 @@ fn validate_config(config: &SessionActorConfig) -> Result<(), AgentLoopError> {
         || !(1..=crate::engine::live_events::MAX_EVENT_CAPACITY).contains(&config.event_capacity)
     {
         return Err(AgentLoopError::InvalidConfiguration(
-            "turn, doom-loop, output, and event limits must be greater than zero".to_owned(),
+            "turn, doom-loop, and output limits must be positive; event capacity must be 1..=1024"
+                .to_owned(),
         ));
     }
     Ok(())
