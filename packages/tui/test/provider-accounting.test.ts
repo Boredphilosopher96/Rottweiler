@@ -76,3 +76,30 @@ test("retained input source directives advance the cursor without changing displ
   expect(state.questions).toBe(initial.questions)
   expect(state.tools).toBe(initial.tools)
 })
+
+
+test("tool result source commits advance the cursor without duplicating canonical completion display", () => {
+  const initial = reduceRottweilerState(createInitialState(), engineEvent({
+    type: "tool_call_finished", meta: meta("0"), turn_id: "1",
+    invocation_id: "invocation", tool_call_id: "provider-alias", call_index: 0,
+    output: { type: "text", text: "canonical result body" }, is_error: false, presentation: null,
+  }))
+  const reference = {
+    type: "conversation_tool_results_committed", meta: meta("1"), agent_turn: "1",
+    results: [{ invocation_id: "invocation", finished_source: "0" }],
+    logical: { encoded_bytes: "128", nodes: 4, string_bytes: "16", depth: 3 },
+  } satisfies EngineEvent
+  expect(isWireEngineEvent(reference)).toBe(true)
+  const committed = reduceRottweilerState(initial, engineEvent(reference))
+  expect(committed.lastSequence).toBe("1")
+  expect(committed.tools).toBe(initial.tools)
+  expect(committed.turns).toBe(initial.turns)
+  expect(committed.streamingTail).toBe(initial.streamingTail)
+  expect(committed.questions).toBe(initial.questions)
+  expect(committed.hasActivity).toBe(initial.hasActivity)
+  expect(committed.cost).toBe(initial.cost)
+  const duplicate = reduceRottweilerState(committed, engineEvent(reference))
+  expect(duplicate.tools).toBe(committed.tools)
+  expect(duplicate.protocol.duplicateEvents).toBe(1)
+  expect(isWireEngineEvent({ ...reference, output: { type: "text", text: "duplicate body" } })).toBe(false)
+})
