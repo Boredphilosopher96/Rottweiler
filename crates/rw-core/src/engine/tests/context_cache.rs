@@ -60,7 +60,7 @@ fn fixture(root: &std::path::Path, generation: usize) -> SessionActorConfig {
             .register(Arc::new(StubTool::new(
                 "inspect",
                 Vec::new(),
-                StubOutcome::Success,
+                StubOutcome::Success(rw_tools::ToolResult::new("ok", serde_json::Value::Null)),
             )))
             .expect("tool");
     }
