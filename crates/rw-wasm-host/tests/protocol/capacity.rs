@@ -73,6 +73,7 @@ pub(super) async fn measure() {
 }
 
 pub(super) fn release_helper() -> (rw_tools::ApprovedExecutable, rw_tools::ExecutableDigest) {
+    super::install_activation_trace();
     let receipt_path = std::path::PathBuf::from(
         std::env::var_os("ROTTWEILER_WASM_BENCH_RECEIPT").expect("exact release helper receipt"),
     )

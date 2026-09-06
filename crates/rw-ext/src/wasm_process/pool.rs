@@ -401,11 +401,16 @@ impl Worker {
         helper: &ApprovedExecutable,
         cancelled: impl std::future::Future<Output = ()>,
     ) -> Result<Self, WasmHookHostError> {
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "rw_performance", stage = "plugin.wasm_process", phase = "queued");
         let process = rw_resources::acquire(rw_resources::ResourceClass::Process, cancelled)
             .await
             .map_err(|error| WasmHookHostError::Execution {
                 message: error.to_string(),
             })?;
+        tracing::debug!(target: "rw_performance", stage = "plugin.wasm_process", phase = "admitted",
+            admission_ms = started.elapsed().as_secs_f64() * 1000.0);
+        let started = std::time::Instant::now();
         let executable = helper
             .launch()
             .map_err(|error| WasmHookHostError::Execution {
@@ -419,6 +424,8 @@ impl Worker {
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| io_error(&error))?;
+        tracing::debug!(target: "rw_performance", stage = "plugin.wasm_process", phase = "spawned",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, process_id = child.id());
         Ok(Self {
             executable,
             _process: process,
@@ -430,6 +437,23 @@ impl Worker {
         self.executable.matches(&generation.helper) && self.digest == Some(generation.digest)
     }
     async fn exchange(
+        &mut self,
+        request: &WasmHostRequest,
+        component: &[u8],
+    ) -> Result<WasmHostResponse, WasmHookHostError> {
+        let stage = match request {
+            WasmHostRequest::Load { .. } => "plugin.wasm_load",
+            WasmHostRequest::Invoke { .. } => "plugin.wasm_invoke",
+        };
+        let started = std::time::Instant::now();
+        tracing::debug!(target: "rw_performance", stage, phase = "begin", process_id = self.child.id());
+        let result = self.exchange_frame(request, component).await;
+        tracing::debug!(target: "rw_performance", stage, phase = "completed", process_id = self.child.id(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = result.is_ok());
+        result
+    }
+
+    async fn exchange_frame(
         &mut self,
         request: &WasmHostRequest,
         component: &[u8],

@@ -30,12 +30,30 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 fn approve_helper(path: &Path) -> rw_tools::ApprovedExecutable {
+    install_activation_trace();
     let path = path.canonicalize().expect("fixture executable");
     rw_tools::ApprovedExecutable::from_installed(&path, &helper_digest(&path))
         .expect("approved fixture executable")
 }
 
+fn install_activation_trace() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    if std::env::var_os("ROTTWEILER_TEST_ACTIVATION_TRACE").is_some() {
+        INSTALLED.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_env_filter("rw_performance=debug")
+                .with_timer(tracing_subscriber::fmt::time::uptime())
+                .with_thread_ids(true)
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .try_init()
+                .expect("explicit worker trace requires the libtest subscriber");
+        });
+    }
+}
+
 fn fixture_helper() -> rw_tools::ApprovedExecutable {
+    install_activation_trace();
     static IDENTITY: std::sync::OnceLock<(std::path::PathBuf, rw_tools::ExecutableDigest)> =
         std::sync::OnceLock::new();
     let (path, digest) = IDENTITY.get_or_init(|| {
