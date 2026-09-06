@@ -134,6 +134,10 @@ mod tests {
         std::fs::write(&path, b"approved code").expect("input");
         let path = path.canonicalize().expect("canonical input");
         let identity = ExecutableArtifactIdentity::capture(&path, 13).expect("identity");
+        assert!(
+            crate::ApprovedExecutable::from_artifact(&identity).is_err(),
+            "ordinary code-file capture cannot grant executable mode"
+        );
         assert!(ExecutableArtifactIdentity::capture(&path, 12).is_err());
         let output = directory.path().join("output");
         let mut destination = std::fs::File::create(&output).expect("private destination");

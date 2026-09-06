@@ -137,8 +137,10 @@ pub enum PluginLaunchError {
 
 #[async_trait]
 pub trait PluginLauncher: Send + Sync {
-    /// Launches by direct exec. Implementations must revalidate and return the exact executable
-    /// identity at the final spawn boundary, clear the environment, create a killable process
+    /// Launches by direct exec. Implementations must pin the exact approved executable and
+    /// attested code bytes through physical settlement, and return their approved identity.
+    /// A hash followed by execution of a mutable path does not satisfy this contract.
+    /// Implementations clear the environment, create a killable process
     /// group, and enforce every absent profile effect at syscall level. Manifest probes may read
     /// only their runtime/entrypoint; approved launches may read/write/network only when the
     /// corresponding helper above permits it. Network must traverse the policy proxy and exact

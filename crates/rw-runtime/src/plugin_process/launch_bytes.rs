@@ -107,23 +107,18 @@ impl LaunchBytes {
         }
     }
     pub(super) fn validate_write_roots(&self, roots: &[PathBuf]) -> Result<(), PluginProcessError> {
-        let (executable, code) = match self {
-            Self::Native { executable, code } => (executable, code),
-            #[cfg(target_os = "linux")]
-            Self::Preparation { .. } => return Ok(()),
-            #[cfg(test)]
-            Self::Harness { .. } => return Ok(()),
-        };
+        let pinned_roots = self.read_roots();
         for root in roots {
             let root = root.canonicalize().map_err(|cause| process_error(&cause))?;
-            let overlaps = |pinned: &Path| pinned.starts_with(&root) || root.starts_with(pinned);
-            if (cfg!(target_os = "macos") && overlaps(executable.path()))
-                || matches!(code, CodeView::Attested { directory, .. }
-                    if overlaps(&directory.path().canonicalize().map_err(|cause| process_error(&cause))?))
-            {
-                return Err(error(
-                    "plugin writable scratch overlaps its approved immutable bytes",
-                ));
+            for pinned in &pinned_roots {
+                let pinned = pinned
+                    .canonicalize()
+                    .map_err(|cause| process_error(&cause))?;
+                if pinned.starts_with(&root) || root.starts_with(&pinned) {
+                    return Err(error(
+                        "plugin writable scratch overlaps its approved immutable bytes",
+                    ));
+                }
             }
         }
         Ok(())
