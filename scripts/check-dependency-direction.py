@@ -48,7 +48,9 @@ ALLOWED = {
     # Private process boundary for the heavyweight WASM runtime. The public
     # `rw` binary talks to it through rw-ext's bounded wire protocol and does
     # not link Wasmtime itself.
-    "rw-wasm-host": {"rw-ext", "rw-plugin-protocol", "rw-types"},
+    # Protocol integration tests construct explicitly approved executable artifacts
+    # through the same tool/sandbox ownership API as the runtime caller.
+    "rw-wasm-host": {"rw-ext", "rw-plugin-protocol", "rw-tools", "rw-types"},
     "rw-cli": {
         "rw-core",
         "rw-ext",
