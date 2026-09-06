@@ -636,8 +636,8 @@ fn m3_context_cost_compaction_and_prompt_dump_use_the_headless_protocol() {
         .home
         .join("sessions")
         .join(&session_id)
-        .join("prompt-shapes.json");
-    let prompt_shapes_backup = prompt_shapes.with_extension("json.backup");
+        .join("prompt-shapes.sqlite3");
+    let prompt_shapes_backup = prompt_shapes.with_extension("sqlite3.backup");
     fs::rename(&prompt_shapes, &prompt_shapes_backup).expect("hide prompt-shape metadata");
     let missing_shape = base_command(&run.workspace, &run.home)
         .args(["prompt", "dump", "--turn", "1", "--resume", &session_id])

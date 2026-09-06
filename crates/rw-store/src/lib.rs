@@ -6,6 +6,7 @@ pub mod command_receipts;
 pub mod config;
 pub mod credentials;
 pub mod memory;
+pub mod prompt_shapes;
 pub mod session;
 pub mod trust;
 pub mod workflow;

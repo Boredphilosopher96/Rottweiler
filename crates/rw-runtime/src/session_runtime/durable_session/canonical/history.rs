@@ -88,22 +88,21 @@ impl SessionHistoryView for CapturedHistory {
     fn verify_prompt(&self, turn: u64, dump: &rw_types::PromptDump) -> Result<(), AgentLoopError> {
         let (profile, record) = self
             .prompt_shapes
-            .shape_for_turn(turn)
+            .shape_at_source(
+                turn,
+                self.through
+                    .ok_or_else(|| persistence("historical prompt source is absent"))?
+                    .0,
+            )
             .map_err(persistence)?
             .ok_or_else(|| {
                 persistence("historical prompt is unavailable: required request shape is missing")
             })?;
-        let tools = dump
-            .tools
-            .iter()
-            .map(|tool| rw_providers::ToolDefinition {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-            })
-            .collect::<Vec<_>>();
         crate::session_runtime::prompt_shapes::validate_historical_prompt_shape(
-            dump, &tools, &profile, &record,
+            dump,
+            &dump.tools,
+            &profile,
+            &record,
         )
         .map_err(persistence)
     }

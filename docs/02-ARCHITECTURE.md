@@ -641,3 +641,17 @@ Private recovery records have explicit fields and bounded JSON decode admission.
 Recovered child sessions hold an admitted resume recipe and bind their actor only when a turn starts. A factory allows 32 MiB of recovery policy preparation; shared tool grants are retained by reference. Preparation survives dropped callers, and close waits for its actual owner before releasing resources. Child progress previews are capped at 256 KiB; larger events send a null preview with their canonical child sequence so clients can read the source. Follow-up turns subscribe at the live source boundary.
 
 Child display publishers coalesce at most one queued observation per admitted child, with an 8 MiB prepared-allocation allowance shared by the publisher. Both tool-launched and hosted children use the same slot semantics. Saturated delivery marks the next canonical source fence; it never waits for display capacity before settling child effects. Hosted lifecycle records and observations enter the same actor queue, with durable terminal acknowledgement releasing the active progress binding.
+
+### Recorded request shapes
+
+Each session stores request-shape metadata in a private indexed database. A row
+binds an immutable canonical context source and turn to a deduplicated tool/cache
+profile and streaming request fingerprint. It contains no conversation bodies.
+Writes commit the first provider request for that source; a reused turn has a
+separate source identity. Historical prompt verification selects that exact source,
+so a different workspace or provider configuration cannot impersonate the recorded
+request. Missing or inconsistent metadata makes the historical prompt unavailable.
+
+The database owns a 256 KiB page cache. Reads select one bounded profile directly;
+startup and writes never scan or materialize lifetime request metadata. Profile
+JSON is admitted at 4 MiB encoded and 16 MiB decoded before typed allocation.

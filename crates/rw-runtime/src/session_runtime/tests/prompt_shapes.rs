@@ -10,7 +10,6 @@ use super::PermissionGate;
 use super::PromptCacheBreakpoint;
 use super::PromptShapeJournal;
 use super::PromptShapeRecord;
-use super::PromptShapeState;
 use super::Provider;
 use super::ProviderModel;
 use super::ProviderRequest;
@@ -46,6 +45,7 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
     let journal =
         Arc::new(PromptShapeJournal::open(root.path(), session_id).expect("prompt-shape journal"));
     journal.set_active_turn(TurnId("1".to_owned()));
+    journal.set_prompt_source(&TurnId("1".into()), rw_types::SequenceId(5));
     let system = Turn {
         role: Role::System,
         blocks: vec![Block::Text {
@@ -85,14 +85,18 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
     journal
         .record_request("fast", &request, CacheBreakpointSupport::Explicit)
         .expect("record prompt shape");
-    let metadata = std::fs::read_to_string(
+    let metadata = std::fs::read(
         root.path()
             .join("sessions")
             .join(session_id)
-            .join("prompt-shapes.json"),
+            .join("prompt-shapes.sqlite3"),
     )
     .expect("prompt-shape metadata");
-    assert!(!metadata.contains("HISTORICAL_PROMPT_SECRET"));
+    assert!(
+        !metadata
+            .windows(b"HISTORICAL_PROMPT_SECRET".len())
+            .any(|window| window == b"HISTORICAL_PROMPT_SECRET")
+    );
     let (profile, record) = journal
         .shape_for_turn(1)
         .expect("historical shape lookup")
@@ -221,6 +225,7 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
         mismatched_profile.cache_support,
     );
     let mismatched_record = PromptShapeRecord {
+        source: record.source,
         profile_id: hash_serialized(&mismatched_profile).expect("mismatched profile id"),
         request_fingerprint: prompt_request_fingerprint(
             &dump.model_alias.0,
@@ -239,13 +244,14 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
 }
 
 #[test]
-fn prompt_shape_sidecar_rejects_tampering_and_missing_profile_references() {
+fn prompt_shape_store_pins_reused_turns_to_their_canonical_sources() {
     let root = tempdir().expect("prompt metadata root");
     let session_id = "tampered-prompt-shape";
     let session_directory = root.path().join("sessions").join(session_id);
     std::fs::create_dir_all(&session_directory).expect("session directory");
     let journal = PromptShapeJournal::open(root.path(), session_id).expect("shape journal");
     journal.set_active_turn(TurnId("1".to_owned()));
+    journal.set_prompt_source(&TurnId("1".into()), rw_types::SequenceId(5));
     let request = ProviderRequest {
         model: "fast".to_owned(),
         turns: vec![Turn {
@@ -269,41 +275,59 @@ fn prompt_shape_sidecar_rejects_tampering_and_missing_profile_references() {
         .record_request("fast", &request, CacheBreakpointSupport::Explicit)
         .expect("record prompt shape");
 
-    let path = session_directory.join("prompt-shapes.json");
-    let pristine = std::fs::read(&path).expect("prompt-shape bytes");
-    let mut tampered: PromptShapeState =
-        serde_json::from_slice(&pristine).expect("prompt-shape state");
-    let profile_id = tampered.records["1"].profile_id.clone();
-    tampered
-        .profiles
-        .get_mut(&profile_id)
-        .expect("recorded profile")
-        .cache_breakpoints[0]
-        .after_item_id = Some("system:9".to_owned());
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&tampered).expect("tampered state"),
-    )
-    .expect("write tampered state");
-    let error = PromptShapeJournal::open(root.path(), session_id)
-        .expect_err("tampered profile must fail closed");
-    assert!(error.to_string().contains("profile id does not match"));
-
-    let mut missing_profile: PromptShapeState =
-        serde_json::from_slice(&pristine).expect("prompt-shape state");
-    missing_profile
-        .records
-        .get_mut("1")
-        .expect("recorded turn")
-        .profile_id = "0".repeat(64);
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&missing_profile).expect("missing profile state"),
-    )
-    .expect("write missing profile state");
-    let error = PromptShapeJournal::open(root.path(), session_id)
-        .expect_err("missing profile reference must fail closed");
-    assert!(error.to_string().contains("references a missing profile"));
+    let original = journal
+        .shape_at_source(1, 5)
+        .expect("source lookup")
+        .expect("recorded shape");
+    assert_eq!(original.1.source, 5);
+    journal.set_active_turn(TurnId("1".into()));
+    journal.set_prompt_source(&TurnId("1".into()), rw_types::SequenceId(25));
+    let mut request = request;
+    request.turns[0].blocks = vec![Block::Text {
+        text: "replacement request".into(),
+    }];
+    journal
+        .record_request("fast", &request, CacheBreakpointSupport::Explicit)
+        .expect("reused turn source");
+    let replacement = journal
+        .shape_at_source(1, 25)
+        .expect("new lookup")
+        .expect("new shape");
+    assert_ne!(
+        original.1.request_fingerprint,
+        replacement.1.request_fingerprint
+    );
+    assert_eq!(
+        journal
+            .shape_at_source(1, 5)
+            .expect("old source")
+            .expect("old record"),
+        original
+    );
+    assert_eq!(
+        journal
+            .shape_for_turn(1)
+            .expect("latest turn")
+            .expect("record"),
+        replacement
+    );
+    assert!(journal.shape_at_source(2, 25).is_err());
+    drop(journal);
+    let reopened = PromptShapeJournal::open(root.path(), session_id).expect("reopen");
+    assert_eq!(
+        reopened
+            .shape_at_source(1, 5)
+            .expect("reopened source")
+            .expect("old record"),
+        original
+    );
+    assert_eq!(
+        reopened
+            .latest_shape()
+            .expect("latest source")
+            .expect("new record"),
+        replacement
+    );
 }
 
 #[test]

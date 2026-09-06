@@ -409,6 +409,10 @@ impl DurableEventSink {
                     EngineEvent::TurnStarted { turn_id, .. } => {
                         self.prompt_shapes.set_active_turn(turn_id.clone());
                     }
+                    EngineEvent::ContextUsageUpdated { meta, turn_id, .. } => {
+                        self.prompt_shapes
+                            .set_prompt_source(turn_id, meta.sequence_id);
+                    }
                     EngineEvent::TurnFinished { turn_id, .. } => {
                         self.prompt_shapes.clear_active_turn(turn_id);
                     }

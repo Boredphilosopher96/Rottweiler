@@ -68,7 +68,6 @@ use super::prompt_shapes::PromptShapeJournal;
 #[cfg(test)]
 use super::prompt_shapes::PromptShapeRecord;
 #[cfg(test)]
-use super::prompt_shapes::PromptShapeState;
 use super::prompt_shapes::cache_breakpoints_for_hint;
 #[cfg(test)]
 use super::prompt_shapes::hash_serialized;

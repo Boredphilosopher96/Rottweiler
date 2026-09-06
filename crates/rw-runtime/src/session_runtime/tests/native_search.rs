@@ -186,6 +186,7 @@ fn unsupported_alias_prompt_shape_omits_dead_websearch_schema() {
     let journal =
         Arc::new(PromptShapeJournal::open(root.path(), session_id).expect("prompt shape journal"));
     journal.set_active_turn(rw_core::TurnId("1".to_owned()));
+    journal.set_prompt_source(&rw_core::TurnId("1".into()), rw_types::SequenceId(5));
     let captured = Arc::new(Mutex::new(None));
     let recording: Arc<dyn ModelDriver> = Arc::new(PromptRecordingModel {
         inner: Arc::new(CapturingModel {

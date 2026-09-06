@@ -6,14 +6,10 @@ use rw_providers::{
 use rw_types::Turn;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
 };
-
-pub(super) const PROMPT_SHAPE_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -21,9 +17,8 @@ pub(super) struct PromptShapeProfile {
     pub(super) model_alias: String,
     pub(super) tools: Vec<ToolDefinition>,
     pub(super) cache_support: CacheBreakpointSupport,
-    #[serde(default)]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(super) cache_hint: Option<CacheHint>,
-    #[serde(default)]
     pub(super) cache_breakpoints: Vec<PromptCacheBreakpoint>,
 }
 
@@ -38,33 +33,20 @@ pub(super) struct PromptCacheBreakpoint {
 pub(super) struct PromptShapeRecord {
     pub(super) profile_id: String,
     pub(super) request_fingerprint: String,
+    pub(super) source: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PromptShapeState {
-    pub(super) version: u16,
-    #[serde(default)]
-    pub(super) profiles: BTreeMap<String, PromptShapeProfile>,
-    #[serde(default)]
-    pub(super) records: BTreeMap<String, PromptShapeRecord>,
-}
-
-impl Default for PromptShapeState {
-    fn default() -> Self {
-        Self {
-            version: PROMPT_SHAPE_VERSION,
-            profiles: BTreeMap::new(),
-            records: BTreeMap::new(),
-        }
-    }
+#[derive(Debug)]
+struct ActivePrompt {
+    turn: rw_core::TurnId,
+    source: Option<u64>,
+    recorded: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct PromptShapeJournal {
-    pub(super) path: PathBuf,
-    pub(super) state: Mutex<PromptShapeState>,
-    pub(super) active_turn: Mutex<Option<rw_core::TurnId>>,
+    store: Mutex<rw_store::prompt_shapes::PromptShapeStore>,
+    active_turn: Mutex<Option<ActivePrompt>>,
 }
 
 impl PromptShapeJournal {
@@ -72,56 +54,44 @@ impl PromptShapeJournal {
         validate_session_id(session_id)?;
         let directory = storage_root.join("sessions").join(session_id);
         ensure_real_directory(&directory, false)?;
-        let path = directory.join("prompt-shapes.json");
-        let state = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
-                    return Err(miette!("prompt-shape metadata is not a regular file"));
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    if metadata.permissions().mode() & 0o077 != 0 {
-                        return Err(miette!(
-                            "prompt-shape metadata permissions grant group or other access"
-                        ));
-                    }
-                }
-                let bytes = std::fs::read(&path).into_diagnostic()?;
-                let state: PromptShapeState = serde_json::from_slice(&bytes).into_diagnostic()?;
-                if state.version != PROMPT_SHAPE_VERSION {
-                    return Err(miette!("unsupported prompt-shape metadata version"));
-                }
-                validate_prompt_shape_state(&state)?;
-                state
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => PromptShapeState::default(),
-            Err(error) => return Err(error).into_diagnostic(),
-        };
         Ok(Self {
-            path,
-            state: Mutex::new(state),
+            store: Mutex::new(
+                rw_store::prompt_shapes::PromptShapeStore::open(
+                    &directory.join("prompt-shapes.sqlite3"),
+                )
+                .into_diagnostic()?,
+            ),
             active_turn: Mutex::new(None),
         })
     }
-
-    pub(super) fn set_active_turn(&self, turn_id: rw_core::TurnId) {
+    pub(super) fn set_active_turn(&self, turn: rw_core::TurnId) {
         *self
             .active_turn
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(turn_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActivePrompt {
+            turn,
+            source: None,
+            recorded: false,
+        });
     }
-
-    pub(super) fn clear_active_turn(&self, turn_id: &rw_core::TurnId) {
+    pub(super) fn set_prompt_source(&self, turn: &rw_core::TurnId, source: rw_types::SequenceId) {
         let mut active = self
             .active_turn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if active.as_ref() == Some(turn_id) {
+        if let Some(active) = active.as_mut().filter(|active| &active.turn == turn) {
+            active.source.get_or_insert(source.0);
+        }
+    }
+    pub(super) fn clear_active_turn(&self, turn: &rw_core::TurnId) {
+        let mut active = self
+            .active_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.as_ref().is_some_and(|active| &active.turn == turn) {
             *active = None;
         }
     }
-
     pub(super) fn record_request(
         &self,
         model_alias: &str,
@@ -131,90 +101,164 @@ impl PromptShapeJournal {
         if request.tool_choice == (ToolChoice::None {}) {
             return Ok(());
         }
-        let Some(turn_id) = self
+        let mut active = self
             .active_turn
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        else {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(active) = active.as_mut() else {
             return Ok(());
         };
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.records.contains_key(&turn_id.0) {
+        if active.recorded {
             return Ok(());
         }
-        let profile = PromptShapeProfile {
-            model_alias: model_alias.to_owned(),
-            tools: request.tools.clone(),
+        let source = active
+            .source
+            .ok_or_else(|| miette!("provider request lacks its committed context source"))?;
+        let turn = active.turn.0.parse::<u64>().into_diagnostic()?;
+        let breakpoints = cache_breakpoints_for_hint(request.cache_hint, cache_support);
+        #[derive(Serialize)]
+        struct Profile<'a> {
+            model_alias: &'a str,
+            tools: &'a [ToolDefinition],
+            cache_support: CacheBreakpointSupport,
+            cache_hint: Option<CacheHint>,
+            cache_breakpoints: &'a [PromptCacheBreakpoint],
+        }
+        let profile = Profile {
+            model_alias,
+            tools: &request.tools,
             cache_support,
             cache_hint: request.cache_hint,
-            cache_breakpoints: cache_breakpoints_for_hint(request.cache_hint, cache_support),
+            cache_breakpoints: &breakpoints,
         };
-        let profile_id = hash_serialized(&profile)?;
-        let request_fingerprint = prompt_request_fingerprint(
+        let mut bytes = BoundedWriter(Vec::new());
+        serde_json::to_writer(&mut bytes, &profile).into_diagnostic()?;
+        admit_profile(&bytes.0)?;
+        let fingerprint = prompt_request_fingerprint(
             model_alias,
             &request.turns,
             &request.tools,
             request.cache_hint,
             cache_support,
-            &profile.cache_breakpoints,
+            &breakpoints,
         )?;
-        state.profiles.entry(profile_id.clone()).or_insert(profile);
-        state.records.insert(
-            turn_id.0,
-            PromptShapeRecord {
-                profile_id,
-                request_fingerprint,
-            },
-        );
-        persist_prompt_shape_state(&self.path, &state)
+        let fingerprint = *blake3::Hash::from_hex(&fingerprint)
+            .into_diagnostic()?
+            .as_bytes();
+        self.store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(turn, source, &bytes.0, fingerprint)
+            .into_diagnostic()?;
+        active.recorded = true;
+        Ok(())
     }
-
     pub(super) fn shape_for_turn(
         &self,
         turn: u64,
     ) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(record) = state.records.get(&turn.to_string()) else {
-            return Ok(None);
-        };
-        let profile = state
-            .profiles
-            .get(&record.profile_id)
-            .ok_or_else(|| miette!("prompt-shape record references a missing profile"))?;
-        Ok(Some((profile.clone(), record.clone())))
+        self.read(Some(turn), None)
     }
-
+    pub(super) fn shape_at_source(
+        &self,
+        turn: u64,
+        source: u64,
+    ) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
+        self.read(Some(turn), Some(source))
+    }
     pub(super) fn latest_shape(&self) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
-        let state = self
-            .state
+        self.read(None, None)
+    }
+    fn read(
+        &self,
+        turn: Option<u64>,
+        source: Option<u64>,
+    ) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
+        let stored = self
+            .store
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some((_, record)) = state
-            .records
-            .iter()
-            .filter_map(|(turn, record)| turn.parse::<u64>().ok().map(|turn| (turn, record)))
-            .max_by_key(|(turn, _)| *turn)
-        else {
-            return Ok(None);
-        };
-        let profile = state
-            .profiles
-            .get(&record.profile_id)
-            .ok_or_else(|| miette!("prompt-shape record references a missing profile"))?;
-        Ok(Some((profile.clone(), record.clone())))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .read(turn, source)
+            .into_diagnostic()?;
+        stored
+            .map(|stored| {
+                admit_profile(&stored.profile)?;
+                let profile: PromptShapeProfile =
+                    serde_json::from_slice(&stored.profile).into_diagnostic()?;
+                if profile
+                    .cache_hint
+                    .is_some_and(|hint| hint.tools_in_prefix == profile.tools.is_empty())
+                    || profile.cache_breakpoints
+                        != cache_breakpoints_for_hint(profile.cache_hint, profile.cache_support)
+                {
+                    return Err(miette!("prompt shape has inconsistent cache metadata"));
+                }
+                let record = PromptShapeRecord {
+                    profile_id: blake3::hash(&stored.profile).to_hex().to_string(),
+                    request_fingerprint: blake3::Hash::from_bytes(stored.fingerprint)
+                        .to_hex()
+                        .to_string(),
+                    source: stored.source,
+                };
+                Ok((profile, record))
+            })
+            .transpose()
+    }
+}
+impl rw_types::allocation::DecodeAllocation for PromptShapeProfile {
+    fn decode_node_bytes() -> Option<usize> {
+        Some(std::mem::size_of::<Self>().max(
+            <serde_json::Value as rw_types::allocation::DecodeAllocation>::decode_node_bytes()?,
+        ))
+    }
+}
+fn admit_profile(bytes: &[u8]) -> Result<()> {
+    let shape = rw_types::json_structure::preflight_json(
+        bytes,
+        rw_types::json_structure::JsonStructureLimits {
+            max_encoded_bytes: rw_store::prompt_shapes::MAX_PROFILE_BYTES,
+            max_nodes: 32_768,
+            max_string_bytes: rw_store::prompt_shapes::MAX_PROFILE_BYTES,
+            max_depth: 32,
+        },
+    )
+    .into_diagnostic()?;
+    if shape
+        .decode_bytes::<PromptShapeProfile>()
+        .is_none_or(|size| size > 16 * 1024 * 1024)
+    {
+        return Err(miette!("prompt shape exceeds decoded allocation admission"));
+    }
+    Ok(())
+}
+struct BoundedWriter(Vec<u8>);
+impl Write for BoundedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.0.len().saturating_add(bytes.len()) > rw_store::prompt_shapes::MAX_PROFILE_BYTES {
+            return Err(io::Error::other("prompt shape exceeds encoded admission"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
 pub(super) fn hash_serialized(value: &impl Serialize) -> Result<String> {
-    let bytes = serde_json::to_vec(value).into_diagnostic()?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    struct HashWriter(blake3::Hasher);
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(blake3::Hasher::new());
+    serde_json::to_writer(&mut writer, value).into_diagnostic()?;
+    Ok(writer.0.finalize().to_hex().to_string())
 }
 
 pub(super) fn cache_breakpoints_for_hint(
@@ -244,68 +288,36 @@ pub(super) fn prompt_dump_cache_breakpoints(
         .collect()
 }
 
-pub(super) fn is_blake3_hex(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-pub(super) fn validate_prompt_shape_state(state: &PromptShapeState) -> Result<()> {
-    for (profile_id, profile) in &state.profiles {
-        if !is_blake3_hex(profile_id) || hash_serialized(profile)? != *profile_id {
-            return Err(miette!(
-                "prompt-shape profile id does not match its serialized content"
-            ));
-        }
-        if profile
-            .cache_hint
-            .is_some_and(|hint| hint.tools_in_prefix == profile.tools.is_empty())
-            || profile.cache_breakpoints
-                != cache_breakpoints_for_hint(profile.cache_hint, profile.cache_support)
-        {
-            return Err(miette!(
-                "prompt-shape profile contains inconsistent cache metadata"
-            ));
-        }
-    }
-    for (turn, record) in &state.records {
-        if turn.parse::<u64>().is_err() {
-            return Err(miette!("prompt-shape record has an invalid turn id"));
-        }
-        if !is_blake3_hex(&record.request_fingerprint) {
-            return Err(miette!(
-                "prompt-shape record has an invalid request fingerprint"
-            ));
-        }
-        if !state.profiles.contains_key(&record.profile_id) {
-            return Err(miette!("prompt-shape record references a missing profile"));
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn prompt_request_fingerprint(
     model_alias: &str,
     turns: &[Turn],
-    tools: &[ToolDefinition],
+    tools: &(impl Serialize + ?Sized),
     cache_hint: Option<CacheHint>,
     cache_support: CacheBreakpointSupport,
     cache_breakpoints: &[PromptCacheBreakpoint],
 ) -> Result<String> {
-    hash_serialized(&serde_json::json!({
-        "model_alias": model_alias,
-        "turns": turns,
-        "tools": tools,
-        "cache_hint": cache_hint,
-        "cache_support": cache_support,
-        "cache_breakpoints": cache_breakpoints,
-    }))
+    #[derive(Serialize)]
+    struct RequestShape<'a, T: ?Sized> {
+        model_alias: &'a str,
+        turns: &'a [Turn],
+        tools: &'a T,
+        cache_hint: Option<CacheHint>,
+        cache_support: CacheBreakpointSupport,
+        cache_breakpoints: &'a [PromptCacheBreakpoint],
+    }
+    hash_serialized(&RequestShape {
+        model_alias,
+        turns,
+        tools,
+        cache_hint,
+        cache_support,
+        cache_breakpoints,
+    })
 }
 
 pub(super) fn validate_historical_prompt_shape(
     dump: &rw_core::PromptDump,
-    tools: &[ToolDefinition],
+    tools: &(impl Serialize + ?Sized),
     profile: &PromptShapeProfile,
     record: &PromptShapeRecord,
 ) -> Result<()> {
@@ -328,34 +340,4 @@ pub(super) fn validate_historical_prompt_shape(
         ));
     }
     Ok(())
-}
-
-pub(super) fn persist_prompt_shape_state(path: &Path, state: &PromptShapeState) -> Result<()> {
-    let bytes = serde_json::to_vec(state).into_diagnostic()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| miette!("prompt-shape path has no parent"))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = parent.join(format!(".prompt-shapes-{}-{nonce}.tmp", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary).into_diagnostic()?;
-    let result = (|| -> Result<()> {
-        file.write_all(&bytes).into_diagnostic()?;
-        file.flush().into_diagnostic()?;
-        file.sync_all().into_diagnostic()?;
-        std::fs::rename(&temporary, path).into_diagnostic()
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
 }
