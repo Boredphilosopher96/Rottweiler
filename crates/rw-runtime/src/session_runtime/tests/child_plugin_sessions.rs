@@ -13,8 +13,8 @@ use rw_tools::{
     ReplayCommandExecutor,
 };
 use rw_types::{
-    SessionId, ThinkingLevel,
-    config::{ToolchainConfig, WebSearchConfig},
+    SessionId,
+    config::{ThinkingLevel, ToolchainConfig, WebSearchConfig},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
