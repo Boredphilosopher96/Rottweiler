@@ -1,5 +1,5 @@
 #![allow(clippy::expect_used)]
-use super::{PluginChild, SupervisedPluginProcess};
+use super::{PluginChild, SupervisedPluginProcess, process_fixture_lease};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -49,6 +49,7 @@ async fn kill_tree_signals_the_actual_child_after_it_changes_groups() {
         .stderr(std::process::Stdio::null());
     let child = command.spawn().expect("child");
     let owner = PluginChild {
+        admission: Mutex::new(Some(process_fixture_lease())),
         _helper: rw_tools::SandboxHelper::from_running(
             &std::env::current_exe().expect("executable"),
         )

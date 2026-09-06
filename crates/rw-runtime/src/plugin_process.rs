@@ -66,9 +66,13 @@ impl PluginLauncher for SandboxedPluginLauncher {
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+        let admission =
+            rw_resources::acquire(rw_resources::ResourceClass::Process, std::future::pending())
+                .await
+                .map_err(|failure| PluginLaunchError::Rejected(error(&failure.to_string())))?;
         let (child, proxy) = spawn_sandboxed_plugin(config, profile, &self.scratch, &self.helper)
             .map_err(PluginLaunchError::Rejected)?;
-        attach_supervisor(child, proxy, config, self.helper.clone()).await
+        attach_supervisor(child, proxy, config, self.helper.clone(), admission).await
     }
 }
 
@@ -201,6 +205,7 @@ async fn attach_supervisor(
     proxy: Option<SupervisedEgressProxy>,
     config: &PluginProcessConfig,
     helper: rw_tools::SandboxHelper,
+    admission: rw_resources::ResourceLease,
 ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
     let process_group = child.id();
     let stdin = child.stdin.take();
@@ -209,6 +214,7 @@ async fn attach_supervisor(
     let denials = proxy.as_ref().map(SupervisedEgressProxy::denials);
     let process = Arc::new(PluginChild {
         _helper: helper,
+        admission: Mutex::new(Some(admission)),
         child: Mutex::new(child),
         process_group,
         violation: Arc::new(Mutex::new(None)),
@@ -291,6 +297,7 @@ impl Drop for PendingPluginHandoff {
 }
 
 struct PluginChild {
+    admission: Mutex<Option<rw_resources::ResourceLease>>,
     _helper: rw_tools::SandboxHelper,
     child: Mutex<Child>,
     process_group: Option<u32>,
@@ -300,6 +307,15 @@ struct PluginChild {
 
 impl Drop for PluginChild {
     fn drop(&mut self) {
+        // A destructor cannot establish asynchronous process-group/proxy proof.
+        if let Some(lease) = self
+            .admission
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            std::mem::forget(lease);
+        }
         let _ = self.kill_original_group();
         let child = self
             .child
@@ -322,7 +338,12 @@ impl SupervisedPluginProcess for PluginChild {
             self.proxy.settle()
         );
         process?;
-        proxy
+        proxy?;
+        self.admission
+            .lock()
+            .map_err(|_| error("plugin process admission owner poisoned"))?
+            .take();
+        Ok(())
     }
 
     fn mark_capability_violation(&self, violation: &CapabilityViolation) {
@@ -819,6 +840,7 @@ mod tests {
                     &std::env::current_exe().expect("executable"),
                 )
                 .expect("helper"),
+                process_fixture_lease(),
             ),
         )
         .await
@@ -850,4 +872,10 @@ pub(crate) fn helper_executable() -> std::io::Result<rw_tools::SandboxHelper> {
         rw_tools::SandboxHelper::from_running(&std::env::current_exe()?)
             .map_err(|error| std::io::Error::other(error.to_string()))
     }
+}
+
+#[cfg(all(test, unix))]
+fn process_fixture_lease() -> rw_resources::ResourceLease {
+    rw_resources::try_acquire(rw_resources::ResourceClass::Process)
+        .unwrap_or_else(|failure| panic!("fixture process admission: {failure}"))
 }

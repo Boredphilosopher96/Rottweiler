@@ -164,7 +164,11 @@ async fn admitted_owner(pool: &Arc<WasmWorkerPool>, generation: &Arc<Generation>
             .await
             .expect("execution"),
     );
-    owner.worker = Some(Worker::start(&generation.helper).expect("child"));
+    owner.worker = Some(
+        Worker::start(&generation.helper, std::future::pending())
+            .await
+            .expect("child"),
+    );
     owner
 }
 
@@ -284,4 +288,38 @@ async fn retirement_deadline_keeps_native_ownership_and_capacity_charged() {
     assert_eq!(pool.quarantined.lock().expect("retained child").len(), 1);
     assert!(pool.shutdown().await.is_err());
     assert!(pool.quarantined.lock().expect("actual cleanup").is_empty());
+}
+
+#[tokio::test]
+async fn shared_process_credit_remains_with_the_actual_wasm_worker() {
+    const PROBE: &str = "RW_WASM_SHARED_PROCESS_PROBE";
+    if std::env::var_os(PROBE).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["wasm_process::pool::tests::shared_process_credit_remains_with_the_actual_wasm_worker", "--exact"])
+            .env(PROBE, "1").output().expect("isolated resource fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    let mut held = Vec::new();
+    while let Ok(lease) = rw_resources::try_acquire(rw_resources::ResourceClass::Process) {
+        held.push(lease);
+    }
+    assert!(!held.is_empty());
+    let helper = approve_helper(std::path::Path::new("/bin/sh"));
+    assert!(
+        Worker::start(&helper, async {}).await.is_err(),
+        "cancelled queue cannot launch"
+    );
+    drop(held.pop());
+    let mut worker = Worker::start(&helper, std::future::pending())
+        .await
+        .expect("physical worker");
+    assert!(rw_resources::try_acquire(rw_resources::ResourceClass::Process).is_err());
+    worker.retire().await.expect("actual process reaped");
+    drop(worker);
+    assert!(rw_resources::try_acquire(rw_resources::ResourceClass::Process).is_ok());
 }

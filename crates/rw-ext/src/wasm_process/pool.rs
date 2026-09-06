@@ -179,6 +179,25 @@ impl WasmWorkerPool {
         self.execution.close();
     }
 
+    async fn start_worker(
+        &self,
+        helper: &ApprovedExecutable,
+        deadline: tokio::time::Instant,
+        cancellation: &CancellationToken,
+    ) -> Result<Worker, WasmHookHostError> {
+        let worker = Worker::start(helper, async {
+            tokio::select! {
+                biased;
+                () = self.stopping.cancelled() => {},
+                () = cancellation.cancelled() => {},
+                () = tokio::time::sleep_until(deadline) => {},
+            }
+        })
+        .await?;
+        self.starts.fetch_add(1, Ordering::Relaxed);
+        Ok(worker)
+    }
+
     pub(super) async fn request(
         self: &Arc<Self>,
         generation: Arc<Generation>,
@@ -273,8 +292,8 @@ impl WasmWorkerPool {
         owner.worker = Some(if let Some(worker) = cached {
             worker
         } else {
-            self.starts.fetch_add(1, Ordering::Relaxed);
-            Worker::start(&generation.helper)?
+            self.start_worker(&generation.helper, deadline, cancellation)
+                .await?
         });
         let exchange = async {
             if owner
@@ -283,8 +302,10 @@ impl WasmWorkerPool {
                 .is_some_and(|worker| !worker.executable.matches(&generation.helper))
             {
                 owner.retire_worker().await?;
-                self.starts.fetch_add(1, Ordering::Relaxed);
-                owner.worker = Some(Worker::start(&generation.helper)?);
+                owner.worker = Some(
+                    self.start_worker(&generation.helper, deadline, cancellation)
+                        .await?,
+                );
             }
             let worker = owner.worker.as_mut().ok_or_else(unavailable)?;
             if worker.matches(&generation) {
@@ -371,11 +392,20 @@ impl Drop for CancelOnDrop {
 
 struct Worker {
     executable: ExecutableLaunch,
+    _process: rw_resources::ResourceLease,
     child: tokio::process::Child,
     digest: Option<blake3::Hash>,
 }
 impl Worker {
-    fn start(helper: &ApprovedExecutable) -> Result<Self, WasmHookHostError> {
+    async fn start(
+        helper: &ApprovedExecutable,
+        cancelled: impl std::future::Future<Output = ()>,
+    ) -> Result<Self, WasmHookHostError> {
+        let process = rw_resources::acquire(rw_resources::ResourceClass::Process, cancelled)
+            .await
+            .map_err(|error| WasmHookHostError::Execution {
+                message: error.to_string(),
+            })?;
         let executable = helper
             .launch()
             .map_err(|error| WasmHookHostError::Execution {
@@ -391,6 +421,7 @@ impl Worker {
             .map_err(|error| io_error(&error))?;
         Ok(Self {
             executable,
+            _process: process,
             child,
             digest: None,
         })

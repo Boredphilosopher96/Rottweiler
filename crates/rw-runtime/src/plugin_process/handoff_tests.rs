@@ -23,7 +23,13 @@ async fn incomplete_stdio_is_rejected_only_after_actual_child_cleanup() {
     let (child, config, pid) = incomplete_child();
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        attach_supervisor(child, None, &config, running_helper()),
+        attach_supervisor(
+            child,
+            None,
+            &config,
+            running_helper(),
+            process_fixture_lease(),
+        ),
     )
     .await
     .expect("bounded handoff cleanup");
@@ -47,7 +53,13 @@ async fn lost_wait_result_is_typed_as_unsettled_launch() {
         .expect("reaped");
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        attach_supervisor(child, None, &config, running_helper()),
+        attach_supervisor(
+            child,
+            None,
+            &config,
+            running_helper(),
+            process_fixture_lease(),
+        ),
     )
     .await
     .expect("failed proof returns");
@@ -72,9 +84,15 @@ async fn successful_process_settlement_stops_proxy_while_process_owner_stays_ali
     let proxy =
         SupervisedEgressProxy::start(EgressPolicy::new(std::iter::empty::<&str>())).expect("proxy");
     let lifecycle = proxy.lifecycle();
-    let launched = attach_supervisor(child, Some(proxy), &config, running_helper())
-        .await
-        .expect("handoff");
+    let launched = attach_supervisor(
+        child,
+        Some(proxy),
+        &config,
+        running_helper(),
+        process_fixture_lease(),
+    )
+    .await
+    .expect("handoff");
     assert!(!lifecycle.is_stopped());
     launched.process.kill_tree().expect("kill owned process");
     tokio::time::timeout(Duration::from_secs(2), launched.process.settle_effects())
