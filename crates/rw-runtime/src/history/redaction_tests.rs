@@ -58,16 +58,15 @@ fn export_redaction_preserves_timestamps_and_slash_command_help() {
 
 #[test]
 fn export_json_redacts_opaque_reasoning_signatures_by_field_name() {
-    let redacted = redact_export_value(
-        serde_json::json!({
-            "type": "thinking_delta",
-            "text": "summary",
-            "signature": "provider-opaque-ciphertext",
-        }),
-        &FixtureRedactor::default(),
-        4096,
-    )
-    .expect("bounded redaction");
+    let value = serde_json::json!({
+        "type": "thinking_delta",
+        "text": "summary",
+        "signature": "provider-opaque-ciphertext",
+    });
+    let limit = value.prepared_bytes().expect("complete value admission");
+    let redacted =
+        redact_export_value(value, &FixtureRedactor::default(), limit).expect("bounded redaction");
+    assert!(redacted.prepared_bytes().expect("retained value") <= limit);
     assert_eq!(redacted["text"], "summary");
     assert_eq!(redacted["signature"], "[REDACTED]");
 }
