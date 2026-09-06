@@ -188,5 +188,5 @@ fn readiness(
         Err(nix::errno::Errno::EINTR) => return Ok([PollFlags::empty(); 3]),
         Err(error) => return Err(io::Error::other(error)),
     }
-    Ok(pollers.map(|poller| poller.revents().unwrap_or_default()))
+    Ok(pollers.map(|poller| poller.revents().unwrap_or_else(PollFlags::empty)))
 }
