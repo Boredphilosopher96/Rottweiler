@@ -118,15 +118,20 @@ mod tests {
         for (parent, child) in [("parent", "child"), ("child", "grandchild")] {
             let mut log = SessionEventLog::open(root.path(), parent).expect("journal");
             let id = hop(parent, child);
-            log.append(EngineEvent::SubagentSpawned {
+            log.append(EngineEvent::TurnStarted {
                 meta: meta(parent, 0),
+                turn_id: rw_types::TurnId("1".into()),
+            })
+            .expect("turn");
+            log.append(EngineEvent::SubagentSpawned {
+                meta: meta(parent, 1),
                 subagent_id: id.subagent_id.clone(),
                 child_session_id: id.session_id.clone(),
                 task: "work".into(),
             })
             .expect("spawn");
             log.append(EngineEvent::SubagentFinished {
-                meta: meta(parent, 1),
+                meta: meta(parent, 2),
                 subagent_id: id.subagent_id.clone(),
                 result: rw_core::interrupted_subagent_recovery_result(&rw_core::SubagentHandle {
                     subagent_id: id.subagent_id,
@@ -158,7 +163,7 @@ mod tests {
         assert!(
             ancestry
                 .iter()
-                .all(|hop| hop.source_sequence == SequenceId(0))
+                .all(|hop| hop.source_sequence == SequenceId(1))
         );
         let mut wrong = target;
         wrong.ancestry[0].session_id = SessionId("foreign".into());
