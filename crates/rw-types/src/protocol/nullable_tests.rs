@@ -161,7 +161,7 @@ const COST_LIMITS: &[&str] = &[
 #[test]
 fn every_cost_limit_requires_an_explicit_nullable_decimal() -> TestResult {
     let mut value = json!({"utc_day":"2026-09-06","subscription_quota":null,
-        "session_usage":Usage::default(),"cache_hit_basis_points":0,"hard_cap_reached":false,
+        "session_usage":Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 },"cache_hit_basis_points":0,"hard_cap_reached":false,
         "session_monetary_accounting_complete":true,"daily_monetary_accounting_complete":true});
     for field in [
         "session_cost_micros_usd",
