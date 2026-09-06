@@ -55,8 +55,8 @@ pub use intelligence::{
 };
 pub use interaction::{AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool};
 pub use protocol::{
-    ProtocolChildLauncher, ProtocolChildRequest, ProtocolProcessHandle, ProtocolSandboxPolicy,
-    SandboxedProtocolLauncher, SpawnedProtocolChild,
+    ApprovedProtocolCommand, ProtocolChildLauncher, ProtocolChildRequest, ProtocolProcessHandle,
+    ProtocolSandboxPolicy, SandboxedProtocolLauncher, SpawnedProtocolChild,
 };
 pub use registry::{
     ApprovalPreview, CancellationToken, CapabilityManifest, McpToolPolicy, MutationScope,
@@ -99,8 +99,8 @@ pub use worktree::{
 };
 
 pub use rw_sandbox::{
-    ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest, ExecutableLaunch,
-    SandboxHelper,
+    ApprovedCode, ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest,
+    ExecutableLaunch, SandboxHelper,
 };
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+mod approved_command;
 use super::*;
 
 pub(super) type McpCredentialResolver = Arc<dyn Fn(&str) -> Result<String> + Send + Sync + 'static>;
@@ -300,44 +301,6 @@ impl McpApprovalStore {
     }
 }
 
-#[async_trait]
-impl McpConnectionApprovalPolicy for McpApprovalStore {
-    async fn approve(&self, config: &McpServerConfig) -> std::result::Result<(), McpError> {
-        let configs = self
-            .configs
-            .read()
-            .map_err(|_| McpError::Policy("MCP approval lock was poisoned".to_owned()))?;
-        let discovered = configs.get(&config.id).ok_or_else(|| {
-            McpError::Policy("MCP server has no trusted configuration provenance".to_owned())
-        })?;
-        for identity in &discovered.attested_files {
-            identity.validate().map_err(|_| {
-                McpError::Policy(
-                    "approved MCP command content identity changed before launch".to_owned(),
-                )
-            })?;
-        }
-        let expected_map = self
-            .expected
-            .read()
-            .map_err(|_| McpError::Policy("MCP approval lock was poisoned".to_owned()))?;
-        let expected = expected_map.get(&config.id).ok_or_else(|| {
-            McpError::Policy("MCP server has no trusted configuration provenance".to_owned())
-        })?;
-        let approved = self
-            .approved
-            .lock()
-            .map_err(|_| McpError::Policy("MCP approval ledger is unavailable".to_owned()))?;
-        if approved.get(config.id.as_str()) == Some(expected) {
-            Ok(())
-        } else {
-            Err(McpError::Policy(
-                "MCP server configuration requires explicit approval".to_owned(),
-            ))
-        }
-    }
-}
-
 /// Exact transport dispatcher. Neither transport may fall back to the other's
 /// authority boundary.
 pub(crate) struct DispatchingMcpConnector {
@@ -371,13 +334,27 @@ impl McpConnector for LazySandboxedStdioConnector {
             .capture_owned()
             .await
             .map_err(McpError::Policy)?;
+        let cwd = match &config.transport {
+            McpTransportConfig::Stdio {
+                working_directory, ..
+            } => working_directory
+                .as_deref()
+                .or_else(|| self.workspace_roots.first().map(PathBuf::as_path)),
+            McpTransportConfig::StreamableHttp { .. } => None,
+        }
+        .ok_or_else(|| McpError::Policy("MCP stdio working directory is required".into()))?;
+        let command = self
+            .approvals
+            .capture_stdio(config, &self.workspace_roots, cwd)
+            .await?;
         let launcher = SandboxedProtocolLauncher::new(
             &self.workspace_roots,
             &self.scratch,
             &helper,
             environment,
         )
-        .map_err(|error| McpError::Policy(error.to_string()))?;
+        .map_err(|error| McpError::Policy(error.to_string()))?
+        .with_approved_command(command);
         rw_mcp::SandboxedStdioConnector::new(launcher, self.approvals.clone())
             .connect(config)
             .await

@@ -194,8 +194,13 @@ impl LspProcessSpawner for SandboxedLspSpawner {
         command.process_group(0);
         let child = command.spawn()?;
         release_lsp_launch_pin(&mut plan);
-        let mut owner =
-            ProcessOwner::new(child, self.helper_executable.clone(), process_credit, None);
+        let mut owner = ProcessOwner::new(
+            child,
+            self.helper_executable.clone(),
+            process_credit,
+            None,
+            crate::protocol::ProcessExecutable::TrustedBinary,
+        );
         let stdin = owner.child()?.stdin.take().ok_or(LspError::Unavailable)?;
         let stdout = owner.child()?.stdout.take().ok_or(LspError::Unavailable)?;
         Ok(SpawnedLspProcess {

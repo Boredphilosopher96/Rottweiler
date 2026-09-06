@@ -6,7 +6,8 @@
 
 mod executable;
 pub use executable::{
-    ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest, ExecutableLaunch,
+    ApprovedCode, ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest,
+    ExecutableLaunch,
 };
 mod helper;
 pub use helper::SandboxHelper;

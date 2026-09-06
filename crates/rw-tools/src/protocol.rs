@@ -1,3 +1,7 @@
+mod approved;
+pub use approved::ApprovedProtocolCommand;
+use approved::PreparedProtocol;
+pub(crate) use approved::ProcessExecutable;
 mod ownership;
 pub(crate) use ownership::ProcessOwner;
 
@@ -7,6 +11,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -70,12 +75,20 @@ pub trait ProtocolChildLauncher: Send + Sync {
 /// Executables and cwd values are canonicalized and checked against the
 /// launcher authority roots. The child receives only the fixed HOME/TMPDIR
 /// values and explicitly approved environment keys.
+#[derive(Clone)]
 pub struct SandboxedProtocolLauncher {
+    authority: ProtocolAuthority,
     workspace_roots: Vec<PathBuf>,
     scratch: PathBuf,
     helper_executable: rw_sandbox::SandboxHelper,
     allowed_environment: BTreeSet<String>,
     sandbox_unavailable: Option<String>,
+}
+
+#[derive(Clone)]
+enum ProtocolAuthority {
+    TrustedBinary,
+    Approved(Arc<ApprovedProtocolCommand>),
 }
 
 impl SandboxedProtocolLauncher {
@@ -105,6 +118,7 @@ impl SandboxedProtocolLauncher {
         let helper_executable = helper_executable.clone();
         let capability = rw_sandbox::probe();
         Ok(Self {
+            authority: ProtocolAuthority::TrustedBinary,
             workspace_roots,
             scratch,
             helper_executable,
@@ -115,6 +129,13 @@ impl SandboxedProtocolLauncher {
                 })
             }),
         })
+    }
+
+    /// Binds exact host-approved bytes; every spawn must match this command.
+    #[must_use]
+    pub fn with_approved_command(mut self, command: ApprovedProtocolCommand) -> Self {
+        self.authority = ProtocolAuthority::Approved(Arc::new(command));
+        self
     }
 
     fn cwd(&self, requested: Option<&Path>) -> io::Result<PathBuf> {
@@ -144,6 +165,22 @@ impl ProtocolChildLauncher for SandboxedProtocolLauncher {
     async fn spawn(&self, request: &ProtocolChildRequest) -> io::Result<SpawnedProtocolChild> {
         let process_credit = rw_resources::try_acquire(rw_resources::ResourceClass::Process)
             .map_err(io::Error::other)?;
+        let launcher = self.clone();
+        let request = request.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            launcher.spawn_owned(&request, process_credit)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+}
+
+impl SandboxedProtocolLauncher {
+    fn spawn_owned(
+        &self,
+        request: &ProtocolChildRequest,
+        process_credit: rw_resources::ResourceLease,
+    ) -> io::Result<SpawnedProtocolChild> {
         validate_request(request, &self.allowed_environment)?;
         if let Some(reason) = &self.sandbox_unavailable {
             return Err(io::Error::new(
@@ -151,19 +188,36 @@ impl ProtocolChildLauncher for SandboxedProtocolLauncher {
                 format!("sandboxed protocol execution is unavailable: {reason}"),
             ));
         }
-        let executable = trusted_executable(&request.executable, &self.workspace_roots)?;
-        let identity = executable_identity(&executable)?;
+        let prepared = match &self.authority {
+            ProtocolAuthority::TrustedBinary => {
+                let program = trusted_executable(&request.executable, &self.workspace_roots)?;
+                PreparedProtocol {
+                    read_roots: vec![program.clone()],
+                    program,
+                    args: request.args.iter().map(OsString::from).collect(),
+                    authority: ProcessExecutable::TrustedBinary,
+                }
+            }
+            ProtocolAuthority::Approved(command) => command.prepare(request)?,
+        };
+        let original_identity = match self.authority {
+            ProtocolAuthority::TrustedBinary => Some(executable_identity(&prepared.program)?),
+            ProtocolAuthority::Approved(_) => None,
+        };
         let cwd = self.cwd(request.working_directory.as_deref())?;
-        let (policy, proxy) = self.sandbox_policy(request, &executable)?;
-        let args = request.args.iter().map(OsString::from).collect::<Vec<_>>();
-        let mut plan = shell_launch_plan(&policy, &self.helper_executable, &executable, &args)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        // Close the canonicalization-to-spawn replacement window as far as the
-        // platform API permits. Linux additionally pins the sandbox helper in LaunchPlan.
-        if executable_identity(&executable)? != identity {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "protocol executable changed during launch",
+        let (policy, proxy) = self.sandbox_policy(request, &prepared.read_roots)?;
+        let mut plan = shell_launch_plan(
+            &policy,
+            &self.helper_executable,
+            &prepared.program,
+            &prepared.args,
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        if let Some(expected) = original_identity
+            && executable_identity(&prepared.program)? != expected
+        {
+            return Err(io::Error::other(
+                "protocol trusted executable changed during launch",
             ));
         }
         let mut command = tokio::process::Command::new(&plan.program);
@@ -191,8 +245,13 @@ impl ProtocolChildLauncher for SandboxedProtocolLauncher {
         command.process_group(0);
         let child = command.spawn()?;
         release_helper_pin(&mut plan);
-        let mut owner =
-            ProcessOwner::new(child, self.helper_executable.clone(), process_credit, proxy);
+        let mut owner = ProcessOwner::new(
+            child,
+            self.helper_executable.clone(),
+            process_credit,
+            proxy,
+            prepared.authority,
+        );
         let stdin = owner
             .child()?
             .stdin
@@ -215,11 +274,24 @@ impl SandboxedProtocolLauncher {
     fn sandbox_policy(
         &self,
         request: &ProtocolChildRequest,
-        executable: &Path,
+        intrinsic: &[PathBuf],
     ) -> io::Result<(SandboxPolicy, Option<SupervisedEgressProxy>)> {
         let mut write_roots = vec![self.scratch.clone()];
         write_roots.extend(self.approved_roots(&request.sandbox.write_roots)?);
-        let mut read_roots = intrinsic_protocol_read_roots(executable, &self.scratch);
+        if matches!(self.authority, ProtocolAuthority::Approved(_)) {
+            for pinned in intrinsic {
+                if write_roots
+                    .iter()
+                    .any(|write| pinned.starts_with(write) || write.starts_with(pinned))
+                {
+                    return Err(io::Error::other(
+                        "MCP write authority overlaps pinned command bytes",
+                    ));
+                }
+            }
+        }
+        let mut read_roots = intrinsic_protocol_read_roots(&self.scratch);
+        read_roots.extend(intrinsic.iter().cloned());
         read_roots.extend(self.approved_roots(&request.sandbox.read_roots)?);
         read_roots.extend(write_roots.iter().cloned());
         read_roots.sort();
@@ -274,8 +346,8 @@ impl SandboxedProtocolLauncher {
     }
 }
 
-fn intrinsic_protocol_read_roots(executable: &Path, scratch: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![executable.to_path_buf(), scratch.to_path_buf()];
+fn intrinsic_protocol_read_roots(scratch: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![scratch.to_path_buf()];
     for candidate in [
         "/System",
         "/Library/Apple",
@@ -516,7 +588,10 @@ mod tests {
         let executable = PathBuf::from("/usr/bin/true");
 
         let (default_policy, proxy) = launcher
-            .sandbox_policy(&request(ProtocolSandboxPolicy::default()), &executable)
+            .sandbox_policy(
+                &request(ProtocolSandboxPolicy::default()),
+                std::slice::from_ref(&executable),
+            )
             .expect("default policy");
         assert!(matches!(default_policy.network(), NetworkPolicy::Deny));
         assert!(proxy.is_none());
@@ -532,7 +607,7 @@ mod tests {
             allowed_domains: vec!["api.example.com".to_owned()],
         });
         let (policy, proxy) = launcher
-            .sandbox_policy(&scoped, &executable)
+            .sandbox_policy(&scoped, std::slice::from_ref(&executable))
             .expect("scoped policy");
         assert!(matches!(
             policy.network(),
@@ -547,7 +622,7 @@ mod tests {
         });
         assert!(
             launcher
-                .sandbox_policy(&outside_request, &executable)
+                .sandbox_policy(&outside_request, std::slice::from_ref(&executable))
                 .is_err()
         );
     }

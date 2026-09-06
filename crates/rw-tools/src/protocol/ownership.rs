@@ -11,6 +11,7 @@ struct Physical {
     signal_result: Option<Result<(), String>>,
     proxy_failed: bool,
     _helper: SandboxHelper,
+    _executable: super::ProcessExecutable,
     _credit: ResourceLease,
     proxy: Option<SupervisedEgressProxy>,
     proxy_job: Option<tokio::task::JoinHandle<()>>,
@@ -22,6 +23,7 @@ impl ProcessOwner {
         helper: SandboxHelper,
         credit: ResourceLease,
         proxy: Option<SupervisedEgressProxy>,
+        executable: super::ProcessExecutable,
     ) -> Self {
         let group = child.id();
         Self(Some(Physical {
@@ -30,6 +32,7 @@ impl ProcessOwner {
             signal_result: None,
             proxy_failed: false,
             _helper: helper,
+            _executable: executable,
             _credit: credit,
             proxy_proof: proxy.as_ref().map(SupervisedEgressProxy::lifecycle),
             proxy,

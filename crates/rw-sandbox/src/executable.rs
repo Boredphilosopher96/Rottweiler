@@ -7,7 +7,9 @@ use std::{
     sync::Arc,
 };
 
+mod code;
 mod identity;
+pub use code::ApprovedCode;
 
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 

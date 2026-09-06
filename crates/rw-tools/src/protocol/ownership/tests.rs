@@ -17,7 +17,16 @@ fn physical(proxy: Option<SupervisedEgressProxy>) -> (ProcessOwner, u32) {
         .process_group(0);
     let child = command.spawn().expect("physical child");
     let pid = child.id().expect("pid");
-    (ProcessOwner::new(child, helper, credit, proxy), pid)
+    (
+        ProcessOwner::new(
+            child,
+            helper,
+            credit,
+            proxy,
+            crate::protocol::ProcessExecutable::TrustedBinary,
+        ),
+        pid,
+    )
 }
 fn pid(value: u32) -> rustix::process::Pid {
     rustix::process::Pid::from_raw(i32::try_from(value).expect("pid range")).expect("pid")

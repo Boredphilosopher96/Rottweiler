@@ -98,6 +98,22 @@ impl ContentAttestation {
         })
     }
 
+    pub(crate) fn artifact_identity(&self) -> rw_tools::ExecutableArtifactIdentity {
+        rw_tools::ExecutableArtifactIdentity {
+            executable: self.path.clone(),
+            bytes: self.length,
+            sha256: self.content_sha256.clone(),
+            #[cfg(unix)]
+            device: self.device,
+            #[cfg(unix)]
+            inode: self.inode,
+            #[cfg(not(unix))]
+            device: 0,
+            #[cfg(not(unix))]
+            inode: 0,
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if &Self::capture(&self.path, self.length)? != self {
             return Err(miette!("approved command content identity changed"));
@@ -688,7 +704,7 @@ fn parse_mcp_server(
     let endpoint = entry.endpoint.take();
     let enabled = entry.enabled;
     let defer_tools = entry.defer_tools;
-    let transport = match (argv, endpoint) {
+    let mut transport = match (argv, endpoint) {
         (Some(argv), None) => parse_stdio_transport(&id, base, argv, entry)?,
         (None, Some(endpoint)) => parse_http_transport(&id, endpoint, entry, &credentials)?,
         _ => {
@@ -703,6 +719,27 @@ fn parse_mcp_server(
         }
         DiscoveredMcpTransport::Http { .. } => Vec::new(),
     };
+    if let DiscoveredMcpTransport::Stdio { argv, cwd, .. } = &mut transport {
+        let base = cwd.as_deref().unwrap_or(base);
+        for argument in argv.iter_mut().skip(1) {
+            let supplied = Path::new(argument);
+            let path = if supplied.is_absolute() {
+                supplied.to_path_buf()
+            } else {
+                base.join(supplied)
+            };
+            if let Ok(canonical) = path.canonicalize()
+                && attested_files
+                    .iter()
+                    .any(|identity| identity.path == canonical)
+            {
+                *argument = canonical
+                    .to_str()
+                    .ok_or_else(|| miette!("MCP command path is not UTF-8"))?
+                    .to_owned();
+            }
+        }
+    }
     Ok(DiscoveredMcpServer {
         name,
         enabled,
