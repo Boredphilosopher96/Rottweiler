@@ -25,8 +25,12 @@ pub(super) struct PromptShapeProfile {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PromptCacheBreakpoint {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(super) after_item_id: Option<String>,
 }
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
