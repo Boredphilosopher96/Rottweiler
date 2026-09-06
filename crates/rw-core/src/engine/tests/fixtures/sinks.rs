@@ -443,6 +443,7 @@ impl SessionEventSink for FailCompactionLedgerSink {
 pub(in crate::engine::tests) struct FailNextBatchSink {
     pub(in crate::engine::tests) inner: Arc<RecordingSink>,
     pub(in crate::engine::tests) fail_next: AtomicBool,
+    pub(in crate::engine::tests) fail_tool_result_commit: AtomicBool,
 }
 
 #[async_trait]
@@ -495,7 +496,12 @@ impl SessionEventSink for FailNextBatchSink {
         self: Arc<Self>,
         batch: Arc<rw_core_batch::AdmittedEventBatch>,
     ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
-        if self.fail_next.swap(false, Ordering::AcqRel) {
+        let reject_tool_result = batch
+            .events()
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ConversationToolResultsCommitted { .. }))
+            && self.fail_tool_result_commit.swap(false, Ordering::AcqRel);
+        if self.fail_next.swap(false, Ordering::AcqRel) || reject_tool_result {
             return Err(AgentLoopError::Persistence(
                 "transient fixture failure".to_owned(),
             ));

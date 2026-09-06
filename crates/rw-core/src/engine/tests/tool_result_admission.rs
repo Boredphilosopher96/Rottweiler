@@ -100,3 +100,106 @@ async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir()
     ));
     handle.close().await.expect("settled actor");
 }
+
+#[tokio::test]
+async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() {
+    use super::fixtures::{sinks::FailNextBatchSink, support::next_matching};
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().expect("root");
+    let model = Arc::new(ScriptedModel::new([tool_script(
+        &[("call", "once", serde_json::json!({}))],
+        &[],
+    )]));
+    let tool = Arc::new(StubTool::new(
+        "once",
+        vec![],
+        StubOutcome::Success(ToolResult::new(
+            "authoritative result",
+            serde_json::Value::Null,
+        )),
+    ));
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).expect("tool");
+    let tools = Arc::new(tools);
+    let sink = Arc::new(FailNextBatchSink::default());
+    sink.fail_tool_result_commit.store(true, Ordering::Release);
+    let mut settings = config(
+        root.path(),
+        model,
+        tools.clone(),
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    settings.event_sink = sink.clone();
+    let handle = super::fixtures::history::spawn(settings)
+        .await
+        .expect("actor");
+    let mut events = handle.subscribe().expect("subscription");
+    handle.send_message("run once").await.expect("message");
+    next_matching(&mut events, |event| matches!(event, crate::engine::PendingEvent::Error { message } if message.contains("settlement is unproven"))).await;
+    assert!(
+        handle.close().await.is_err(),
+        "unpublished result closure remains explicit"
+    );
+    let source = sink.test_events_after(None).await.expect("source");
+    assert!(
+        !source
+            .iter()
+            .any(|event| matches!(event, EngineEvent::TurnFinished { .. }))
+    );
+    let recovered = project_session_events(&source).expect("repairable prefix");
+    assert_eq!(recovered.interrupted_turn, Some(1));
+    assert!(
+        recovered.interrupted_tool_repairs.is_empty(),
+        "completed effects are never replayed"
+    );
+    assert!(recovered.interrupted_tool_turn.is_some());
+    let reopen_model = Arc::new(ScriptedModel::default());
+    let mut settings = config(
+        root.path(),
+        reopen_model.clone(),
+        tools,
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    settings.recovered = recovered;
+    settings.event_sink = sink.clone();
+    let reopened = super::fixtures::history::spawn(settings)
+        .await
+        .expect("reopen");
+    let mut replay = reopened.subscribe().expect("subscription");
+    next_matching(&mut replay, |event| {
+        matches!(
+            event,
+            crate::engine::PendingEvent::TurnFinished {
+                status: AgentTurnStatus::Interrupted,
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(tool.calls.load(Ordering::Acquire), 1);
+    assert_eq!(reopen_model.request_count(), 0);
+    let source = sink.test_events_after(None).await.expect("repaired source");
+    assert_eq!(
+        source
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::ToolCallFinished { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        source
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::ConversationToolResultsCommitted { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        project_session_events(&source)
+            .expect("repaired claim")
+            .interrupted_turn
+            .is_none()
+    );
+    reopened.close().await.expect("settled reopen");
+}
