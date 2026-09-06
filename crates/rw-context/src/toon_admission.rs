@@ -84,6 +84,7 @@ impl Write for Count {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::ToonAllocation;
     #[test]
     fn plan_covers_escaped_and_indented_output_before_encode() {
