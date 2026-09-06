@@ -5,7 +5,7 @@ use super::fixtures::{
     support::{TestEventSinkExt, config, tool_script},
     tools::{StubOutcome, StubTool},
 };
-use crate::engine::{AgentTurnStatus, builtin_hook_dispatcher, project_session_events};
+use crate::engine::{builtin_hook_dispatcher, project_session_events};
 use rw_tools::{ToolRegistry, ToolResult};
 use rw_types::{Block, EngineEvent, Role, ToolOutput, config::PermissionDecision};
 use std::{sync::Arc, time::Duration};
@@ -104,7 +104,7 @@ async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir()
 
 #[tokio::test]
 async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() {
-    use super::fixtures::{sinks::FailNextBatchSink, support::next_matching};
+    use super::fixtures::sinks::FailNextBatchSink;
     use std::sync::atomic::Ordering;
     let root = tempfile::tempdir().expect("root");
     let model = Arc::new(ScriptedModel::new([tool_script(
@@ -168,6 +168,7 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
         recovered.interrupted_tool_repairs.is_empty(),
         "completed effects are never replayed"
     );
+    let before_reopen = source;
     let reopen_model = Arc::new(ScriptedModel::default());
     let mut settings = config(
         root.path(),
@@ -181,20 +182,18 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
     let reopened = super::fixtures::history::spawn(settings)
         .await
         .expect("reopen");
-    let mut replay = reopened.subscribe().expect("subscription");
-    next_matching(&mut replay, |event| {
-        matches!(
-            event,
-            crate::engine::PendingEvent::TurnFinished {
-                status: AgentTurnStatus::Interrupted,
-                ..
-            }
-        )
-    })
-    .await;
+    let snapshot = reopened
+        .snapshot()
+        .await
+        .expect("reopened actor observation barrier");
+    assert!(!snapshot.running);
     assert_eq!(tool.calls.load(Ordering::Acquire), 1);
     assert_eq!(reopen_model.request_count(), 0);
     let source = sink.test_events_after(None).await.expect("repaired source");
+    assert_eq!(
+        source, before_reopen,
+        "reopen must not append another repair"
+    );
     assert_repaired_order(&source);
     assert!(
         project_session_events(&source)
