@@ -16,11 +16,14 @@ test("actual App/HTTP ownership workload retires each generation and restores pr
       const data = JSON.parse(readFileSync(report, "utf8"))
       expect(data.load).toEqual(MEMORY_LOAD)
       expect(data.finalAllocationBytes).toBe(0)
+      expect(data.resolvedChildControls).toBe(0)
       expect(data.recycle.captured).toBe(generation === 0)
       expect(data.recycle.restored).toBe(generation > 0)
       expect(data.samples.filter((sample: { stage: string }) => sample.stage === "destroyed-and-collected")).toHaveLength(2)
       expect(data.samples.some((sample: { stage: string }) => sample.stage === "decoded-history-and-mutation-awaiting-consumers")).toBe(true)
       expect(data.samples.some((sample: { stage: string }) => sample.stage === "viewer-owned-canonical-page")).toBe(true)
+      expect(data.samples.some((sample: { stage: string }) => sample.stage === "pending-child-before-process-handoff")).toBe(true)
+      expect(data.samples.some((sample: { stage: string }) => sample.stage === "restored-pending-child-with-authoritative-controls")).toBe(generation > 0)
     }
   } finally { rmSync(directory, { recursive: true, force: true }) }
 }, 30_000)

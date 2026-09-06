@@ -81,6 +81,8 @@ export class EngineHttpSseClient {
   #clientAuthRequest: Promise<ClientAuth> | null = null
   #activeEventStream: ActiveEventStream | null = null
 
+  get commandUsage() { return { reads: this.#commands.usage, controls: this.#commands.controlUsage, watches: this.#commands.watchUsage } }
+
   constructor(options: EngineTransportOptions) {
     if (options.socketPath.length === 0) {
       throw new TypeError("engine Unix socket path must not be empty")
