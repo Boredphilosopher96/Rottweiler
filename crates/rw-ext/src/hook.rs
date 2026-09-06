@@ -716,21 +716,8 @@ fn apply_directive(
 }
 
 fn check_size(value: &impl serde::Serialize) -> Result<(), HookError> {
-    struct Counter(usize);
-    impl std::io::Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_add(bytes.len())
-                .filter(|bytes| *bytes <= rw_plugin_protocol::MAX_HOOK_PAYLOAD_BYTES)
-                .ok_or_else(|| std::io::Error::other("hook payload exceeds its byte limit"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    serde_json::to_writer(Counter(0), value)
+    rw_types::json_encoding::JsonWriter::count(rw_plugin_protocol::MAX_HOOK_PAYLOAD_BYTES)
+        .serialize(value)
         .map_err(|_| HookError::new("payload_limit", "hook payload exceeds its byte limit"))
 }
 

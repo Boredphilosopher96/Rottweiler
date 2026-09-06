@@ -220,3 +220,13 @@ fn session_panel_credits_span_registries_and_allow_replacement_at_capacity() {
     }
     budget.close().expect("all retained allocations returned");
 }
+
+#[test]
+fn ui_encoded_ceiling_preserves_utf8_escaping_and_limit_error() {
+    // Quotes, two UTF-8 bytes, and a two-byte escaped newline.
+    let value = "é\n";
+    assert_eq!(super::encoded_bytes(&value, 6).expect("exact boundary"), 6);
+    let rejected = super::encoded_bytes(&value, 5).expect_err("one byte over the limit");
+    assert_eq!(rejected.code, "ui_unavailable");
+    assert_eq!(rejected.message, "UI encoded limit");
+}

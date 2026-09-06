@@ -417,3 +417,17 @@ async fn settlement_timeout_closes_admission_even_when_handler_returned_successf
     }
     assert_eq!(started.elapsed(), HOOK_SETTLEMENT_TIMEOUT);
 }
+
+#[test]
+fn hook_payload_ceiling_counts_json_escaping() {
+    let limit = rw_plugin_protocol::MAX_HOOK_PAYLOAD_BYTES;
+    // Each newline requires two encoded bytes, plus the JSON string quotes.
+    let mut text = "\n".repeat((limit - 2) / 2);
+    assert!(check_size(&text).is_ok());
+    text.push('x');
+    let Err(rejected) = check_size(&text) else {
+        panic!("encoded overflow must fail");
+    };
+    assert_eq!(rejected.code, "payload_limit");
+    assert_eq!(rejected.message, "hook payload exceeds its byte limit");
+}

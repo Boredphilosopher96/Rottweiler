@@ -24,7 +24,6 @@ use rw_types::{
 };
 use serde::Serialize;
 use std::{
-    io::Write,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -443,26 +442,15 @@ fn ensure_open(state: &State) -> Result<(), PluginRpcError> {
     }
 }
 fn encoded_bytes(value: &impl Serialize, limit: usize) -> Result<usize, PluginRpcError> {
-    struct Count {
-        bytes: usize,
-        limit: usize,
-    }
-    impl Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.bytes = self
-                .bytes
-                .checked_add(bytes.len())
-                .filter(|bytes| *bytes <= self.limit)
-                .ok_or_else(|| std::io::Error::other("UI encoded limit"))?;
-            Ok(bytes.len())
+    let mut writer = rw_types::json_encoding::JsonWriter::count(limit);
+    writer.serialize(value).map_err(|cause| {
+        if writer.exceeded() {
+            error("UI encoded limit")
+        } else {
+            error(cause)
         }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Count { bytes: 0, limit };
-    serde_json::to_writer(&mut count, value).map_err(error)?;
-    Ok(count.bytes)
+    })?;
+    Ok(writer.written())
 }
 fn core_error(error: &PluginRpcError) -> AgentLoopError {
     AgentLoopError::InvalidConfiguration(error.to_string())

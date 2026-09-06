@@ -132,19 +132,9 @@ fn bounded_page(
 }
 
 fn encoded_size(value: &impl serde::Serialize) -> Result<usize, HostError> {
-    struct Count(usize);
-    impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.saturating_add(bytes.len());
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut counter = Count(0);
-    serde_json::to_writer(&mut counter, value).map_err(storage)?;
-    Ok(counter.0)
+    let mut writer = rw_types::json_encoding::JsonWriter::count(usize::MAX);
+    writer.serialize(value).map_err(storage)?;
+    Ok(writer.written())
 }
 
 fn invalidation(
