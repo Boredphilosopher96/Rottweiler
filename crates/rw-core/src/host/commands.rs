@@ -55,13 +55,13 @@ impl EngineHost {
             ClientCommand::ReadFamilyControls {
                 meta,
                 session_id,
-                after_revision,
+                after_revision: _,
             } => {
                 let session = self.ready_session(&session_id).await?;
                 let service = session
                     .subagents()
                     .ok_or_else(|| HostError::Query("family controls unavailable".into()))?;
-                let snapshot = service.family_controls(&session_id, after_revision).await?;
+                let snapshot = service.family_controls(&session_id).await?;
                 Ok((
                     CommandOutcome::Accepted {},
                     Some(session_id.clone()),

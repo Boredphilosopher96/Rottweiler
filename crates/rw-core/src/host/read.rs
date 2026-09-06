@@ -1,4 +1,5 @@
 //! Read responses own their byte admission through transport buffer release.
+mod family_wait;
 
 use super::{BoundClient, DedupeRegistry, DedupeState, EngineHost, HostError, rejected};
 use bytes::Bytes;
@@ -19,6 +20,7 @@ const MAX_RETAINED_REPLY_UNITS: usize = 32 * 1024;
 
 #[derive(Debug)]
 pub(super) struct ReadAdmission {
+    family_waits: family_wait::FamilyWaitAdmission,
     global: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     clients: Mutex<HashMap<ClientId, Weak<Semaphore>>>,
@@ -26,6 +28,7 @@ pub(super) struct ReadAdmission {
 impl Default for ReadAdmission {
     fn default() -> Self {
         Self {
+            family_waits: family_wait::FamilyWaitAdmission::default(),
             global: Arc::new(Semaphore::new(MAX_ACTIVE_READS)),
             bytes: Arc::new(Semaphore::new(MAX_RETAINED_REPLY_UNITS)),
             clients: Mutex::new(HashMap::new()),
@@ -357,6 +360,20 @@ impl HostReadChannel {
                         "command_metadata",
                         "unsupported protocol or invalid request identity",
                     ),
+                    events: Vec::new(),
+                },
+                None,
+            );
+        }
+        if let Err(error) = self
+            .admission
+            .family_waits
+            .wait(&bound.client_id, &command)
+            .await
+        {
+            return HostReply::encode(
+                CommandReply::Read {
+                    outcome: rejected("family_wait_busy", &error.to_string()),
                     events: Vec::new(),
                 },
                 None,

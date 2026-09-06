@@ -360,6 +360,18 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::session_state::MAX_SESSION_QUEUE_ITEMS,
         ),
         (
+            "MAX_FAMILY_CONTROL_WAITS",
+            rw_types::family_controls::MAX_FAMILY_CONTROL_WAITS,
+        ),
+        (
+            "MAX_CLIENT_FAMILY_CONTROL_WAITS",
+            rw_types::family_controls::MAX_CLIENT_FAMILY_CONTROL_WAITS,
+        ),
+        (
+            "FAMILY_CONTROL_WAIT_MILLIS",
+            rw_types::family_controls::FAMILY_CONTROL_WAIT_MILLIS,
+        ),
+        (
             "MAX_FAMILY_CONTROL_DEPTH",
             rw_types::family_controls::MAX_FAMILY_CONTROL_DEPTH,
         ),

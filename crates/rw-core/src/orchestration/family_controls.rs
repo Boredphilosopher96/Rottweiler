@@ -16,12 +16,10 @@ use std::{collections::HashMap, sync::Arc};
 impl SubagentOrchestrator {
     /// # Errors
     /// Rejects inconsistent live bindings or a discovery result exceeding its source bound.
-    pub async fn family_controls(
+    pub fn family_controls(
         &self,
         root: &SessionId,
-        after: Option<rw_types::SequenceId>,
     ) -> Result<FamilyControlsSnapshot, OrchestrationError> {
-        control_observation::wait(after).await;
         let revision = control_observation::revision();
         let sessions = self
             .inner

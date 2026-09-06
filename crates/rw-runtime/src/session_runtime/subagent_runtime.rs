@@ -208,12 +208,10 @@ impl HostSubagentService for HostedSubagentController {
     async fn family_controls(
         &self,
         root: &SessionId,
-        after: Option<rw_types::SequenceId>,
     ) -> Result<rw_types::family_controls::FamilyControlsSnapshot, HostError> {
         self.ensure_parent(root)?;
         self.orchestrator
-            .family_controls(root, after)
-            .await
+            .family_controls(root)
             .map_err(|error| HostError::Protocol(error.to_string()))
     }
     async fn child_controls(

@@ -15,8 +15,7 @@ async fn family_discovery_binds_every_hop_and_rejects_foreign_roots() {
     owner.recover_record(nested).await.expect("second");
     let root = SessionId("parent".into());
     let snapshot = owner
-        .family_controls(&root, None)
-        .await
+        .family_controls(&root)
         .expect("discover without progress");
     assert_eq!(snapshot.children.len(), 2);
     let child = snapshot
@@ -44,8 +43,7 @@ async fn family_discovery_binds_every_hop_and_rejects_foreign_roots() {
     assert!(owner.control_child(&root, &wrong).is_err());
     assert!(
         owner
-            .family_controls(&SessionId("foreign".into()), None)
-            .await
+            .family_controls(&SessionId("foreign".into()))
             .expect("unrelated root")
             .children
             .is_empty()

@@ -8,6 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub const MAX_FAMILY_CONTROL_WAITS: usize = 64;
+pub const MAX_CLIENT_FAMILY_CONTROL_WAITS: usize = 1;
+pub const FAMILY_CONTROL_WAIT_MILLIS: usize = 10_000;
 pub const MAX_FAMILY_CONTROL_DEPTH: usize = 8;
 pub const MAX_FAMILY_CONTROL_ROWS: usize = crate::session_children::MAX_ACTIVE_CHILDREN;
 pub const MAX_FAMILY_CONTROLS_BYTES: usize = 512 * 1024;

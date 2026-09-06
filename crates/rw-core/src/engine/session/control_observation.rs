@@ -19,7 +19,13 @@ pub(crate) fn changed() {
 pub(crate) async fn wait(after: Option<SequenceId>) {
     let mut receiver = changes().subscribe();
     if after.is_some_and(|after| after.0 == *receiver.borrow_and_update()) {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.changed()).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(
+                rw_types::family_controls::FAMILY_CONTROL_WAIT_MILLIS as u64,
+            ),
+            receiver.changed(),
+        )
+        .await;
     }
 }
 
