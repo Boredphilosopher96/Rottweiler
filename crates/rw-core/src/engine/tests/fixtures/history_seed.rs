@@ -93,17 +93,7 @@ pub(super) fn events(
             reclaimed_tokens: *reclaimed_tokens,
         });
     }
-    for (index, content) in recovered.queued_messages.iter().enumerate() {
-        pending.push(PendingEvent::MessageQueued {
-            position: recovered
-                .queued_message_positions
-                .get(index)
-                .copied()
-                .unwrap_or(index as u64 + 1),
-            content: content.clone(),
-            attachments: vec![],
-        });
-    }
+    append_queue(&mut pending, recovered);
     Ok(pending
         .into_iter()
         .enumerate()
@@ -158,4 +148,18 @@ fn append_conversation(
         }
     }
     Ok(sources)
+}
+
+fn append_queue(pending: &mut Vec<PendingEvent>, recovered: &crate::engine::SessionRecoveredState) {
+    for (index, content) in recovered.queued_messages.iter().enumerate() {
+        pending.push(PendingEvent::MessageQueued {
+            position: recovered
+                .queued_message_positions
+                .get(index)
+                .copied()
+                .unwrap_or(index as u64 + 1),
+            content: content.clone(),
+            attachments: vec![],
+        });
+    }
 }
