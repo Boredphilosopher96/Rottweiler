@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use crate::bash::audited_system_git;
 use crate::registry::{CancellationToken, ToolError};
 
-use super::{DIAGNOSTIC_LIMIT, MAX_GIT_OUTPUT_BYTES, canonical_directory};
+use super::{DIAGNOSTIC_LIMIT, canonical_directory};
 
 pub(super) async fn append_untracked_patches(
     root: &Path,
@@ -272,8 +272,6 @@ where
     if let Some(work_tree) = work_tree {
         command.env("GIT_WORK_TREE", work_tree);
     }
-    #[cfg(unix)]
-    command.process_group(0);
     command
 }
 
