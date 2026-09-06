@@ -1,4 +1,5 @@
 //! Bounded control priority without reordering a producer's acknowledged data.
+use rw_types::json_encoding::JsonWriter;
 use std::sync::Arc;
 
 use rw_plugin_protocol::{
@@ -44,29 +45,13 @@ struct PreparedFrame {
 impl PreparedFrame {
     fn new(frame: RpcFrame) -> Result<Self, ()> {
         frame.validate().map_err(|_| ())?;
-        let mut size = FrameSize(0);
-        serde_json::to_writer(&mut size, &frame).map_err(|_| ())?;
+        let mut size = JsonWriter::count(MAX_FRAME_BYTES);
+        size.serialize(&frame).map_err(|_| ())?;
         Ok(Self {
             frame,
-            bytes: size.0 + 1,
+            bytes: size.written() + 1,
             retained: None,
         })
-    }
-}
-
-struct FrameSize(usize);
-
-impl std::io::Write for FrameSize {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 = self.0.saturating_add(bytes.len());
-        if self.0 > MAX_FRAME_BYTES {
-            return Err(std::io::Error::other("plugin frame exceeds byte limit"));
-        }
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 
@@ -99,7 +84,10 @@ impl RpcWriter {
         self.encodings
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut bytes = Vec::with_capacity(prepared.bytes);
-        serde_json::to_writer(&mut bytes, &prepared.frame).map_err(|_| ())?;
+        JsonWriter::buffer(&mut bytes, prepared.bytes, 0)
+            .map_err(|_| ())?
+            .serialize(&prepared.frame)
+            .map_err(|_| ())?;
         bytes.push(b'\n');
         drop(prepared.frame);
         drop(prepared.retained);
@@ -107,54 +95,68 @@ impl RpcWriter {
     }
 
     pub(super) async fn send(&self, frame: RpcFrame) -> Result<(), ()> {
-        self.send_prepared(PreparedFrame::new(frame)?).await
+        let prepared = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            PreparedFrame::new(frame)
+        })
+        .await
+        .map_err(|_| ())??;
+        let queued = self
+            .encode_admitted(prepared, Arc::clone(&self.control_bytes), None)
+            .await?;
+        self.control.send(queued).await.map_err(|_| ())
     }
 
     pub(super) async fn send_reply(
         &self,
         reply: super::push_reply::OwnedPushFrame,
     ) -> Result<(), ()> {
-        let mut prepared = PreparedFrame::new(reply.frame)?;
-        prepared.retained = Some(reply.retained);
-        self.send_prepared(prepared).await
+        let prepared = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            let mut prepared = PreparedFrame::new(reply.frame)?;
+            prepared.retained = Some(reply.retained);
+            Ok::<_, ()>(prepared)
+        })
+        .await
+        .map_err(|_| ())??;
+        let queued = self
+            .encode_admitted(prepared, Arc::clone(&self.control_bytes), None)
+            .await?;
+        self.control.send(queued).await.map_err(|_| ())
     }
 
-    async fn send_prepared(&self, prepared: PreparedFrame) -> Result<(), ()> {
+    async fn encode_admitted(
+        &self,
+        prepared: PreparedFrame,
+        pool: Arc<Semaphore>,
+        written: Option<oneshot::Sender<()>>,
+    ) -> Result<QueuedFrame, ()> {
         let count = u32::try_from(prepared.bytes).map_err(|_| ())?;
-        let permit = Arc::clone(&self.control_bytes)
-            .acquire_many_owned(count)
-            .await
-            .map_err(|_| ())?;
-        let bytes = self.encode(prepared)?;
-        self.control
-            .send(QueuedFrame {
+        let permit = pool.acquire_many_owned(count).await.map_err(|_| ())?;
+        let writer = self.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            let bytes = writer.encode(prepared)?;
+            Ok(QueuedFrame {
                 bytes,
                 _permit: permit,
-                written: None,
+                written,
             })
-            .await
-            .map_err(|_| ())
+        })
+        .await
+        .map_err(|_| ())?
     }
 
     /// Waits for the actual pipe write so its producer's terminal control frame
     /// cannot overtake earlier body data when control traffic has priority.
     pub(super) async fn send_data(&self, frame: RpcFrame) -> Result<(), ()> {
-        let prepared = PreparedFrame::new(frame)?;
-        let count = u32::try_from(prepared.bytes).map_err(|_| ())?;
-        let permit = Arc::clone(&self.data_bytes)
-            .acquire_many_owned(count)
-            .await
-            .map_err(|_| ())?;
-        let bytes = self.encode(prepared)?;
+        let prepared = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            PreparedFrame::new(frame)
+        })
+        .await
+        .map_err(|_| ())??;
         let (written, receiver) = oneshot::channel();
-        self.data
-            .send(QueuedFrame {
-                bytes,
-                _permit: permit,
-                written: Some(written),
-            })
-            .await
-            .map_err(|_| ())?;
+        let queued = self
+            .encode_admitted(prepared, Arc::clone(&self.data_bytes), Some(written))
+            .await?;
+        self.data.send(queued).await.map_err(|_| ())?;
         receiver.await.map_err(|_| ())
     }
 }
@@ -206,12 +208,18 @@ mod tests {
         let source = Arc::new(());
         let weak = Arc::downgrade(&source);
         let pool = Arc::new(Semaphore::new(64 * 1024 * 1024));
-        let reply = PushReplySlot::from_pool(pool.clone(), super::super::PushReplyLimits::CONTENT)
-            .expect("slot")
-            .encode(&json!({"body":"retained"}))
+        let mut slot =
+            PushReplySlot::from_pool(pool.clone(), super::super::PushReplyLimits::CONTENT)
+                .expect("slot");
+        let reply = slot
+            .encode(json!({"body":"retained"}))
+            .await
             .expect("reply")
-            .retain(source)
-            .redact(RpcId::Number(1), &NoopPluginBoundaryRedactor)
+            .retain(source);
+        drop(slot);
+        let reply = reply
+            .redact(RpcId::Number(1), Arc::new(NoopPluginBoundaryRedactor))
+            .await
             .expect("redaction");
         let (writer, mut receiver) = RpcWriter::channel();
         let blocked = writer
@@ -252,14 +260,18 @@ mod tests {
         let weak = Arc::downgrade(&source);
         // The result alone is exactly 4 MiB; an RPC envelope cannot fit beside it.
         let body = "x".repeat(MAX_FRAME_BYTES - 2);
-        let reply = PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT)
-            .expect("slot")
-            .encode(&body)
+        let mut slot =
+            PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT).expect("slot");
+        let reply = slot
+            .encode(body)
+            .await
             .expect("legal result body")
-            .retain(source)
-            .redact(RpcId::Number(1), &NoopPluginBoundaryRedactor)
+            .retain(source);
+        drop(slot);
+        let reply = reply
+            .redact(RpcId::Number(1), Arc::new(NoopPluginBoundaryRedactor))
+            .await
             .expect("bounded redaction");
-        drop(body);
         let (writer, mut receiver) = RpcWriter::channel();
         assert!(writer.send_reply(reply).await.is_err());
         assert!(weak.upgrade().is_none());
@@ -287,13 +299,17 @@ mod tests {
             .acquire_many_owned(u32::try_from(DATA_QUEUE_BYTES).unwrap())
             .await
             .unwrap();
-        let mut pending_control = Box::pin(writer.send(response(1)));
-        let mut pending_data = Box::pin(writer.send_data(response(2)));
+        let control_writer = writer.clone();
+        let mut pending_control =
+            tokio::spawn(async move { control_writer.send(response(1)).await });
+        let data_writer = writer.clone();
+        let mut pending_data =
+            tokio::spawn(async move { data_writer.send_data(response(2)).await });
         assert!(futures_util::poll!(&mut pending_control).is_pending());
         assert!(futures_util::poll!(&mut pending_data).is_pending());
         assert_eq!(writer.encodings.load(Ordering::Relaxed), 0);
         drop(control);
-        pending_control.await.unwrap();
+        pending_control.await.unwrap().unwrap();
         let active = receiver.recv().await.unwrap();
         assert_eq!(
             writer.control_bytes.available_permits(),
@@ -312,7 +328,7 @@ mod tests {
             DATA_QUEUE_BYTES - active.bytes.len()
         );
         active.complete();
-        pending_data.await.unwrap();
+        pending_data.await.unwrap().unwrap();
         assert_eq!(writer.data_bytes.available_permits(), DATA_QUEUE_BYTES);
     }
 

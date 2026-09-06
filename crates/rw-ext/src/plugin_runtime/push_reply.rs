@@ -8,7 +8,7 @@ use rw_types::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const POOL_BYTES: usize = 64 * 1024 * 1024;
@@ -29,6 +29,16 @@ impl PushReplyLimits {
     /// Canonical content and context/state pages.
     pub const CONTENT: Self = Self {
         encoded: MAX_FRAME_BYTES,
+        decoded: VALUE_BYTES,
+    };
+    /// One host tool outcome, including its bounded result and correlation fields.
+    pub const TOOL_OUTCOME: Self = Self {
+        encoded: rw_types::extension_tools::MAX_EXTENSION_TOOL_OUTPUT_BYTES + 16 * 1024,
+        decoded: VALUE_BYTES,
+    };
+    /// One plugin namespace, including entry framing and source cursors.
+    pub const STATE: Self = Self {
+        encoded: rw_types::extension_contract::MAX_EXTENSION_NAMESPACE_BYTES + 16 * 1024,
         decoded: VALUE_BYTES,
     };
     /// One source-qualified event chunk, including its JSON escaping and metadata.
@@ -53,7 +63,7 @@ fn unavailable() -> PluginRpcError {
 
 /// Acquired before a callback constructs its response or starts delegated effects.
 pub struct PushReplySlot {
-    credit: OwnedSemaphorePermit,
+    credit: Arc<Mutex<OwnedSemaphorePermit>>,
     limits: PushReplyLimits,
 }
 impl PushReplySlot {
@@ -67,17 +77,58 @@ impl PushReplySlot {
         let count = u32::try_from(limits.construction()).map_err(|_| unavailable())?;
         Ok(Self {
             limits,
-            credit: pool
-                .try_acquire_many_owned(count)
-                .map_err(|_| unavailable())?,
+            credit: Arc::new(Mutex::new(
+                pool.try_acquire_many_owned(count)
+                    .map_err(|_| unavailable())?,
+            )),
         })
     }
-    /// Serialize and structurally admit a typed response before allocating JSON containers.
-    /// The typed source remains owned by the caller until this function returns.
+    /// Serialize and structurally admit a typed response in an owned CPU worker.
     /// # Errors
-    /// Rejects oversized encodings, decoded amplification, or invalid serialization.
-    pub fn encode(&mut self, source: &impl Serialize) -> Result<PushReply, PluginRpcError> {
-        if self.credit.num_permits() < self.limits.construction() {
+    /// Rejects physical admission, oversized encodings or decoded amplification.
+    pub async fn encode<T: Serialize + Send + 'static>(
+        &mut self,
+        source: T,
+    ) -> Result<PushReply, PluginRpcError> {
+        self.encode_source(source, None).await
+    }
+    /// Move the upstream source allowance into the physical transformation worker.
+    /// # Errors
+    /// Rejects physical admission, oversized encodings or decoded amplification.
+    pub async fn encode_retained<T: Serialize + Send + 'static>(
+        &mut self,
+        source: T,
+        owner: impl Send + Sync + 'static,
+    ) -> Result<PushReply, PluginRpcError> {
+        self.encode_source(source, Some(Box::new(owner))).await
+    }
+    async fn encode_source<T: Serialize + Send + 'static>(
+        &mut self,
+        source: T,
+        owner: Option<Box<dyn Send + Sync>>,
+    ) -> Result<PushReply, PluginRpcError> {
+        let work = EncodingWork {
+            source,
+            owner,
+            slot: Self {
+                credit: Arc::clone(&self.credit),
+                limits: self.limits,
+            },
+        };
+        let (result, _slot) =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || work.run())
+                .await
+                .map_err(|error| rpc_error("reply_worker", &error.to_string()))?;
+        result
+    }
+    fn encode_value(&self, source: &impl Serialize) -> Result<PushReply, PluginRpcError> {
+        if self
+            .credit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .num_permits()
+            < self.limits.construction()
+        {
             return Err(unavailable());
         }
         let mut encoded = Vec::new();
@@ -110,7 +161,12 @@ impl PushReplySlot {
         drop(encoded);
         let bytes = value.bytes() + FRAME_OVERHEAD;
         let retained = ReplyRetention {
-            credit: self.credit.split(bytes).ok_or_else(unavailable)?,
+            credit: self
+                .credit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .split(bytes)
+                .ok_or_else(unavailable)?,
             source: None,
         };
         Ok(PushReply {
@@ -119,7 +175,16 @@ impl PushReplySlot {
             limits: self.limits,
         })
     }
-    pub(super) fn failure(self, id: RpcId, error: PluginRpcError) -> OwnedPushFrame {
+    pub(super) fn failure(
+        self,
+        id: RpcId,
+        error: PluginRpcError,
+    ) -> Result<OwnedPushFrame, PluginRpcError> {
+        // A cancelled encode waiter can leave a physical worker using this slot.
+        // Its construction credit cannot be transferred to an unrelated error frame.
+        if Arc::strong_count(&self.credit) != 1 {
+            return Err(unavailable());
+        }
         // Failure diagnostics also cross an admitted boundary. Invalid unbounded
         // producer errors become an explicit admission failure, never a partial message.
         let error = if error
@@ -132,7 +197,13 @@ impl PushReplySlot {
         } else {
             error
         };
-        OwnedPushFrame {
+        let mut credit = self
+            .credit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = credit.num_permits();
+        let retained = credit.split(count).ok_or_else(unavailable)?;
+        Ok(OwnedPushFrame {
             frame: RpcFrame::Failure(RpcFailure {
                 jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.into(),
                 id: Some(id),
@@ -143,10 +214,35 @@ impl PushReplySlot {
                 },
             }),
             retained: ReplyRetention {
-                credit: self.credit,
+                credit: retained,
                 source: None,
             },
-        }
+        })
+    }
+}
+
+// Drop typed source allocations before their upstream and construction allowances,
+// including cancellation while the CPU admission future still owns this work.
+struct EncodingWork<T> {
+    source: T,
+    owner: Option<Box<dyn Send + Sync>>,
+    slot: PushReplySlot,
+}
+impl<T: Serialize> EncodingWork<T> {
+    fn run(self) -> (Result<PushReply, PluginRpcError>, PushReplySlot) {
+        let result = self.slot.encode_value(&self.source);
+        drop(self.source);
+        let result = match result {
+            Ok(mut reply) => {
+                reply.retained.source = self.owner;
+                Ok(reply)
+            }
+            Err(error) => {
+                drop(self.owner);
+                Err(error)
+            }
+        };
+        (result, self.slot)
     }
 }
 
@@ -163,40 +259,41 @@ impl PushReply {
         self.retained.source = Some(Box::new((self.retained.source.take(), owner)));
         self
     }
-    pub(super) fn redact(
+    pub(super) async fn redact(
+        self,
+        id: RpcId,
+        redactor: Arc<dyn PluginBoundaryRedactor>,
+    ) -> Result<OwnedPushFrame, PluginRpcError> {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            self.redact_value_owned(id, redactor.as_ref())
+        })
+        .await
+        .map_err(|error| rpc_error("reply_worker", &error.to_string()))?
+    }
+    fn redact_value_owned(
         mut self,
         id: RpcId,
         redactor: &dyn PluginBoundaryRedactor,
     ) -> Result<OwnedPushFrame, PluginRpcError> {
-        // The original value stays charged; two bounded string replacement buffers
-        // may coexist inside the redactor. Never wait while retaining this value.
-        let scratch = Arc::clone(self.retained.credit.semaphore())
-            .try_acquire_many_owned(
-                u32::try_from(2 * self.limits.decoded).map_err(|_| unavailable())?,
-            )
-            .map_err(|_| unavailable())?;
-        self.retained.credit.merge(scratch);
         let mut bytes = self.value.prepared_bytes().ok_or_else(unavailable)?;
-        redact_value(&mut self.value, redactor, &mut bytes, self.limits.decoded)?;
-        let plan =
-            AllocationPlan::new(std::mem::take(&mut self.value)).map_err(|_| unavailable())?;
-        if plan.bytes() > self.limits.decoded {
-            return Err(unavailable());
-        }
-        let prepared = plan.prepare();
+        redact_value(
+            &mut self.value,
+            redactor,
+            &mut bytes,
+            self.limits.decoded,
+            &mut self.retained,
+        )?;
+        // The admitted Value has normalized maps/arrays; replacing string leaves
+        // preserves that ownership. No second map reconstruction is necessary.
         let id_bytes = match &id {
             RpcId::String(value) => value.capacity(),
             RpcId::Number(_) => 0,
         };
-        let bytes = prepared
-            .bytes()
+        let bytes = bytes
             .checked_add(FRAME_OVERHEAD)
             .and_then(|bytes| bytes.checked_add(id_bytes))
             .ok_or_else(unavailable)?;
-        self.value = prepared.into_inner();
-        if bytes > self.retained.credit.num_permits() {
-            return Err(unavailable());
-        }
+        self.retained.ensure(bytes)?;
         self.retained.shrink(bytes);
         Ok(OwnedPushFrame {
             frame: RpcFrame::Success(RpcSuccess {
@@ -213,12 +310,22 @@ fn redact_value(
     redactor: &dyn PluginBoundaryRedactor,
     bytes: &mut usize,
     ceiling: usize,
+    retained: &mut ReplyRetention,
 ) -> Result<(), PluginRpcError> {
     match value {
         Value::String(text) => {
             let other = bytes.checked_sub(text.capacity()).ok_or_else(unavailable)?;
             let limit = ceiling.checked_sub(other).ok_or_else(unavailable)?;
-            let replacement = redactor.redact_reply_text(text, limit)?;
+            let current = *bytes;
+            let replacement = redactor.redact_reply_text(text, limit, &mut |scratch| {
+                let required = current
+                    .checked_add(scratch)
+                    .and_then(|value| value.checked_add(FRAME_OVERHEAD))
+                    .ok_or_else(|| std::io::Error::other("reply admission overflow"))?;
+                retained
+                    .ensure(required)
+                    .map_err(|_| std::io::Error::other("reply working admission exhausted"))
+            })?;
             *bytes = other
                 .checked_add(replacement.capacity())
                 .filter(|bytes| *bytes <= ceiling)
@@ -227,12 +334,12 @@ fn redact_value(
         }
         Value::Array(values) => {
             for value in values {
-                redact_value(value, redactor, bytes, ceiling)?;
+                redact_value(value, redactor, bytes, ceiling, retained)?;
             }
         }
         Value::Object(values) => {
             for value in values.values_mut() {
-                redact_value(value, redactor, bytes, ceiling)?;
+                redact_value(value, redactor, bytes, ceiling, retained)?;
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -244,6 +351,17 @@ pub(super) struct ReplyRetention {
     source: Option<Box<dyn Send + Sync>>,
 }
 impl ReplyRetention {
+    fn ensure(&mut self, bytes: usize) -> Result<(), PluginRpcError> {
+        if bytes > self.credit.num_permits() {
+            let additional =
+                u32::try_from(bytes - self.credit.num_permits()).map_err(|_| unavailable())?;
+            let credit = Arc::clone(self.credit.semaphore())
+                .try_acquire_many_owned(additional)
+                .map_err(|_| unavailable())?;
+            self.credit.merge(credit);
+        }
+        Ok(())
+    }
     fn shrink(&mut self, bytes: usize) {
         if bytes < self.credit.num_permits() {
             drop(self.credit.split(self.credit.num_permits() - bytes));
@@ -259,8 +377,8 @@ pub(super) struct OwnedPushFrame {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
-    #[test]
-    fn construction_admission_precedes_callback_and_refunds_after_rejection() {
+    #[tokio::test]
+    async fn construction_admission_precedes_callback_and_refunds_after_rejection() {
         let pool = Arc::new(Semaphore::new(POOL_BYTES));
         let first =
             PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT).expect("first");
@@ -290,17 +408,19 @@ mod tests {
         assert!(
             PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT)
                 .expect("slot")
-                .encode(&dense)
+                .encode(dense)
+                .await
                 .is_err()
         );
         assert_eq!(pool.available_permits(), POOL_BYTES);
     }
-    #[test]
-    fn retained_replies_allow_new_construction_after_scratch_release() {
+    #[tokio::test]
+    async fn retained_replies_allow_new_construction_after_scratch_release() {
         let pool = Arc::new(Semaphore::new(POOL_BYTES));
         let first = PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT)
             .expect("first")
-            .encode(&"small")
+            .encode("small")
+            .await
             .expect("reply");
         assert!(pool.available_permits() > POOL_BYTES - 2 * FRAME_OVERHEAD);
         let second = PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT)
@@ -322,7 +442,7 @@ mod tests {
             reply: &mut PushReplySlot,
         ) -> Result<PushReply, PluginRpcError> {
             self.0.wait().await;
-            reply.encode(&serde_json::json!({"outcome":"applied"}))
+            reply.encode(serde_json::json!({"outcome":"applied"})).await
         }
     }
     #[tokio::test]
@@ -350,6 +470,99 @@ mod tests {
         }
         assert_eq!(pool.available_permits(), POOL_BYTES);
     }
+    struct BlockedSource {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl Serialize for BlockedSource {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            if let Some(entered) = self.entered.lock().expect("entry lock").take() {
+                let _ = entered.send(());
+            }
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("release worker");
+            serializer.serialize_str("settled")
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_encode_keeps_source_and_construction_credit_until_worker_settles() {
+        let pool = Arc::new(Semaphore::new(POOL_BYTES));
+        let mut slot =
+            PushReplySlot::from_pool(pool.clone(), PushReplyLimits::ACKNOWLEDGEMENT).expect("slot");
+        let owner = Arc::new(());
+        let weak = Arc::downgrade(&owner);
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, receiver) = std::sync::mpsc::channel();
+        let source = BlockedSource {
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(receiver),
+        };
+        let mut encode = Box::pin(slot.encode_retained(source, owner));
+        tokio::select! {
+            result = &mut encode => panic!("worker unexpectedly completed: {}", result.is_ok()),
+            result = entry => result.expect("worker entered"),
+        }
+        // The single-threaded executor remains available while Serialize is blocked.
+        tokio::task::yield_now().await;
+        drop(encode);
+        assert!(weak.upgrade().is_some());
+        assert!(slot.failure(RpcId::Number(1), unavailable()).is_err());
+        assert_eq!(
+            pool.available_permits(),
+            POOL_BYTES - PushReplyLimits::ACKNOWLEDGEMENT.construction()
+        );
+        release.send(()).expect("release");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while weak.upgrade().is_some() || pool.available_permits() != POOL_BYTES {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical worker settled");
+    }
+
+    #[tokio::test]
+    async fn nested_state_redaction_progresses_beside_two_tool_callback_owners() {
+        use super::super::NoopPluginBoundaryRedactor;
+        let pool = Arc::new(Semaphore::new(POOL_BYTES));
+        let outer = PushReplySlot::from_pool(pool.clone(), PushReplyLimits::TOOL_OUTCOME)
+            .expect("outer tool effect");
+        let mut concurrent = PushReplySlot::from_pool(pool.clone(), PushReplyLimits::TOOL_OUTCOME)
+            .expect("concurrent tool effect");
+        let mut inner = PushReplySlot::from_pool(pool.clone(), PushReplyLimits::STATE)
+            .expect("nested state read");
+        assert!(PushReplySlot::from_pool(pool.clone(), PushReplyLimits::CONTENT).is_err());
+        let result = inner
+            .encode(serde_json::json!({"entries":[{"key":"task","value":"ready"}]}))
+            .await
+            .expect("state encoding");
+        drop(inner);
+        let state = result
+            .redact(RpcId::Number(2), Arc::new(NoopPluginBoundaryRedactor))
+            .await
+            .expect("nested state redaction");
+        assert!(
+            matches!(&state.frame, RpcFrame::Success(value) if value.result["entries"][0]["value"] == "ready")
+        );
+        let body = "x".repeat(rw_types::extension_tools::MAX_EXTENSION_TOOL_OUTPUT_BYTES - 2);
+        let result = concurrent.encode(body).await.expect("large tool result");
+        drop(concurrent);
+        let result = result
+            .redact(RpcId::Number(3), Arc::new(NoopPluginBoundaryRedactor))
+            .await
+            .expect("large result redaction");
+        assert!(
+            matches!(&result.frame, RpcFrame::Success(value) if value.result.as_str().map(str::len) == Some(rw_types::extension_tools::MAX_EXTENSION_TOOL_OUTPUT_BYTES - 2))
+        );
+        drop(result);
+        drop(state);
+        drop(outer);
+        assert_eq!(pool.available_permits(), POOL_BYTES);
+    }
+
     #[test]
     fn callback_error_keeps_original_slot_through_failure_frame() {
         let pool = Arc::new(Semaphore::new(POOL_BYTES));
@@ -363,7 +576,9 @@ mod tests {
             pool.available_permits(),
             POOL_BYTES - PushReplyLimits::ACKNOWLEDGEMENT.construction()
         );
-        let frame = slot.failure(RpcId::String("correlation".into()), error);
+        let frame = slot
+            .failure(RpcId::String("correlation".into()), error)
+            .expect("failure frame");
         assert!(pool.available_permits() < POOL_BYTES);
         drop(frame);
         assert_eq!(pool.available_permits(), POOL_BYTES);

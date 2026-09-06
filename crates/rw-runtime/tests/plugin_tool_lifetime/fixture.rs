@@ -27,6 +27,7 @@ impl rw_ext::PluginBoundaryRedactor for Redactor {
         &self,
         text: &str,
         max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
     ) -> Result<String, rw_ext::PluginRpcError> {
         if text.len() > max_bytes {
             return Err(rw_ext::PluginRpcError {
@@ -34,6 +35,10 @@ impl rw_ext::PluginBoundaryRedactor for Redactor {
                 message: "fixture reply exceeds admission".into(),
             });
         }
+        admit(text.len()).map_err(|error| rw_ext::PluginRpcError {
+            code: "reply_admission".into(),
+            message: error.to_string(),
+        })?;
         Ok(text.to_owned())
     }
     fn redact(&self, value: serde_json::Value) -> serde_json::Value {

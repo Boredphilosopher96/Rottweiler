@@ -112,6 +112,19 @@ impl FixtureRedactor {
     /// # Errors
     /// Rejects input or any replacement stage exceeding the caller's byte budget.
     pub fn redact_text_bounded(&self, value: &str, max_bytes: usize) -> std::io::Result<String> {
+        self.redact_text_admitted(value, max_bytes, &mut |_| Ok(()))
+    }
+
+    /// Reserve actual replacement working bytes before each allocation. The
+    /// callback accounts for intermediate strings, excluding the caller's input.
+    /// # Errors
+    /// Rejects an oversized replacement or denied working-byte admission.
+    pub fn redact_text_admitted(
+        &self,
+        value: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> std::io::Result<String> {
         if value.len() > max_bytes {
             return Err(redaction_limit());
         }
@@ -119,9 +132,10 @@ impl FixtureRedactor {
             .secrets
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admit(value.len())?;
         let mut rendered = value.to_owned();
         for secret in secrets.iter() {
-            if let Some(replaced) = limited_replacement(&rendered, max_bytes, || {
+            if let Some(replaced) = limited_replacement(&rendered, max_bytes, admit, || {
                 rendered
                     .match_indices(secret.as_str())
                     .map(|(start, value)| (start, start + value.len()))
@@ -130,7 +144,7 @@ impl FixtureRedactor {
             }
         }
         for pattern in strict_patterns() {
-            if let Some(replaced) = limited_replacement(&rendered, max_bytes, || {
+            if let Some(replaced) = limited_replacement(&rendered, max_bytes, admit, || {
                 pattern
                     .find_iter(&rendered)
                     .map(|found| (found.start(), found.end()))
@@ -291,6 +305,7 @@ fn redaction_limit() -> std::io::Error {
 fn limited_replacement<F, I>(
     value: &str,
     limit: usize,
+    admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
     ranges: F,
 ) -> std::io::Result<Option<String>>
 where
@@ -310,6 +325,12 @@ where
     if !any {
         return Ok(None);
     }
+    admit(
+        value
+            .len()
+            .checked_add(length)
+            .ok_or_else(redaction_limit)?,
+    )?;
     let mut output = String::with_capacity(length);
     let mut offset = 0;
     for (start, end) in ranges() {
@@ -330,6 +351,30 @@ impl crate::KnownSecretRegistrar for FixtureRedactor {
 #[cfg(test)]
 mod bounded_tests {
     use super::FixtureRedactor;
+    #[test]
+    fn denied_replacement_working_bytes_stop_before_expansion_and_preserve_order() {
+        let redactor = FixtureRedactor::new(["x".to_owned(), "E".to_owned()]);
+        let mut requested = Vec::new();
+        let result = redactor.redact_text_admitted("x", 1024, &mut |bytes| {
+            requested.push(bytes);
+            if bytes > 1 {
+                Err(std::io::Error::other("denied scratch"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(requested, [1, 11]);
+        requested.clear();
+        let result = redactor.redact_text_admitted("x", 1024, &mut |bytes| {
+            requested.push(bytes);
+            Ok(())
+        });
+        assert_eq!(result.ok(), Some(redactor.redact_text("x")));
+        // x becomes [REDACTED], then each E expands under the same ordered rules.
+        assert_eq!(requested, [1, 11, 38]);
+    }
+
     #[test]
     fn bounded_text_matches_ordered_semantics_and_rejects_expansion_before_allocating() {
         let redactor = FixtureRedactor::new(["x".to_owned(), "E".to_owned()]);

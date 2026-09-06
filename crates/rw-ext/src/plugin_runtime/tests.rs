@@ -210,17 +210,23 @@ impl PushHandler for RecordingPush {
             .lock()
             .expect("push lock")
             .push((method.to_owned(), params));
-        reply.encode(&Value::Null)
+        reply.encode(Value::Null).await
     }
 }
 
 struct CanaryRedactor;
 
 impl PluginBoundaryRedactor for CanaryRedactor {
-    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError> {
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> Result<String, PluginRpcError> {
         if text.len() > max_bytes {
             return Err(rpc_error("reply_admission", "reply string too large"));
         }
+        admit(text.len()).map_err(|error| rpc_error("reply_admission", &error.to_string()))?;
         Ok(text.replace("PLUGIN_CANARY_SECRET", "[REDACTED]"))
     }
 
@@ -245,10 +251,16 @@ const HTTP_SECRET: &str = "PLUGIN_HTTP_SECRET_CANARY";
 struct HttpSecretRedactor;
 
 impl PluginBoundaryRedactor for HttpSecretRedactor {
-    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError> {
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> Result<String, PluginRpcError> {
         if text.len() > max_bytes {
             return Err(rpc_error("reply_admission", "reply string too large"));
         }
+        admit(text.len()).map_err(|error| rpc_error("reply_admission", &error.to_string()))?;
         Ok(text.replace(HTTP_SECRET, "[REDACTED]"))
     }
 
@@ -568,7 +580,7 @@ impl PushHandler for DelayedActorPush {
             "fixture owner panicked after actor admission"
         );
         outcome.await.expect("actor outcome");
-        reply.encode(&Value::Null)
+        reply.encode(Value::Null).await
     }
 }
 

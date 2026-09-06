@@ -229,7 +229,7 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         return false;
     }
     let limits = if request.method == rw_plugin_protocol::METHOD_EFFECT_TOOL_CALL {
-        PushReplyLimits::CONTENT
+        PushReplyLimits::TOOL_OUTCOME
     } else {
         let Ok(limits) = state.push_handler.reply_limits(&request.method) else {
             return false;
@@ -294,18 +294,11 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
             lease.complete();
             return;
         }
-        let response = match response {
-            Ok(result) => {
-                drop(reply);
-                if let Ok(response) = result.redact(request.id, redactor.as_ref()) {
-                    response
-                } else {
-                    termination.begin();
-                    lease.complete();
-                    return;
-                }
-            }
-            Err(error) => reply.failure(request.id, error),
+        let response = finish_host_reply(response, reply, request.id, redactor).await;
+        let Ok(response) = response else {
+            termination.begin();
+            lease.complete();
+            return;
         };
         if !tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, writer.send_reply(response))
             .await
@@ -317,6 +310,23 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         lease.complete();
     });
     true
+}
+
+async fn finish_host_reply(
+    response: Result<PushReply, PluginRpcError>,
+    reply: PushReplySlot,
+    id: RpcId,
+    redactor: Arc<dyn super::PluginBoundaryRedactor>,
+) -> Result<super::push_reply::OwnedPushFrame, PluginRpcError> {
+    match response {
+        Ok(result) => {
+            // Construction scratch is no longer live; release it before the
+            // retained result requests its independent redaction working bytes.
+            drop(reply);
+            result.redact(id, redactor).await
+        }
+        Err(error) => reply.failure(id, error),
+    }
 }
 
 async fn handle_tool_effect(
@@ -354,7 +364,7 @@ async fn handle_tool_effect(
             };
             rpc_error(code, &error.to_string())
         })?;
-    reply.encode(&result)
+    reply.encode(result).await
 }
 
 pub(super) async fn validate_control_origin(

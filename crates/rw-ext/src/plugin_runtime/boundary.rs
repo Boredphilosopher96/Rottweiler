@@ -36,10 +36,16 @@ pub struct LaunchedPluginProcess {
 pub trait PluginBoundaryRedactor: Send + Sync {
     fn redact(&self, value: Value) -> Value;
 
-    /// Redact one reply string with at most two `max_bytes` temporary buffers.
+    /// Redact one reply string, admitting total temporary bytes before allocation.
+    /// The callback excludes the caller-owned original string.
     /// # Errors
     /// Rejects before a replacement would exceed its admitted allocation.
-    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError>;
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> Result<String, PluginRpcError>;
 
     /// Redacts known credential bytes before an HTTP response chunk is encoded
     /// onto the plugin wire.
@@ -73,10 +79,16 @@ impl PluginBoundaryRedactor for NoopPluginBoundaryRedactor {
         value
     }
 
-    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError> {
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> Result<String, PluginRpcError> {
         if text.len() > max_bytes {
             return Err(rpc_error("reply_admission", "reply string too large"));
         }
+        admit(text.len()).map_err(|error| rpc_error("reply_admission", &error.to_string()))?;
         Ok(text.to_owned())
     }
 

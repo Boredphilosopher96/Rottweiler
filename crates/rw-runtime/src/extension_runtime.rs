@@ -431,9 +431,11 @@ impl PushHandler for SessionPluginPushHandler {
                 Ok(rw_ext::PushReplyLimits::ACKNOWLEDGEMENT)
             }
             METHOD_EVENT_READ => Ok(rw_ext::PushReplyLimits::EVENT_CHUNK),
-            METHOD_SESSION_CONTEXT_READ
-            | METHOD_EXTENSION_STATE_READ
-            | rw_plugin_protocol::METHOD_SESSION_TOOL_CALL => Ok(rw_ext::PushReplyLimits::CONTENT),
+            METHOD_SESSION_CONTEXT_READ => Ok(rw_ext::PushReplyLimits::CONTENT),
+            METHOD_EXTENSION_STATE_READ => Ok(rw_ext::PushReplyLimits::STATE),
+            rw_plugin_protocol::METHOD_SESSION_TOOL_CALL => {
+                Ok(rw_ext::PushReplyLimits::TOOL_OUTCOME)
+            }
             _ => Err(plugin_push_error(
                 "invalid_push",
                 "plugin push method is unknown",
@@ -457,21 +459,22 @@ impl PushHandler for SessionPluginPushHandler {
                     .call_tool(request)
                     .await
                     .map_err(|error| plugin_push_error("host_tool_failed", &error.to_string()))?;
-                Ok(reply.encode(&*result)?.retain(result))
+                let (value, owner) = result.into_parts();
+                reply.encode_retained(value, owner).await
             }
             rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => {
-                reply.encode(&self.publish_panel(params)?)
+                reply.encode(self.publish_panel(params)?).await
             }
             METHOD_EVENT_READ => {
                 let read = serde_json::from_value(params).map_err(|_| {
                     plugin_push_error("invalid_event_read", "invalid event source parameters")
                 })?;
-                reply.encode(&self.event_sources.read(&read)?)
+                reply.encode(self.event_sources.read(&read)?).await
             }
             METHOD_SESSION_CONTEXT_READ => {
                 let request = serde_json::from_value(params)
                     .map_err(|_| plugin_push_error("invalid_push", "invalid context read"))?;
-                plugin_push_result(reply, capability.read_context(request).await)
+                plugin_push_result(reply, capability.read_context(request).await).await
             }
             METHOD_SESSION_CONTROL => {
                 let request: rw_types::extension_invocation::ExtensionControlRequest =
@@ -482,12 +485,15 @@ impl PushHandler for SessionPluginPushHandler {
                     reply,
                     capability.control(request.origin, request.control).await,
                 )
+                .await
             }
-            METHOD_SESSION_QUERY => plugin_push_result(reply, capability.query().await),
-            METHOD_EXTENSION_STATE_READ => plugin_push_result(reply, capability.read_state().await),
+            METHOD_SESSION_QUERY => plugin_push_result(reply, capability.query().await).await,
+            METHOD_EXTENSION_STATE_READ => {
+                plugin_push_result(reply, capability.read_state().await).await
+            }
             METHOD_EXTENSION_STATE_COMMIT => {
                 let transaction = plugin_state_transaction(params)?;
-                plugin_push_result(reply, capability.commit_state(transaction).await)
+                plugin_push_result(reply, capability.commit_state(transaction).await).await
             }
             METHOD_SESSION_INJECT_MESSAGE => {
                 let content = plugin_push_string(&params, "content")?;
@@ -506,14 +512,16 @@ impl PushHandler for SessionPluginPushHandler {
                         rw_plugin_protocol::InjectionDisposition::Command
                     }
                 };
-                reply.encode(&rw_plugin_protocol::InjectMessageResult { disposition })
+                reply
+                    .encode(rw_plugin_protocol::InjectMessageResult { disposition })
+                    .await
             }
             METHOD_SESSION_SET_STATUS => {
                 capability
                     .set_status(plugin_push_string(&params, "status")?)
                     .await
                     .map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
-                reply.encode(&serde_json::Value::Null)
+                reply.encode(serde_json::Value::Null).await
             }
             METHOD_UI_NOTIFY => {
                 capability
@@ -523,7 +531,7 @@ impl PushHandler for SessionPluginPushHandler {
                     )
                     .await
                     .map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
-                reply.encode(&serde_json::Value::Null)
+                reply.encode(serde_json::Value::Null).await
             }
             _ => Err(plugin_push_error(
                 "invalid_push",
@@ -533,12 +541,12 @@ impl PushHandler for SessionPluginPushHandler {
     }
 }
 
-fn plugin_push_result<T: serde::Serialize>(
+async fn plugin_push_result<T: serde::Serialize + Send + 'static>(
     reply: &mut rw_ext::PushReplySlot,
     result: std::result::Result<T, rw_core::AgentLoopError>,
 ) -> std::result::Result<rw_ext::PushReply, PluginRpcError> {
     let value = result.map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
-    reply.encode(&value)
+    reply.encode(value).await
 }
 
 fn plugin_push_string(
@@ -607,11 +615,12 @@ impl PluginBoundaryRedactor for SharedPluginRedactor {
         &self,
         text: &str,
         max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
     ) -> std::result::Result<String, PluginRpcError> {
         self.0
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .redact_text_bounded(text, max_bytes)
+            .redact_text_admitted(text, max_bytes, admit)
             .map_err(|_| {
                 plugin_push_error("reply_admission", "redacted reply string exceeds admission")
             })
