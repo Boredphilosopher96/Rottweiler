@@ -20,7 +20,10 @@ pub use control::{
 };
 mod encoding;
 mod fragments;
-pub use fragments::{ConversationFragment, ConversationFragmentCursor, MAX_SUMMARY_FRAGMENT_BYTES};
+pub use fragments::{
+    ConversationFragment, ConversationFragmentCursor, ConversationFragmentSource,
+    MAX_SUMMARY_FRAGMENT_BYTES,
+};
 mod extension;
 mod maintenance;
 mod projector;

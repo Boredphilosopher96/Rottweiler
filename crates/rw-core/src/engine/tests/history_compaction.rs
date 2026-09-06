@@ -49,12 +49,12 @@ impl SessionHistoryView for SmallView {
     > {
         self.0.source_turn(sequence).await
     }
-    async fn conversation_fragment(
+    async fn conversation_fragment_source(
         &self,
-        cursor: crate::engine::recovery::ConversationFragmentCursor,
-        max_bytes: usize,
-    ) -> Result<HistoryRead<crate::engine::recovery::ConversationFragment>, AgentLoopError> {
-        self.0.conversation_fragment(cursor, max_bytes).await
+        ordinal: u64,
+    ) -> Result<HistoryRead<crate::engine::recovery::ConversationFragmentSource>, AgentLoopError>
+    {
+        self.0.conversation_fragment_source(ordinal).await
     }
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
         self.0.reserve_working_set()

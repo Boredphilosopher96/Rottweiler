@@ -35,12 +35,11 @@ pub trait SessionHistoryView: Send + Sync {
         sequence: SequenceId,
     ) -> Result<HistoryRead<Option<(u64, super::ConversationSource)>>, AgentLoopError>;
 
-    /// Read one complete continuation step of an oversized source for summarization.
-    async fn conversation_fragment(
+    /// Decode and encode one oversized source once; retain its owner through all continuations.
+    async fn conversation_fragment_source(
         &self,
-        cursor: super::ConversationFragmentCursor,
-        max_bytes: usize,
-    ) -> Result<HistoryRead<super::ConversationFragment>, AgentLoopError>;
+        ordinal: u64,
+    ) -> Result<HistoryRead<super::ConversationFragmentSource>, AgentLoopError>;
 
     /// Reserve the application-wide working allowance before context transformation.
     /// The owner must remain live through temporary buffers and delivered results.

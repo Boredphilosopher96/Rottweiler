@@ -1,4 +1,5 @@
 //! A rolling summary consumes every canonical page before replacing its generation.
+mod fragments;
 use super::{
     accounting::{BudgetUsage, SessionAccountingFallback, cost_units},
     compaction::execute_compaction,
@@ -254,7 +255,7 @@ impl Summary {
         &mut self,
         history: &Arc<dyn SessionHistoryView>,
         next: &mut u64,
-        fragment: &mut Option<crate::engine::recovery::ConversationFragmentCursor>,
+        fragment: &mut Option<fragments::PendingFragments>,
         end: u64,
         tokens: u64,
     ) -> Result<HistoryRead<()>, AgentLoopError> {
@@ -267,27 +268,15 @@ impl Summary {
             || first.decoded_bytes > PAGE_HEAP
             || first.estimated_tokens > tokens
         {
-            let cursor = fragment.unwrap_or(crate::engine::recovery::ConversationFragmentCursor {
-                ordinal: *next,
-                block_index: 0,
-                byte_offset: 0,
-            });
-            let bytes = usize::try_from(tokens.saturating_sub(16).saturating_mul(4))
-                .unwrap_or(usize::MAX)
-                .min(crate::engine::recovery::MAX_SUMMARY_FRAGMENT_BYTES);
-            let result = history.conversation_fragment(cursor, bytes).await?;
-            let (result, owner) = result.into_parts();
-            if result.source.sequence != first.sequence {
-                return Err(invalid("fragment source changed"));
-            }
-            *fragment = result.next;
-            if fragment.is_none() {
-                *next += 1;
-            }
-            if let Some(value) = result.turn {
-                self.carry.push(value);
-            }
-            return Ok(owner);
+            return fragments::append(
+                fragment,
+                history,
+                next,
+                first.sequence,
+                tokens,
+                &mut self.carry,
+            )
+            .await;
         }
         let page = history
             .conversation_page(

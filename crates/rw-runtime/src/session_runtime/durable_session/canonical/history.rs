@@ -90,12 +90,11 @@ impl SessionHistoryView for CapturedHistory {
         self.query(move |history| history.source_turn(sequence))
             .await
     }
-    async fn conversation_fragment(
+    async fn conversation_fragment_source(
         &self,
-        cursor: rw_core::recovery::ConversationFragmentCursor,
-        max_bytes: usize,
-    ) -> Result<HistoryRead<rw_core::recovery::ConversationFragment>, AgentLoopError> {
-        self.query(move |history| history.conversation_fragment(cursor, max_bytes))
+        ordinal: u64,
+    ) -> Result<HistoryRead<rw_core::recovery::ConversationFragmentSource>, AgentLoopError> {
+        self.query(move |history| history.conversation_fragment_source(ordinal))
             .await
     }
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
@@ -237,12 +236,9 @@ impl RetainedResult for Option<(u64, rw_core::recovery::ConversationSource)> {
     }
 }
 
-impl RetainedResult for rw_core::recovery::ConversationFragment {
+impl RetainedResult for rw_core::recovery::ConversationFragmentSource {
     fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
-        use rw_types::allocation::PrepareAllocation;
-        self.turn
-            .prepared_bytes()
-            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
-            .ok_or_else(|| persistence("fragment retained allocation overflow"))
+        self.retained_bytes()
+            .ok_or_else(|| persistence("fragment source retained allocation overflow"))
     }
 }
