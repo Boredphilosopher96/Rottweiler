@@ -490,7 +490,7 @@ pub(super) async fn apply_post_tool_hook(
         execution.is_error = true;
         return execution;
     }
-    let HookInput::PostTool(input) = post_tool.input() else {
+    let HookInput::PostTool(mut input) = post_tool.into_input() else {
         unreachable!("dispatcher preserves hook phase")
     };
     if result_budget
@@ -500,7 +500,8 @@ pub(super) async fn apply_post_tool_hook(
         super::tool_result_budget::reject(&mut execution);
         return execution;
     }
-    execution.output = input.output.clone();
+    rw_types::allocation::PrepareAllocation::prepare_allocations(&mut input.output);
+    execution.output = input.output;
     execution.is_error = input.is_error;
     execution
 }

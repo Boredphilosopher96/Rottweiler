@@ -284,6 +284,12 @@ pub struct HookDispatchResult {
 }
 
 impl HookDispatchResult {
+    /// Transfer the callback value and release its unused container capacity at the consumer boundary.
+    #[must_use]
+    pub fn into_input(self) -> HookInput {
+        self.input
+    }
+
     #[must_use]
     pub const fn input(&self) -> &HookInput {
         &self.input

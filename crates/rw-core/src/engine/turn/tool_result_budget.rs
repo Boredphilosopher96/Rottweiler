@@ -60,6 +60,10 @@ impl ToolResultBudget {
     pub(super) fn admit_execution(&self, execution: &mut ToolExecution) {
         if self.admit(execution.call.index, &execution.output).is_err() {
             reject(execution);
+        } else {
+            // Release producer map capacity before any host callback/settlement await.
+            // The normalized destination is admitted while the producer value is consumed.
+            execution.output.prepare_allocations();
         }
     }
     pub(super) fn settled(&self, execution: &ToolExecution) {
@@ -146,5 +150,59 @@ mod tests {
         assert_eq!(bytes.load(Ordering::SeqCst), first);
         drop(worker);
         assert_eq!(bytes.load(Ordering::SeqCst), 0);
+    }
+    #[cfg(feature = "allocation-measurement")]
+    #[test]
+    #[ignore = "isolated allocation qualification; run exact with one test thread"]
+    fn callback_spare_map_capacity_is_released_before_host_retention() {
+        use super::super::tool_requests::PendingToolCall;
+        let allocation = stats_alloc::Region::new(&stats_alloc::INSTRUMENTED_SYSTEM);
+        let mut map = serde_json::Map::with_capacity(200_000);
+        map.insert(
+            "body".into(),
+            serde_json::Value::String("exact result".into()),
+        );
+        let allocated = allocation.change().bytes_allocated;
+        assert!(
+            allocated > 1024 * 1024,
+            "workload must reserve real map capacity"
+        );
+        let mut execution = ToolExecution {
+            call: PendingToolCall {
+                id: "call".into(),
+                invocation_id: rw_types::ToolInvocationId("invocation".into()),
+                name: "fixture".into(),
+                arguments: None,
+                index: 0,
+            },
+            output: ToolOutput::Structured {
+                value: serde_json::Value::Object(map),
+            },
+            is_error: false,
+            unsettled: false,
+            presentation: None,
+        };
+        let bytes = Arc::new(AtomicUsize::new(0));
+        let budget = ToolResultBudget(Arc::new(Mutex::new(State {
+            owner: Box::new(Meter(bytes.clone())),
+            slots: vec![SLOT_BYTES],
+            retained: SLOT_BYTES,
+        })));
+        let normalization = stats_alloc::Region::new(&stats_alloc::INSTRUMENTED_SYSTEM);
+        budget.admit_execution(&mut execution);
+        let change = normalization.change();
+        assert!(
+            change.bytes_deallocated > 1024 * 1024,
+            "producer spare capacity must be freed"
+        );
+        assert!(
+            change.bytes_allocated < 64 * 1024,
+            "normalized destination must stay small"
+        );
+        assert!(!execution.is_error);
+        assert!(
+            matches!(&execution.output, ToolOutput::Structured { value } if value == &serde_json::json!({"body":"exact result"}))
+        );
+        assert!(bytes.load(Ordering::SeqCst) < SCRATCH_BYTES + 64 * 1024);
     }
 }
