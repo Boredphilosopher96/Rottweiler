@@ -1,6 +1,6 @@
-use super::build_toolchain_executor;
 use crate::session_runtime::command_execution::{CommandFixtureMode, build_command_executor};
 use crate::session_runtime::toolchain::{HookCommandCapture, ToolchainRuntime};
+use crate::session_runtime::toolchain_authority::build_toolchain_executor;
 use rw_tools::{
     BashSandboxMode, CancellationToken, CommandExecutor, CommandRequest, CommandSafetyClassifier,
     ExecutionLease,

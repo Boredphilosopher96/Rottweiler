@@ -58,6 +58,3 @@ pub(super) fn build_toolchain_executor(
         _scratch: scratch,
     }))
 }
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests;

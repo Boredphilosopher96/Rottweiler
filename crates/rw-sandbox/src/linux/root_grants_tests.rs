@@ -4,43 +4,44 @@ use std::os::fd::AsFd as _;
 use std::os::unix::fs::{MetadataExt as _, symlink};
 
 #[test]
-fn prepared_read_root_rejects_same_kind_symlink_substitution() {
-    let fixture = tempfile::tempdir().expect("root fixture");
+fn prepared_read_root_rejects_same_kind_symlink_substitution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempfile::tempdir()?;
     let allowed = fixture.path().join("allowed");
     let outside = fixture.path().join("outside");
-    std::fs::create_dir(&allowed).expect("allowed root");
-    std::fs::create_dir(&outside).expect("outside root");
-    let policy = SandboxPolicy::new([fixture.path()], NetworkPolicy::Deny)
-        .expect("write policy")
-        .with_read_roots([&allowed])
-        .expect("read policy");
-    let declared = &policy.read_roots.as_ref().expect("explicit roots")[0];
-    let pinned = open_landlock_root(declared, RootKind::Directory).expect("original directory");
-    let original = std::fs::metadata(&allowed).expect("original identity");
-    std::fs::rename(&allowed, fixture.path().join("retired")).expect("retire original path");
-    symlink(&outside, &allowed).expect("substitute same-kind outside directory");
+    std::fs::create_dir(&allowed)?;
+    std::fs::create_dir(&outside)?;
+    let policy =
+        SandboxPolicy::new([fixture.path()], NetworkPolicy::Deny)?.with_read_roots([&allowed])?;
+    let declared = &policy.read_roots.as_ref().ok_or("explicit roots missing")?[0];
+    let pinned = open_landlock_root(declared, RootKind::Directory)?;
+    let original = std::fs::metadata(&allowed)?;
+    std::fs::rename(&allowed, fixture.path().join("retired"))?;
+    symlink(&outside, &allowed)?;
     assert!(
         open_landlock_root(declared, RootKind::Directory).is_err(),
         "same-kind symlink substitution must not extend read authority"
     );
-    let retained = rustix::fs::fstat(pinned.as_fd()).expect("retained descriptor");
+    let retained = rustix::fs::fstat(pinned.as_fd())?;
     assert_eq!(retained.st_ino, original.ino());
     assert_eq!(retained.st_dev, original.dev());
+    Ok(())
 }
 
 #[test]
-fn prepared_root_rejects_symlink_substitution_of_an_ancestor() {
-    let fixture = tempfile::tempdir().expect("root fixture");
+fn prepared_root_rejects_symlink_substitution_of_an_ancestor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempfile::tempdir()?;
     let parent = fixture.path().join("parent");
     let outside = fixture.path().join("outside");
-    std::fs::create_dir_all(parent.join("runtime")).expect("runtime directory");
-    std::fs::create_dir_all(outside.join("runtime")).expect("outside runtime directory");
-    let policy = SandboxPolicy::new([parent.join("runtime")], NetworkPolicy::Deny)
-        .expect("canonical policy");
-    std::fs::rename(&parent, fixture.path().join("retired")).expect("retire ancestor");
-    symlink(&outside, &parent).expect("substitute ancestor");
+    std::fs::create_dir_all(parent.join("runtime"))?;
+    std::fs::create_dir_all(outside.join("runtime"))?;
+    let policy = SandboxPolicy::new([parent.join("runtime")], NetworkPolicy::Deny)?;
+    std::fs::rename(&parent, fixture.path().join("retired"))?;
+    symlink(&outside, &parent)?;
     assert!(
         open_landlock_root(&policy.write_roots[0], RootKind::Directory).is_err(),
         "an ancestor symlink must not redirect an approved root"
     );
+    Ok(())
 }

@@ -331,6 +331,8 @@ mod subagent_recovery;
 mod subagent_worktrees;
 mod tool_composition;
 mod toolchain;
+#[cfg(target_os = "linux")]
+mod toolchain_authority;
 mod web_fetch;
 mod websearch_recording;
 mod workspace_roots;
