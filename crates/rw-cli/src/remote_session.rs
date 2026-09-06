@@ -43,13 +43,14 @@ pub(super) async fn spawn_detached_server(
             .ok_or_else(|| miette!("live engine bootstrap token failed validation"))?;
         println!(
             "{}",
-            serde_json::json!({
-                "version": 1,
-                "socket": paths.socket,
-                "token": token,
-                "session_id": session_id,
-                "started": false,
+            serde_json::to_string(&DetachedServerReady {
+                version: 1,
+                socket: paths.socket.clone(),
+                token,
+                session_id: session_id.to_owned(),
+                started: false,
             })
+            .into_diagnostic()?
         );
         return Ok(());
     }
@@ -95,13 +96,14 @@ pub(super) async fn spawn_detached_server(
                 .ok_or_else(|| miette!("new engine bootstrap token failed validation"))?;
             println!(
                 "{}",
-                serde_json::json!({
-                    "version": 1,
-                    "socket": paths.socket,
-                    "token": token,
-                    "session_id": session_id,
-                    "started": true,
+                serde_json::to_string(&DetachedServerReady {
+                    version: 1,
+                    socket: paths.socket.clone(),
+                    token,
+                    session_id: session_id.to_owned(),
+                    started: true,
                 })
+                .into_diagnostic()?
             );
             return Ok(());
         }
@@ -523,6 +525,7 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
         let ready: DetachedServerReady = serde_json::from_slice(&output.stdout)
             .map_err(|_| "remote engine returned an invalid readiness descriptor".to_owned())?;
         if ready.version != 1
+            || ready.socket != self.config.remote_socket
             || ready.session_id != self.config.session_id
             || !valid_bootstrap_token(&ready.token)
         {
@@ -546,10 +549,11 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DetachedServerReady {
     pub(super) version: u16,
+    pub(super) socket: PathBuf,
     pub(super) token: String,
     pub(super) session_id: String,
     pub(super) started: bool,

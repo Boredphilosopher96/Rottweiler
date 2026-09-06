@@ -230,6 +230,7 @@ fn unix_identity_helpers_preserve_signed_failure_and_lossless_mode_widening() {
 fn detached_readiness_requires_explicit_process_ownership() -> Result<(), serde_json::Error> {
     let started: DetachedServerReady = serde_json::from_value(serde_json::json!({
         "version": 1,
+        "socket": "/tmp/engine.sock",
         "token": "a".repeat(64),
         "session_id": "session",
         "started": true,
@@ -238,6 +239,7 @@ fn detached_readiness_requires_explicit_process_ownership() -> Result<(), serde_
 
     let pre_existing: DetachedServerReady = serde_json::from_value(serde_json::json!({
         "version": 1,
+        "socket": "/tmp/engine.sock",
         "token": "b".repeat(64),
         "session_id": "session",
         "started": false,
@@ -245,11 +247,12 @@ fn detached_readiness_requires_explicit_process_ownership() -> Result<(), serde_
     assert!(!pre_existing.started);
     let descriptor = serde_json::json!({
         "version": 1,
+        "socket": "/tmp/engine.sock",
         "token": "c".repeat(64),
         "session_id": "session",
         "started": false,
     });
-    for field in ["version", "token", "session_id", "started"] {
+    for field in ["version", "socket", "token", "session_id", "started"] {
         let mut incomplete = descriptor.clone();
         incomplete
             .as_object_mut()
