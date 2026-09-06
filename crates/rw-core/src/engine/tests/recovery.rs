@@ -66,9 +66,10 @@ fn projector_preserves_committed_partial_ir_and_marks_kill_tail_interrupted() {
         ),
         wire_event(
             2,
-            PendingEvent::ConversationTurnCommitted {
+            PendingEvent::ConversationInputCommitted {
                 agent_turn: 1,
-                turn: user.clone(),
+                accepted_source: rw_types::SequenceId(1),
+                selection: rw_types::InputSelection::Accepted {},
             },
         ),
         wire_event(
@@ -125,9 +126,10 @@ fn projector_rewind_clears_future_queue_failed_uncommitted_and_partial_state() {
             content: "kept user".to_owned(),
             attachments: Vec::new(),
         },
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::ConversationInputCommitted {
             agent_turn: 1,
-            turn: committed_user.clone(),
+            accepted_source: rw_types::SequenceId(1),
+            selection: rw_types::InputSelection::Accepted {},
         },
         PendingEvent::ConversationTurnCommitted {
             agent_turn: 1,
@@ -191,13 +193,6 @@ fn projector_rewind_clears_future_queue_failed_uncommitted_and_partial_state() {
 
 #[test]
 fn projector_kill_boundaries_never_duplicate_committed_tool_calls_or_results() {
-    let user = Turn {
-        role: Role::User,
-        blocks: vec![Block::Text {
-            text: "use tool".to_owned(),
-        }],
-        meta: TurnMeta::default(),
-    };
     let assistant = Turn {
         role: Role::Assistant,
         blocks: vec![Block::ToolCall {
@@ -225,9 +220,10 @@ fn projector_kill_boundaries_never_duplicate_committed_tool_calls_or_results() {
             content: "use tool".to_owned(),
             attachments: Vec::new(),
         },
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::ConversationInputCommitted {
             agent_turn: 1,
-            turn: user,
+            accepted_source: rw_types::SequenceId(1),
+            selection: rw_types::InputSelection::Accepted {},
         },
         PendingEvent::ConversationTurnCommitted {
             agent_turn: 1,
