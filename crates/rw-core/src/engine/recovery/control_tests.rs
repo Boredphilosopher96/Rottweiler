@@ -275,14 +275,13 @@ fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
     );
     assert!(expected.interrupted.is_none());
     assert!(history.recovery_at_completed_turn(99).is_err());
-    append(
-        &mut journal,
-        vec![PendingEvent::ConversationRewound {
-            to_turn: 1,
-            operation_id: "rewind-source".into(),
-            unrestorable_paths: vec![],
-        }],
-    );
+    let rewind = PendingEvent::ConversationRewound {
+        to_turn: 1,
+        operation_id: "rewind-source".into(),
+        unrestorable_paths: vec![],
+    };
+    let rewind_event = super::tests::event(history.head().next_sequence, rewind.clone());
+    append(&mut journal, vec![rewind]);
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let actual = recovery
         .snapshot()
@@ -294,7 +293,16 @@ fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
         actual_bootstrap.head.conversation,
         expected.head.conversation
     );
-    assert_eq!(actual_bootstrap.head.control, expected.head.control);
+    assert_eq!(
+        actual_bootstrap.head.next_sequence,
+        expected.head.next_sequence + 1
+    );
+    let mut expected_control = expected.head.control;
+    expected_control
+        .input_claims
+        .advance(&rewind_event)
+        .expect("exact published rewind claim transition");
+    assert_eq!(actual_bootstrap.head.control, expected_control);
     assert_eq!(actual_bootstrap.head.budget, expected.head.budget);
     assert_eq!(actual_bootstrap.controls, expected.controls);
     assert!(

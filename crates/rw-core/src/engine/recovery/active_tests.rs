@@ -173,6 +173,12 @@ fn oversized_active_materialization_is_rejected_from_admission_metadata() {
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     append(&mut journal, vec![PendingEvent::TurnStarted { turn: 1 }]);
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let initial_head_bytes = serde_json::to_vec(&recovery.head().expect("initial head"))
+        .expect("encode")
+        .len();
     for _ in 0..5 {
         append(
             &mut journal,
@@ -182,15 +188,21 @@ fn oversized_active_materialization_is_rejected_from_admission_metadata() {
             }],
         );
     }
-    let mut recovery =
-        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
     catch_up(&mut recovery, &journal.read_view(), &modes);
-    assert!(
-        serde_json::to_vec(&recovery.head().expect("head"))
-            .expect("encode")
-            .len()
-            < 2048
-    );
+    let head = recovery.head().expect("head");
+    let bytes = super::encoding::encode(&head, super::MAX_RECOVERY_HEAD_BYTES)
+        .expect("production metadata admission");
+    // Only three u64 source counters grow; both physical cursors remain one digit.
+    // Their largest decimal width bounds growth independently of the 35MiB payload.
+    assert!(bytes.len() <= initial_head_bytes + 3 * u64::MAX.to_string().len());
+    let parts = head
+        .control
+        .active
+        .as_ref()
+        .expect("active source")
+        .assistant_parts;
+    assert_eq!(parts.records, 5);
+    assert!(parts.serialized_bytes >= 35 * 1024 * 1024);
     let history = recovery
         .snapshot()
         .expect("snapshot")
