@@ -306,3 +306,73 @@ async fn cancelling_close_retains_receipt_until_physical_finalization() {
     assert_eq!(budget.available_permits(), 1);
     assert!(terminal.finished.is_none());
 }
+
+#[tokio::test]
+async fn output_only_caller_loss_retains_slot_until_wake_and_restores_shared_flags() {
+    let (stdout, _blocked_peer) = UnixStream::pair().expect("stdout");
+    let flags = rustix::fs::fcntl_getfl(&stdout).expect("flags");
+    let active = Arc::new(Semaphore::new(1));
+    let (_, _, mut terminal) = Terminal::spawn_mode(
+        super::Descriptors::Output {
+            stdout: duplicate(&stdout).expect("stdout"),
+            stderr: duplicate(&stdout).expect("stderr shares file description"),
+        },
+        active.clone().try_acquire_owned().expect("admission"),
+        || {},
+    )
+    .await
+    .expect("output-only worker");
+    {
+        let write = terminal.print("x".repeat(1024 * 1024));
+        tokio::pin!(write);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut write)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(terminal.output_slot.available_permits(), 0);
+    assert_eq!(active.available_permits(), 0);
+    assert!(terminal.print("second".to_owned()).await.is_err());
+    tokio::time::timeout(Duration::from_secs(2), terminal.close())
+        .await
+        .expect("wake")
+        .expect("settle");
+    assert_eq!(terminal.output_slot.available_permits(), 1);
+    assert_eq!(active.available_permits(), 1);
+    assert_eq!(
+        rustix::fs::fcntl_getfl(&stdout).expect("restored flags"),
+        flags
+    );
+}
+
+#[tokio::test]
+async fn output_only_preserves_stdout_and_stderr_without_prompt_or_input() {
+    let (stdout, mut out) = UnixStream::pair().expect("stdout");
+    let (stderr, mut err) = UnixStream::pair().expect("stderr");
+    let active = Arc::new(Semaphore::new(1))
+        .try_acquire_owned()
+        .expect("admission");
+    let (_, _, mut terminal) = Terminal::spawn_mode(
+        super::Descriptors::Output {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        },
+        active,
+        || {},
+    )
+    .await
+    .expect("output-only worker");
+    terminal.print("héllo\n".to_owned()).await.expect("stdout");
+    terminal
+        .print_to("error\n".to_owned(), true)
+        .await
+        .expect("stderr");
+    terminal.close().await.expect("settle");
+    let mut normal = String::new();
+    let mut diagnostic = String::new();
+    out.read_to_string(&mut normal).expect("stdout EOF");
+    err.read_to_string(&mut diagnostic).expect("stderr EOF");
+    assert_eq!(normal, "héllo\n");
+    assert_eq!(diagnostic, "error\n");
+}

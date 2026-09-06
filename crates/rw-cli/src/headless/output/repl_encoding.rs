@@ -42,7 +42,7 @@ fn formatted(args: fmt::Arguments<'_>, limit: usize) -> Result<String> {
         .into_diagnostic()?;
     String::from_utf8(bytes).into_diagnostic()
 }
-fn pretty(value: &impl Serialize, limit: usize) -> Result<String> {
+pub(super) fn pretty(value: &impl Serialize, limit: usize) -> Result<String> {
     let mut bytes = Vec::new();
     let mut output = JsonWriter::buffer(&mut bytes, limit, 0).into_diagnostic()?;
     serde_json::to_writer_pretty(&mut output, value).into_diagnostic()?;
@@ -56,6 +56,7 @@ fn text(event: &EngineEvent, limit: usize) -> Result<Option<String>> {
         }
         EngineEvent::ContextSnapshotReady { snapshot, .. } => Some(pretty(snapshot, limit)?),
         EngineEvent::CostSnapshotReady { snapshot, .. } => Some(pretty(snapshot, limit)?),
+        EngineEvent::PromptDumpReady { dump, .. } => Some(pretty(dump, limit)?),
         EngineEvent::ContextItemPinned { item_id, .. } => Some(formatted(
             format_args!("pinned context item {}\n", item_id.0),
             limit,

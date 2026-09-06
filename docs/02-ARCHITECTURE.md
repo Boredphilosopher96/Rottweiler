@@ -102,6 +102,13 @@ the unsubmitted backlog and terminates the REPL. Output is ordered, capped at
 Ctrl-C reaches the actor through an independent coalesced signal even during a
 blocked write. Shutdown wakes polling, retires queued output, discards unsubmitted
 terminal bytes and waits for physical I/O settlement before returning the terminal.
+Print mode uses that same admitted worker in output-only mode: it never opens
+stdin or changes terminal modes. Plain text preserves stdout/stderr routing;
+streaming JSON and final JSON use bounded buffers and ordered writes. Final JSON
+admits encoded bytes alongside its retained aggregate before allocation. SIGINT
+cancels a blocked print, requests actor interruption, and wakes and settles the
+physical writer before session close; partial output returns an explicit failure.
+
 
 Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` and `rw-resources` are dependency leaves. `rw-resources` owns process-wide physical execution admission, with no dependency on sessions, tools, or presentation. `rw-types` consumes the operation contract and the allocation derive macro. `rw-plugin-protocol` consumes the operation and shared-type contracts. `rw-sandbox` owns policy and calls the dependency-free macOS bootstrap crate for Mach authority clearing. `xtask` consumes the type, provider, plugin, operation, and storage owners to generate schemas and SDK projections; product crates never depend on it. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
 

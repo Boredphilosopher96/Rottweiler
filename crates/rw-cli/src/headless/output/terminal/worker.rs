@@ -128,7 +128,7 @@ fn pump(
     }
 }
 
-fn write_some(output: &OwnedFd, bytes: &[u8]) -> io::Result<usize> {
+pub(super) fn write_some(output: &OwnedFd, bytes: &[u8]) -> io::Result<usize> {
     match rustix::io::write(output, &bytes[..bytes.len().min(4096)]) {
         Ok(0) => Err(io::Error::new(
             io::ErrorKind::WriteZero,
@@ -140,7 +140,7 @@ fn write_some(output: &OwnedFd, bytes: &[u8]) -> io::Result<usize> {
     }
 }
 
-fn finish(output: &mut Option<OutputRequest>) {
+pub(super) fn finish(output: &mut Option<OutputRequest>) {
     if let Some(OutputRequest {
         message,
         done,

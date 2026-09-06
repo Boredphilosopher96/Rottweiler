@@ -85,3 +85,29 @@ fn admitted_json_preserves_public_events_text_and_exact_fields() {
         })
     );
 }
+
+#[test]
+fn final_json_admits_retained_events_and_encoded_output_together() {
+    let mut aggregate = PrintAggregate::new("print");
+    aggregate.push(&text("é\n".repeat(64))).expect("event");
+    let expected = serde_json::to_string(&aggregate).expect("canonical JSON") + "\n";
+    let retained = aggregate.events.capacity() * size_of::<EngineEvent>()
+        + aggregate.event_heap
+        + aggregate.text.capacity()
+        + aggregate.session_id.capacity()
+        + size_of::<PrintAggregate>();
+    aggregate.limit = retained + expected.len() - 1;
+    assert!(
+        aggregate
+            .encode()
+            .expect_err("combined admission")
+            .to_string()
+            .contains("stream-json")
+    );
+    let mut aggregate = PrintAggregate::new("print");
+    aggregate.push(&text("é\n".repeat(64))).expect("event");
+    aggregate.limit = retained + expected.len();
+    let encoded = aggregate.encode().expect("exact combined admission");
+    assert_eq!(encoded, expected);
+    assert_eq!(encoded.capacity(), encoded.len());
+}

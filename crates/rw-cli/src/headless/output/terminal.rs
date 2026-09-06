@@ -1,6 +1,7 @@
 //! One bounded physical owner for headless terminal input, output and shutdown.
 mod io;
 mod lines;
+mod output_only;
 mod worker;
 
 use super::{
@@ -32,9 +33,14 @@ impl Wake {
         self.notify();
     }
 }
+enum Descriptors {
+    Interactive { input: OwnedFd, output: OwnedFd },
+    Output { stdout: OwnedFd, stderr: OwnedFd },
+}
 struct OutputRequest {
     message: String,
     offset: usize,
+    stderr: bool,
     done: oneshot::Sender<std_io::Result<()>>,
     _slot: OwnedSemaphorePermit,
 }
@@ -64,15 +70,27 @@ pub(super) struct Terminal {
 }
 impl Terminal {
     pub(super) async fn start() -> Result<(InputReceiver, Interrupts, Self)> {
+        let active = Self::admit()?;
+        let input = io::duplicate(std_io::stdin()).into_diagnostic()?;
+        let output = io::duplicate(std_io::stdout()).into_diagnostic()?;
+        Self::spawn(input, output, active).await
+    }
+    fn admit() -> Result<OwnedSemaphorePermit> {
         static ACTIVE: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let active = ACTIVE
             .get_or_init(|| Arc::new(Semaphore::new(1)))
             .clone()
             .try_acquire_owned()
             .map_err(|_| miette!("headless terminal is still active"))?;
-        let input = io::duplicate(std_io::stdin()).into_diagnostic()?;
-        let output = io::duplicate(std_io::stdout()).into_diagnostic()?;
-        Self::spawn(input, output, active).await
+        Ok(active)
+    }
+    pub(super) async fn start_output() -> Result<Self> {
+        let active = Self::admit()?;
+        let stdout = io::duplicate(std_io::stdout()).into_diagnostic()?;
+        let stderr = io::duplicate(std_io::stderr()).into_diagnostic()?;
+        let (_, _, terminal) =
+            Self::spawn_mode(Descriptors::Output { stdout, stderr }, active, || {}).await?;
+        Ok(terminal)
     }
     async fn spawn(
         input: OwnedFd,
@@ -85,6 +103,14 @@ impl Terminal {
     async fn spawn_with_finalizer(
         input: OwnedFd,
         output: OwnedFd,
+        active: OwnedSemaphorePermit,
+        finalize: impl FnOnce() + Send + 'static,
+    ) -> Result<(InputReceiver, Interrupts, Self)> {
+        Self::spawn_mode(Descriptors::Interactive { input, output }, active, finalize).await
+    }
+
+    async fn spawn_mode(
+        descriptors: Descriptors,
         active: OwnedSemaphorePermit,
         finalize: impl FnOnce() + Send + 'static,
     ) -> Result<(InputReceiver, Interrupts, Self)> {
@@ -113,15 +139,20 @@ impl Terminal {
                 let result = {
                     let _lease = lease;
                     let _active = active;
-                    let result = worker::run(
-                        input,
-                        output,
-                        reader,
-                        &physical_wake,
-                        &send,
-                        &requests,
-                        &interrupt_send,
-                    );
+                    let result = match descriptors {
+                        Descriptors::Interactive { input, output } => worker::run(
+                            input,
+                            output,
+                            reader,
+                            &physical_wake,
+                            &send,
+                            &requests,
+                            &interrupt_send,
+                        ),
+                        Descriptors::Output { stdout, stderr } => {
+                            output_only::run(stdout, stderr, reader, &physical_wake, &requests)
+                        }
+                    };
                     finalize();
                     drop(requests);
                     drop(send);
@@ -145,33 +176,39 @@ impl Terminal {
         ))
     }
     pub(super) async fn print(&mut self, message: String) -> Result<()> {
+        self.print_to(message, false).await
+    }
+    pub(super) async fn print_to(&mut self, message: String, stderr: bool) -> Result<()> {
         if let Some(failure) = self.failure.message() {
             return Err(miette!(failure));
         }
         if message.capacity() > MAX_REPL_OUTPUT_BYTES {
-            return Err(miette!("REPL output exceeds its retained byte allowance"));
+            return Err(miette!(
+                "headless output exceeds its retained byte allowance"
+            ));
         }
         let slot = self
             .output_slot
             .clone()
             .try_acquire_owned()
-            .map_err(|_| miette!("REPL output is still owned by a physical write"))?;
+            .map_err(|_| miette!("headless output is still owned by a physical write"))?;
         let (done, result) = oneshot::channel();
         self.output
             .try_send(OutputRequest {
                 message,
                 offset: 0,
+                stderr,
                 done,
                 _slot: slot,
             })
-            .map_err(|_| miette!("REPL output worker is unavailable"))?;
+            .map_err(|_| miette!("headless output worker is unavailable"))?;
         self.wake.notify();
         let result = result.await;
         if let Some(failure) = self.failure.message() {
             return Err(miette!(failure));
         }
         result
-            .map_err(|_| miette!("REPL terminal output failed"))?
+            .map_err(|_| miette!("headless terminal output failed"))?
             .into_diagnostic()
     }
     pub(super) async fn close(&mut self) -> Result<()> {

@@ -2,7 +2,7 @@
 mod output;
 
 use crate::cli_args::OutputFormat;
-use miette::{IntoDiagnostic, Result, miette};
+use miette::{Result, miette};
 use rw_core::TurnStatus;
 use rw_runtime::session::{LocalSessionOptions, compose_local_session};
 
@@ -14,15 +14,9 @@ pub(super) struct ClientOptions {
 
 pub(super) async fn run(options: LocalSessionOptions, client: ClientOptions) -> Result<()> {
     let session = compose_local_session(options).await?;
-    if client.perf_markers {
-        // Composition is complete: provider/tool/command registries, MCP, and actor.
-        eprintln!("rw_perf_prompt_ready=1");
-    }
     let execution = async {
         if let Some(dump) = session.prompt_dump() {
-            serde_json::to_writer_pretty(std::io::stdout().lock(), dump).into_diagnostic()?;
-            println!();
-            Ok(None)
+            output::print_dump(session.handle(), dump, client.perf_markers).await
         } else if let Some(prompt) = client.prompt {
             output::run_print(
                 session.handle(),
@@ -33,6 +27,9 @@ pub(super) async fn run(options: LocalSessionOptions, client: ClientOptions) -> 
             )
             .await
         } else {
+            if client.perf_markers {
+                eprintln!("rw_perf_prompt_ready=1");
+            }
             output::run_repl(session.handle(), client.format).await
         }
     }

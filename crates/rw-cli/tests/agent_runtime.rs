@@ -416,3 +416,6 @@ mod sessions;
 #[path = "agent_runtime/process.rs"]
 mod process;
 use process::TestProcess;
+
+#[path = "agent_runtime/print_output.rs"]
+mod print_output;

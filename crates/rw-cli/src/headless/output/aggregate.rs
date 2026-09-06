@@ -3,7 +3,9 @@ use super::public_event::PublicEventPlan;
 use crate::cli_args::OutputFormat;
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{EngineEvent, TurnStatus, Usage};
+use rw_types::json_encoding::JsonWriter;
 use serde::Serialize;
+use std::io::Write as _;
 
 const MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
 const MAX_JSON_EVENTS: usize = 16_384;
@@ -35,16 +37,18 @@ impl PrintOutput {
         }
         Ok(())
     }
-    pub(super) fn finish(self, format: OutputFormat) -> Result<Option<TurnStatus>> {
-        if let Some(aggregate) = self.aggregate {
-            rw_types::json_encoding::JsonWriter::stream(&mut std::io::stdout().lock(), usize::MAX)
-                .serialize(&aggregate)
-                .into_diagnostic()?;
-            println!();
+    pub(super) fn finish(
+        self,
+        format: OutputFormat,
+    ) -> Result<(Option<TurnStatus>, Option<String>)> {
+        let message = if let Some(aggregate) = self.aggregate {
+            Some(aggregate.encode()?)
         } else if format == OutputFormat::Text && !self.ends_newline {
-            println!();
-        }
-        Ok(self.status)
+            Some("\n".to_owned())
+        } else {
+            None
+        };
+        Ok((self.status, message))
     }
 }
 
@@ -77,6 +81,27 @@ impl PrintAggregate {
             event_heap: 0,
             limit: MAX_JSON_BYTES,
         }
+    }
+    fn encode(self) -> Result<String> {
+        let retained = self
+            .events
+            .capacity()
+            .checked_mul(size_of::<EngineEvent>())
+            .and_then(|n| n.checked_add(self.event_heap))
+            .and_then(|n| n.checked_add(self.text.capacity()))
+            .and_then(|n| n.checked_add(self.session_id.capacity()))
+            .and_then(|n| n.checked_add(size_of::<Self>()))
+            .ok_or_else(limit_error)?;
+        let available = self.limit.checked_sub(retained).ok_or_else(limit_error)?;
+        let mut count = JsonWriter::count(available);
+        count.serialize(&self).map_err(|_| limit_error())?;
+        count.write_all(b"\n").map_err(|_| limit_error())?;
+        let length = count.written();
+        let mut bytes = Vec::with_capacity(length);
+        let mut writer = JsonWriter::buffer(&mut bytes, length, 0).into_diagnostic()?;
+        writer.serialize(&self).into_diagnostic()?;
+        writer.write_all(b"\n").into_diagnostic()?;
+        String::from_utf8(bytes).into_diagnostic()
     }
     fn push(&mut self, event: &EngineEvent) -> Result<()> {
         if self.events.len() >= MAX_JSON_EVENTS {
