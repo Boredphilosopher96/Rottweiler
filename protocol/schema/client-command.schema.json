@@ -54,6 +54,96 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "after_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "read_family_controls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "after_revision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_child_controls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "expected_revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "response": {
+          "$ref": "#/$defs/ChildControlResponse"
+        },
+        "type": {
+          "type": "string",
+          "const": "resolve_child_control"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target",
+        "expected_revision",
+        "response"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "type": {
           "type": "string",
           "const": "get_ui_catalog"
@@ -1935,6 +2025,215 @@
       "description": "Stable identifier of an engine session.",
       "type": "string"
     },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "ChildControlTarget": {
+      "description": "An exact path through the live parent's owned child bindings.",
+      "type": "object",
+      "properties": {
+        "ancestry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChildControlHop"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ancestry",
+        "session_id"
+      ]
+    },
+    "ChildControlHop": {
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "ChildControlResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "question_id": {
+              "$ref": "#/$defs/QuestionId"
+            },
+            "answers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Answer"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "question"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "question_id",
+            "answers"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "decision": {
+              "$ref": "#/$defs/ApprovalDecision"
+            },
+            "binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "approval"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "tool_call_id",
+            "invocation_id",
+            "decision",
+            "binding"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "$ref": "#/$defs/PlanDecision"
+            },
+            "revisions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "plan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "decision",
+            "revisions"
+          ]
+        }
+      ]
+    },
+    "QuestionId": {
+      "description": "Stable identifier of an interactive question.",
+      "type": "string"
+    },
+    "Answer": {
+      "description": "One answer returned for a question entry.",
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "values"
+      ]
+    },
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
+    },
+    "ApprovalDecision": {
+      "description": "A driver's decision at the permission chokepoint.",
+      "type": "string",
+      "enum": [
+        "allow_once",
+        "allow_session",
+        "allow_project",
+        "deny"
+      ]
+    },
+    "ApprovalBinding": {
+      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "arguments_hash": {
+          "type": "string"
+        },
+        "base_hash": {
+          "type": "string"
+        },
+        "diff_hash": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "arguments_hash",
+        "base_hash",
+        "diff_hash"
+      ]
+    },
+    "PlanDecision": {
+      "description": "Driver response to a submitted plan.",
+      "type": "string",
+      "enum": [
+        "approve",
+        "reject"
+      ]
+    },
     "UiActionRequest": {
       "description": "Action arguments and command selection remain in the approved host registry.",
       "type": "object",
@@ -2034,10 +2333,6 @@
         }
       ]
     },
-    "ToolInvocationId": {
-      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
-      "type": "string"
-    },
     "SessionReadScope": {
       "description": "Direct session authority or an explicit path from an independently authorized root.",
       "oneOf": [
@@ -2103,14 +2398,6 @@
         "session_id",
         "source_sequence"
       ]
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
-      "type": "string"
-    },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
-      "type": "string"
     },
     "TranscriptTailRead": {
       "type": "object",
@@ -2751,77 +3038,6 @@
             "data"
           ]
         }
-      ]
-    },
-    "ToolCallId": {
-      "description": "Stable identifier assigned to a model tool call.",
-      "type": "string"
-    },
-    "ApprovalDecision": {
-      "description": "A driver's decision at the permission chokepoint.",
-      "type": "string",
-      "enum": [
-        "allow_once",
-        "allow_session",
-        "allow_project",
-        "deny"
-      ]
-    },
-    "ApprovalBinding": {
-      "description": "Optional structured unified diff attached to a mutating-tool approval.",
-      "type": "object",
-      "properties": {
-        "proposal_id": {
-          "type": "string"
-        },
-        "arguments_hash": {
-          "type": "string"
-        },
-        "base_hash": {
-          "type": "string"
-        },
-        "diff_hash": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "proposal_id",
-        "arguments_hash",
-        "base_hash",
-        "diff_hash"
-      ]
-    },
-    "PlanDecision": {
-      "description": "Driver response to a submitted plan.",
-      "type": "string",
-      "enum": [
-        "approve",
-        "reject"
-      ]
-    },
-    "QuestionId": {
-      "description": "Stable identifier of an interactive question.",
-      "type": "string"
-    },
-    "Answer": {
-      "description": "One answer returned for a question entry.",
-      "type": "object",
-      "properties": {
-        "question_id": {
-          "$ref": "#/$defs/QuestionId"
-        },
-        "values": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "question_id",
-        "values"
       ]
     },
     "ModeId": {

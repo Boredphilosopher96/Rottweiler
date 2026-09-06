@@ -56,10 +56,12 @@
             "properties": {
               "type": {
                 "enum": [
+                  "child_controls_ready",
                   "command_acknowledged",
                   "command_descriptors_listed",
                   "context_snapshot_ready",
                   "cost_snapshot_ready",
+                  "family_controls_ready",
                   "host_shutdown",
                   "mcp_server_approval_reviewed",
                   "mcp_servers_listed",

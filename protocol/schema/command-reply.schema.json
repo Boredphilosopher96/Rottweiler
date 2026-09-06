@@ -207,6 +207,60 @@
             "session_id": {
               "$ref": "#/$defs/SessionId"
             },
+            "snapshot": {
+              "$ref": "#/$defs/FamilyControlsSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "family_controls_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "target": {
+              "$ref": "#/$defs/ChildControlTarget"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/ChildControlsSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "child_controls_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
             "catalog": {
               "$ref": "#/$defs/UiCatalog"
             },
@@ -3843,6 +3897,148 @@
         "verification"
       ]
     },
+    "FamilyControlsSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "description": "Reconnect starts with an unconditional read; this fence belongs to the live host.",
+          "$ref": "#/$defs/SequenceId"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FamilyControlRow"
+          },
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "children"
+      ],
+      "x-rw-max-json-bytes": 524288
+    },
+    "FamilyControlRow": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "controls": {
+          "$ref": "#/$defs/ChildControlSummary"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "controls"
+      ]
+    },
+    "ChildControlTarget": {
+      "description": "An exact path through the live parent's owned child bindings.",
+      "type": "object",
+      "properties": {
+        "ancestry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChildControlHop"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ancestry",
+        "session_id"
+      ]
+    },
+    "ChildControlHop": {
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "ChildControlSummary": {
+      "description": "Revision is a live control fence, not a journal cursor. `through` is the durable cut.",
+      "type": "object",
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "questions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "approvals": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "pending_plan": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "through",
+        "questions",
+        "approvals",
+        "pending_plan",
+        "available"
+      ]
+    },
+    "ChildControlsSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SessionControlsSnapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "snapshot"
+      ]
+    },
     "UiCatalog": {
       "type": "object",
       "properties": {
@@ -4609,10 +4805,6 @@
         "task_preview",
         "task_truncated"
       ]
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
-      "type": "string"
     },
     "TodoReadResult": {
       "description": "One bounded read either returns an exact snapshot or reports indexed progress.",
