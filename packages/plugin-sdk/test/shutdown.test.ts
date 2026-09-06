@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { setImmediate as nextTurn } from "node:timers/promises"
 import { PluginServer, PROTOCOL_LIMITS } from "../src/index"
 
 test("shutdown retains an ignored-abort handler after transport deadline until its effect settles", async () => {
@@ -29,10 +30,10 @@ test("shutdown retains an ignored-abort handler after transport deadline until i
   try {
     expect(server.shutdown()).toBe(shutdown)
     await timedOut.promise
-    await Promise.resolve()
+    await nextTurn()
     expect(entered).toBe(true)
-    expect(completed).toBe(false)
     expect(await Bun.file(marker).exists()).toBe(false)
+    expect(completed).toBe(false)
     release.resolve()
     await shutdown
     expect(await readFile(marker, "utf8")).toBe("effect settled after cancellation")
