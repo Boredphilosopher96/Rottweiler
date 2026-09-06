@@ -960,7 +960,7 @@ function applyKnownEvent(
           [event.question_id]: {
             questionId: event.question_id,
             turnId: event.turn_id,
-            questions: event.questions,
+            question: event.question,
           },
         },
       }

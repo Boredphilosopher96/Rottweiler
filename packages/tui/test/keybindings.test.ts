@@ -601,7 +601,7 @@ describe("Vim TUI interaction", () => {
         scope: {
           questionId: "scope",
           turnId: "1",
-          questions: [{
+          question: {
             id: "scope",
             prompt: "Which scope?",
             response_kind: "select_one",
@@ -609,7 +609,7 @@ describe("Vim TUI interaction", () => {
               { value: "focused", label: "Focused", description: "Fast" },
               { value: "full", label: "Full", description: "Complete" },
             ],
-          }],
+          },
         },
       },
     })

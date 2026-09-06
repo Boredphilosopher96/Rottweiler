@@ -514,7 +514,7 @@ export class ChildUiController {
   }
 
   isActiveSubagentRunning(): boolean {
-    if (this.#familyChild !== null) return !this.familyControlReady || (!Object.values(this.#activeChildState?.questions ?? {}).some(question => question.questions[0]?.response_kind === "text") && this.subagentDescriptor(this.#activeSubagentId!)?.activity !== "idle")
+    if (this.#familyChild !== null) return !this.familyControlReady || (!Object.values(this.#activeChildState?.questions ?? {}).some(question => question.question.response_kind === "text") && this.subagentDescriptor(this.#activeSubagentId!)?.activity !== "idle")
     return this.#activeSubagentId !== null &&
       this.subagentDescriptor(this.#activeSubagentId)?.activity === "running"
   }

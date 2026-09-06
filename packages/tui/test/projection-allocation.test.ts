@@ -33,7 +33,7 @@ test("mounted root and child stay charged until a complete rebind, with identica
 
 test("refused incoming projection preserves the exact mounted unresolved question", () => {
   const initial = createInitialState()
-  const question = { questionId: "q", turnId: "1", questions: [], answered: false, answers: null }
+  const question = { questionId: "q", turnId: "1", question: { id: "q", prompt: "Choose", response_kind: "text" as const, options: [] } }
   const pending = { ...initial, questions: { q: question } }
   const max = 100_000
   const owner = new ClientAllocationOwner({ ...CLIENT_ALLOCATION_LIMITS, live: max }, max)

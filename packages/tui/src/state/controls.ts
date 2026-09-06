@@ -1,5 +1,5 @@
 import type { EngineEvent, SessionControlsSnapshot } from "../protocol"
-import { MAX_SESSION_CONTROLS_BYTES, MAX_SESSION_CONTROLS_PREPARED_BYTES, MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_SET_BYTES, MAX_PENDING_TOOL_INVOCATIONS, MAX_PENDING_PLAN_BYTES } from "../../../../protocol/types"
+import { MAX_SESSION_CONTROLS_BYTES, MAX_SESSION_CONTROLS_PREPARED_BYTES, MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_BYTES, MAX_PENDING_TOOL_INVOCATIONS, MAX_PENDING_PLAN_BYTES } from "../../../../protocol/types"
 import { jsonEncodedBytes } from "../json-size"
 import { retainedJsonBytes } from "../retained-json"
 import { EngineProtocolError } from "../transport/errors"
@@ -30,12 +30,12 @@ export function readControls(state: RottweilerState, snapshot: SessionControlsSn
   }
   const questions: Record<string, RottweilerState["questions"][string]> = Object.create(null)
   for (const question of snapshot.controls.questions) {
-    if (question.questions.length === 0 || question.questions.length > MAX_PENDING_QUESTION_REQUESTS
-      || jsonEncodedBytes(question.questions, MAX_QUESTION_SET_BYTES) > MAX_QUESTION_SET_BYTES) {
+    if (question.question.id !== question.question_id
+      || jsonEncodedBytes(question.question, MAX_QUESTION_BYTES) > MAX_QUESTION_BYTES) {
       throw new EngineProtocolError("session question exceeds the source-owned admission limit")
     }
     if (Object.hasOwn(questions, question.question_id)) throw new EngineProtocolError("duplicate session question identity")
-    questions[question.question_id] = { questionId: question.question_id, turnId: question.turn_id, questions: question.questions }
+    questions[question.question_id] = { questionId: question.question_id, turnId: question.turn_id, question: question.question }
   }
   const approvals = new Map(snapshot.controls.approvals.map(approval => [approval.invocation_id, approval]))
   if (approvals.size !== snapshot.controls.approvals.length) throw new EngineProtocolError("duplicate session approval identity")

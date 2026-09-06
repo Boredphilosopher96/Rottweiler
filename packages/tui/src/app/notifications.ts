@@ -33,7 +33,7 @@ export function notifyTransition(notifications: NotificationAdapter, previous: R
       void notifications.notify({
         kind: "question_asked",
         title: "Rottweiler has a question",
-        body: question.questions[0]?.prompt ?? "Input required",
+        body: question.question.prompt ?? "Input required",
       })
     } else if (finished !== undefined) {
       void notifications.notify({

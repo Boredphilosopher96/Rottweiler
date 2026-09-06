@@ -338,8 +338,7 @@ function scenarios(): ScreenScenario[] {
           question: {
             questionId: "question",
             turnId: "2",
-            questions: [
-              {
+            question: {
                 id: "question",
                 prompt: "Which validation scope should run next?",
                 response_kind: "select_one",
@@ -348,7 +347,6 @@ function scenarios(): ScreenScenario[] {
                   { value: "full", label: "Full suite", description: "All workspace tests" },
                 ],
               },
-            ],
           },
         },
       },

@@ -335,12 +335,12 @@ describe("Rottweiler presentation", () => {
         },
         turn_id: "turn-terminal",
         question_id: "question-1",
-        questions: [{
+        question: {
           id: "question-1",
           prompt: "Continue?",
           response_kind: "select_one",
           options: [{ value: "yes", label: "Yes" }],
-        }],
+        },
       },
       {
         type: "turn_finished",

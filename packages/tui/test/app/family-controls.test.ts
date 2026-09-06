@@ -15,7 +15,7 @@ function untilAbort(signal: AbortSignal): Promise<never> {
 function snapshot(kind: "question" | "approval"): SessionControlsSnapshot {
   return { through: "12", controls: {
     pending_plan: null,
-    questions: kind !== "question" ? [] : [{ turn_id: "turn", question_id: "child-question", questions: [{ id: "child-question", prompt: "Which child file?", response_kind: "text", options: [] }] }],
+    questions: kind !== "question" ? [] : [{ turn_id: "turn", question_id: "child-question", question: { id: "child-question", prompt: "Which child file?", response_kind: "text", options: [] } }],
     approvals: kind !== "approval" ? [] : [{ invocation_id: "child-invocation", tool_call_id: "provider-alias", turn_id: "turn", name: "write", args: { path: "child.txt" }, capabilities: [], rationale: "Child asks to write", diff: null }],
   } }
 }

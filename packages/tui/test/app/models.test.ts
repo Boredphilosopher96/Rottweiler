@@ -254,7 +254,7 @@ describe("Rottweiler models", () => {
       },
       turn_id: "4",
       question_id: "model-switch-1",
-      questions: [{
+      question: {
         id: "model-switch-1",
         prompt: "How should the new model receive this conversation?",
         response_kind: "select_one",
@@ -279,7 +279,7 @@ describe("Rottweiler models", () => {
             model_context_transfer: "start_without_context",
           },
         ],
-      }],
+      },
     })
     await setup.renderOnce()
 
@@ -295,10 +295,10 @@ describe("Rottweiler models", () => {
       type: "answer_question",
       session_id: "session-model-context",
       question_id: "model-switch-1",
-      answers: [{
+      answer: {
         question_id: "model-switch-1",
-        values: ["pass_summary"],
-      }],
+        value: "pass_summary",
+      },
     }))
   })
 

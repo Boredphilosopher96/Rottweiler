@@ -55,7 +55,7 @@ export async function exerciseLiveOwners(app: RottweilerApp, fixture: MemoryFixt
   // Source-confirmed fixture decisions close controls before the explicit process handoff.
   for (let index = 0; index < MEMORY_LOAD.questions; index++) {
     app.handleEvent({ type: "question_answered", meta: { protocol_version: PROTOCOL_VERSION, session_id: "memory-probe", sequence_id: String(20001 + MEMORY_LOAD.toolInvocations * (1 + MEMORY_LOAD.toolChunks) + index), emitted_at: "2026-09-06T00:00:01Z" },
-      turn_id: "probe-turn", question_id: `question-${index}`, answers: [] })
+      turn_id: "probe-turn", question_id: `question-${index}`, answer: { question_id: `question-${index}`, value: "answer" } })
   }
   await render()
   if (app.interactionPanel.visible || Object.keys(app.state.questions).length !== 0) throw new Error("settled controls remain interactive")

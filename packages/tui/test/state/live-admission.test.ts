@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test"
-import { MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_SET_BYTES, MAX_TURN_CITATIONS, MAX_CITATION_TEXT_BYTES, MAX_TURN_CITATION_TEXT_BYTES } from "../../../../protocol/types"
+import { MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_BYTES, MAX_TURN_CITATIONS, MAX_CITATION_TEXT_BYTES, MAX_TURN_CITATION_TEXT_BYTES } from "../../../../protocol/types"
 import { createInitialState } from "../../src/state"
 import type { EngineEvent } from "../../src/protocol"
 import { meta, reduce } from "./fixtures"
 
 const asked = (sequence: number, id: string, prompt = "Choose"): EngineEvent => ({
   type: "question_asked", meta: meta(String(sequence)), turn_id: "1", question_id: id,
-  questions: [{ id, prompt, response_kind: "text", options: [] }],
+  question: { id, prompt, response_kind: "text", options: [] },
 })
 const answered = (sequence: number, id: string): EngineEvent => ({
   type: "question_answered", meta: meta(String(sequence)), turn_id: "1", question_id: id,
-  answers: [{ question_id: id, values: ["answer"] }],
+  answer: { question_id: id, value: "answer" },
 })
 const citation = (sequence: number, uri = "https://example.test"): EngineEvent => ({
   type: "citation_delta", meta: meta(String(sequence)), turn_id: "1", uri, title: null,
@@ -23,7 +23,7 @@ test("thousands of settled questions leave no completed payloads while pending q
     state = reduce(state, answered(index * 2 + 3, String(index)))
     expect(Object.keys(state.questions)).toEqual(["pending"])
   }
-  expect(state.questions.pending?.questions[0]?.prompt).toBe("Choose")
+  expect(state.questions.pending?.question?.prompt).toBe("Choose")
 })
 
 test("question count and escaped byte limits reject without advancing the durable cursor", () => {
@@ -35,7 +35,7 @@ test("question count and escaped byte limits reject without advancing the durabl
   expect(Object.keys(state.questions)).toHaveLength(MAX_PENDING_QUESTION_REQUESTS)
   state = reduce(state, answered(MAX_PENDING_QUESTION_REQUESTS, "0"))
   expect(Object.keys(reduce(state, asked(MAX_PENDING_QUESTION_REQUESTS + 1, "fits")).questions)).toHaveLength(MAX_PENDING_QUESTION_REQUESTS)
-  expect(() => reduce(createInitialState(), asked(0, "large", "\0".repeat(MAX_QUESTION_SET_BYTES / 2)))).toThrow("admission")
+  expect(() => reduce(createInitialState(), asked(0, "large", "\0".repeat(MAX_QUESTION_BYTES / 2)))).toThrow("admission")
 })
 
 test("citations count and bytes remain bounded across the complete agent turn", () => {
@@ -52,4 +52,12 @@ test("citations count and bytes remain bounded across the complete agent turn", 
   const nextTurn = reduce(bytes, { ...citation(entries, "new"), turn_id: "2" } as EngineEvent)
   expect(nextTurn.streamingTail?.citationBytes).toBe(3)
   expect(() => reduce(createInitialState(), { ...citation(0, text), title: "extra" } as EngineEvent)).toThrow("admission")
+})
+
+test("question identity mismatches reject before changing the pending map or cursor", () => {
+  const state = createInitialState()
+  const event = asked(1, "outer") as Extract<EngineEvent, { type: "question_asked" }>
+  expect(() => reduce(state, { ...event, question: { ...event.question, id: "different" } })).toThrow("admission")
+  expect(state.lastSequence).toBeNull()
+  expect(state.questions).toEqual({})
 })

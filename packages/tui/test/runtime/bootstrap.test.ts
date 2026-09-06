@@ -31,7 +31,7 @@ function source(offset = 0): BootstrapPost {
         break
       case "session_controls_ready":
         event.snapshot.through = String(14 + offset)
-        event.snapshot.controls.questions = [{ question_id: "q", turn_id: "1", questions: [{ id: "q", prompt: "Choose", response_kind: "text", options: [] }] }]
+        event.snapshot.controls.questions = [{ question_id: "q", turn_id: "1", question: { id: "q", prompt: "Choose", response_kind: "text", options: [] } }]
         break
       case "session_children_ready":
         if (event.result.type === "ready") event.result.snapshot.through = String(15 + offset)
@@ -58,7 +58,7 @@ test("bootstrap retains every component while replay converges from the oldest i
   expect(cache.allocations.usage.bytes).toBeGreaterThan(cache.usage.bytes)
   const durable = (sequence: string) => ({ protocol_version: PROTOCOL_VERSION, session_id: "s", sequence_id: sequence, emitted_at: "2026-01-01T00:00:00Z" })
   state = reduceRottweilerState(state, engineEvent({ type: "plugin_status_changed", meta: durable("11"), plugin_id: "wasm:fixture", status: "Old" }), "s")
-  state = reduceRottweilerState(state, engineEvent({ type: "question_answered", meta: durable("12"), turn_id: "1", question_id: "q", answers: [] }), "s")
+  state = reduceRottweilerState(state, engineEvent({ type: "question_answered", meta: durable("12"), turn_id: "1", question_id: "q", answer: { question_id: "q", value: "answer" } }), "s")
   expect(state.pluginStatuses["wasm:fixture"]).toBe("Ready")
   expect(state.questions.q).toBeDefined()
   expect(state.lastSequence).toBe("12")
@@ -132,9 +132,9 @@ test("the mounted app replaces its source model without losing drafts and releas
   const collect = () => collectSessionBootstrap(async (command, signal, allocation) => {
     const reply = await read(command, signal, allocation)
     const event = reply.type === "read" ? reply.events[0] : undefined
-    if (event?.type === "session_controls_ready") event.snapshot.controls.questions[0]!.questions = [{
+    if (event?.type === "session_controls_ready") event.snapshot.controls.questions[0]!.question = {
       id: "q", prompt: "Choose", response_kind: "select_one", options: [{ label: "Keep", value: "keep", description: "Keep" }],
-    }]
+    }
     return reply
   }, meta, cache, "s", signal())
   try {

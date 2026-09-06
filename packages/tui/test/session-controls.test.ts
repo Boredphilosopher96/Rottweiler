@@ -6,7 +6,7 @@ import { createInitialState, engineEvent, reduceRottweilerState } from "../src/s
 import { SessionSnapshotReader } from "../src/runtime-snapshots"
 
 const meta = (sequence: string) => ({ protocol_version: PROTOCOL_VERSION, session_id: "s", sequence_id: sequence, emitted_at: "2026-01-01T00:00:00Z" })
-const question = { question_id: "q", turn_id: "1", questions: [{ id: "q", prompt: "Choose", response_kind: "text" as const, options: [] }] }
+const question = { question_id: "q", turn_id: "1", question: { id: "q", prompt: "Choose", response_kind: "text" as const, options: [] } }
 function snapshot(through: string | null): SessionControlsSnapshot {
   return { through, controls: { questions: [question], approvals: [{ invocation_id: "inv", tool_call_id: "call", turn_id: "1", name: "write", args: { path: "file" }, capabilities: [], rationale: "write file", diff: null }], pending_plan: null } }
 }
@@ -21,11 +21,11 @@ test("snapshot fence preserves unresolved controls through older replay while th
   expect(state.lastSequence).toBeNull()
   state = apply(state, { type: "tool_call_started", meta: meta("1"), invocation_id: "inv", tool_call_id: "call", turn_id: "1", name: "write", args: {}, call_index: 0 })
   expect(state.tools.inv?.status).toBe("awaiting_approval")
-  state = apply(state, { type: "question_answered", meta: meta("2"), turn_id: "1", question_id: "q", answers: [] })
+  state = apply(state, { type: "question_answered", meta: meta("2"), turn_id: "1", question_id: "q", answer: { question_id: "q", value: "answer" } })
   expect(state.questions.q).toBeDefined()
   state = apply(state, { type: "tool_approval_resolved", meta: meta("3"), invocation_id: "inv", tool_call_id: "call", turn_id: "1", decision: "allow_once" })
   expect(state.tools.inv?.status).toBe("awaiting_approval")
-  state = apply(state, { type: "question_asked", meta: meta("4"), question_id: "stale", turn_id: "1", questions: question.questions })
+  state = apply(state, { type: "question_asked", meta: meta("4"), question_id: "stale", turn_id: "1", question: question.question })
   expect(state.questions.stale).toBeUndefined()
   expect(state.lastSequence).toBe("4")
   state = apply(state, { type: "tool_approval_resolved", meta: meta("5"), invocation_id: "inv", tool_call_id: "call", turn_id: "1", decision: "deny" })

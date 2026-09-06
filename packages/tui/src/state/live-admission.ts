@@ -1,6 +1,6 @@
 import {
   MAX_PLUGIN_STATUS_BYTES, MAX_SESSION_PLUGIN_STATUSES, MAX_CITATION_TEXT_BYTES, MAX_TURN_CITATIONS, MAX_TURN_CITATION_TEXT_BYTES,
-  MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_SET_BYTES,
+  MAX_PENDING_QUESTION_REQUESTS, MAX_QUESTION_BYTES,
 } from "../../../../protocol/types"
 import type { EngineEvent } from "../protocol"
 import { jsonEncodedBytes } from "../json-size"
@@ -23,8 +23,8 @@ export function assertLiveAdmission(state: RottweilerState, event: EngineEvent):
   } else if (event.type === "question_asked") {
     const pending = Object.keys(state.questions).length
     if ((state.questions[event.question_id] === undefined && pending >= MAX_PENDING_QUESTION_REQUESTS)
-      || event.questions.length === 0 || event.questions.length > MAX_PENDING_QUESTION_REQUESTS
-      || jsonEncodedBytes(event.questions, MAX_QUESTION_SET_BYTES) > MAX_QUESTION_SET_BYTES) {
+      || event.question.id !== event.question_id
+      || jsonEncodedBytes(event.question, MAX_QUESTION_BYTES) > MAX_QUESTION_BYTES) {
       throw new EngineProtocolError("unresolved questions exceed the source-owned admission limit")
     }
   } else if (event.type === "citation_delta") {

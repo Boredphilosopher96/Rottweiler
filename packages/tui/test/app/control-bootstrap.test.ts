@@ -22,8 +22,8 @@ test("a recreated renderer restores draft state and reconciles a fresh bounded i
       type: "session_controls_ready", session_id: "s",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "client", request_id: "controls", emitted_at: "2026-01-01T00:00:00Z" },
       snapshot: { through: "25", controls: { approvals: [], pending_plan: null, questions: [{
-        question_id: "choice", turn_id: "2", questions: [{ id: "choice", prompt: "Choose", response_kind: "select_one",
-          options: [{ value: "keep", label: "Keep", description: "Keep this change" }] }],
+        question_id: "choice", turn_id: "2", question: { id: "choice", prompt: "Choose", response_kind: "select_one",
+          options: [{ value: "keep", label: "Keep", description: "Keep this change" }] },
       }] } },
     }
     app.handleEvent(event)
@@ -31,7 +31,7 @@ test("a recreated renderer restores draft state and reconciles a fresh bounded i
     expect(app.composer.value).toBe("unfinished user draft")
     expect(app.state.lastSequence).toBeNull()
     expect(app.state.questions.choice).toBeDefined()
-    app.handleEvent({ type: "question_answered", meta: { protocol_version: PROTOCOL_VERSION, session_id: "s", sequence_id: "26", emitted_at: "2026-01-01T00:00:01Z" }, turn_id: "2", question_id: "choice", answers: [] })
+    app.handleEvent({ type: "question_answered", meta: { protocol_version: PROTOCOL_VERSION, session_id: "s", sequence_id: "26", emitted_at: "2026-01-01T00:00:01Z" }, turn_id: "2", question_id: "choice", answer: { question_id: "choice", value: "answer" } })
     await waitForHistory(setup, () => setup.renderer.currentFocusedRenderable === app.composer.editor)
     expect(app.state.questions.choice).toBeUndefined()
     expect(app.composer.value).toBe("unfinished user draft")
@@ -43,9 +43,9 @@ for (const kind of ["text", "select_one"] as const) {
     const makeEvent = (prompt = "Choose"): EngineEvent => ({ type: "session_controls_ready", session_id: "s",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "client", request_id: "controls", emitted_at: "2026-01-01T00:00:00Z" },
       snapshot: { through: "25", controls: { approvals: [], pending_plan: null, questions: [{ question_id: "q", turn_id: "2",
-        questions: [{ id: "q", prompt, response_kind: kind, options: kind === "text" ? [] : [
+        question: { id: "q", prompt, response_kind: kind, options: kind === "text" ? [] : [
           { value: "first", label: "First", description: null }, { value: "second", label: "Second", description: null },
-        ] }],
+        ] },
       }] } },
     })
     const first = await createTestRenderer({ width: 80, height: 24, useThread: false })

@@ -171,7 +171,7 @@ export interface SubagentProjection {
 export interface QuestionProjection {
   readonly questionId: string
   readonly turnId: string
-  readonly questions: readonly Question[]
+  readonly question: Question
 }
 
 export interface CommandAcknowledgement {

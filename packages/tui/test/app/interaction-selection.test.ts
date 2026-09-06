@@ -9,9 +9,9 @@ function controls(prompt = "Choose", turn = "2"): EngineEvent {
   return { type: "session_controls_ready", session_id: "s",
     meta: { protocol_version: PROTOCOL_VERSION, client_id: "c", request_id: "r", emitted_at: "2026-01-01T00:00:00Z" },
     snapshot: { through: "25", controls: { approvals: [], pending_plan: null, questions: [{ question_id: "q", turn_id: turn,
-      questions: [{ id: "q", prompt, response_kind: "select_one", options: [
+      question: { id: "q", prompt, response_kind: "select_one", options: [
         { label: "First", value: "first", description: null }, { label: "Second", value: "second", description: null },
-      ] }],
+      ] },
     }] } } }
 }
 

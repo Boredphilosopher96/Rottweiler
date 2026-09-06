@@ -827,9 +827,8 @@ export class RottweilerApp extends BoxRenderable {
     if (!this.#terminalFocused) notifyTransition(this.#options.notifications, previous, next)
     if (
       event.type === "question_asked" && next.questions[event.question_id] !== undefined &&
-      Array.isArray(eventRecord.questions) &&
-      isRecord(eventRecord.questions[0]) &&
-      eventRecord.questions[0].response_kind === "text"
+      isRecord(eventRecord.question) &&
+      eventRecord.question.response_kind === "text"
     ) {
       this.composer.focus()
     }

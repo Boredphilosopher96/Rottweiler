@@ -25,7 +25,7 @@ test("selected child restores metadata, canonical text and pending controls with
       return { revision: "1", children: [{ target, controls: { revision: "1", through: "10", questions: 1, approvals: 0, pending_plan: false, available: true } }] }
     },
     async child() { return { revision: "1", snapshot: { through: "10", controls: { approvals: [], pending_plan: null,
-      questions: resolved ? [] : [{ turn_id: "actual-turn", question_id: "question", questions: [{ id: "question", prompt: "Choose the child path", response_kind: "text", options: [] }] }] } } } },
+      questions: resolved ? [] : [{ turn_id: "actual-turn", question_id: "question", question: { id: "question", prompt: "Choose the child path", response_kind: "text", options: [] } }] } } } },
     async state(root, selected) { expect(root).toBe("root"); expect(selected).toEqual(target); stateReads++; return metadata },
     async scope(root, selected) { expect(selected).toEqual(target); scopes++; return { type: "ready", scope: { type: "descendant", root_session_id: root,
       ancestry: [{ subagent_id: "agent", session_id: "child", source_sequence: "2" }] } } },

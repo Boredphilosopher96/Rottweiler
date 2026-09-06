@@ -83,10 +83,10 @@ export class SubmissionController {
       return false
     }
     if (this.host.children.selectedFamily) {
-      const question = Object.values(this.host.children.presentedState().questions).find(value => value.questions[0]?.response_kind === "text")
+      const question = Object.values(this.host.children.presentedState().questions).find(value => value.question.response_kind === "text")
       if (question !== undefined) {
         if (attachments.length > 0) { this.host.projectError("question_attachments_unsupported", "Answer this question with text only; attachments stay in your draft."); return false }
-        return await this.host.children.respond({ type: "question", question_id: question.questionId, answers: [{ question_id: question.questionId, values: [content] }] })
+        return await this.host.children.respond({ type: "question", question_id: question.questionId, answer: { question_id: question.questionId, value: content } })
       }
     }
     if (content.startsWith("!")) {
@@ -168,7 +168,7 @@ export class SubmissionController {
       return true
     }
     const textQuestion = Object.values(this.host.ui.state.questions).find(
-      (question) => question.questions[0]?.response_kind === "text",
+      (question) => question.question.response_kind === "text",
     )
     if (textQuestion !== undefined) {
       if (attachments.length > 0) {
@@ -183,7 +183,7 @@ export class SubmissionController {
         meta: this.host.requests.meta(),
         session_id: this.host.sessionId,
         question_id: textQuestion.questionId,
-        answers: [{ question_id: textQuestion.questionId, values: [content] }],
+        answer: { question_id: textQuestion.questionId, value: content },
       }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
       if (outcome?.type !== "accepted") {
@@ -368,9 +368,9 @@ export class SubmissionController {
     }
   }
 
-  answer(question: QuestionProjection, values: readonly string[]): void {
+  answer(question: QuestionProjection, value: string): void {
     if (this.host.children.selectedFamily) {
-      void this.host.children.respond({ type: "question", question_id: question.questionId, answers: [{ question_id: question.questionId, values: [...values] }] })
+      void this.host.children.respond({ type: "question", question_id: question.questionId, answer: { question_id: question.questionId, value } })
       return
     }
     this.host.requests.dispatch({
@@ -378,7 +378,7 @@ export class SubmissionController {
       meta: this.host.requests.meta(),
       session_id: this.host.sessionId,
       question_id: question.questionId,
-      answers: [{ question_id: question.questionId, values: [...values] }],
+      answer: { question_id: question.questionId, value },
     })
   }
 

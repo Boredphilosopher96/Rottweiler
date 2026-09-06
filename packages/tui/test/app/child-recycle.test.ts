@@ -28,7 +28,7 @@ for (const kind of ["question", "approval"] as const) {
             approvals: kind === "approval" ? 1 : 0, pending_plan: false, available: true } }] }
         },
         async child() { return { revision, snapshot: { through: "10", controls: { pending_plan: null,
-          questions: kind === "question" ? [{ question_id: "q", turn_id: "turn", questions: [{ id: "q", prompt: "Which file?", response_kind: "text", options: [] }] }] : [],
+          questions: kind === "question" ? [{ question_id: "q", turn_id: "turn", question: { id: "q", prompt: "Which file?", response_kind: "text", options: [] } }] : [],
           approvals: kind === "approval" ? [{ invocation_id: "invocation", tool_call_id: "alias", turn_id: "turn", name: "write",
             args: { path: "file.txt" }, capabilities: [], rationale: "Write this file", diff: null }] : [],
         } } } },

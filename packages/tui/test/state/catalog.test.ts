@@ -247,7 +247,7 @@ describe("state catalog", () => {
       meta: meta("1"),
       turn_id: "4",
       question_id: "model-switch-1",
-      questions: [{
+      question: {
         id: "model-switch-1",
         prompt: "How should context move to the selected model?",
         response_kind: "select_one",
@@ -269,10 +269,10 @@ describe("state catalog", () => {
             model_context_transfer: "start_without_context",
           },
         ],
-      }],
+      },
     })
 
-    expect(state.questions["model-switch-1"]?.questions[0]).toMatchObject({
+    expect(state.questions["model-switch-1"]?.question).toMatchObject({
       model_switch: { model: "openai/gpt-5", provider: "openai" },
       options: [
         { value: "pass_summary", model_context_transfer: "pass_summary" },

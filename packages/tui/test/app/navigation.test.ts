@@ -98,10 +98,10 @@ test("a historical replay cannot trigger a live session transition", async () =>
 
 test("source navigation retains the active question's keyboard ownership", async () => {
   const { setup, app } = await fixture()
-  app.setState({ ...app.state, questions: { choice: { questionId: "choice", turnId: "2", questions: [{
+  app.setState({ ...app.state, questions: { choice: { questionId: "choice", turnId: "2", question: {
     id: "choice", prompt: "Choose", response_kind: "select_one",
     options: [{ value: "keep", label: "Keep", description: "Keep the change" }],
-  }] } } })
+  } } } })
   await setup.flush()
   const focused = renderer?.currentFocusedRenderable
   expect(focused).toBe(app.interactionPanel.select)

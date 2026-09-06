@@ -28,7 +28,7 @@ import { KNOWN_TOOL_DISPLAY_NAMES, permissionRuntimeMode, toolDisplayName } from
 
 export interface InteractionCallbacks {
   readonly onApproval: (tool: ToolProjection, action: InteractionApprovalAction) => void
-  readonly onAnswer: (question: QuestionProjection, values: readonly string[]) => void
+  readonly onAnswer: (question: QuestionProjection, value: string) => void
   readonly onPlanReview: (decision: PlanDecision) => void
 }
 
@@ -159,7 +159,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
 
   /** Free-text questions deliberately use the composer as the dock input. */
   get usesComposer(): boolean {
-    return this.visible && this.#activeQuestion?.questions[0]?.response_kind === "text"
+    return this.visible && this.#activeQuestion?.question?.response_kind === "text"
   }
 
   /** Selectable approvals, questions, and plans own keyboard focus themselves. */
@@ -281,19 +281,19 @@ export class InteractionPanelRenderable extends BoxRenderable {
 
   #showQuestion(question: QuestionProjection): void {
     this.#activeTool = null
-    const selected = this.#retainSelection(["question", question.questionId, question.turnId, question.questions])
+    const selected = this.#retainSelection(["question", question.questionId, question.turnId, question.question])
     this.#activeQuestion = question
     this.#activePlan = null
     this.#removeDiff()
     this.visible = true
     this.borderColor = this.#theme.info
     this.title = " Rottweiler asks "
-    const first = question.questions[0]
-    const freeText = first?.response_kind === "text"
+    const prompt = question.question
+    const freeText = prompt.response_kind === "text"
     this.prompt.content = freeText
-      ? `${first?.prompt ?? "Your answer"}\nType your answer below. Enter sends; Shift+Enter adds a line.`
-      : first?.prompt ?? "Choose an answer"
-    this.select.options = questionOptions(first)
+      ? `${prompt.prompt}\nType your answer below. Enter sends; Shift+Enter adds a line.`
+      : prompt.prompt
+    this.select.options = questionOptions(prompt)
     this.select.visible = !freeText
     this.#layout(freeText ? 4 : 0)
     if (!freeText) {
@@ -346,7 +346,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     if (this.#activeQuestion !== null) {
       const option = this.select.options[index]
       const value = typeof option?.value === "string" ? option.value : option?.name ?? ""
-      this.#callbacks.onAnswer(this.#activeQuestion, [value])
+      this.#callbacks.onAnswer(this.#activeQuestion, value)
     }
   }
 
@@ -470,8 +470,8 @@ function approvalCommand(command: string): string {
   ].join("\n")
 }
 
-function questionOptions(question: Question | undefined) {
-  if (question === undefined || question.response_kind === "text") {
+function questionOptions(question: Question) {
+  if (question.response_kind === "text") {
     return []
   }
   return question.options.map((option) => ({

@@ -294,21 +294,19 @@ describe("state queries", () => {
         meta: meta("8"),
         turn_id: "4",
         question_id: "question-1",
-        questions: [
-          {
+        question: {
             id: "question-1",
             prompt: "Continue?",
             response_kind: "select_one",
             options: [{ value: "yes", label: "Yes" }],
           },
-        ],
       },
       {
         type: "question_answered",
         meta: meta("9"),
         turn_id: "4",
         question_id: "question-1",
-        answers: [{ question_id: "question-1", values: ["yes"] }],
+        answer: { question_id: "question-1", value: "yes" },
       },
       {
         type: "turn_finished",

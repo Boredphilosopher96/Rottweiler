@@ -57,7 +57,7 @@ test("selected snapshot and action target remain owned across cancellation, repl
   const immediate = new FamilyControlsController({ allocations: owner, reader: { ...reader, child: async () => ({ revision: "2", snapshot: controls }) }, changed() {}, apply() {} })
   immediate.connect("root"); await flush(); immediate.select(target); await flush()
   const action = Promise.withResolvers<void>()
-  const response = immediate.respond({ type: "question", question_id: "question", answers: [] }, async (root, selected, revision) => {
+  const response = immediate.respond({ type: "question", question_id: "question", answer: { question_id: "question", value: "answer" } }, async (root, selected, revision) => {
     expect(root).toBe("root"); expect(selected).toEqual(target); expect(revision).toBe("2"); await action.promise
   })
   immediate.close(); await immediate.settled()

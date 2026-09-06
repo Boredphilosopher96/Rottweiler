@@ -64,8 +64,8 @@ export class MemoryFixture {
       }
       case "get_session_controls": return { type: "session_controls_ready", meta, session_id: SESSION, snapshot: { through: String(20000 + MEMORY_LOAD.toolInvocations * (1 + MEMORY_LOAD.toolChunks)),
         controls: { approvals: [], pending_plan: null, questions: Array.from({ length: MEMORY_LOAD.questions }, (_, index) => ({
-          question_id: `question-${index}`, turn_id: "probe-turn", questions: [{ id: `q-${index}`, prompt: `Decision ${index} ${"context ".repeat(512)}`,
-            response_kind: "select_one", options: [{ value: "yes", label: "Continue", description: "Proceed with this decision" }] }],
+          question_id: `question-${index}`, turn_id: "probe-turn", question: { id: `question-${index}`, prompt: `Decision ${index} ${"context ".repeat(512)}`,
+            response_kind: "select_one", options: [{ value: "yes", label: "Continue", description: "Proceed with this decision" }] },
         })) } } }
       case "get_todos": return { type: "todos_read", meta, session_id: SESSION, result: { type: "ready", todos: { through: SOURCE, snapshot: { items: [] } } } }
       case "read_session_children": return { type: "session_children_ready", meta, session_id: SESSION, result: { type: "ready", snapshot: { through: SOURCE, children: [] } } }

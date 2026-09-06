@@ -169,7 +169,7 @@ describe("Rottweiler layout", () => {
         choice: {
           questionId: "choice",
           turnId: "2",
-          questions: [{
+          question: {
             id: "choice",
             prompt: "Choose the safe option",
             response_kind: "select_one",
@@ -177,7 +177,7 @@ describe("Rottweiler layout", () => {
               { value: "keep", label: "Keep", description: "Keep the change" },
               { value: "revert", label: "Revert", description: "Revert the change" },
             ],
-          }],
+          },
         },
       },
     })

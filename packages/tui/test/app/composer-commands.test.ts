@@ -252,12 +252,12 @@ describe("Rottweiler composer-commands", () => {
       },
       turn_id: "1",
       question_id: "question-text",
-      questions: [{
+      question: {
         id: "question-text",
         prompt: "What should change?",
         response_kind: "text",
         options: [],
-      }],
+      },
     })
 
     await setup.renderOnce()
@@ -281,7 +281,7 @@ describe("Rottweiler composer-commands", () => {
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "answer_question",
       question_id: "question-text",
-      answers: [{ question_id: "question-text", values: [exact] }],
+      answer: { question_id: "question-text", value: exact },
     }))
   })
 
