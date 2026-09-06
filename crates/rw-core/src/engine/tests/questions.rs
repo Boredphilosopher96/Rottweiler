@@ -324,15 +324,79 @@ async fn question_answer_persistence_failure_rejects_ack_and_stops_tool_continua
             .iter()
             .all(|event| !matches!(event, EngineEvent::QuestionAnswered { .. }))
     );
+    assert_failed_answer_repaired(&handle, &mut events, &sink).await;
+    handle
+        .close()
+        .await
+        .expect("physically settled question actor");
+    assert_eq!(model.request_count(), 1);
+}
+
+async fn assert_failed_answer_repaired(
+    handle: &crate::engine::SessionHandle,
+    events: &mut crate::engine::SessionSubscription,
+    sink: &ToggleLeaseSink,
+) {
+    // The rejected acknowledgement precedes physical tool settlement. The
+    // durable terminal event is the repair fence that makes state readable.
     timeout(Duration::from_secs(1), async {
         loop {
-            if !handle.snapshot().await.expect("snapshot").running {
+            let event = events.recv().await.expect("repair event");
+            if let EngineEvent::TurnFinished {
+                turn_id, status, ..
+            } = event.as_ref()
+            {
+                assert_eq!(turn_id.0, "1");
+                assert_eq!(*status, rw_types::TurnStatus::Interrupted);
                 break;
             }
-            tokio::task::yield_now().await;
         }
     })
     .await
     .expect("cancelled question turn");
-    assert_eq!(model.request_count(), 1);
+    let state = handle.snapshot().await.expect("repaired state");
+    assert!(!state.running);
+    assert_eq!(state.completed_turns, 1);
+    assert_eq!(state.driver_client_id, Some(ClientId("driver".to_owned())));
+    assert!(
+        handle
+            .controls()
+            .await
+            .expect("repaired controls")
+            .controls
+            .questions
+            .is_empty()
+    );
+    let source = sink.events.lock().expect("durable source");
+    assert!(
+        source
+            .iter()
+            .all(|event| !matches!(event, EngineEvent::QuestionAnswered { .. }))
+    );
+    let completions: Vec<_> = source
+        .iter()
+        .filter_map(|event| {
+            if let EngineEvent::ToolCallFinished {
+                tool_call_id,
+                is_error,
+                ..
+            } = event
+            {
+                Some((tool_call_id, is_error))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].0.0, "question-call");
+    assert!(
+        *completions[0].1,
+        "the rejected answer cannot complete the tool successfully"
+    );
+    let recovered = project_session_events(&source).expect("canonical repaired state");
+    assert_eq!(recovered.completed_turns, 1);
+    assert!(recovered.interrupted_turn.is_none());
+    assert!(recovered.pending_questions.is_empty());
+    assert!(recovered.interrupted_tool_repairs.is_empty());
 }
