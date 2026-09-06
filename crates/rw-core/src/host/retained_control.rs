@@ -7,6 +7,8 @@ use rw_types::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const UNIT: usize = 1024;
+const _: () =
+    assert!(rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT <= u32::MAX as usize);
 const NORMAL_REPLY_UNITS: u32 = 4 * 1024;
 
 #[derive(Debug)]
@@ -38,13 +40,7 @@ impl CompletionBudget {
         let (pool, units) = if command.is_urgent() {
             (
                 &self.urgent,
-                const {
-                    assert!(
-                        rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT
-                            <= u32::MAX as usize
-                    );
-                    (rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT) as u32
-                },
+                u32::try_from(rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT).ok()?,
             )
         } else {
             (&self.normal, NORMAL_REPLY_UNITS)
