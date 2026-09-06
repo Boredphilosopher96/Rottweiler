@@ -53,16 +53,29 @@ impl ActorTasks {
 
     /// Blocking work remains registered until the actual worker exits, even when
     /// the caller abandons the join handle.
-    pub(super) fn spawn_blocking<T: Send + 'static>(
+    pub(super) async fn spawn_blocking<T: Send + 'static>(
         &self,
         owners: Arc<SessionActorConfig>,
         cancellation: CancellationToken,
+        class: rw_resources::ResourceClass,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Result<tokio::task::JoinHandle<T>, AgentLoopError> {
-        let guard = self.admit(owners, cancellation)?;
+        // Register the waiting operation too, so actor close cancels a queued
+        // admission. No physical work exists until the resource lease arrives.
+        let mut guard = self.admit(owners, cancellation.clone())?;
+        guard.completed = true;
+        let execution = rw_resources::acquire(class, cancellation.cancelled())
+            .await
+            .map_err(|error| {
+                AgentLoopError::InvalidConfiguration(format!(
+                    "blocking execution admission: {error}"
+                ))
+            })?;
+        guard.completed = false;
         let span = tracing::Span::current();
         Ok(tokio::task::spawn_blocking(move || {
             span.in_scope(|| {
+                let _execution = execution;
                 let mut guard = guard;
                 let result = work();
                 guard.completed = true;

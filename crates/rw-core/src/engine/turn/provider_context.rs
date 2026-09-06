@@ -67,9 +67,13 @@ impl ProviderContext<'_> {
         let sources = selection.sources.to_vec();
         let surgery = selection.surgery.to_vec();
         let mut pruned = selection.pruned.clone();
-        let task =
-            self.tasks
-                .spawn_blocking(Arc::clone(&config), self.cancellation.clone(), move || {
+        let task = self
+            .tasks
+            .spawn_blocking(
+                Arc::clone(&config),
+                self.cancellation.clone(),
+                rw_resources::ResourceClass::Cpu,
+                move || {
                     let conversation = worker_conversation
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -98,7 +102,9 @@ impl ProviderContext<'_> {
                         &pruned,
                     )?;
                     Ok::<_, AgentLoopError>((working, assembled, events, pruned))
-                });
+                },
+            )
+            .await;
         let result = match task {
             Ok(task) => task
                 .await

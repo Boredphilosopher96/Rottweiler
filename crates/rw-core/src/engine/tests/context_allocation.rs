@@ -63,3 +63,52 @@ async fn context_work_is_admitted_before_copies_and_owned_through_delivery() {
     drop(delivered);
     assert!(dropped.load(Ordering::Acquire));
 }
+
+#[tokio::test]
+async fn dropped_blocking_reply_keeps_the_actual_worker_registered_until_exit() {
+    let root = tempfile::tempdir().expect("root");
+    let config = Arc::new(
+        history::bind(config(
+            root.path(),
+            Arc::new(ScriptedModel::default()),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .await
+        .expect("source"),
+    );
+    let tasks = crate::engine::task_ownership::ActorTasks::default();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let worker = tasks
+        .spawn_blocking(
+            config,
+            rw_tools::CancellationToken::default(),
+            rw_resources::ResourceClass::Blocking,
+            move || {
+                entered.send(()).expect("worker entry");
+                wait.recv().expect("release worker");
+                42
+            },
+        )
+        .await
+        .expect("admitted worker");
+    entry.await.expect("actual execution");
+    drop(worker);
+    assert!(!tasks.idle());
+    tasks.cancel();
+    assert!(
+        !tasks.idle(),
+        "cancellation cannot claim completion of a blocking worker"
+    );
+    release.send(()).expect("release");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !tasks.idle() {
+            tasks.changed().await;
+        }
+    })
+    .await
+    .expect("actual completion");
+    assert!(tasks.failure().is_none());
+}

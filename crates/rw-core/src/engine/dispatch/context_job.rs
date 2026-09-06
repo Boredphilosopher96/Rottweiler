@@ -146,6 +146,7 @@ async fn read(
         .spawn_blocking(
             Arc::clone(&config),
             rw_tools::CancellationToken::default(),
+            rw_resources::ResourceClass::Cpu,
             move || {
                 // Both materializations remain owned through transformation and output delivery.
                 current.try_map(|current| {
@@ -174,7 +175,8 @@ async fn read(
                     }
                 })
             },
-        )?
+        )
+        .await?
         .await
         .map_err(|error| invalid(&format!("context result worker failed: {error}")))?
 }
@@ -211,6 +213,7 @@ async fn historical_prompt(
         .spawn_blocking(
             Arc::clone(&config),
             rw_tools::CancellationToken::default(),
+            rw_resources::ResourceClass::Cpu,
             move || {
                 current.try_map(|current| {
                     let dump = prompt_dump(
@@ -223,7 +226,8 @@ async fn historical_prompt(
                     Ok(Output::Prompt(dump))
                 })
             },
-        )?
+        )
+        .await?
         .await
         .map_err(|error| invalid(&format!("historical prompt worker failed: {error}")))?
 }

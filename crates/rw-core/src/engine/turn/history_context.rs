@@ -58,6 +58,7 @@ pub(in crate::engine) async fn assemble_view(
         .spawn_blocking(
             Arc::clone(&config),
             rw_tools::CancellationToken::default(),
+            rw_resources::ResourceClass::Cpu,
             move || {
                 let working =
                     super::context_memory::admit(reserved, &config, &page.turns, &queued)?;
@@ -84,7 +85,8 @@ pub(in crate::engine) async fn assemble_view(
                     assembled,
                 }))
             },
-        )?
+        )
+        .await?
         .await
         .map_err(|error| {
             AgentLoopError::EffectsUnsettled(format!("context assembly worker failed: {error}"))
