@@ -347,14 +347,16 @@ impl McpConnector for LazySandboxedStdioConnector {
             .approvals
             .capture_stdio(config, &self.workspace_roots, cwd)
             .await?;
-        let launcher = SandboxedProtocolLauncher::new(
-            &self.workspace_roots,
-            &self.scratch,
-            &helper,
-            environment,
-        )
-        .map_err(|error| McpError::Policy(error.to_string()))?
-        .with_approved_command(command);
+        let roots = self.workspace_roots.clone();
+        let scratch = self.scratch.clone();
+        let launcher =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                SandboxedProtocolLauncher::new(&roots, &scratch, &helper, environment)
+                    .map(|launcher| launcher.with_approved_command(command))
+                    .map_err(|error| McpError::Policy(error.to_string()))
+            })
+            .await
+            .map_err(|_| McpError::Policy("MCP launch authority worker failed".into()))??;
         rw_mcp::SandboxedStdioConnector::new(launcher, self.approvals.clone())
             .connect(config)
             .await
