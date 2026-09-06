@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import platform
@@ -41,6 +42,8 @@ def make_archive(root: Path, release_platform: str) -> Path:
         platform_contract = RELEASE_CONTRACT.platform(release_platform)
         for member in platform_contract.archive_members:
             content = installer if member.id == "installer" else member.id.encode("ascii")
+            if member.id == "wasm_host_identity":
+                content = json.dumps({"bytes": len(b"wasm_host"), "sha256": hashlib.sha256(b"wasm_host").hexdigest()}).encode()
             info = tarfile.TarInfo(f"{release_root}/{member.path}")
             info.mode = member.mode
             info.size = len(content)

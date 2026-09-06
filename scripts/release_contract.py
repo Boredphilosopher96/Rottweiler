@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import dataclass
 import json
 import os
@@ -29,6 +30,7 @@ EXPECTED_MEMBER_IDS = {
     "engine",
     "tui",
     "wasm_host",
+    "wasm_host_identity",
     "plugin_host",
     "opentui_native",
 }
@@ -481,6 +483,43 @@ def verify_archive(
             f"{contract.expanded_max_bytes}"
         )
 
+    verify_helper_receipt(archive, release_root, platform)
+
+
+def _unique_receipt_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("WASM helper identity has duplicate fields")
+    return fields
+
+
+def verify_helper_receipt(archive: Path, release_root: str, platform: PlatformContract) -> None:
+    """Require the installed helper identity to describe its exact archived bytes."""
+    receipt_member = _member_by_id(platform, "wasm_host_identity")
+    helper_member = _member_by_id(platform, "wasm_host")
+    with tarfile.open(archive, "r:gz") as bundle:
+        receipt_file = bundle.extractfile(f"{release_root}/{receipt_member.path}")
+        helper_file = bundle.extractfile(f"{release_root}/{helper_member.path}")
+        if receipt_file is None or helper_file is None:
+            raise ValueError("WASM helper identity requires regular archive files")
+        with receipt_file, helper_file:
+            encoded = receipt_file.read(receipt_member.max_bytes + 1)
+            if len(encoded) > receipt_member.max_bytes:
+                raise ValueError("WASM helper identity exceeds its size bound")
+            try:
+                receipt = json.loads(encoded, object_pairs_hook=_unique_receipt_fields)
+            except (ValueError, UnicodeError) as error:
+                raise ValueError("WASM helper identity must be valid JSON") from error
+            if (not isinstance(receipt, dict) or set(receipt) != {"bytes", "sha256"}
+                    or type(receipt["bytes"]) is not int or receipt["bytes"] <= 0
+                    or not isinstance(receipt["sha256"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"]) is None):
+                raise ValueError("WASM helper identity has invalid fields")
+            info = bundle.getmember(f"{release_root}/{helper_member.path}")
+            if (receipt["bytes"] != info.size
+                    or receipt["sha256"] != hashlib.file_digest(helper_file, "sha256").hexdigest()):
+                raise ValueError("WASM helper identity does not match archived bytes")
+
 
 def _rust_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
@@ -772,10 +811,17 @@ def stage_release(
                 render_installer(contract, template_path, version, platform_id),
                 member.mode,
             )
+        elif member.id == "wasm_host_identity":
+            continue
         else:
             source = sources[member.id]
             shutil.copyfile(source, destination)
         destination.chmod(member.mode)
+    member = _member_by_id(platform, "wasm_host_identity")
+    with (output / _member_by_id(platform, "wasm_host").path).open("rb") as helper:
+        receipt = {"bytes": os.fstat(helper.fileno()).st_size,
+                   "sha256": hashlib.file_digest(helper, "sha256").hexdigest()}
+    _write_atomic(output / member.path, json.dumps(receipt, separators=(",", ":")) + "\n", member.mode)
 
 
 def parse_args() -> argparse.Namespace:

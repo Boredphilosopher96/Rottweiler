@@ -29,6 +29,12 @@
         "max_bytes": 104857600
       },
       {
+        "id": "wasm_host_identity",
+        "path": "bin/rottweiler-wasm-host.identity.json",
+        "mode": "0644",
+        "max_bytes": 4096
+      },
+      {
         "id": "plugin_host",
         "path": "bin/rottweiler-plugin-host",
         "mode": "0755",

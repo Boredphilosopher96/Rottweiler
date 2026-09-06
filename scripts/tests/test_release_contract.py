@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -30,7 +31,7 @@ def load_module():
     return module
 
 
-def make_archive(path: Path, contract, platform_id: str, *, extra: bool = False) -> None:
+def make_archive(path: Path, contract, platform_id: str, *, extra: bool = False, identity: bytes | None = None) -> None:
     platform_contract = contract.platform(platform_id)
     root = contract.archive_root(VERSION, platform_id)
     with tarfile.open(path, "w:gz") as archive:
@@ -44,6 +45,8 @@ def make_archive(path: Path, contract, platform_id: str, *, extra: bool = False)
         archive.addfile(bin_info)
         for member in platform_contract.archive_members:
             content = b"#!/bin/sh\n" if member.mode == 0o755 else b"native\n"
+            if member.id == "wasm_host_identity":
+                content = identity if identity is not None else json.dumps({"bytes": 10, "sha256": hashlib.sha256(b"#!/bin/sh\n").hexdigest()}).encode()
             info = tarfile.TarInfo(f"{root}/{member.path}")
             info.mode = member.mode
             info.size = len(content)
@@ -60,6 +63,21 @@ class ReleaseContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_module()
+
+    def test_archive_rejects_invalid_helper_identity(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        valid = {"bytes": 10, "sha256": hashlib.sha256(b"#!/bin/sh\n").hexdigest()}
+        cases = [b"{}", b"not json", b'{"bytes":1,"bytes":2,"sha256":"x"}', json.dumps({**valid, "bytes": True}).encode(),
+                 json.dumps({**valid, "bytes": 11}).encode(),
+                 json.dumps({**valid, "sha256": "0" * 64}).encode(),
+                 json.dumps({**valid, "unknown": 1}).encode()]
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / f"{contract.archive_root(VERSION, 'linux-aarch64')}.tar.gz"
+            for identity in cases:
+                with self.subTest(identity=identity):
+                    make_archive(archive, contract, "linux-aarch64", identity=identity)
+                    with self.assertRaisesRegex(ValueError, "WASM helper identity"):
+                        self.module.verify_archive(contract, archive, VERSION, "linux-aarch64")
 
     def test_contract_resolves_canonical_platforms_and_product_budgets(self) -> None:
         contract = self.module.load_contract(CONTRACT_PATH)

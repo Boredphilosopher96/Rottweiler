@@ -61,6 +61,12 @@ const DARWIN_ARM64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         max_bytes: 104_857_600,
     },
     ReleaseArchiveMember {
+        id: "wasm_host_identity",
+        path: "bin/rottweiler-wasm-host.identity.json",
+        mode: 0o644,
+        max_bytes: 4_096,
+    },
+    ReleaseArchiveMember {
         id: "plugin_host",
         path: "bin/rottweiler-plugin-host",
         mode: 0o755,
@@ -98,6 +104,12 @@ const DARWIN_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         path: "bin/rottweiler-wasm-host",
         mode: 0o755,
         max_bytes: 104_857_600,
+    },
+    ReleaseArchiveMember {
+        id: "wasm_host_identity",
+        path: "bin/rottweiler-wasm-host.identity.json",
+        mode: 0o644,
+        max_bytes: 4_096,
     },
     ReleaseArchiveMember {
         id: "plugin_host",
@@ -139,6 +151,12 @@ const LINUX_AARCH64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         max_bytes: 104_857_600,
     },
     ReleaseArchiveMember {
+        id: "wasm_host_identity",
+        path: "bin/rottweiler-wasm-host.identity.json",
+        mode: 0o644,
+        max_bytes: 4_096,
+    },
+    ReleaseArchiveMember {
         id: "plugin_host",
         path: "bin/rottweiler-plugin-host",
         mode: 0o755,
@@ -176,6 +194,12 @@ const LINUX_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         path: "bin/rottweiler-wasm-host",
         mode: 0o755,
         max_bytes: 104_857_600,
+    },
+    ReleaseArchiveMember {
+        id: "wasm_host_identity",
+        path: "bin/rottweiler-wasm-host.identity.json",
+        mode: 0o644,
+        max_bytes: 4_096,
     },
     ReleaseArchiveMember {
         id: "plugin_host",

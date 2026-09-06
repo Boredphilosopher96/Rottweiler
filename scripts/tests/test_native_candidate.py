@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -59,7 +60,10 @@ class NativeCandidateFixture:
         for member in self.platform.archive_members:
             path = self.stage / member.path
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(member.id.encode())
+            content = member.id.encode()
+            if member.id == "wasm_host_identity":
+                content = json.dumps({"bytes": len(b"wasm_host"), "sha256": hashlib.sha256(b"wasm_host").hexdigest()}).encode()
+            path.write_bytes(content)
             path.chmod(member.mode)
         self.archive = self.root / (self.stage.name + ".tar.gz")
         packager.package(self.stage, self.archive, 1700000000)
