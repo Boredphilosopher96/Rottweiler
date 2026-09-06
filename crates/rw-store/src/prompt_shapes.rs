@@ -75,7 +75,7 @@ impl PromptShapeStore {
         connection.pragma_update(None, "synchronous", "FULL")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id: u32 = transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        let objects: usize = transaction.query_row(
+        let objects: i64 = transaction.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
             [],
             |row| row.get(0),

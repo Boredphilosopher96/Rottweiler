@@ -23,6 +23,30 @@ pub(super) struct PromptRecordingModel {
     pub(super) journal: Arc<PromptShapeJournal>,
 }
 
+impl PromptRecordingModel {
+    fn recorded_stream(
+        &self,
+        alias: &str,
+        provider: Option<&str>,
+        request: ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> BoxEventStream {
+        use futures_util::StreamExt as _;
+        let alias = alias.to_owned();
+        let provider = provider.map(str::to_owned);
+        let inner = Arc::clone(&self.inner);
+        let journal = Arc::clone(&self.journal);
+        Box::pin(async_stream::try_stream! {
+            let cache = inner.context_metadata(&alias).cache_breakpoints.unwrap_or(CacheBreakpointSupport::None);
+            let request = journal.record_owned(alias.clone(), request, cache).await
+                .map_err(|error| rw_providers::ProviderError::new(rw_providers::ProviderErrorKind::Protocol, format!("request shape commit failed: {error}")))?;
+            let mut stream = inner.stream_for_provider(&alias, provider.as_deref(), request, invocation)
+                .map_err(|error| rw_providers::ProviderError::new(rw_providers::ProviderErrorKind::Protocol, error.to_string()))?;
+            while let Some(event) = stream.next().await { yield event?; }
+        })
+    }
+}
+
 #[async_trait]
 impl ModelDriver for PromptRecordingModel {
     fn native_web_searcher(
@@ -34,7 +58,9 @@ impl ModelDriver for PromptRecordingModel {
     }
 
     async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
-        self.inner.settle_effects().await
+        let (inner, records) =
+            tokio::join!(self.inner.settle_effects(), self.journal.settle_records());
+        inner.and(records.map_err(|error| AgentLoopError::Persistence(error.to_string())))
     }
 
     fn stream(
@@ -43,15 +69,7 @@ impl ModelDriver for PromptRecordingModel {
         request: ProviderRequest,
         invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        let cache_support = self
-            .inner
-            .context_metadata(alias)
-            .cache_breakpoints
-            .unwrap_or(CacheBreakpointSupport::None);
-        self.journal
-            .record_request(alias, &request, cache_support)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        self.inner.stream(alias, request, invocation)
+        Ok(self.recorded_stream(alias, None, request, invocation))
     }
 
     fn stream_for_provider(
@@ -61,16 +79,7 @@ impl ModelDriver for PromptRecordingModel {
         request: ProviderRequest,
         invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        let cache_support = self
-            .inner
-            .context_metadata(alias)
-            .cache_breakpoints
-            .unwrap_or(CacheBreakpointSupport::None);
-        self.journal
-            .record_request(alias, &request, cache_support)
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        self.inner
-            .stream_for_provider(alias, provider, request, invocation)
+        Ok(self.recorded_stream(alias, provider, request, invocation))
     }
 
     fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {

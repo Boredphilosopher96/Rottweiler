@@ -177,8 +177,8 @@ fn configured_websearch_schema_is_exposed_for_an_unsupported_alias() {
     );
 }
 
-#[test]
-fn unsupported_alias_prompt_shape_omits_dead_websearch_schema() {
+#[tokio::test]
+async fn unsupported_alias_prompt_shape_omits_dead_websearch_schema() {
     let root = tempdir().expect("prompt shape root");
     let session_id = "alias-websearch-shape";
     std::fs::create_dir_all(root.path().join("sessions").join(session_id))
@@ -213,11 +213,14 @@ fn unsupported_alias_prompt_shape_omits_dead_websearch_schema() {
             tools_in_prefix: true,
         }),
     };
-    drop(
-        model
-            .stream("local", request, test_provider_invocation())
-            .expect("filtered request"),
-    );
+    use futures_util::StreamExt as _;
+    let mut stream = model
+        .stream("local", request, test_provider_invocation())
+        .expect("filtered request");
+    while let Some(event) = stream.next().await {
+        event.expect("recorded provider event");
+    }
+    model.settle_effects().await.expect("recording settled");
 
     let (profile, _) = journal
         .shape_for_turn(1)

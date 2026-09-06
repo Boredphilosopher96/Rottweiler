@@ -47,7 +47,7 @@ fn indexed_shapes_preserve_physical_sources_with_unsigned_turn_identities() {
     );
     assert!(store.read(Some(9), Some(8)).is_err());
     assert!(store.record(8, 8, b"changed source", [7; 32]).is_err());
-    let profiles: usize = store
+    let profiles: i64 = store
         .connection
         .query_row("SELECT count(*) FROM profiles", [], |row| row.get(0))
         .expect("deduplicated profiles");

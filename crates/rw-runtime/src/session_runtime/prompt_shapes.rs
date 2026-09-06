@@ -47,6 +47,7 @@ struct ActivePrompt {
 pub(super) struct PromptShapeJournal {
     store: Mutex<rw_store::prompt_shapes::PromptShapeStore>,
     active_turn: Mutex<Option<ActivePrompt>>,
+    records: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl PromptShapeJournal {
@@ -62,7 +63,40 @@ impl PromptShapeJournal {
                 .into_diagnostic()?,
             ),
             active_turn: Mutex::new(None),
+            records: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         })
+    }
+    pub(super) async fn record_owned(
+        self: std::sync::Arc<Self>,
+        alias: String,
+        request: ProviderRequest,
+        cache: CacheBreakpointSupport,
+    ) -> Result<ProviderRequest> {
+        if request.tool_choice == (ToolChoice::None {})
+            || self
+                .active_turn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_none_or(|active| active.recorded)
+        {
+            return Ok(request);
+        }
+        let permit = std::sync::Arc::clone(&self.records)
+            .try_acquire_owned()
+            .into_diagnostic()?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            self.record_request(&alias, &request, cache)?;
+            Ok(request)
+        })
+        .await
+        .into_diagnostic()?
+    }
+    pub(super) async fn settle_records(&self) -> Result<()> {
+        let permit = self.records.acquire().await.into_diagnostic()?;
+        drop(permit);
+        Ok(())
     }
     pub(super) fn set_active_turn(&self, turn: rw_core::TurnId) {
         *self
