@@ -165,6 +165,15 @@ jobs:
           --output "$RUNNER_TEMP/native-candidates.noindex"
           --target-dir "$RUNNER_TEMP/native-target.noindex"
           --github-output "$GITHUB_OUTPUT"
+      - name: Prepare MCP acceptance fixture before measurement
+        id: mcp-fixture
+        run: |
+          scripts/cargo-release.sh build --locked --release -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture
+          release_dir=$(scripts/cargo-release.sh artifact-dir)
+          echo "executable=$release_dir/rw-mcp-fixture" >> "$GITHUB_OUTPUT"
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/native-target.noindex
+          CARGO_PROFILE_RELEASE_DEBUG: 0
       - name: Retain native candidate identity
         run: |
           cp "${{ steps.candidate.outputs.candidate }}/build.json" perf-results/native-build.json
@@ -182,7 +191,7 @@ jobs:
       - name: M8 production-composition performance gate (macOS)
         run: |
           engine=$(python3 scripts/native_candidate.py path "${{ steps.candidate.outputs.candidate }}" engine)
-          crates/rw-cli/tests/m8_release_gate.sh "$engine"
+          crates/rw-cli/tests/m8_release_gate.sh "$engine" "${{ steps.mcp-fixture.outputs.executable }}"
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
           CARGO_TARGET_DIR: ${{ runner.temp }}/native-target.noindex

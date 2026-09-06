@@ -103,8 +103,12 @@ set -- "$@" "$image" sh -eu -c '
     export CARGO_PROFILE_RELEASE_DEBUG=0
     scripts/cargo-release.sh build --locked --release -p rw-cli --bin rw || status=$?
     if [ "$status" -eq 0 ]; then
+      scripts/cargo-release.sh build --locked --release \
+        -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture || status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
       release_dir=$(scripts/cargo-release.sh artifact-dir)
-      crates/rw-cli/tests/m8_release_gate.sh "$release_dir/rw" || status=$?
+      crates/rw-cli/tests/m8_release_gate.sh "$release_dir/rw" "$release_dir/rw-mcp-fixture" || status=$?
     fi
   fi
   if [ -n "${ROTTWEILER_PERF_OUTPUT:-}" ] && [ -e "$ROTTWEILER_PERF_OUTPUT" ]; then

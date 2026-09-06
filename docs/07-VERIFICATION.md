@@ -346,7 +346,7 @@ eight-hour process.
 measures the named production path. Empty or stub benchmarks cannot satisfy a
 budget, and an activated budget remains part of the global gate.
 
-The production-composition prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh ENGINE_EXECUTABLE`. It consumes the production engine and builds only the MCP fixture in the worktree's reusable target directory. It runs the
+The production-composition prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh ENGINE_EXECUTABLE MCP_FIXTURE_EXECUTABLE`. It consumes two explicitly prepared executables and performs no compilation. Prepare the MCP fixture with `scripts/cargo-release.sh build --locked --release -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture` in the worktree's reusable target before conditioning or measuring the host. Its test-support features remain outside the production engine. The gate runs the
 release `rw` binary with an exact persisted project extension inventory trust record and MCP
 approval ledger, discovers three project-configured stdio servers, starts each
 through the production sandbox launcher, loads their real catalogs, composes

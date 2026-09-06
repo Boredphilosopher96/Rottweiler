@@ -12,6 +12,41 @@ WRAPPER = REPO / "crates/rw-cli/tests/m8_release_gate_linux.sh"
 
 
 class M8LinuxWrapperTests(unittest.TestCase):
+    def test_native_measurement_consumes_explicit_artifacts_without_compilation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            engine, fixture = root / "engine", root / "fixture"
+            engine.write_bytes(b"prepared engine")
+            fixture.write_bytes(b"prepared fixture")
+            log = root / "arguments"
+            driver = root / "python3"
+            driver.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$@" > "$M8_LOG"\n'
+                'cp "$3" "$M8_ENGINE_CAPTURE"\n'
+                'cp "$5" "$M8_FIXTURE_CAPTURE"\n'
+            )
+            driver.chmod(0o700)
+            for name in ("cargo", "rustc"):
+                compiler = root / name
+                compiler.write_text('#!/bin/sh\nexit 97\n')
+                compiler.chmod(0o700)
+            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                   "M8_LOG": str(log), "M8_ENGINE_CAPTURE": str(root / "copied-engine"),
+                   "M8_FIXTURE_CAPTURE": str(root / "copied-fixture"),
+                   "ROTTWEILER_M8_PERF_SAMPLES": "100", "ROTTWEILER_M8_FUNCTIONAL_ONLY": "0"}
+            env.pop("ROTTWEILER_PERF_OUTPUT", None)
+            wrapper = REPO / "crates/rw-cli/tests/m8_release_gate.sh"
+            subprocess.run([str(wrapper), str(engine), str(fixture)], env=env, check=True)
+            arguments = log.read_text().splitlines()
+            self.assertEqual((root / "copied-engine").read_bytes(), engine.read_bytes())
+            self.assertEqual((root / "copied-fixture").read_bytes(), fixture.read_bytes())
+            self.assertEqual(arguments[-2:], ["--samples", "100"])
+            self.assertFalse(Path(arguments[2]).parent.exists(), "private copies must be cleaned")
+            missing = subprocess.run([str(wrapper), str(engine)], env=env, capture_output=True)
+            self.assertEqual(missing.returncode, 2)
+            self.assertIn(b"MCP_FIXTURE_EXECUTABLE", missing.stderr)
+
     def test_forwards_metrics_and_uses_ephemeral_tmpfs_builds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
