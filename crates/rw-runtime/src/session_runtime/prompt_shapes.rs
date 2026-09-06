@@ -169,9 +169,16 @@ impl PromptShapeJournal {
             cache_hint: request.cache_hint,
             cache_breakpoints: &breakpoints,
         };
-        let mut bytes = BoundedWriter(Vec::new());
-        serde_json::to_writer(&mut bytes, &profile).into_diagnostic()?;
-        admit_profile(&bytes.0)?;
+        let mut bytes = Vec::new();
+        rw_types::json_encoding::JsonWriter::buffer(
+            &mut bytes,
+            rw_store::prompt_shapes::MAX_PROFILE_BYTES,
+            0,
+        )
+        .into_diagnostic()?
+        .serialize(&profile)
+        .into_diagnostic()?;
+        admit_profile(&bytes)?;
         let fingerprint = prompt_request_fingerprint(
             model_alias,
             &request.turns,
@@ -186,7 +193,7 @@ impl PromptShapeJournal {
         self.store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record(turn, source, &bytes.0, fingerprint)
+            .record(turn, source, &bytes, fingerprint)
             .into_diagnostic()?;
         active.recorded = true;
         Ok(())
@@ -271,29 +278,6 @@ fn admit_profile(bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
-struct BoundedWriter(Vec<u8>);
-impl Write for BoundedWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.0.len().saturating_add(bytes.len()) > rw_store::prompt_shapes::MAX_PROFILE_BYTES {
-            return Err(io::Error::other("prompt shape exceeds encoded admission"));
-        }
-        let needed = self.0.len() + bytes.len();
-        if needed > self.0.capacity() {
-            let capacity = needed
-                .next_power_of_two()
-                .min(rw_store::prompt_shapes::MAX_PROFILE_BYTES);
-            self.0
-                .try_reserve_exact(capacity - self.0.len())
-                .map_err(io::Error::other)?;
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 pub(super) fn hash_serialized(value: &impl Serialize) -> Result<String> {
     struct HashWriter(blake3::Hasher);
     impl Write for HashWriter {
@@ -306,7 +290,9 @@ pub(super) fn hash_serialized(value: &impl Serialize) -> Result<String> {
         }
     }
     let mut writer = HashWriter(blake3::Hasher::new());
-    serde_json::to_writer(&mut writer, value).into_diagnostic()?;
+    rw_types::json_encoding::JsonWriter::stream(&mut writer, usize::MAX)
+        .serialize(value)
+        .into_diagnostic()?;
     Ok(writer.0.finalize().to_hex().to_string())
 }
 

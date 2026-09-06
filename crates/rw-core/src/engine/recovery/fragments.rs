@@ -2,7 +2,7 @@
 use super::{CanonicalHistory, RecoveryError};
 use rw_types::allocation::PrepareAllocation;
 use rw_types::{Block, ContextBlockId, Role, SequenceId, Turn, TurnMeta};
-use std::{io::Write, ops::Range};
+use std::ops::Range;
 
 pub const MAX_SUMMARY_FRAGMENT_BYTES: usize = 256 * 1024;
 
@@ -113,24 +113,22 @@ impl ConversationFragmentSource {
         buffer
             .try_reserve_exact(encoded_limit)
             .map_err(|_| RecoveryError::Limit("fragment encoded allocation"))?;
-        let mut writer = SourceWriter {
-            bytes: buffer,
-            limit: encoded_limit,
-        };
+        let mut writer = rw_types::json_encoding::JsonWriter::buffer(&mut buffer, encoded_limit, 0)
+            .map_err(|_| RecoveryError::Limit("fragment encoded allocation"))?;
         let mut blocks = Vec::with_capacity(turn.blocks.len());
         for block in &turn.blocks {
-            let start = writer.bytes.len();
-            serde_json::to_writer(&mut writer, block)?;
+            let start = writer.written();
+            writer.serialize(block)?;
             blocks.push(EncodedBlock {
                 kind: kind(block),
-                range: start..writer.bytes.len(),
+                range: start..writer.written(),
             });
         }
         Ok(Self {
             ordinal,
             sequence,
             role: turn.role,
-            bytes: writer.bytes,
+            bytes: buffer,
             blocks,
         })
     }
@@ -222,22 +220,6 @@ fn kind(block: &Block) -> &'static str {
         Block::ToolResult { .. } => "tool_result",
         Block::Image { .. } => "image",
         Block::Citation { .. } => "citation",
-    }
-}
-struct SourceWriter {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-impl Write for SourceWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
-            return Err(std::io::Error::other("summary source encoded admission"));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 fn json_window(bytes: &[u8], offset: u64, limit: usize) -> Result<(&str, bool), RecoveryError> {
