@@ -173,12 +173,12 @@ export class ClientRestoreController {
   }
 
   /** Rebuild view bindings from client-owned data; projection responses remain engine-owned. */
-  restoreRecycleState(state: AppClientState): void {
-    if (state.sessionId !== this.host.sessionId) return
+  restoreRecycleState(state: AppClientState): boolean {
+    if (state.sessionId !== this.host.sessionId) return false
     const owner = this.host.history.cache.allocations.reserve("drafts", retainedJsonBytes(state, 64 * 1024 * 1024))
     let installed = false
     try {
-    if (!this.host.children.restoreDrafts(state.parentComposer ?? { content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)) { owner.release(); return }
+    if (!this.host.children.restoreDrafts(state.parentComposer ?? { content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)) { owner.release(); return false }
     this.discard(); this.#pendingMounted = state.child === null
     this.#answerGuard = state.interaction?.composer ? { session: state.sessionId, control: state.interaction.fingerprint,
       text: interactionFingerprint(state.composer.content), child: interactionFingerprint(state.child) } : null
@@ -228,7 +228,8 @@ export class ClientRestoreController {
     this.host.ui.setState(this.host.ui.state)
     this.host.input.focusForInputMode()
     installed = true
-    } finally { if (!installed) { this.discard(); owner.release() } }
+    return true
+    } finally { if (!installed) { if (this.#pendingAllocation === owner) this.discard(); owner.release() } }
   }
 
   /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */

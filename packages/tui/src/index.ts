@@ -164,7 +164,11 @@ async function main(): Promise<void> {
 
   const { ClientAllocationOwner } = await import("./client-allocation")
   const allocations = new ClientAllocationOwner()
-  const runtimeBootstrap: Promise<RuntimeBootstrap> = createEngineRuntimeFromEnvironment({
+  const { readTuiRecycleState, recycleTuiIfNeeded } = await import("./recycle-state")
+  using recycleAllocation = allocations.reserve("decoding", 0)
+  let recycledState = readTuiRecycleState(recycleStatePath, recycleAllocation)
+  const handoffReady = Promise.withResolvers<void>()
+  const startRuntime = () => createEngineRuntimeFromEnvironment({
     allocations, diagnostics,
     onDriverReady: () => {
       const marker = process.env.ROTTWEILER_DRIVER_READY_MARKER
@@ -173,7 +177,8 @@ async function main(): Promise<void> {
         delete process.env.ROTTWEILER_DRIVER_READY_MARKER
       }
     },
-  }).then(
+  })
+  const runtimeBootstrap: Promise<RuntimeBootstrap> = (recycledState === null ? startRuntime() : handoffReady.promise.then(startRuntime)).then(
     (runtime) => ({ runtime, error: null }),
     (error: unknown) => ({ runtime: null, error }),
   )
@@ -343,15 +348,14 @@ async function main(): Promise<void> {
       })
     },
   })
-  const { readTuiRecycleState, recycleTuiIfNeeded } = await import("./recycle-state")
-  using recycleAllocation = allocations.reserve("decoding", 0)
-  let recycledState = readTuiRecycleState(recycleStatePath, recycleAllocation)
   if (recycledState !== null) {
-    app.restoreRecycleState(recycledState)
+    if (!app.restoreRecycleState(recycledState.state)) throw new Error("Saved editing state could not be admitted; its private handoff is retained.")
+    recycledState.consume()
     renderer.on(openTui.CliRenderEvents.FRAME, () => app.applyPendingRecycleScroll())
   }
   recycledState = null
   recycleAllocation.release()
+  handoffReady.resolve()
   startupFrame.destroy()
   renderer.root.add(app)
   appMounted = true

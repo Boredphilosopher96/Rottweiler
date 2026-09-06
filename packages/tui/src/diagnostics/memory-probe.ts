@@ -64,8 +64,9 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
       })
       setup.renderer.root.add(app)
       if (cycle === 0 && handoff !== null) {
-        app.restoreRecycleState(handoff)
-        const savedSelection = handoff.interaction
+        requireThat(app.restoreRecycleState(handoff.state), "private handoff adoption failed")
+        const savedSelection = handoff.state.interaction
+        handoff.consume()
         handoff = null
         handoffAllocation.release()
         await until(() => { app!.applyPendingRecycleScroll(); return app!.activeSubagentId === "agent-0" && app!.interactionPanel.usesComposer && app!.composer.value.startsWith("handoff child draft ") })

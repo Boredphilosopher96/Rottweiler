@@ -1,3 +1,4 @@
+import { admittedRecycleDrafts } from "./recycle-drafts"
 import {
   closeSync,
   fchmodSync,
@@ -20,6 +21,7 @@ import type { Attachment } from "./protocol"
 import { MAX_ATTACHMENTS_PER_DRAFT } from "./composer-drafts"
 import type { ComposerDraft } from "./subagent-state"
 import type { HistoryViewport } from "./history/controller"
+import { JsonAllocationShape } from "./transport/reply-allocation"
 import { jsonEncodedBytes } from "./json-size"
 import { parseU64 } from "./transport/types"
 import type { InputMode, VimFocus } from "./keybindings"
@@ -82,8 +84,21 @@ export function isRestorablePicker(kind: string): kind is RestorablePickerKind {
   return RESTORABLE_PICKERS.some((candidate) => candidate === kind)
 }
 
-/** Consume a private, one-shot TUI recycle handoff. Invalid files fail closed. */
-export function readTuiRecycleState(path: string | undefined, allocation: ClientAllocationLease): AppClientState | null {
+export interface DecodedRecycleState {
+  readonly state: AppClientState
+  /** Consume only after all local editing state has been admitted by its new owners. */
+  consume(): void
+}
+
+function preparedRecycleBytes(bytes: Uint8Array): number {
+  const shape = new JsonAllocationShape()
+  shape.append(bytes)
+  // Decode and normalized handoff coexist until editable state takes ownership.
+  return shape.peak(bytes.byteLength + 1, 0) * 2
+}
+
+/** Read one bounded private handoff, retaining its file until application adoption succeeds. */
+export function readTuiRecycleState(path: string | undefined, allocation: ClientAllocationLease): DecodedRecycleState | null {
   if (path === undefined || path.length === 0) return null
   let descriptor: number | null = null
   try {
@@ -96,7 +111,7 @@ export function readTuiRecycleState(path: string | undefined, allocation: Client
       (metadata.mode & 0o077) !== 0 ||
       (process.getuid !== undefined && metadata.uid !== process.getuid())
     ) return null
-    allocation.admit(metadata.size * 32 + 65536)
+    allocation.admit(metadata.size + 2049)
     const bytes = Buffer.alloc(metadata.size + 1)
     let used = 0
     while (used < bytes.length) {
@@ -105,10 +120,23 @@ export function readTuiRecycleState(path: string | undefined, allocation: Client
       used += count
     }
     if (used !== metadata.size) return null
-    const parsed: unknown = JSON.parse(bytes.subarray(0, used).toString("utf8"))
-    unlinkSync(path)
-    return parseTuiRecycleState(parsed)
-  } catch {
+    const prepared = preparedRecycleBytes(bytes.subarray(0, used))
+    if (prepared > MAX_RECYCLE_PREPARED_BYTES) return null
+    allocation.admit(prepared)
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, used)))
+    const state = parseTuiRecycleState(parsed)
+    if (state === null) return null
+    let consumed = false
+    return { state, consume() {
+      if (consumed) return
+      const current = lstatSync(path)
+      if (current.dev !== metadata.dev || current.ino !== metadata.ino || current.size !== metadata.size || current.mtimeMs !== metadata.mtimeMs) {
+        throw new Error("client handoff changed before adoption")
+      }
+      unlinkSync(path); consumed = true
+    } }
+  } catch (error) {
+    if (error instanceof ClientAllocationError) throw error
     return null
   } finally { if (descriptor !== null) closeSync(descriptor) }
 }
@@ -116,8 +144,10 @@ export function readTuiRecycleState(path: string | undefined, allocation: Client
 /** Atomically persist the small TUI-only state lost during an RSS recycle. */
 export function writeTuiRecycleState(path: string | undefined, state: AppClientState): boolean {
   if (path === undefined || path.length === 0) return false
+  if (parseTuiRecycleState(state) === null) return false
   if (jsonEncodedBytes(state, MAX_RECYCLE_STATE_BYTES - 1) > MAX_RECYCLE_STATE_BYTES - 1) return false
-  const encoded = `${JSON.stringify(state)}\n`
+  const encoded = Buffer.from(`${JSON.stringify(state)}\n`, "utf8")
+  if (preparedRecycleBytes(encoded) > MAX_RECYCLE_PREPARED_BYTES) return false
   const temporary = `${path}.${process.pid}.tmp`
   let descriptor: number | null = null
   try {
@@ -130,7 +160,7 @@ export function writeTuiRecycleState(path: string | undefined, state: AppClientS
     ) return false
     descriptor = openSync(temporary, "wx", 0o600)
     fchmodSync(descriptor, 0o600)
-    writeFileSync(descriptor, encoded, "utf8")
+    writeFileSync(descriptor, encoded)
     fsyncSync(descriptor)
     closeSync(descriptor)
     descriptor = null
@@ -268,7 +298,7 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
       scrollOffset: item.scrollOffset, modelProviderFilter: item.modelProviderFilter,
       onboarding: item.onboarding, themeBeforePreview: item.themeBeforePreview }
   }
-  return {
+  const state: AppClientState = {
     schemaVersion: 4, sessionId: value.sessionId, child, parentComposer, interaction,
     composer: { ...draft, cursorOffset: value.composer.cursorOffset,
       selection },
@@ -276,4 +306,5 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
     history, toolsScrollTop: value.toolsScrollTop, transcript, tools,
     inputMode: value.inputMode, focus: value.focus, theme: value.theme, picker,
   }
+  return admittedRecycleDrafts(state) ? state : null
 }

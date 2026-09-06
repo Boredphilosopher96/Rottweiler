@@ -942,7 +942,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   recycleState(): AppClientState | null { return this.#contributions.pending ? null : this.#clientRestore.recycleState() }
-  restoreRecycleState(state: AppClientState): void { this.#clientRestore.restoreRecycleState(state) }
+  restoreRecycleState(state: AppClientState): boolean { return this.#clientRestore.restoreRecycleState(state) }
   applyPendingRecycleScroll(): void { this.#clientRestore.applyPendingRecycleScroll() }
 
   #bindStateToComponents(state: RottweilerState): void {
