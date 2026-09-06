@@ -60,6 +60,14 @@ async function main(): Promise<void> {
     await runCompiledTreeSitterSmoke(treeSitterSmokeReport)
     return
   }
+  const inputProbeReport = process.env.ROTTWEILER_CLIENT_INPUT_PROBE_REPORT
+  if (inputProbeReport !== undefined && inputProbeReport.length > 0) {
+    const directory = process.env.ROTTWEILER_CLIENT_INPUT_PROBE_DIRECTORY
+    if (directory === undefined) throw new Error("client input probe requires a private directory")
+    const { runClientInputProbe } = await import("./diagnostics/input-probe")
+    await runClientInputProbe(inputProbeReport, directory)
+    return
+  }
   const memoryProbeReport = process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT
   if (memoryProbeReport !== undefined && memoryProbeReport.length > 0) {
     const directory = process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY

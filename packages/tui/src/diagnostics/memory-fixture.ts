@@ -42,6 +42,9 @@ export class MemoryFixture {
     return command.type === "get_session_review" ? this.#event(command) : null
   }
   meta(): ClientCommand["meta"] { return { protocol_version: PROTOCOL_VERSION, client_id: "memory-client", request_id: `memory-${++this.#request}` } }
+  historyReady(): Extract<EngineEvent, { type: "session_history_ready" }> {
+    return { type: "session_history_ready", meta: { ...this.meta(), emitted_at }, session_id: SESSION, through_sequence: SOURCE }
+  }
   hold(): void { this.#held = true }
   invalidateNext(): void { this.#invalid = true }
   release(): void { this.#held = false; for (const resolve of this.#pending) resolve(); this.#pending.clear() }

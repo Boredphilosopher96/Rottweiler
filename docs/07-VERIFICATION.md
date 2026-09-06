@@ -287,6 +287,18 @@ Protected performance, nightly and release gates retain the strict wall-clock
 input-to-echo and socket p99 budgets on their fixed native images. These gates
 are the user-visible latency authority; smoke results do not qualify p99.
 
+`python3 packages/tui/scripts/client-input-probe.py --candidate PATH --output PATH`
+verifies and launches the compiled shared JavaScript host with the explicit TUI
+role. Its 110×36 native-renderer kernel admits a near-limit 128 KiB UTF-8 composer,
+then measures App keyboard dispatch through native frame capture using wall time.
+Draft setup, history/parser preparation, cursor placement, initial paint and GC
+occur outside the samples. Each of three trials retains all 128 raw samples and
+excludes its first five warmup keys; every nearest-rank p99 must stay below 16 ms.
+Exact final text, painted input, draining terminal output and complete allocation
+retirement are correctness conditions. The runner consumes an exact-source
+verified candidate and never compiles. This kernel qualifies compiled editing;
+process startup, full-application RSS and soak behavior have separate gates.
+
 Full p99 consumers run on fixed native GitHub-hosted images and record the exact
 image version with every raw sample set. Linux measures an independently built,
 checksummed artifact. macOS builds outside the checkout directly on the
