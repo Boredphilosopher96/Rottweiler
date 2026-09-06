@@ -19,7 +19,7 @@ import { MAX_EDITOR_BYTES, type ClipboardImage, type EditorAdapter, type ImagePa
 import type { RottweilerTheme } from "../theme"
 import { ComposerEditorRenderable } from "./composer-editor"
 import { jsonEncodedBytes } from "../json-size"
-import { ComposerDraftStore, sameAttachment } from "../composer-drafts"
+import { ComposerDraftStore, sameAttachment, MAX_COMPOSER_TEXT_BYTES, COMPOSER_TEXT_LIMIT_NOTICE } from "../composer-drafts"
 import { ImageAttachmentRenderable } from "./image"
 
 const COMPOSER_PLACEHOLDER = "Describe a task…"
@@ -143,11 +143,12 @@ export class ComposerRenderable extends BoxRenderable {
       onSubmit: () => this.submit(),
       onContentChange: () => this.#contentChanged(),
       onPaste: (event) => void this.#paste(event),
-    }, codeUnits => {
-      if (this.#drafts.canRetainText(this.#scope(), codeUnits, this.#attachments)) return true
+    }, (codeUnits, utf8Bytes) => {
+      if (utf8Bytes > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return false }
+      if (this.#drafts.canRetainTextBytes(this.#scope(), utf8Bytes) && this.#drafts.canRetainText(this.#scope(), codeUnits, this.#attachments)) return true
       this.#options.onAttachmentError?.("Draft storage is full. Shorten a draft or remove an attachment before adding more content.")
       return false
-    })
+    }, this.#drafts.allocations)
     this.queueText = new TextRenderable(ctx, {
       id: "composer-queue",
       content: "",
@@ -374,6 +375,7 @@ export class ComposerRenderable extends BoxRenderable {
   #scope(): string { return this.#options.submissionScope?.() ?? "default" }
 
   #admitDraft(content: string, attachments: readonly Attachment[]): boolean {
+    if (Buffer.byteLength(content) > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return false }
     if (this.#retiring || this.isDestroyed) return false
     if (this.#drafts.set(this.#scope(), { content, attachments })) return true
     this.#options.onAttachmentError?.("Draft storage is full. Shorten a draft or remove an attachment before adding more content.")
@@ -508,7 +510,7 @@ export class ComposerRenderable extends BoxRenderable {
       this.#options.onAttachmentError?.("External editor content exceeds its 2 MiB limit.")
       return
     }
-    const reservation = this.#drafts.reserveText(this.#scope(), MAX_EDITOR_BYTES)
+    const reservation = this.#drafts.reserveText(this.#scope(), MAX_COMPOSER_TEXT_BYTES)
     if (reservation === null) {
       this.#options.onAttachmentError?.("Another input is still loading, or the draft has no space for the external editor.")
       return
@@ -519,7 +521,7 @@ export class ComposerRenderable extends BoxRenderable {
     try {
       const result = await this.#options.editor.compose(content)
       if (!current() || result === null) return
-      if (Buffer.byteLength(result) > MAX_EDITOR_BYTES) throw new Error("External editor content exceeds its 2 MiB limit.")
+      if (Buffer.byteLength(result) > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return }
       if (this.editor.plainText === content) this.#drafts.set(this.#scope(), { content: "", attachments: this.#attachments })
       const restored = reservation.finish(result).settle(false)
       if (restored !== null) {

@@ -3,6 +3,8 @@ export { MAX_CLIENT_DRAFT_BYTES } from "./client-allocation"
 import { MAX_ATTACHMENTS_PER_MESSAGE, type Attachment } from "./protocol"
 import type { ComposerDraft } from "./subagent-state"
 
+export const MAX_COMPOSER_TEXT_BYTES = 128 * 1024
+export const COMPOSER_TEXT_LIMIT_NOTICE = "Composer text is limited to 128 KiB. Attach large content as a file."
 export const MAX_CLIENT_DRAFTS = 256
 export const MAX_ATTACHMENTS_PER_DRAFT = 2 * MAX_ATTACHMENTS_PER_MESSAGE
 const EMPTY: ComposerDraft = { content: "", attachments: [] }
@@ -65,7 +67,7 @@ export class ComposerDraftStore {
     return [...this.#drafts].map(([scope, entry]) => ({ scope, draft: entry.draft }))
   }
   canRetainText(scope: string, codeUnits: number, attachments: readonly Attachment[]): boolean {
-    if (!Number.isSafeInteger(codeUnits) || codeUnits < 0 || !this.#attachmentsFit(scope, attachments.length)) return false
+    if (!Number.isSafeInteger(codeUnits) || codeUnits < 0 || codeUnits > MAX_COMPOSER_TEXT_BYTES || !this.#attachmentsFit(scope, attachments.length)) return false
     const payload = draftBytes(codeUnits, attachments)
     const bytes = payload === 0 ? 0 : payload + scope.length * 2
     const previous = this.#drafts.get(scope)
@@ -73,7 +75,7 @@ export class ComposerDraftStore {
       && (bytes === 0 || previous !== undefined || this.#drafts.size + this.#pending.size + this.#reads.size < this.maximumDrafts)
   }
   set(scope: string, draft: ComposerDraft): boolean {
-    if (!this.#attachmentsFit(scope, draft.attachments.length)) return false
+    if (!this.#textFits(scope, draft.content) || !this.#attachmentsFit(scope, draft.attachments.length)) return false
     const old = this.#drafts.get(scope)
     const bytes = composerDraftBytes(draft) + (draft.content === "" && draft.attachments.length === 0 ? 0 : scope.length * 2)
     if (!this.#fits(this.#bytes - (old?.bytes ?? 0) + bytes)
@@ -82,6 +84,14 @@ export class ComposerDraftStore {
     if (bytes === 0) this.#drafts.delete(scope)
     else this.#drafts.set(scope, { draft: snapshot(draft), bytes })
     return true
+  }
+  #textFits(scope: string, content: string): boolean { return this.canRetainTextBytes(scope, Buffer.byteLength(content)) }
+  canRetainTextBytes(scope: string, bytes: number): boolean {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) return false
+    for (const pending of this.#pending) if (pending.active && pending.scope === scope && pending.entry.draft.content !== "") {
+      bytes += Buffer.byteLength(pending.entry.draft.content) + (bytes > 0 ? 1 : 0)
+    }
+    return bytes <= MAX_COMPOSER_TEXT_BYTES
   }
   #attachmentsFit(scope: string, count: number): boolean {
     for (const item of this.#pending) {
@@ -121,7 +131,7 @@ export class ComposerDraftStore {
 
   /** Reserve chunk storage, final joining and editable copies before reading source bodies. */
   reserveText(scope: string, maximumTextBytes: number): DraftTextReservation | null {
-    if (!Number.isSafeInteger(maximumTextBytes) || maximumTextBytes < 0) return null
+    if (!Number.isSafeInteger(maximumTextBytes) || maximumTextBytes < 0 || maximumTextBytes > MAX_COMPOSER_TEXT_BYTES) return null
     const reservation = this.reserveDraft(scope, 512 + maximumTextBytes * 10, 0)
     return reservation === null ? null : {
       cancel: () => reservation.cancel(),
@@ -155,7 +165,7 @@ export class ComposerDraftStore {
       finish: draft => {
         if (!live) throw new Error("input read reservation has settled")
         const retained = composerDraftBytes(draft) + scope.length * 2
-        if (retained > bytes || draft.attachments.length > attachmentSlots) {
+        if (retained > bytes || !this.#textFits(scope, mergeDrafts(draft, this.get(scope)).content) || draft.attachments.length > attachmentSlots) {
           throw new Error("input exceeds its draft reservation")
         }
         release()

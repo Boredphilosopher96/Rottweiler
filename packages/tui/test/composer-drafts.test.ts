@@ -1,5 +1,6 @@
+import { ClientAllocationOwner } from "../src/client-allocation"
 import { expect, test } from "bun:test"
-import { ComposerDraftStore, composerDraftBytes } from "../src/composer-drafts"
+import { ComposerDraftStore, composerDraftBytes, MAX_COMPOSER_TEXT_BYTES } from "../src/composer-drafts"
 import type { ComposerDraft } from "../src/subagent-state"
 
 const draft = (content: string): ComposerDraft => ({ content, attachments: [] })
@@ -92,7 +93,7 @@ test("native edit checkpoints release history without changing text, cursor or s
   const { createTestRenderer } = await import("@opentui/core/testing")
   const { ComposerEditorRenderable } = await import("../src/components/composer-editor")
   const setup = await createTestRenderer({ width: 80, height: 20, useThread: false })
-  const editor = new ComposerEditorRenderable(setup.renderer, { id: "bounded-editor" }, () => true, 2048)
+  const editor = new ComposerEditorRenderable(setup.renderer, { id: "bounded-editor" }, () => true, new ClientAllocationOwner(), 2048)
   setup.renderer.root.add(editor)
   editor.insertText("start")
   expect(editor.editBuffer.canUndo()).toBe(true)
@@ -102,6 +103,8 @@ test("native edit checkpoints release history without changing text, cursor or s
   }
   expect(editor.plainText).toBe("start" + " next".repeat(100))
   expect(editor.cursorOffset).toBe(editor.plainText.length)
+  expect(editor.editBuffer.canUndo()).toBe(true)
+  editor.editBuffer.clearHistory()
   expect(editor.editBuffer.canUndo()).toBe(false)
   editor.setSelection(1, 3)
   editor.insertText("XY")
@@ -168,19 +171,81 @@ test("input read reservations retain capacity across clear and reserve attachmen
 })
 
 
-test("native editing reads preserve admitted text and selections beyond the convenience getter cap", async () => {
+test("native editing admits the complete UTF-8 limit and refuses overflow without changing selection", async () => {
   const { createTestRenderer } = await import("@opentui/core/testing")
   const { ComposerEditorRenderable } = await import("../src/components/composer-editor")
   const setup = await createTestRenderer({ width: 40, height: 10, useThread: false })
-  const editor = new ComposerEditorRenderable(setup.renderer, { id: "large-editor" }, units => units <= 3 * 1024 * 1024)
+  const editor = new ComposerEditorRenderable(setup.renderer, { id: "large-editor" }, () => true, new ClientAllocationOwner())
   setup.renderer.root.add(editor)
   try {
-    const text = "é".repeat(1024 * 1024) + "tail"
+    const text = "é".repeat(MAX_COMPOSER_TEXT_BYTES / 2)
     editor.setText(text)
     expect(editor.plainText).toBe(text)
+    editor.cursorOffset = text.length
+    editor.insertText("x")
+    expect(editor.plainText).toBe(text)
     editor.setSelection(0, text.length)
+    editor.setText(text + "x")
     expect(editor.getSelectedText()).toBe(text)
     editor.insertText("replacement")
     expect(editor.plainText).toBe("replacement")
+  } finally { setup.renderer.destroy() }
+})
+
+
+test("pending submitted text reserves the exact UTF-8 rollback destination", () => {
+  const owner = new ComposerDraftStore()
+  const text = "é".repeat(MAX_COMPOSER_TEXT_BYTES / 2 - 2)
+  expect(owner.set("parent", draft(text))).toBe(true)
+  const pending = owner.submit("parent")!
+  expect(owner.set("parent", draft("xy"))).toBe(true)
+  expect(owner.set("parent", draft("overflow"))).toBe(false)
+  expect(pending.settle(false)?.content).toBe(text + "\nxy")
+  expect(owner.get("parent").content).toBe(text + "\nxy")
+  owner.clear()
+})
+
+test("ordinary keys on a near-limit draft retain delta undo instead of resetting the entire buffer", async () => {
+  const { createTestRenderer } = await import("@opentui/core/testing")
+  const { ComposerEditorRenderable } = await import("../src/components/composer-editor")
+  const setup = await createTestRenderer({ width: 40, height: 10, useThread: false })
+  const editor = new ComposerEditorRenderable(setup.renderer, { id: "delta-editor" }, () => true, new ClientAllocationOwner())
+  setup.renderer.root.add(editor)
+  try {
+    const text = "x".repeat(MAX_COMPOSER_TEXT_BYTES - 64)
+    editor.setText(text); editor.cursorOffset = text.length
+    for (let index = 0; index < 32; index++) editor.insertChar("y")
+    expect(editor.plainText).toBe(text + "y".repeat(32))
+    expect(editor.historyCharge).toBeLessThan(32 * 1024)
+    expect(editor.editBuffer.canUndo()).toBe(true)
+    editor.editBuffer.undo()
+    // Native direct mutation is followed by its native content event before model observation.
+    await setup.renderOnce()
+    expect(editor.plainText).toBe(text + "y".repeat(31))
+  } finally { setup.renderer.destroy() }
+})
+
+
+test("composer set, restore and external editor refusal preserve the prior draft and explain attachment input", async () => {
+  const { createTestRenderer } = await import("@opentui/core/testing")
+  const { ComposerRenderable } = await import("../src/components/composer")
+  const { kennelTheme } = await import("../src/theme")
+  const setup = await createTestRenderer({ width: 80, height: 20, useThread: false })
+  const errors: string[] = []
+  const tooLarge = "x".repeat(MAX_COMPOSER_TEXT_BYTES + 1)
+  const composer = new ComposerRenderable(setup.renderer, kennelTheme, {
+    editor: { compose: async () => tooLarge }, imagePaste: { readImage: async () => null, preparePath: () => null },
+    onSubmit: () => true, onFileMention: () => {}, onAttachmentError: message => errors.push(message),
+  })
+  setup.renderer.root.add(composer)
+  try {
+    composer.restoreDraft("keep", [attachment])
+    composer.value = tooLarge
+    composer.restoreDraft(tooLarge, [])
+    await composer.openExternalEditor()
+    expect(composer.value).toBe("keep")
+    expect(composer.attachments).toEqual([attachment])
+    expect(errors).toHaveLength(3)
+    expect(errors.every(message => message.includes("Attach large content as a file"))).toBe(true)
   } finally { setup.renderer.destroy() }
 })

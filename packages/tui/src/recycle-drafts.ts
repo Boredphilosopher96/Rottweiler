@@ -1,9 +1,11 @@
-import { composerDraftBytes, MAX_CLIENT_DRAFT_BYTES, MAX_CLIENT_DRAFTS } from "./composer-drafts"
+import { composerDraftBytes, MAX_CLIENT_DRAFT_BYTES, MAX_CLIENT_DRAFTS, MAX_COMPOSER_TEXT_BYTES } from "./composer-drafts"
 import type { AppClientState } from "./recycle-state"
 import type { ComposerDraft } from "./subagent-state"
 
 /** The private payload must fit the same aggregate editing owner used after restart. */
 export function admittedRecycleDrafts(state: AppClientState): boolean {
+  if ([state.composer, ...(state.parentComposer === null ? [] : [state.parentComposer]), ...state.subagentDrafts.map(entry => entry.draft)]
+    .some(draft => Buffer.byteLength(draft.content) > MAX_COMPOSER_TEXT_BYTES)) return false
   const parent = state.parentComposer ?? state.composer
   let bytes = composerDraftBytes(parent), count = bytes === 0 ? 0 : 1
   if (bytes > 0) bytes += "parent".length * 2

@@ -158,7 +158,7 @@ describe("Rottweiler semantic timeline", () => {
     expect(result.app.composer.value).toBe("")
   })
 
-  test("insufficient draft capacity refuses before rewind dispatch and keeps the current draft", async () => {
+  test("history exceeding the interactive text limit refuses before rewind dispatch and preserves the draft", async () => {
     const reader = history("x")
     const result = await setup({ ...reader, content: async (session, read, signal, allocation) => ({
       ...await reader.content(session, read, signal, allocation), text: "x".repeat(4096), total_bytes: 16 * 1024 * 1024, next_offset: 4096,
@@ -167,7 +167,7 @@ describe("Rottweiler semantic timeline", () => {
     await selectAction(result, "edit")
     expect(result.commands.some(command => command.type === "rewind")).toBe(false)
     expect(result.app.composer.value).toBe("keep this draft")
-    expect(result.app.state.errors.at(-1)?.message).toContain("Draft capacity")
+    expect(result.app.state.errors.at(-1)?.message).toContain("Attach large content as a file")
   })
 
   test("rewind-only uses the selected completed boundary without loading its body", async () => {

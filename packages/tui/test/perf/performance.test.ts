@@ -1,3 +1,4 @@
+import { MAX_COMPOSER_TEXT_BYTES } from "../../src/composer-drafts"
 import { emptySessionReader, sessionReaderFor, conversationItem } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
@@ -409,6 +410,32 @@ describe("M4 executable TUI performance budgets", () => {
     )
     for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
+  test("near-limit UTF-8 composer input and render stay below 16ms p99", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 28, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
+    renderer.root.add(app)
+    const trialP99s: number[] = []
+    for (let trial = 0; trial < 3; trial++) {
+      const original = "é".repeat((MAX_COMPOSER_TEXT_BYTES - 256) / 2)
+      app.composer.value = original
+      app.composer.editor.cursorOffset = original.length
+      await setup.renderOnce(); Bun.gc(true)
+      const samples = samplesFor("bounded_composer_input", inputLatencyClock(), 5)
+      for (let key = 0; key < 128; key++) {
+        const elapsed = startInputLatencySample()
+        app.composer.editor.insertChar("x")
+        await setup.renderOnce()
+        setup.captureCharFrame()
+        samples.push(elapsed())
+      }
+      expect(app.composer.value).toBe(original + "x".repeat(128))
+      trialP99s.push(percentile(samples.slice(5), 0.99))
+    }
+    console.info(`Bounded composer input/render (${inputLatencyClock()}): p99s=${trialP99s.map(value => value.toFixed(3)).join(",")}ms`)
+    for (const p99 of trialP99s) expect(p99).toBeLessThan(16)
+  })
+
 })
 
 function percentile(values: readonly number[], quantile: number): number {

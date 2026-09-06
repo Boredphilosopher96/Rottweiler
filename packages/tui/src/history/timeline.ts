@@ -1,3 +1,4 @@
+import { MAX_COMPOSER_TEXT_BYTES, COMPOSER_TEXT_LIMIT_NOTICE } from "../composer-drafts"
 import { CacheRead } from "./read-allocation"
 import type { ComposerDraftStore, DraftSubmission, DraftTextReservation } from "../composer-drafts"
 import type { TranscriptContentSource, TranscriptView } from "../protocol"
@@ -89,6 +90,7 @@ export async function readTimelineDraft(reader: Pick<SessionReader, "page" | "co
       }
       if (total === null) {
         total = page.total_bytes
+        if (total > MAX_COMPOSER_TEXT_BYTES) throw new Error(COMPOSER_TEXT_LIMIT_NOTICE)
         reservation = drafts.reserveText(scope, total)
         if (reservation === null) throw new Error("Draft capacity is full; keep or submit the current draft before restoring history.")
       }

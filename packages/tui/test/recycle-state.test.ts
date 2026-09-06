@@ -102,8 +102,8 @@ test("near-limit editing state uses the same writer, decoder and mounted transfe
   const { recycleTuiIfNeeded, MAX_RECYCLE_PREPARED_BYTES } = await import("../src/recycle-state")
   const root = await mkdtemp(join(tmpdir(), "rw-large-handoff-")); roots.push(root); await chmod(root, 0o700)
   const path = join(root, "state.json"), allocations = new ClientAllocationOwner()
-  const bytes = 5 * 1024 * 1024
-  const state: AppClientState = { ...clientState, composer: { content: "x".repeat(bytes), attachments: [], cursorOffset: bytes, selection: null } }
+  const bytes = 128 * 1024
+  const state: AppClientState = { ...clientState, composer: { content: "x".repeat(bytes), attachments: [{ name: "large.txt", media_type: "text/plain", data: { type: "text", content: "a".repeat(5 * 1024 * 1024) } }], cursorOffset: bytes, selection: null } }
   let exits = 0
   expect(recycleTuiIfNeeded({ allocations, observedBytes: 2, thresholdBytes: 1, path, capture: () => state, recycle: () => { exits++ } })).toBe(true)
   expect(exits).toBe(1)
@@ -117,6 +117,7 @@ test("near-limit editing state uses the same writer, decoder and mounted transfe
   try {
     expect(app.restoreRecycleState(decoded!.state)).toBe(true)
     expect(app.composer.value.length).toBe(bytes)
+    expect(app.composer.attachments[0]?.data).toEqual(state.composer.attachments[0]!.data)
     decoded!.consume(); decoding.release()
     expect(allocations.usage.bytes).toBeLessThan(allocations.maximumBytes)
   } finally { app.destroy(); setup.renderer.destroy(); await Bun.sleep(0) }
