@@ -24,7 +24,6 @@ use super::code_intelligence::lsp_servers_for_root;
 use super::command_execution::CommandFixtureMode;
 #[cfg(target_os = "macos")]
 use super::command_execution::READ_ONLY_HOOK_COMMAND_FIXTURE_NAMESPACE;
-use super::command_execution::build_command_executor;
 use super::command_execution::build_read_only_hook_executor;
 use super::credential_resolution::DeferredCredentialResolver;
 use super::credential_resolution::DeferredToolProxy;
