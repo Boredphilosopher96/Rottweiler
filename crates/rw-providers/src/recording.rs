@@ -1,5 +1,7 @@
+mod catalog;
 mod redaction;
 mod replay_reads;
+mod schema;
 mod writer;
 pub use redaction::*;
 use replay_reads::ReplayReads;
@@ -40,14 +42,14 @@ struct RecordFixture {
     version: u16,
     provider: String,
     capabilities: RecordedCapabilities,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(with = "schema::optional_metadata")]
     model_metadata: Option<ProviderModelMetadata>,
     wire_mode: WireMode,
     request_hash: String,
     occurrence: u64,
     request: ProviderRequest,
     raw_sse: Vec<RawSseFrame>,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(with = "schema::optional_error")]
     start_error: Option<ProviderError>,
     items: Vec<RecordedItem>,
 }
@@ -74,7 +76,7 @@ struct CapabilityManifest {
     version: u16,
     provider: String,
     capabilities: RecordedCapabilities,
-    #[serde(deserialize_with = "Option::deserialize")]
+    #[serde(with = "schema::optional_metadata")]
     model_metadata: Option<ProviderModelMetadata>,
 }
 
@@ -146,10 +148,15 @@ impl From<RecordedCapabilities> for Capabilities {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum RecordedItem {
-    Event { event: ProviderEvent },
-    Error { error: ProviderError },
+    Event {
+        event: ProviderEvent,
+    },
+    Error {
+        #[serde(with = "schema::ErrorFields")]
+        error: ProviderError,
+    },
 }
 
 #[derive(Default)]
@@ -839,12 +846,7 @@ impl Provider for ReplayProvider {
                 ),
             )
         })?;
-        let fixture: RecordFixture = serde_json::from_slice(&bytes).map_err(|error| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                format!("invalid replay fixture {}: {error}", path.display()),
-            )
-        })?;
+        let fixture = catalog::decode_fixture(&bytes)?;
         fixture.validate()?;
         if fixture.provider != self.name
             || !fixture_matches_manifest(
@@ -1007,73 +1009,7 @@ async fn load_recorded_capabilities(
     directory: &Path,
     provider: &str,
 ) -> Result<(RecordedCapabilities, Option<ProviderModelMetadata>), ProviderError> {
-    let manifest_path = capability_manifest_path(directory, provider);
-    let manifest_bytes = tokio::fs::read(&manifest_path).await.map_err(|_| {
-        ProviderError::new(
-            ProviderErrorKind::ReplayMiss,
-            format!("no completed replay recording exists for provider {provider:?}"),
-        )
-    })?;
-    let manifest: CapabilityManifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|error| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                format!(
-                    "invalid replay capability manifest {}: {error}",
-                    manifest_path.display()
-                ),
-            )
-        })?;
-    validate_manifest(provider, &manifest)?;
-
-    let prefix = format!("{}-", provider_hash(provider));
-    let mut entries = tokio::fs::read_dir(directory)
-        .await
-        .map_err(record_io_error)?;
-    let mut fixture_paths = Vec::new();
-    while let Some(entry) = entries.next_entry().await.map_err(record_io_error)? {
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        if file_name.starts_with(&prefix)
-            && file_name.ends_with(".json")
-            && file_name != format!("{}-capabilities.json", provider_hash(provider))
-        {
-            fixture_paths.push(entry.path());
-        }
-    }
-    fixture_paths.sort();
-    if fixture_paths.is_empty() {
-        return Err(ProviderError::new(
-            ProviderErrorKind::ReplayMiss,
-            format!("no completed replay fixtures exist for provider {provider:?}"),
-        ));
-    }
-    for path in fixture_paths {
-        let bytes = tokio::fs::read(&path).await.map_err(record_io_error)?;
-        let fixture: RecordFixture = serde_json::from_slice(&bytes).map_err(|error| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                format!("invalid replay fixture {}: {error}", path.display()),
-            )
-        })?;
-        fixture.validate()?;
-        if fixture.provider != provider
-            || !fixture_matches_manifest(
-                &fixture,
-                &manifest.capabilities,
-                manifest.model_metadata.as_ref(),
-            )
-        {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Protocol,
-                format!(
-                    "replay fixture {} is inconsistent with its provider capability manifest",
-                    path.display()
-                ),
-            ));
-        }
-    }
-    Ok((manifest.capabilities, manifest.model_metadata))
+    catalog::load(directory.to_owned(), provider.to_owned()).await
 }
 
 fn ensure_capability_manifest(
@@ -1107,12 +1043,7 @@ fn ensure_capability_manifest(
             occurrence,
         );
     }
-    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| {
-        ProviderError::new(
-            ProviderErrorKind::Protocol,
-            format!("could not serialize replay capability manifest: {error}"),
-        )
-    })?;
+    let bytes = catalog::encode_manifest(&manifest)?;
     let provider_hash = provider_hash(provider);
     let temporary = directory.join(format!(
         ".{provider_hash}-capabilities-{hash}-{occurrence:08}.tmp"
@@ -1157,13 +1088,8 @@ fn reconcile_capability_manifest(
     hash: &str,
     occurrence: u64,
 ) -> Result<(), ProviderError> {
-    let bytes = std::fs::read(path).map_err(record_io_error)?;
-    let manifest: CapabilityManifest = serde_json::from_slice(&bytes).map_err(|error| {
-        ProviderError::new(
-            ProviderErrorKind::Protocol,
-            format!("invalid replay capability manifest: {error}"),
-        )
-    })?;
+    let bytes = replay_reads::read_bounded(path, catalog::MANIFEST_BYTES, || Ok(()))?;
+    let manifest = catalog::decode_manifest(&bytes)?;
     validate_manifest(provider, &manifest)?;
     match (manifest.model_metadata.as_ref(), model_metadata) {
         (None, Some(metadata)) => {
@@ -1263,12 +1189,7 @@ fn replace_manifest_atomically(
     hash: &str,
     occurrence: u64,
 ) -> Result<(), ProviderError> {
-    let bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
-        ProviderError::new(
-            ProviderErrorKind::Protocol,
-            format!("could not serialize resolved replay capability manifest: {error}"),
-        )
-    })?;
+    let bytes = catalog::encode_manifest(manifest)?;
     let temporary = path.with_file_name(format!(
         ".{}-resolved-{hash}-{occurrence:08}.tmp",
         path.file_name()
@@ -1326,12 +1247,9 @@ fn write_fixture_sync(
     redactor: &FixtureRedactor,
 ) -> Result<(), ProviderError> {
     std::fs::create_dir_all(directory).map_err(record_io_error)?;
-    let bytes = serde_json::to_string_pretty(fixture).map_err(|error| {
-        ProviderError::new(
-            ProviderErrorKind::Protocol,
-            format!("could not serialize replay fixture: {error}"),
-        )
-    })?;
+    let bytes = catalog::encode_fixture(fixture)?;
+    let bytes = String::from_utf8(bytes)
+        .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
     let redacted = redactor.redact(&bytes);
     if redacted.len() > replay_reads::MAX_FIXTURE_BYTES {
         return Err(ProviderError::new(
@@ -1339,6 +1257,7 @@ fn write_fixture_sync(
             "recording fixture exceeds encoded byte admission",
         ));
     }
+    catalog::admit_fixture(redacted.as_bytes())?;
     let target = fixture_path(directory, provider, hash, occurrence);
     let provider_hash = provider_hash(provider);
     let temporary = directory.join(format!(".{provider_hash}-{hash}-{occurrence:08}.tmp"));

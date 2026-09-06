@@ -513,7 +513,7 @@ impl Provider for ResponsesWithoutNativeProvider {
     }
 }
 
-fn request() -> ProviderRequest {
+pub(in crate::recording) fn request() -> ProviderRequest {
     ProviderRequest {
         model: "fixture-model".to_owned(),
         turns: Vec::new(),
@@ -1237,7 +1237,7 @@ async fn concurrent_start_completion_order_does_not_renumber_occurrences() {
     let _ = tokio::fs::remove_dir_all(directory).await;
 }
 
-fn unique_temp_directory(label: &str) -> std::path::PathBuf {
+pub(in crate::recording) fn unique_temp_directory(label: &str) -> std::path::PathBuf {
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
     let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let process = std::process::id();

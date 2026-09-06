@@ -189,12 +189,20 @@ async fn prove(job: &Job) -> Result<(), ProviderError> {
     }
 }
 fn read_fixture(path: PathBuf) -> Result<Vec<u8>, ProviderError> {
+    read_bounded(&path, MAX_FIXTURE_BYTES, || Ok(()))
+}
+pub(super) fn read_bounded(
+    path: &std::path::Path,
+    limit: usize,
+    check: impl Fn() -> Result<(), ProviderError>,
+) -> Result<Vec<u8>, ProviderError> {
+    check()?;
     let mut file = std::fs::File::open(path).map_err(|_| {
         ProviderError::new(ProviderErrorKind::ReplayMiss, "replay fixture unavailable")
     })?;
     let len = usize::try_from(file.metadata().map_err(|error| io_error(&error))?.len())
         .map_err(|_| size_error())?;
-    if len > MAX_FIXTURE_BYTES {
+    if len > limit {
         return Err(size_error());
     }
     // A descriptor's admitted length plus one detects growth without an
@@ -202,7 +210,9 @@ fn read_fixture(path: PathBuf) -> Result<Vec<u8>, ProviderError> {
     let mut bytes = vec![0; len + 1];
     let mut used = 0;
     while used < bytes.len() {
-        match file.read(&mut bytes[used..]) {
+        check()?;
+        let end = bytes.len().min(used + 64 * 1024);
+        match file.read(&mut bytes[used..end]) {
             Ok(0) => break,
             Ok(count) => used += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}

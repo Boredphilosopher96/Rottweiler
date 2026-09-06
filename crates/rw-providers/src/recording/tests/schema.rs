@@ -159,3 +159,79 @@ async fn capability_manifest_requires_its_complete_schema() {
         .await
         .unwrap_or_else(|error| panic!("fixture cleanup: {error:?}"));
 }
+
+#[tokio::test]
+async fn nested_recording_objects_require_all_fields_without_changing_provider_defaults() {
+    let (directory, _, recorded) = recording().await;
+    let mut fixture: super::RecordFixture = serde_json::from_value(recorded)
+        .unwrap_or_else(|error| panic!("complete fixture: {error}"));
+    fixture.model_metadata = Some(crate::ProviderModelMetadata {
+        capabilities: super::test_capabilities(),
+        pricing: Some(crate::ModelPricing::default()),
+        accounting: crate::UsageAccounting::AiCredits {
+            micros_usd_per_credit: 100,
+        },
+    });
+    fixture.start_error = Some(crate::ProviderError::new(
+        ProviderErrorKind::Protocol,
+        "fixture error",
+    ));
+    fixture.raw_sse = vec![crate::types::RawSseFrame {
+        event: None,
+        data: "{}".to_owned(),
+    }];
+    fixture.items = vec![super::super::RecordedItem::Error {
+        error: crate::ProviderError::new(ProviderErrorKind::Protocol, "stream error"),
+    }];
+    // This tests decoding each complete storage object; outcome consistency is
+    // separately checked by the real loader tests above.
+    let value = serde_json::to_value(&fixture).unwrap_or_else(|error| panic!("serialize: {error}"));
+    for pointer in [
+        "/model_metadata",
+        "/model_metadata/capabilities",
+        "/model_metadata/pricing",
+        "/model_metadata/accounting",
+        "/start_error",
+        "/raw_sse/0",
+        "/items/0",
+        "/items/0/error",
+    ] {
+        reject_incomplete_object(&value, pointer);
+    }
+    // Pricing omissions remain meaningful for external catalog responses.
+    let pricing =
+        serde_json::json!({"input_per_million_micros_usd": 1, "output_per_million_micros_usd": 2});
+    assert!(serde_json::from_value::<crate::ModelPricing>(pricing).is_ok());
+    tokio::fs::remove_dir_all(directory)
+        .await
+        .unwrap_or_else(|error| panic!("cleanup: {error}"));
+}
+
+fn reject_incomplete_object(fixture: &serde_json::Value, pointer: &str) {
+    let object = fixture
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("object {pointer}"));
+    for field in object.keys() {
+        let mut changed = fixture.clone();
+        changed
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap_or_else(|| panic!("object {pointer}"))
+            .remove(field);
+        assert!(
+            serde_json::from_value::<super::RecordFixture>(changed).is_err(),
+            "accepted missing {pointer}/{field}"
+        );
+    }
+    let mut changed = fixture.clone();
+    changed
+        .pointer_mut(pointer)
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap_or_else(|| panic!("object {pointer}"))
+        .insert("undeclared".to_owned(), serde_json::json!(true));
+    assert!(
+        serde_json::from_value::<super::RecordFixture>(changed).is_err(),
+        "accepted unknown {pointer} field"
+    );
+}

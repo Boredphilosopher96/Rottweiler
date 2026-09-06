@@ -569,7 +569,9 @@ pub trait WireFrameSink: Send + Sync {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawSseFrame {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub event: Option<String>,
     pub data: String,
 }
