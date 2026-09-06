@@ -29,6 +29,7 @@ pub enum ClientCommand {
         session_id: SessionId,
         #[serde(deserialize_with = "Option::deserialize")]
         #[schemars(schema_with = "crate::schema::required_nullable::<SequenceId>")]
+        #[ts(optional = false)]
         after_revision: Option<SequenceId>,
     },
     ReadChildControls {
