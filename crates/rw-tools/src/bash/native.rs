@@ -158,6 +158,15 @@ impl CommandExecutor for TokioCommandExecutor {
             () = cancellation.cancelled() => return Err(ToolError::Cancelled),
             permit = Arc::clone(&self.native_cleanup.admission).acquire_owned() => permit.map_err(|_| ToolError::EffectsUnsettled("native executor is quarantined".to_owned()))?,
         };
+        let process_credit = rw_resources::acquire(
+            rw_resources::ResourceClass::Process,
+            cancellation.cancelled(),
+        )
+        .await
+        .map_err(|error| match error {
+            rw_resources::AdmissionError::Cancelled => ToolError::Cancelled,
+            error => ToolError::Command(error.to_string()),
+        })?;
         let safe = request.sandbox != BashSandboxMode::Unsandboxed
             && request.network_domains.is_empty()
             && self.safety.classify(&request.command) == CommandSafety::SafeListed;
@@ -199,6 +208,7 @@ impl CommandExecutor for TokioCommandExecutor {
         let mut owner = NativeCommandOwner {
             state: Some(NativeCommandState {
                 _admission: admission,
+                _process_credit: process_credit,
                 child_id: child.id(),
                 child,
                 watchdog: None,
@@ -424,6 +434,7 @@ pub(super) type CommandOutputTasks = (
 );
 
 pub(super) struct NativeCommandState {
+    _process_credit: rw_resources::ResourceLease,
     _admission: tokio::sync::OwnedSemaphorePermit,
     child: Child,
     child_id: Option<u32>,

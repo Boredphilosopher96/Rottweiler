@@ -152,6 +152,7 @@ impl SandboxedLspSpawner {
 }
 
 struct TokioLspHandle {
+    _process_credit: rw_resources::ResourceLease,
     _helper: rw_sandbox::SandboxHelper,
     child: Child,
     process_group: Option<u32>,
@@ -201,6 +202,8 @@ impl LspProcessSpawner for SandboxedLspSpawner {
         workspace: &Path,
         server: &LspServerConfig,
     ) -> Result<SpawnedLspProcess, LspError> {
+        let process_credit = rw_resources::try_acquire(rw_resources::ResourceClass::Process)
+            .map_err(io::Error::other)?;
         let mut plan = self.launch_plan(server)?;
         let mut command = tokio::process::Command::new(&plan.program);
         command
@@ -228,6 +231,7 @@ impl LspProcessSpawner for SandboxedLspSpawner {
         let stdout = child.stdout.take().ok_or(LspError::Unavailable)?;
         Ok(SpawnedLspProcess {
             handle: Box::new(TokioLspHandle {
+                _process_credit: process_credit,
                 _helper: self.helper_executable.clone(),
                 child,
                 process_group,

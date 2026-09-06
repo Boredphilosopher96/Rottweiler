@@ -139,6 +139,8 @@ impl SandboxedProtocolLauncher {
 #[async_trait]
 impl ProtocolChildLauncher for SandboxedProtocolLauncher {
     async fn spawn(&self, request: &ProtocolChildRequest) -> io::Result<SpawnedProtocolChild> {
+        let process_credit = rw_resources::try_acquire(rw_resources::ResourceClass::Process)
+            .map_err(io::Error::other)?;
         validate_request(request, &self.allowed_environment)?;
         if let Some(reason) = &self.sandbox_unavailable {
             return Err(io::Error::new(
@@ -199,6 +201,7 @@ impl ProtocolChildLauncher for SandboxedProtocolLauncher {
             stdin,
             stdout,
             handle: Box::new(TokioProtocolHandle {
+                _process_credit: process_credit,
                 _helper: self.helper_executable.clone(),
                 child,
                 process_group,
@@ -406,6 +409,7 @@ fn has_symlink_provenance(path: &Path) -> bool {
 }
 
 struct TokioProtocolHandle {
+    _process_credit: rw_resources::ResourceLease,
     _helper: rw_sandbox::SandboxHelper,
     child: Child,
     process_group: Option<u32>,
