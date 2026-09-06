@@ -1,5 +1,4 @@
-import { resolveRenderLib } from "@opentui/core"
-import { heapStats } from "bun:jsc"
+import { clientMemoryBreakdown } from "./memory-counters"
 import { writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createRottweilerApp, type RottweilerAppOptions } from "../app"
@@ -50,7 +49,7 @@ export async function runHeldViewMemoryProbe(reportPath: string, directory: stri
     if (snapshot.open) app.outputViewer.showDocument(snapshot)
     else app.outputViewer.closePresentation()
   })
-  const samples: Array<{ cycle: number; elapsedMs: number; rssBytes: number; highWaterBytes: number; allocation: typeof allocations.usage; terminal: typeof terminal.snapshot; memory: ReturnType<typeof heldMemoryBreakdown> }> = []
+  const samples: Array<{ cycle: number; elapsedMs: number; rssBytes: number; highWaterBytes: number; allocation: typeof allocations.usage; terminal: typeof terminal.snapshot; memory: ReturnType<typeof clientMemoryBreakdown> }> = []
   let sequence = 20000
   const meta = () => ({ protocol_version: PROTOCOL_VERSION, session_id: "memory-probe", sequence_id: String(sequence++), emitted_at: "2026-09-06T00:00:00Z" })
   const identity = (index: number) => ({ turn_id: "held-turn", tool_call_id: `held-provider-${index}`, invocation_id: `held-invocation-${index}` })
@@ -95,7 +94,7 @@ export async function runHeldViewMemoryProbe(reportPath: string, directory: stri
       if (view === "action") requireThat((allocations.usage.domains.decoding ?? 0) >= 4096, "pending credential action lost its result owner")
       if (cycle % 10 === 0 || cycle + 1 === cycles) {
         Bun.gc(true)
-        samples.push({ cycle, elapsedMs: performance.now() - heldAt, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, terminal: terminal.snapshot, memory: heldMemoryBreakdown() })
+        samples.push({ cycle, elapsedMs: performance.now() - heldAt, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, terminal: terminal.snapshot, memory: clientMemoryBreakdown() })
       }
     }
     // Settlement occurs only after the complete held-view measurement interval.
@@ -118,11 +117,4 @@ export async function runHeldViewMemoryProbe(reportPath: string, directory: stri
     load: { tools: MEMORY_LOAD.toolInvocations, chunksPerCyclePerTool: 4, chunkBytes: 4096, assistantBytesPerCycle: 4096, cycleIntervalMs: 50 },
     fixture: "bounded in-process protocol server; credential result is synthetic",
     terminalOutput: "streamed to a draining sink; native ANSI history is not retained", samples, finalAllocationBytes: allocations.usage.bytes }) + "\n", { mode: 0o600 })
-}
-
-function heldMemoryBreakdown() {
-  const heap = heapStats()
-  const memory = process.memoryUsage()
-  return { heapSize: heap.heapSize, heapCapacity: heap.heapCapacity, objectCount: heap.objectCount,
-    externalBytes: memory.external, arrayBufferBytes: memory.arrayBuffers, native: resolveRenderLib().getAllocatorStats() }
 }

@@ -1,3 +1,4 @@
+import { clientMemoryBreakdown } from "./memory-counters"
 import { createMemoryRenderer } from "./memory-renderer"
 import { exerciseLiveOwners } from "./memory-live"
 import { writeFile } from "node:fs/promises"
@@ -9,7 +10,7 @@ import { observedResidentBytes } from "../process-memory"
 import { readTuiRecycleState, recycleTuiIfNeeded } from "../recycle-state"
 import { MEMORY_LOAD, MEMORY_CHILD, MemoryFixture } from "./memory-fixture"
 
-interface Sample { cycle: number; stage: string; rssBytes: number; highWaterBytes: number; allocation: ReturnType<typeof usage> }
+interface Sample { cycle: number; stage: string; rssBytes: number; highWaterBytes: number; allocation: ReturnType<typeof usage>; memory: ReturnType<typeof clientMemoryBreakdown> | null }
 function usage(owner: ClientAllocationOwner) { return owner.usage }
 function requireThat(value: unknown, message: string): asserts value { if (!value) throw new Error(message) }
 
@@ -26,7 +27,7 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
   const handoffPath = join(workDirectory, "client-handoff.json")
   using handoffAllocation = allocations.reserve("decoding", 0)
   let handoff = readTuiRecycleState(handoffPath, handoffAllocation)
-  const sample = (cycle: number, stage: string) => samples.push({ cycle, stage, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage })
+  const sample = (cycle: number, stage: string) => samples.push({ cycle, stage, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, memory: stage === "destroyed-and-collected" || cycle === -1 ? clientMemoryBreakdown() : null })
   const until = async (condition: () => boolean) => {
     const deadline = performance.now() + 10_000
     while (!condition()) {
