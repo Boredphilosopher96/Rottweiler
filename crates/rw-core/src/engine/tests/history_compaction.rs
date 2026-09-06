@@ -68,6 +68,7 @@ impl SessionHistoryView for SmallView {
 async fn fixture(
     root: &std::path::Path,
     model: Arc<M3Model>,
+    mask: bool,
 ) -> (crate::engine::SessionHandle, Arc<dyn SessionHistory>) {
     let mut config = config(
         root,
@@ -88,6 +89,28 @@ async fn fixture(
             )
         })
         .collect();
+    if mask {
+        config.recovered.conversation[1].blocks = vec![rw_types::Block::ToolResult {
+            id: rw_types::ToolCallId("masked-call".into()),
+            output: rw_types::ToolOutput::Text {
+                text: "PRUNED_SECRET".into(),
+            },
+            is_error: false,
+        }];
+        config.recovered.conversation[2] = text_turn(Role::User, "EVICTED_SECRET");
+        config
+            .recovered
+            .pruned_tool_outputs
+            .insert("masked-call".into(), 42);
+        config
+            .recovered
+            .context_surgery
+            .push(crate::engine::projection::ContextSurgeryAction {
+                item_id: rw_types::ContextItemId("conversation:2".into()),
+                pinned: false,
+                effective_after_agent_turn: 1,
+            });
+    }
     let mut config = history::bind(config).await.expect("canonical fixture");
     let source = Arc::clone(&config.history);
     config.history = Arc::new(SmallPages(Arc::clone(&source)));
@@ -103,7 +126,7 @@ async fn overflow_consumes_every_page_and_keeps_new_input_after_atomic_summary()
         stop_script("summary-three", &[]),
         stop_script("answer", &[]),
     ]));
-    let (handle, source) = fixture(root.path(), Arc::clone(&model)).await;
+    let (handle, source) = fixture(root.path(), Arc::clone(&model), false).await;
     let mut events = handle.subscribe().expect("events");
     handle.send_message("new-input").await.expect("start");
     let events = collect_turn(&mut events).await;
@@ -156,7 +179,7 @@ async fn failed_middle_page_preserves_full_canonical_generation() {
             "summary unavailable",
         ))],
     ]));
-    let (handle, source) = fixture(root.path(), Arc::clone(&model)).await;
+    let (handle, source) = fixture(root.path(), Arc::clone(&model), false).await;
     let mut events = handle.subscribe().expect("events");
     handle.send_message("new-input").await.expect("start");
     let events = collect_turn(&mut events).await;
@@ -182,5 +205,40 @@ async fn failed_middle_page_preserves_full_canonical_generation() {
             .iter()
             .any(|block| matches!(block, rw_types::Block::Text{text} if text == "source-00"))
     );
+    handle.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn rolling_summary_never_reintroduces_evicted_or_pruned_payloads() {
+    let root = tempfile::tempdir().expect("root");
+    let model = Arc::new(M3Model::new([
+        stop_script("summary-one", &[]),
+        stop_script("summary-two", &[]),
+        stop_script("summary-three", &[]),
+        stop_script("answer", &[]),
+    ]));
+    let (handle, _) = fixture(root.path(), Arc::clone(&model), true).await;
+    let mut events = handle.subscribe().expect("events");
+    handle.send_message("new-input").await.expect("start");
+    let events = collect_turn(&mut events).await;
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        PendingEvent::TurnFinished {
+            status: AgentTurnStatus::Completed,
+            ..
+        }
+    )));
+    let requests = model.requests();
+    assert_eq!(requests.len(), 4);
+    for request in &requests {
+        let request = serde_json::to_string(request).expect("fixture request");
+        assert!(!request.contains("PRUNED_SECRET"));
+        assert!(!request.contains("EVICTED_SECRET"));
+    }
+    assert!(requests[0].turns.iter().any(|turn| {
+        turn.blocks.iter().any(|block|
+        matches!(block, rw_types::Block::ToolResult { output: rw_types::ToolOutput::Text{text}, .. }
+            if text == rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT))
+    }));
     handle.close().await.expect("close");
 }

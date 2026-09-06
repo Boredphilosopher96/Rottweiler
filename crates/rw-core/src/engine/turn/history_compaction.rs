@@ -160,15 +160,30 @@ async fn summarize(
         }
         next = page.range.end;
         let (page, source) = page.into_parts();
-        let base = summary.carry.len();
-        for (offset, action) in page.context_actions.into_iter().enumerate() {
-            if let Some(mut action) = action.filter(|action| action.pinned) {
-                action.item_id = ContextItemId(format!("conversation:{}", base + offset));
+        for (mut value, action) in page.turns.into_iter().zip(page.context_actions) {
+            if action.as_ref().is_some_and(|action| !action.pinned) {
+                continue;
+            }
+            for block in &mut value.blocks {
+                if let rw_types::Block::ToolResult { id, output, .. } = block
+                    && page.pruned_tool_outputs.contains_key(&id.0)
+                {
+                    *output = rw_types::ToolOutput::Text {
+                        text: rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT.into(),
+                    };
+                }
+            }
+            if let Some(mut action) = action {
+                action.item_id = ContextItemId(format!("conversation:{}", summary.carry.len()));
                 summary.pins.push(action);
             }
+            summary.carry.push(value);
         }
-        summary.carry.extend(page.turns);
         check_carry(&summary.carry, &summary.pins)?;
+        if summary.carry.is_empty() {
+            drop(source);
+            continue;
+        }
         let execution = execute_compaction(
             &summary.carry,
             &summary.pins,
