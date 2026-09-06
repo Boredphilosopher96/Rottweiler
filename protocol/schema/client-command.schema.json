@@ -630,11 +630,8 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "answers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Answer"
-          }
+        "answer": {
+          "$ref": "#/$defs/Answer"
         },
         "type": {
           "type": "string",
@@ -647,7 +644,7 @@
         "meta",
         "session_id",
         "question_id",
-        "answers"
+        "answer"
       ]
     },
     {
@@ -2129,11 +2126,8 @@
             "question_id": {
               "$ref": "#/$defs/QuestionId"
             },
-            "answers": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Answer"
-              }
+            "answer": {
+              "$ref": "#/$defs/Answer"
             },
             "type": {
               "type": "string",
@@ -2144,7 +2138,7 @@
           "required": [
             "type",
             "question_id",
-            "answers"
+            "answer"
           ]
         },
         {
@@ -2220,17 +2214,14 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "values": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "value": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
       "required": [
         "question_id",
-        "values"
+        "value"
       ]
     },
     "ToolCallId": {

@@ -2125,11 +2125,8 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "questions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Question"
-          }
+        "question": {
+          "$ref": "#/$defs/Question"
         },
         "type": {
           "type": "string",
@@ -2142,7 +2139,7 @@
         "meta",
         "turn_id",
         "question_id",
-        "questions"
+        "question"
       ]
     },
     {
@@ -2157,11 +2154,8 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "answers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Answer"
-          }
+        "answer": {
+          "$ref": "#/$defs/Answer"
         },
         "type": {
           "type": "string",
@@ -2174,7 +2168,7 @@
         "meta",
         "turn_id",
         "question_id",
-        "answers"
+        "answer"
       ]
     },
     {
@@ -3591,18 +3585,15 @@
         "turn_id": {
           "$ref": "#/$defs/TurnId"
         },
-        "questions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Question"
-          }
+        "question": {
+          "$ref": "#/$defs/Question"
         }
       },
       "additionalProperties": false,
       "required": [
         "question_id",
         "turn_id",
-        "questions"
+        "question"
       ]
     },
     "QuestionId": {
@@ -3653,8 +3644,7 @@
       "type": "string",
       "enum": [
         "text",
-        "select_one",
-        "select_many"
+        "select_one"
       ]
     },
     "QuestionOption": {
@@ -8662,17 +8652,14 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "values": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "value": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
       "required": [
         "question_id",
-        "values"
+        "value"
       ]
     },
     "ProviderCallIdentity": {

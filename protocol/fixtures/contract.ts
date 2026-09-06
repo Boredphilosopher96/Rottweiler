@@ -182,14 +182,10 @@ export const contractFixture = {
       },
       "session_id": "session-fixture",
       "question_id": "question-1",
-      "answers": [
-        {
-          "question_id": "question-1",
-          "values": [
-            "yes"
-          ]
-        }
-      ]
+      "answer": {
+        "question_id": "question-1",
+        "value": "yes"
+      }
     },
     {
       "type": "interrupt",
@@ -668,37 +664,18 @@ export const contractFixture = {
       },
       "turn_id": "turn-fixture",
       "question_id": "question-1",
-      "questions": [
-        {
-          "id": "question-1",
-          "prompt": "Continue?",
-          "response_kind": "select_one",
-          "options": [
-            {
-              "value": "yes",
-              "label": "Yes",
-              "description": null
-            }
-          ]
-        },
-        {
-          "id": "question-model-switch",
-          "prompt": "How should the new model receive this conversation?",
-          "response_kind": "select_one",
-          "options": [
-            {
-              "value": "pass_summary",
-              "label": "Pass summary",
-              "description": "Compact this conversation, then switch models",
-              "model_context_transfer": "pass_summary"
-            }
-          ],
-          "model_switch": {
-            "model": "openai/gpt-5",
-            "provider": "openai"
+      "question": {
+        "id": "question-1",
+        "prompt": "Continue?",
+        "response_kind": "select_one",
+        "options": [
+          {
+            "value": "yes",
+            "label": "Yes",
+            "description": null
           }
-        }
-      ]
+        ]
+      }
     },
     {
       "type": "question_answered",
@@ -711,14 +688,10 @@ export const contractFixture = {
       },
       "turn_id": "turn-fixture",
       "question_id": "question-1",
-      "answers": [
-        {
-          "question_id": "question-1",
-          "values": [
-            "yes"
-          ]
-        }
-      ]
+      "answer": {
+        "question_id": "question-1",
+        "value": "yes"
+      }
     },
     {
       "type": "turn_finished",
