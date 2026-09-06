@@ -22,7 +22,7 @@ pub(crate) fn materialize_claimed_event<'a>(
     source: &JournalReadView,
     checked: rw_types::input_claims::InputClaimChecked<'a>,
 ) -> Result<Cow<'a, EngineEvent>, RecoveryError> {
-    materialize_indexed_event(source, checked.event())
+    materialize_indexed_event(source, checked.into_event())
 }
 
 pub(in crate::engine) fn materialize_audit_event<'a>(

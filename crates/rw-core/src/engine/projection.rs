@@ -942,11 +942,11 @@ impl SessionProjector {
             }
         }
         Ok(Self {
+            input_claims,
             conversation,
             title,
             conversation_agent_turns,
             queued,
-            input_claims,
             uncommitted_users,
             completed_turns,
             active_turn,

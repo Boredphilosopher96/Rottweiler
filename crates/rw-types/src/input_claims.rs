@@ -34,7 +34,7 @@ pub struct InputClaimChecked<'a> {
 }
 impl<'a> InputClaimChecked<'a> {
     #[must_use]
-    pub fn event(&self) -> &'a EngineEvent {
+    pub fn into_event(self) -> &'a EngineEvent {
         self.event
     }
 }

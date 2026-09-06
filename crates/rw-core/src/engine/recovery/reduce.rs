@@ -102,19 +102,19 @@ pub(super) fn reduce(
                 TurnSourceKind::Committed,
                 &turn,
             )?;
-            if head.compacting.is_none() {
-                if let Some(active) = &mut head.control.active {
-                    match turn.role {
-                        Role::Assistant => {
-                            active.last_assistant_commit = Some(sequence);
-                            active.assistant_parts = SourceTotals::default();
-                        }
-                        Role::Tool => {
-                            active.last_tool_commit = Some(sequence);
-                            active.tool_results = SourceTotals::default();
-                        }
-                        _ => {}
+            if head.compacting.is_none()
+                && let Some(active) = &mut head.control.active
+            {
+                match turn.role {
+                    Role::Assistant => {
+                        active.last_assistant_commit = Some(sequence);
+                        active.assistant_parts = SourceTotals::default();
                     }
+                    Role::Tool => {
+                        active.last_tool_commit = Some(sequence);
+                        active.tool_results = SourceTotals::default();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -199,7 +199,6 @@ pub(super) fn reduce(
             }
         }
         PendingEvent::QueuedMessagesCleared => head.control.queued.clear(),
-        PendingEvent::UserMessageRetained { .. } => {}
         PendingEvent::UserMessageAccepted {
             content,
             attachments,
@@ -525,7 +524,8 @@ pub(super) fn reduce(
                 head.plugin_statuses.insert(plugin_id, sequence);
             }
         }
-        PendingEvent::ToolApprovalResolved { .. }
+        PendingEvent::UserMessageRetained { .. }
+        | PendingEvent::ToolApprovalResolved { .. }
         | PendingEvent::ToolOutput { .. }
         | PendingEvent::PermissionRequested { .. }
         | PendingEvent::ToolDiffReady { .. }
