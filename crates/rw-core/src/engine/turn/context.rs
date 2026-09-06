@@ -363,6 +363,11 @@ pub(in crate::engine) fn context_snapshot(
             reserved,
         )
     });
+    let source_ordinals = sources
+        .iter()
+        .enumerate()
+        .map(|(ordinal, source)| (source.sequence.0, ordinal))
+        .collect::<BTreeMap<_, _>>();
     let source_items = assembled
         .items
         .iter()
@@ -385,11 +390,7 @@ pub(in crate::engine) fn context_snapshot(
                 .strip_prefix("conversation:")
                 .and_then(|value| value.parse::<u64>().ok());
             source
-                .and_then(|sequence| {
-                    sources
-                        .binary_search_by_key(&sequence, |source| source.sequence.0)
-                        .ok()
-                })
+                .and_then(|sequence| source_ordinals.get(&sequence).copied())
                 .and_then(|index| durable_conversation.get(index))
                 .is_none_or(|turn| turn.role != Role::Tool)
         })

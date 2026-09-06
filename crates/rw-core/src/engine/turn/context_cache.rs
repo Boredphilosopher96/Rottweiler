@@ -4,7 +4,7 @@ use crate::engine::recovery::ConversationSource;
 use rw_context::{PreparedPrefix, ToonPromptEncoder};
 use rw_providers::CacheBreakpointSupport;
 use rw_types::{Block, SequenceId, Turn};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 pub(super) struct ContextCache {
@@ -28,12 +28,12 @@ impl ContextCache {
         sources: &[ConversationSource],
         pruned: &BTreeMap<String, u64>,
     ) -> Vec<Turn> {
-        // Source arrays are ordered by physical sequence, including replacements.
-        self.turns.retain(|sequence, _| {
-            sources
-                .binary_search_by_key(sequence, |source| source.sequence.0)
-                .is_ok()
-        });
+        // Logical order need not be physical sequence order after prefix replacement.
+        let selected = sources
+            .iter()
+            .map(|source| source.sequence.0)
+            .collect::<BTreeSet<_>>();
+        self.turns.retain(|sequence, _| selected.contains(sequence));
         let mut toon = ToonPromptEncoder::default();
         conversation
             .iter()

@@ -254,3 +254,50 @@ fn measure_incremental_context_against_full_assembly() {
         }
     }
 }
+
+#[test]
+fn prefix_replacement_keeps_an_older_source_cache_entry() {
+    let root = tempfile::tempdir().expect("root");
+    let config = fixture(root.path(), 0);
+    let mut conversation = vec![text_turn(Role::Assistant, "prefix"), output(1)];
+    let mut sources = vec![source(1), source(2)];
+    let queued = VecDeque::new();
+    let pruned = BTreeMap::new();
+    let mut working =
+        admit(HistoryRead::new((), ()), &config, &conversation, &queued).expect("working");
+    drop(
+        assemble_session_context(
+            &config,
+            &working,
+            &conversation,
+            &sources,
+            &queued,
+            &[],
+            &pruned,
+        )
+        .expect("warm"),
+    );
+    let before = working.normalizations();
+    conversation[0] = text_turn(Role::Assistant, "new summary");
+    sources[0] = source(40);
+    working = readmit(working, &config, &conversation, &queued).expect("replanned");
+    let cached = assemble_session_context(
+        &config,
+        &working,
+        &conversation,
+        &sources,
+        &queued,
+        &[],
+        &pruned,
+    )
+    .expect("replacement");
+    assert_eq!(
+        working.normalizations(),
+        before + 1,
+        "unchanged older suffix is reused"
+    );
+    let full =
+        assemble_full_session_context(&config, &conversation, &sources, &queued, &[], &pruned)
+            .expect("oracle");
+    assert_eq!(cached, full);
+}
