@@ -108,7 +108,8 @@ fn real_worker_revokes_inherited_bootstrap_effect_authority() {
     let mut baseline = worker.clone();
     let helper_index = baseline
         .iter()
-        .position(|value| Path::new(value) == helper)
+        .position(|value| value == "--rw-macos-worker")
+        .and_then(|index| index.checked_sub(1))
         .expect("helper in launch plan");
     baseline.drain(helper_index..helper_index + 2);
     *baseline.last_mut().expect("mode") = "baseline".to_owned();
