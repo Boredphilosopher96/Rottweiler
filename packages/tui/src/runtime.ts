@@ -159,6 +159,7 @@ export class EngineRuntimeError extends Error {
  */
 export class TuiEngineRuntime {
   readonly #metadata = new SessionSnapshotReader(
+    () => this.#requiredApp().historyCache.allocations,
     MAX_SESSION_STATE_PREPARED_BYTES,
     async (sessionId, signal, allocation) => {
       const generation = this.#sessionGeneration
@@ -187,6 +188,7 @@ export class TuiEngineRuntime {
   )
 
   readonly #children = new SessionSnapshotReader(
+    () => this.#requiredApp().historyCache.allocations,
     MAX_SESSION_CHILDREN_PREPARED_BYTES,
     async (sessionId, signal, allocation) => {
       const generation = this.#sessionGeneration

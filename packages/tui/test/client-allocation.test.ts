@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { ClientAllocationOwner, type ClientAllocationDomain } from "../src/client-allocation"
 import { ClientCache } from "../src/history/cache"
 import { ComposerDraftStore } from "../src/composer-drafts"
-const limits: Record<ClientAllocationDomain, number> = { history: 4096, drafts: 4096, controls: 4096, metadata: 4096, children: 4096, tasks: 4096 }
+const limits: Record<ClientAllocationDomain, number> = { live: 4096, decoding: 4096, history: 4096, drafts: 4096, controls: 4096, metadata: 4096, children: 4096, tasks: 4096 }
 
 test("history and retained snapshots compete for one aggregate allocation owner", () => {
   const owner = new ClientAllocationOwner(limits, 5000)

@@ -1,3 +1,4 @@
+import type { ClientAllocationOwner } from "./client-allocation"
 import { CLIENT_TASK_REPLY_BYTES } from "./client-allocation"
 import type { EngineEvent, TodoReadResult } from "./protocol"
 import { SessionSnapshotReader } from "./runtime-snapshots"
@@ -5,6 +6,7 @@ import { directSessionRead, type SessionReader, type SessionReadTarget } from ".
 import { invalidateTodos, readTodos, type TodoState } from "./state/todos"
 
 interface TodoControllerOptions {
+  readonly allocations: ClientAllocationOwner
   readonly reader: Pick<SessionReader, "todos">
   readonly state: () => TodoState
   readonly update: (state: TodoState) => void
@@ -22,6 +24,7 @@ export class TodoController {
   constructor(options: TodoControllerOptions) {
     this.#options = options
     this.#reader = new SessionSnapshotReader(
+      () => options.allocations,
       CLIENT_TASK_REPLY_BYTES,
       (request, signal, allocation) => options.reader.todos(request.target, signal, allocation),
       result => {

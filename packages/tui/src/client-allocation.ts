@@ -6,6 +6,8 @@ export const CLIENT_TASK_REPLY_BYTES = MAX_TODO_TOTAL_BYTES * 32 + MAX_TODO_ITEM
 /** Each snapshot domain admits the mounted revision and its incoming decoder together. */
 export const CLIENT_ALLOCATION_LIMITS = {
   history: CLIENT_HISTORY_BYTES,
+  live: 192 * 1024 * 1024,
+  decoding: 128 * 1024 * 1024,
   drafts: 2 * MAX_CLIENT_DRAFT_BYTES,
   controls: 2 * MAX_SESSION_CONTROLS_PREPARED_BYTES,
   metadata: 2 * MAX_SESSION_STATE_PREPARED_BYTES,
@@ -26,7 +28,7 @@ export class ClientAllocationOwner {
   #peak = 0
   constructor(
     readonly limits: Readonly<Record<ClientAllocationDomain, number>> = CLIENT_ALLOCATION_LIMITS,
-    readonly maximumBytes = Object.values(limits).reduce((sum, bytes) => sum + bytes, 0),
+    readonly maximumBytes = Math.min(256 * 1024 * 1024, Object.values(limits).reduce((sum, bytes) => sum + bytes, 0)),
   ) {
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0
       || Object.values(limits).some(bytes => !Number.isSafeInteger(bytes) || bytes <= 0)) throw new RangeError("invalid client allocation limits")

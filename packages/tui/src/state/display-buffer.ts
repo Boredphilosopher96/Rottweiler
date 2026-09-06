@@ -31,10 +31,15 @@ export interface ToolOutputChunk {
   readonly stream: ToolOutputStream
   readonly chunk: string
 }
-interface ChunkNode {
-  readonly previous: ChunkNode | null
-  readonly value: ToolOutputChunk
+class ToolOutputNode {
+  constructor(readonly previous: ToolOutputNode | null, readonly value: ToolOutputChunk) {}
 }
+export class ToolOutputCacheIdentity {
+  #allocatedBytes = 0
+  get allocationBytes(): number { return TOOL_OUTPUT_CACHE_ALLOCATION_BYTES + this.#allocatedBytes }
+  record(chunk: string): void { this.#allocatedBytes += 160 + chunk.length * 2 }
+}
+export const TOOL_OUTPUT_CACHE_ALLOCATION_BYTES = MAX_TOOL_DISPLAY_BYTES * 10 + MAX_TOOL_DISPLAY_CHUNKS * 64 + MAX_WINDOW_LINES * 256
 export interface OutputLineWindow {
   readonly lines: readonly string[]
   readonly lineCount: number
@@ -53,7 +58,7 @@ export interface ToolOutputPreview {
   readonly sourceTruncated: boolean
 }
 interface Materialization extends ToolOutputPreview {
-  readonly node: ChunkNode | null
+  readonly node: WeakRef<ToolOutputNode> | null
   readonly count: number
   readonly window: LineWindow
   readonly markerTail: string
@@ -125,8 +130,8 @@ export class ToolOutputBuffer {
     readonly retainedBytes = 0,
     readonly omittedBytes = 0,
     readonly truncated = false,
-    private readonly root: object = {},
-    private readonly node: ChunkNode | null = null,
+    private readonly root = new ToolOutputCacheIdentity(),
+    private readonly node: ToolOutputNode | null = null,
   ) {}
 
   static empty(): ToolOutputBuffer { return new ToolOutputBuffer() }
@@ -144,14 +149,15 @@ export class ToolOutputBuffer {
     const chunk = allowed ? utf8Prefix(value.chunk, remaining) : ""
     const retained = Buffer.byteLength(chunk)
     const truncated = this.truncated || !allowed || retained < bytes
-    const root = this.count === 0 && !this.truncated ? {} : this.root
+    const root = this.count === 0 && !this.truncated ? new ToolOutputCacheIdentity() : this.root
+    if (allowed) root.record(chunk)
     return new ToolOutputBuffer(
       this.count + (allowed ? 1 : 0),
       this.retainedBytes + retained,
       Math.min(Number.MAX_SAFE_INTEGER, this.omittedBytes + bytes - retained),
       truncated,
       root,
-      allowed ? { previous: this.node, value: { stream: value.stream, chunk } } : this.node,
+      allowed ? new ToolOutputNode(this.node, { stream: value.stream, chunk }) : this.node,
     )
   }
 
@@ -162,15 +168,16 @@ export class ToolOutputBuffer {
       materializations.set(this.root, cache)
     }
     let result = cache.current
-    if (result.node !== this.node) {
+    const resultNode = result.node?.deref() ?? null
+    if (resultNode !== this.node) {
       const pending: ToolOutputChunk[] = []
       let cursor = this.node
-      while (cursor !== null && cursor !== result.node) {
+      while (cursor !== null && cursor !== resultNode) {
         pending.push(cursor.value)
         cache.visitedNodes += 1
         cursor = cursor.previous
       }
-      if (cursor !== result.node) result = EMPTY_MATERIALIZATION
+      if (cursor !== resultNode) result = EMPTY_MATERIALIZATION
       let hasOutput = result.hasOutput
       let count = result.count
       let plainWindow = result.plainWindow
@@ -192,7 +199,7 @@ export class ToolOutputBuffer {
         hasOutput ||= value.chunk !== ""
         count++
       }
-      result = { node: this.node, count: this.count, hasOutput, plainWindow, labeledWindow, window, markerTail,
+      result = { node: this.node === null ? null : new WeakRef(this.node), count: this.count, hasOutput, plainWindow, labeledWindow, window, markerTail,
         tailLines: window.visibleLines, lineCount: window.visibleLineCount, sourceTruncated }
       // An old immutable snapshot must not roll the forward materialization cursor back.
       if (this.count >= cache.current.count) cache.current = result
@@ -208,6 +215,8 @@ export class ToolOutputBuffer {
     truncatedMaterializations.set(result, view)
     return view
   }
+
+  get allocationCache(): ToolOutputCacheIdentity | null { return this.count === 0 ? null : this.root }
 
   sameStream(other: ToolOutputBuffer): boolean { return this.root === other.root }
 

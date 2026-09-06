@@ -1,3 +1,4 @@
+import { ProjectionAllocations } from "./state/allocation"
 import { BootstrapPresentation } from "./app/bootstrap"
 import type { SessionBootstrap } from "./runtime-bootstrap"
 import { navigateTranscript } from "./app/navigation"
@@ -121,7 +122,9 @@ export class RottweilerApp extends BoxRenderable {
   readonly #document: DocumentController
   readonly #bootstrap: BootstrapPresentation
   readonly #history: HistoryPresentation
-  #state: RottweilerState
+  readonly #allocations: ProjectionAllocations
+  get #state(): RottweilerState { return this.#allocations.root }
+  set #state(value: RottweilerState) { this.#allocations.set("root", value) }
   #workspaceRoots: RottweilerState["workspaceRoots"] | undefined
   #options: Required<
     Pick<
@@ -236,6 +239,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#history = new HistoryPresentation(options.sessionReader, snapshot => {
       if (!this.#destroyed && this.transcript !== undefined) this.transcript.setHistory(snapshot)
     }, options.diagnostics)
+    this.#allocations = new ProjectionAllocations(this.historyCache.allocations)
     this.#bootstrap = new BootstrapPresentation(state => { this.#presentation.resume(); this.setState(state) })
     this.#document = new DocumentController(options.sessionReader, this.#history.controller.cache, snapshot => {
         if (!this.#destroyed && this.outputViewer !== undefined) {
@@ -267,6 +271,7 @@ export class RottweilerApp extends BoxRenderable {
       },
     })
     this.#todos = new TodoController({
+      allocations: this.historyCache.allocations,
       reader: options.sessionReader, state: () => this.#state.todos,
       update: (todos) => this.setState({ ...this.#state, todos }),
     })
@@ -346,6 +351,7 @@ export class RottweilerApp extends BoxRenderable {
     const app = this
     this.#children = new ChildUiController({
       sessionReader: options.sessionReader,
+      allocations: this.#allocations,
       get state() { return app.#state }, set state(value) { app.#state = value },
       get sessionId() { return app.#sessionId }, get composer() { return app.composer },
       get banner() { return app.banner }, get theme() { return app.#theme },
@@ -626,15 +632,12 @@ export class RottweilerApp extends BoxRenderable {
     else if (this.commandPalette.visible) this.commandPalette.input.focus()
     else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
   }
-
   get state(): RottweilerState {
     return this.#state
   }
-
   get primaryView(): PrimaryView {
     return this.#primaryView
   }
-
   get toolsElapsedTimerActive(): boolean {
     return this.#toolsElapsedTimer !== null
   }
@@ -646,7 +649,6 @@ export class RottweilerApp extends BoxRenderable {
   showConversationView(): void {
     this.#setPrimaryView("conversation")
   }
-
   get activeSubagentId(): string | null {
     return this.#children.activeId
   }
@@ -703,6 +705,10 @@ export class RottweilerApp extends BoxRenderable {
 
   handleEvent(event: EngineEvent): void {
     if (this.#destroyed) return
+    const previous = this.#allocations.retain()
+    try { this.#handleEvent(event) } finally { previous.release() }
+  }
+  #handleEvent(event: EngineEvent): void {
     if (durableSequenceId(event) !== null && "meta" in event && isRecord(event.meta)
       && "session_id" in event.meta && typeof event.meta.session_id === "string") this.#history?.invalidate(event.meta.session_id)
     if (event.type === "session_history_ready" || event.type === "session_replay_completed") {
@@ -815,7 +821,7 @@ export class RottweilerApp extends BoxRenderable {
     if (modelSwitchOutcome?.type === "rejected") {
       this.#projectRejection(modelSwitchOutcome)
     }
-    this.#notify(previous, next)
+    if (!this.#terminalFocused) notifyTransition(this.#options.notifications, previous, next)
     if (
       event.type === "question_asked" && next.questions[event.question_id] !== undefined &&
       Array.isArray(eventRecord.questions) &&
@@ -924,7 +930,6 @@ export class RottweilerApp extends BoxRenderable {
       this.#projectionRequests.command({ type: "get_cost" })
     }
   }
-
   get historyCache() { return this.#history.controller.cache }
   installBootstrap(value: SessionBootstrap): void { this.#bootstrap.install(value) }
 
@@ -1119,6 +1124,7 @@ export class RottweilerApp extends BoxRenderable {
       toolsVisible || this.#children.activeId !== null ? [] : this.#state.queuedMessages,
     )
     this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
+    this.#allocations.presented()
   }
 
   #updateToolsWorkspace(state: RottweilerState, restoreHidden = false): void {
@@ -1306,6 +1312,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#syntaxStyle.destroy()
     super.destroy()
     this.#bootstrap.dispose()
+    this.#allocations.dispose()
   }
 
   #showClipboardNotice(): void {
@@ -1477,10 +1484,6 @@ export class RottweilerApp extends BoxRenderable {
         ],
       })
     }
-  }
-
-  #notify(previous: RottweilerState, next: RottweilerState): void {
-    if (!this.#terminalFocused) notifyTransition(this.#options.notifications, previous, next)
   }
 
 }

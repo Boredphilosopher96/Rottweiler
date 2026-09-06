@@ -1,3 +1,4 @@
+import type { ClientAllocationOwner } from "./client-allocation"
 import type { ReplyAllocation } from "./transport/reply-allocation"
 import { EngineProtocolError } from "./transport/errors"
 
@@ -9,6 +10,7 @@ export class SessionSnapshotReader<Event, Target = string> {
   #running: Promise<void> | null = null
   #nextReadAt = 0
   constructor(
+    readonly allocations: () => ClientAllocationOwner,
     readonly maximumPreparedBytes: number,
     readonly read: (target: Target, signal: AbortSignal, allocation: ReplyAllocation) => Promise<Event>,
     readonly apply: (event: Event) => boolean,
@@ -36,17 +38,21 @@ export class SessionSnapshotReader<Event, Target = string> {
         if (request.signal.aborted) continue
         this.#nextReadAt = performance.now() + 250
         const maximumPreparedBytes = this.maximumPreparedBytes
+        const claim = this.allocations().reserve("decoding", 0)
+        try {
         const event = await this.read(request.target, request.signal, {
           admit(bytes) {
             if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > maximumPreparedBytes) {
               throw new EngineProtocolError("session snapshot reply exceeds its prepared allocation limit")
             }
+            claim.resize(bytes)
           },
         })
         if (!request.signal.aborted && !this.apply(event) && this.#wanted === null) {
           // A newer source transition won the reply race. Demand stays coalesced.
           if (!request.signal.aborted && this.#wanted === null) this.#wanted = request
         }
+        } finally { claim.release() }
       } catch (error) {
         if (!request.signal.aborted) this.failed(error, request.target)
       }

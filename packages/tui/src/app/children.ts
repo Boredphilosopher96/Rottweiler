@@ -1,3 +1,4 @@
+import type { ProjectionAllocations } from "../state/allocation"
 import { childProgressSource } from "../child-source"
 import { TodoController } from "../todo-controller"
 import { emptyTodos } from "../state/todos"
@@ -29,6 +30,7 @@ import {
 import type { RottweilerTheme } from "../theme"
 import { boundedUiText } from "../ui-presentation"
 interface ChildUiHost {
+  readonly allocations: ProjectionAllocations
   state: RottweilerState
   readonly sessionId: string
   readonly composer: ComposerRenderable
@@ -61,7 +63,8 @@ export class ChildUiController {
   #scope: object = {}
   #subagentListError: string | null = null
   #subagentDescriptors: readonly SubagentDescriptor[] = []
-  #activeChildState: RottweilerState | null = null
+  get #activeChildState(): RottweilerState | null { return this.#host.allocations.child }
+  set #activeChildState(value: RottweilerState | null) { this.#host.allocations.set("child", value) }
   #historicalChild: { readonly sessionId: string; readonly task: string; readonly target: SessionReadTarget } | null = null
   readonly draftStore: ComposerDraftStore
   #activeSubagentId: string | null = null
@@ -74,6 +77,7 @@ export class ChildUiController {
     this.draftStore = new ComposerDraftStore(undefined, undefined, host.history.controller.cache.allocations)
     this.#host = host
     this.#todos = new TodoController({
+      allocations: host.history.controller.cache.allocations,
       reader: host.sessionReader,
       state: () => this.#activeChildState?.todos ?? emptyTodos(),
       update: todos => {
