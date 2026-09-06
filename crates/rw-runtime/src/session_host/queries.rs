@@ -401,7 +401,7 @@ impl HostQueryService for RuntimeSessionFactory {
         query: &str,
         limit: u32,
     ) -> Result<(Vec<WorkspaceFileMatch>, bool), HostError> {
-        let workspaces = self.workspace_roots_for_session(session)?;
+        let workspaces = self.workspace_roots_for_session(session).await?;
         let query = query.to_owned();
         let limit = usize::try_from(limit)
             .unwrap_or(usize::MAX)
@@ -423,7 +423,7 @@ impl HostQueryService for RuntimeSessionFactory {
         path: &str,
         max_bytes: u32,
     ) -> Result<WorkspaceFilePreview, HostError> {
-        let workspaces = self.workspace_roots_for_session(session)?;
+        let workspaces = self.workspace_roots_for_session(session).await?;
         let (root_index, relative) = split_virtual_path(path)?;
         let workspace = workspaces
             .get(root_index)
@@ -474,7 +474,7 @@ impl HostQueryService for RuntimeSessionFactory {
         path: &str,
         max_bytes: u32,
     ) -> Result<WorkspaceDiff, HostError> {
-        let workspaces = self.workspace_roots_for_session(session)?;
+        let workspaces = self.workspace_roots_for_session(session).await?;
         let (root_index, relative) = split_virtual_path(path)?;
         let workspace = workspaces
             .get(root_index)

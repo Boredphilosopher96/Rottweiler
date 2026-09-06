@@ -542,6 +542,7 @@ async fn hosted_add_dir_enforces_allowed_roots_before_generation_or_tool_access(
     assert_eq!(
         factory
             .workspace_roots_for_session(&hosted.descriptor())
+            .await
             .expect("host roots after denial"),
         vec![workspace.clone()]
     );
@@ -573,6 +574,7 @@ async fn hosted_add_dir_enforces_allowed_roots_before_generation_or_tool_access(
     assert_eq!(
         factory
             .workspace_roots_for_session(&allowed_hosted.descriptor())
+            .await
             .expect("host roots after allowed add"),
         vec![workspace, allowed]
     );

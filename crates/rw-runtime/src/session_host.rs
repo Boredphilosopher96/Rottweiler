@@ -667,9 +667,30 @@ impl RuntimeSessionFactory {
         Ok(workspace)
     }
 
-    fn workspace_roots_for_session(
+    async fn workspace_roots_for_session(
         &self,
         descriptor: &SessionDescriptor,
+    ) -> Result<Vec<PathBuf>, HostError> {
+        let order = self
+            .journal_service
+            .routing_projection_order(&descriptor.session_id.0)
+            .map_err(|error| HostError::Query(error.to_string()))?
+            .acquire()
+            .await
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let factory = self.clone();
+        let descriptor = descriptor.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            factory.load_workspace_roots_for_session(&descriptor, &order)
+        })
+        .await
+        .map_err(|_| HostError::Query("workspace roots worker failed".into()))?
+    }
+
+    fn load_workspace_roots_for_session(
+        &self,
+        descriptor: &SessionDescriptor,
+        order: &crate::journal_service::ProjectionPermit,
     ) -> Result<Vec<PathBuf>, HostError> {
         let primary = self.workspace_for_session(descriptor)?;
         let configured = load_session_workspace_roots(
@@ -677,6 +698,7 @@ impl RuntimeSessionFactory {
             &self.options.storage_root,
             &primary,
             &descriptor.session_id.0,
+            order,
         )
         .map_err(|_| HostError::Query("session workspace roots are unavailable".to_owned()))?;
         let mut roots = Vec::with_capacity(configured.len());
