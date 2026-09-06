@@ -180,6 +180,7 @@ fn plugin_sandbox_policy(
         .and_then(|policy| policy.with_read_roots(read_roots))
         .map_err(|sandbox| error(&sandbox.to_string()))?
         .with_only_declared_reads()
+        .with_self_process_reads()
         .without_process_creation();
     #[cfg(target_os = "macos")]
     let policy = if matches!(profile.mode, rw_ext::PluginSandboxMode::Preparation { .. }) {
@@ -409,7 +410,9 @@ fn intrinsic_plugin_read_roots(
         "/lib64",
         "/etc/ld.so.cache",
         "/dev",
-        "/proc/self",
+        "/proc/sys/vm/overcommit_memory",
+        "/proc/sys/vm/mmap_min_addr",
+        "/sys/kernel/mm/transparent_hugepage/enabled",
         "/proc/meminfo",
         "/sys/devices/system/cpu",
         "/sys/fs/cgroup",

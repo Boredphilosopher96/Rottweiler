@@ -108,6 +108,7 @@ pub struct SandboxPolicy {
     network: NetworkPolicy,
     allow_process_creation: bool,
     system_read_roots: bool,
+    self_process_reads: bool,
     #[cfg(target_os = "linux")]
     preparation: Option<PreparationFilesystem>,
     #[cfg(target_os = "macos")]
@@ -179,6 +180,7 @@ impl SandboxPolicy {
             read_root_kinds: None,
             allow_process_creation: true,
             system_read_roots: true,
+            self_process_reads: false,
             #[cfg(target_os = "linux")]
             preparation: None,
             #[cfg(target_os = "macos")]
@@ -249,6 +251,15 @@ impl SandboxPolicy {
         self
     }
 
+    /// Allows Linux runtime introspection of the worker's own process. The
+    /// helper resolves `/proc/self` after entering its process namespace, so
+    /// this never grants access to the calling host's process directory.
+    #[must_use]
+    pub fn with_self_process_reads(mut self) -> Self {
+        self.self_process_reads = true;
+        self
+    }
+
     /// Exact roots visible to a read-restricted child, if narrowing was requested.
     #[must_use]
     pub fn read_roots(&self) -> Option<&[PathBuf]> {
@@ -271,6 +282,7 @@ impl SandboxPolicy {
             read_root_kinds: self.read_root_kinds.clone(),
             allow_process_creation: self.allow_process_creation,
             system_read_roots: self.system_read_roots,
+            self_process_reads: self.self_process_reads,
             #[cfg(target_os = "linux")]
             preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]
@@ -290,6 +302,7 @@ impl SandboxPolicy {
             read_root_kinds: self.read_root_kinds.clone(),
             allow_process_creation: self.allow_process_creation,
             system_read_roots: self.system_read_roots,
+            self_process_reads: self.self_process_reads,
             #[cfg(target_os = "linux")]
             preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]

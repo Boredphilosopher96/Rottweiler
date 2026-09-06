@@ -264,6 +264,9 @@ fn install_landlock(policy: &SandboxPolicy, program: &OsString) -> Result<(), Sa
             collect_system_read_root(Path::new(root), &homes, &mut read_grants)?;
         }
     }
+    if policy.self_process_reads {
+        collect_system_read_root(Path::new("/proc/self"), &homes, &mut read_grants)?;
+    }
     match (&policy.read_roots, &policy.read_root_kinds) {
         (Some(read_roots), Some(read_root_kinds)) if read_roots.len() == read_root_kinds.len() => {
             for (root, kind) in read_roots.iter().zip(read_root_kinds) {
