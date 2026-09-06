@@ -40,7 +40,6 @@ use rw_types::Role;
 use rw_types::config::PermissionDecision;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;

@@ -22,7 +22,6 @@ use crate::engine::turn::emit_batch;
 use rw_types::ClientCommand;
 use rw_types::ClientRole;
 use rw_types::CommandMeta;
-use rw_types::ContextItemId;
 use rw_types::ModeId;
 use rw_types::ModelContextTransfer;
 use rw_types::PlanArtifact;

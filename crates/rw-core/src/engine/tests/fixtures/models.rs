@@ -13,7 +13,6 @@ use rw_providers::Capabilities;
 use rw_providers::FinishReason;
 use rw_providers::Provider;
 use rw_providers::ProviderError;
-use rw_providers::ProviderErrorKind;
 use rw_providers::ProviderEvent;
 use rw_providers::ProviderRequest;
 use rw_providers::ProviderRouter;

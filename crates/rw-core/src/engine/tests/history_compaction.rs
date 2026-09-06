@@ -296,7 +296,7 @@ async fn oversized_individual_block_is_summarized_with_complete_fragment_coverag
     let mut events = actor.subscribe().expect("events");
     actor.compact(None).await.expect("compact");
     next_matching(&mut events, |event| {
-        matches!(event.kind, PendingEvent::CompactionFinished { .. })
+        matches!(event, PendingEvent::CompactionFinished { .. })
     })
     .await;
     let mut json = String::new();
@@ -357,7 +357,7 @@ async fn oversized_pruned_block_never_reaches_summary_provider() {
     let mut events = actor.subscribe().expect("events");
     actor.compact(None).await.expect("compact");
     next_matching(&mut events, |event| {
-        matches!(event.kind, PendingEvent::CompactionFinished { .. })
+        matches!(event, PendingEvent::CompactionFinished { .. })
     })
     .await;
     let requests = model.requests();
