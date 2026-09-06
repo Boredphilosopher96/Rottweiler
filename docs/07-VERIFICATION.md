@@ -278,9 +278,12 @@ completed sample as it runs, including failures during warmup or sampling.
 Malformed, duplicate, negative, and out-of-interval timing markers fail the gate.
 
 The required pull-request and `main` TUI smoke applies the same distinction to
-input echo: it measures input dispatch plus render compute with process CPU time
+input echo and the same-process UDS transport harness: they measure input/render
+and transport compute with process CPU time
 on shared hosted runners, excluding time while the process is descheduled, and
-still requires every trial's p99 to remain below 16ms. Protected performance,
+requires every input trial's p99 below 16ms and transport p99 below 2ms. Both
+package and dedicated smoke jobs use this clock; transport evidence always retains
+raw wall and CPU samples with the selected clock. Protected performance,
 nightly, and release TUI gates retain wall-clock input-to-echo measurement on
 their fixed native images; those gates remain the user-visible latency
 authority.

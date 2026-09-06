@@ -375,6 +375,7 @@ fn event_log(home: &Path) -> Option<PathBuf> {
     Some(session.path().join("journal").join("active.jsonl"))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
