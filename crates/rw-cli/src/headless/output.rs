@@ -393,7 +393,7 @@ pub(super) enum PendingInteraction {
     },
 }
 
-pub(super) async fn display_next_interaction(
+async fn display_next_interaction(
     interaction: Option<&PendingInteraction>,
     printer: &mut printer::OwnedPrinter,
 ) -> Result<()> {
