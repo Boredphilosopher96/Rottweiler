@@ -27,8 +27,7 @@ const COMPRESSED_TREE_SITTER_ASSET_HEADER_BYTES = 8
 function cleanupOrphanedBunBuilds(): void {
   for (const entry of readdirSync(import.meta.dir)) {
     if (/^\..+\.bun-build$/.test(entry)) {
-      // Bun normally leaves a file here, but interrupted/compiler-version
-      // changes have also produced directories. Handle both shapes.
+      // Interrupted compiler output can be a file or a directory.
       rmSync(join(import.meta.dir, entry), { recursive: true, force: true })
     }
   }
@@ -62,11 +61,11 @@ const selectedReleasePlatform = releasePlatformForNodeTarget(
   process.platform,
   process.arch,
 )
-if (selectedReleasePlatform === undefined && process.platform !== "win32") {
+if (selectedReleasePlatform === undefined) {
   throw new Error(`Rottweiler does not publish ${process.platform}-${process.arch}`)
 }
-const selectedNativeLibrary =
-  selectedReleasePlatform?.nativeLibrary ?? "opentui.dll"
+const selectedNativeLibrary = selectedReleasePlatform.nativeLibrary
+const maxJavaScriptBundleBytes = selectedReleasePlatform.productBudgets.jsBundleLessThanBytes
 const nativeBuild = spawnSync(process.env.PYTHON ?? "python3", [join(import.meta.dir, "../../scripts/build-opentui-native.py")], {
   encoding: "utf8", stdio: ["ignore", "pipe", "inherit"],
 })
@@ -117,8 +116,7 @@ function signDarwinArtifact(path: string, label: string): void {
 }
 
 function enforceJavaScriptBundleSize(executable: string, nativeLibrary: string): void {
-  const limit = selectedReleasePlatform?.productBudgets.jsBundleLessThanBytes
-  if (limit === undefined) return
+  const limit = maxJavaScriptBundleBytes
   const executableBytes = statSync(executable).size
   const nativeBytes = statSync(nativeLibrary).size
   const bundleBytes = executableBytes + nativeBytes
