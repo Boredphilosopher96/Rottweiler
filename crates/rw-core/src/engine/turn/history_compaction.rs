@@ -138,49 +138,16 @@ async fn summarize(
 ) -> Result<Summary, AgentLoopError> {
     let mut summary = Summary::default();
     let mut next = 0;
+    let mut fragment = None;
     let end = history.conversation().turns;
     while next < end {
         if cancellation.is_cancelled() {
             return Err(invalid("history compaction cancelled"));
         }
-        let page = history
-            .conversation_page(
-                next..end,
-                HistoryMaterializationLimits {
-                    max_turns: 128,
-                    max_serialized_bytes: PAGE_BYTES,
-                    max_decoded_bytes: PAGE_HEAP,
-                    max_estimated_tokens: page_tokens(
-                        config,
-                        &summary.carry,
-                        instructions.as_deref(),
-                    )?,
-                },
-            )
+        let tokens = page_tokens(config, &summary.carry, instructions.as_deref())?;
+        let source = summary
+            .append_next(history, &mut next, &mut fragment, end, tokens)
             .await?;
-        if page.range.start != next || page.range.end <= next {
-            return Err(invalid("history compaction cursor did not advance"));
-        }
-        next = page.range.end;
-        let (page, source) = page.into_parts();
-        for ((mut value, source), action) in page
-            .turns
-            .into_iter()
-            .zip(page.sources)
-            .zip(page.context_actions)
-        {
-            if action.as_ref().is_some_and(|action| !action.pinned) {
-                continue;
-            }
-            apply_pruning(&mut value, source.sequence, &page.pruned_tool_outputs);
-            if let Some(action) = action {
-                summary.pins.push(CarryPin {
-                    ordinal: summary.carry.len(),
-                    order: action.effective_after_agent_turn,
-                });
-            }
-            summary.carry.push(value);
-        }
         check_carry(&summary.carry, &summary.pins)?;
         if summary.carry.is_empty() {
             drop(source);
@@ -265,6 +232,82 @@ fn page_tokens(
 }
 
 impl Summary {
+    async fn append_next(
+        &mut self,
+        history: &Arc<dyn SessionHistoryView>,
+        next: &mut u64,
+        fragment: &mut Option<crate::engine::recovery::ConversationFragmentCursor>,
+        end: u64,
+        tokens: u64,
+    ) -> Result<HistoryRead<()>, AgentLoopError> {
+        let sources = history.conversation_sources(*next..*next + 1).await?;
+        let first = sources
+            .first()
+            .ok_or_else(|| invalid("history source cursor"))?;
+        if fragment.is_some()
+            || first.serialized_bytes > PAGE_BYTES
+            || first.decoded_bytes > PAGE_HEAP
+            || first.estimated_tokens > tokens
+        {
+            let cursor = fragment.unwrap_or(crate::engine::recovery::ConversationFragmentCursor {
+                ordinal: *next,
+                block_index: 0,
+                byte_offset: 0,
+            });
+            let bytes = usize::try_from(tokens.saturating_sub(128).saturating_mul(4))
+                .unwrap_or(usize::MAX)
+                .min(crate::engine::recovery::MAX_SUMMARY_FRAGMENT_BYTES);
+            let result = history.conversation_fragment(cursor, bytes).await?;
+            let (result, owner) = result.into_parts();
+            if result.source.sequence != first.sequence {
+                return Err(invalid("fragment source changed"));
+            }
+            *fragment = result.next;
+            if fragment.is_none() {
+                *next += 1;
+            }
+            if let Some(value) = result.turn {
+                self.carry.push(value);
+            }
+            return Ok(owner);
+        }
+        let page = history
+            .conversation_page(
+                *next..end,
+                HistoryMaterializationLimits {
+                    max_turns: 128,
+                    max_serialized_bytes: PAGE_BYTES,
+                    max_decoded_bytes: PAGE_HEAP,
+                    max_estimated_tokens: tokens,
+                },
+            )
+            .await?;
+        if page.range.start != *next || page.range.end <= *next {
+            return Err(invalid("history compaction cursor did not advance"));
+        }
+        *next = page.range.end;
+        let (page, owner) = page.into_parts();
+        for ((mut value, source), action) in page
+            .turns
+            .into_iter()
+            .zip(page.sources)
+            .zip(page.context_actions)
+        {
+            if action.as_ref().is_some_and(|action| !action.pinned) {
+                continue;
+            }
+            apply_pruning(&mut value, source.sequence, &page.pruned_tool_outputs);
+            if let Some(action) = action {
+                self.pins.push(CarryPin {
+                    ordinal: self.carry.len(),
+                    order: action.effective_after_agent_turn,
+                });
+            }
+            self.carry.push(value);
+        }
+        Ok(owner)
+    }
+
     async fn accept(
         &mut self,
         execution: super::compaction::CompactionExecution,
@@ -344,4 +387,15 @@ pub(super) fn apply_pruning(
             };
         }
     }
+}
+
+pub(super) fn requires_streaming(
+    view: &Arc<dyn SessionHistoryView>,
+    config: &SessionActorConfig,
+    instructions: Option<&str>,
+) -> Result<bool, AgentLoopError> {
+    let cut = view.conversation();
+    Ok(cut.serialized_bytes > PAGE_BYTES
+        || cut.decoded_bytes > PAGE_HEAP
+        || cut.estimated_tokens > page_tokens(config, &[], instructions)?)
 }

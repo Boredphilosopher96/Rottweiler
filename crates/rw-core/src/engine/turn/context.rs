@@ -307,18 +307,34 @@ pub(in crate::engine) fn context_snapshot(
             reserved,
         )
     });
+    let source_items = assembled
+        .items
+        .iter()
+        .filter_map(|item| {
+            item.id
+                .0
+                .strip_prefix("conversation:")?
+                .parse::<u64>()
+                .ok()
+                .map(|sequence| (sequence, item))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut items = assembled
         .items
         .iter()
         .filter(|item| {
-            let Some(index) = sources
-                .iter()
-                .position(|source| conversation_item(source.sequence).0 == item.id.0)
-            else {
-                return true;
-            };
-            durable_conversation
-                .get(index)
+            let source = item
+                .id
+                .0
+                .strip_prefix("conversation:")
+                .and_then(|value| value.parse::<u64>().ok());
+            source
+                .and_then(|sequence| {
+                    sources
+                        .binary_search_by_key(&sequence, |source| source.sequence.0)
+                        .ok()
+                })
+                .and_then(|index| durable_conversation.get(index))
                 .is_none_or(|turn| turn.role != Role::Tool)
         })
         .map(|item| {
@@ -377,11 +393,7 @@ pub(in crate::engine) fn context_snapshot(
             continue;
         }
         let sequence = sources[index].sequence;
-        let context_item_id = conversation_item(sequence).0;
-        let parent = assembled
-            .items
-            .iter()
-            .find(|item| item.id.0 == context_item_id);
+        let parent = source_items.get(&sequence.0).copied();
         let prompt_turn = parent
             .and_then(|item| item.assembled_turn_index)
             .and_then(|index| assembled.turns.get(index));

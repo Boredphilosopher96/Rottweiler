@@ -22,6 +22,10 @@ impl LocalTokenEstimator {
     /// Estimates tokens using the canonical JSON byte length.
     #[must_use]
     pub fn value(value: &Value) -> u64 {
+        Self::serialized(value)
+    }
+
+    fn serialized(value: &impl serde::Serialize) -> u64 {
         let mut counter = JsonByteCounter::default();
         // Key order changes the bytes, but not their length. Counting the same
         // serializer's output avoids cloning the value and allocating its JSON.
@@ -60,9 +64,9 @@ impl LocalTokenEstimator {
             Block::ToolResult { id, output, .. } => {
                 Self::text(&id.0).saturating_add(Self::tool_output(output))
             }
-            Block::Image { media_type, data } => Self::text(media_type).saturating_add(
-                Self::value(&serde_json::to_value(data).unwrap_or(Value::Null)),
-            ),
+            Block::Image { media_type, data } => {
+                Self::text(media_type).saturating_add(Self::serialized(data))
+            }
             Block::Citation {
                 uri,
                 title,
@@ -82,10 +86,9 @@ impl LocalTokenEstimator {
                 let estimate = match part {
                     ToolOutputPart::Text { text } => Self::text(text),
                     ToolOutputPart::Structured { value } => Self::value(value),
-                    ToolOutputPart::Image { media_type, data } => Self::text(media_type)
-                        .saturating_add(Self::value(
-                            &serde_json::to_value(data).unwrap_or(Value::Null),
-                        )),
+                    ToolOutputPart::Image { media_type, data } => {
+                        Self::text(media_type).saturating_add(Self::serialized(data))
+                    }
                 };
                 total.saturating_add(estimate)
             }),

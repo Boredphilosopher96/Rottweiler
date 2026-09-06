@@ -517,6 +517,7 @@ pub(in crate::engine) async fn compact_during_turn(
     turn: u64,
     conversation: &mut Vec<Turn>,
     surgery: &mut Vec<ContextSurgeryAction>,
+    retained: &mut Option<crate::engine::recovery::HistoryRead<()>>,
     reason: CompactionReason,
     config: &SessionActorConfig,
     cancellation: &CancellationToken,
@@ -527,6 +528,32 @@ pub(in crate::engine) async fn compact_during_turn(
     current_turn_tokens: u64,
     instructions: Option<String>,
 ) -> Result<(u64, u64, u64, bool), AgentLoopError> {
+    let view = config.history.capture_history().await?;
+    if super::history_compaction::requires_streaming(&view, config, instructions.as_deref())? {
+        let (page, spend) = super::history_compaction::compact(
+            view,
+            Vec::new(),
+            config,
+            cancellation,
+            signals,
+            turn,
+            reason,
+            instructions,
+            local_session_accounting,
+        )
+        .await?;
+        let (page, owner) = page.into_parts();
+        *conversation = page.turns;
+        *surgery = page.context_actions.into_iter().flatten().collect();
+        *retained = Some(owner);
+        return Ok((
+            spend.cost_micros_usd,
+            spend.ai_credit_micros,
+            spend.subscription_tokens,
+            false,
+        ));
+    }
+    let working = view.reserve_working_set()?;
     persist_event(
         signals,
         PendingEvent::CompactionStarted {
@@ -647,7 +674,10 @@ pub(in crate::engine) async fn compact_during_turn(
     }
     .await;
     match transaction {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            *retained = Some(working);
+            Ok(result)
+        }
         Err(error) => {
             persist_event(
                 signals,

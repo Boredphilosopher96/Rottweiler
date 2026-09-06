@@ -19,6 +19,8 @@ pub use control::{
     RecoveryControlPayloads,
 };
 mod encoding;
+mod fragments;
+pub use fragments::{ConversationFragment, ConversationFragmentCursor, MAX_SUMMARY_FRAGMENT_BYTES};
 mod extension;
 mod maintenance;
 mod projector;

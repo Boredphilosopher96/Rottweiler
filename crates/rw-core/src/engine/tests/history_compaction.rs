@@ -49,6 +49,13 @@ impl SessionHistoryView for SmallView {
     > {
         self.0.source_turn(sequence).await
     }
+    async fn conversation_fragment(
+        &self,
+        cursor: crate::engine::recovery::ConversationFragmentCursor,
+        max_bytes: usize,
+    ) -> Result<HistoryRead<crate::engine::recovery::ConversationFragment>, AgentLoopError> {
+        self.0.conversation_fragment(cursor, max_bytes).await
+    }
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
         self.0.reserve_working_set()
     }
@@ -256,4 +263,111 @@ async fn rolling_summary_never_reintroduces_evicted_or_pruned_payloads() {
             if text == rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT))
     }));
     handle.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn oversized_individual_block_is_summarized_with_complete_fragment_coverage() {
+    let root = tempfile::tempdir().expect("root");
+    let model = Arc::new(M3Model::new(
+        (0..64).map(|_| stop_script("bounded summary", &[])),
+    ));
+    let original = rw_types::Block::ToolResult {
+        id: rw_types::ToolCallId("source-call".into()),
+        output: rw_types::ToolOutput::Structured {
+            value: serde_json::json!({"payload": "🙂é\\\"\n".repeat(170_000), "end": "last-marker"}),
+        },
+        is_error: false,
+    };
+    let mut input = config(
+        root.path(),
+        model.clone(),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    input.recovered.conversation = vec![rw_types::Turn {
+        role: Role::Tool,
+        blocks: vec![original.clone()],
+        meta: rw_types::TurnMeta::default(),
+    }];
+    let input = history::bind(input).await.expect("source");
+    let source = input.history.capture_history().await.expect("capture");
+    let actor = SessionActor::spawn(input).expect("actor");
+    let mut events = actor.subscribe().expect("events");
+    actor.compact(None).await.expect("compact");
+    let events = collect_turn(&mut events).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, PendingEvent::CompactionFinished { .. }))
+    );
+    let mut json = String::new();
+    let mut fragments = 0;
+    for request in model.requests() {
+        for turn in request.turns {
+            for block in turn.blocks {
+                if let rw_types::Block::Text { text } = block
+                    && text.starts_with("Canonical Tool tool_result block 0:0;")
+                {
+                    assert!(text.len() <= crate::engine::recovery::MAX_SUMMARY_FRAGMENT_BYTES);
+                    json.push_str(text.split_once('\n').expect("frame").1);
+                    fragments += 1;
+                }
+            }
+        }
+    }
+    assert!(fragments > 1);
+    assert_eq!(
+        serde_json::from_str::<rw_types::Block>(&json).expect("complete source JSON"),
+        original
+    );
+    let page = source
+        .conversation_page(0..1, HistoryMaterializationLimits::default())
+        .await
+        .expect("immutable original");
+    assert_eq!(page.turns[0].blocks[0], original);
+    actor.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn oversized_pruned_block_never_reaches_summary_provider() {
+    let root = tempfile::tempdir().expect("root");
+    let model = Arc::new(M3Model::new([stop_script("bounded summary", &[])]));
+    let mut input = config(
+        root.path(),
+        model.clone(),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    input.recovered.conversation = vec![rw_types::Turn {
+        role: Role::Tool,
+        blocks: vec![rw_types::Block::ToolResult {
+            id: rw_types::ToolCallId("source-call".into()),
+            output: rw_types::ToolOutput::Text {
+                text: "HIDDEN_FRAGMENT_PAYLOAD".repeat(100_000),
+            },
+            is_error: false,
+        }],
+        meta: rw_types::TurnMeta::default(),
+    }];
+    input
+        .recovered
+        .pruned_tool_outputs
+        .insert("0:0".into(), 100_000);
+    let actor = history::spawn(input).await.expect("actor");
+    let mut events = actor.subscribe().expect("events");
+    actor.compact(None).await.expect("compact");
+    let events = collect_turn(&mut events).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, PendingEvent::CompactionFinished { .. }))
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 1);
+    let text = serde_json::to_string(&requests).expect("requests");
+    assert!(!text.contains("HIDDEN_FRAGMENT_PAYLOAD"));
+    assert!(text.contains(rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT));
+    actor.close().await.expect("close");
 }

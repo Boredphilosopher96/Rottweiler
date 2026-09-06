@@ -205,6 +205,7 @@ pub(super) async fn run_turn(
     let mut turn_cost = None;
     let mut citation_admission = rw_types::citation_admission::CitationAdmission::default();
 
+    let mut compacted_source_owner = None;
     'iterations: for iteration in 0..config.max_turns {
         if cancellation.is_cancelled() {
             status = AgentTurnStatus::Interrupted;
@@ -303,6 +304,7 @@ pub(super) async fn run_turn(
                     turn,
                     &mut conversation,
                     &mut context_surgery,
+                    &mut compacted_source_owner,
                     CompactionReason::Automatic,
                     &config,
                     &cancellation,
@@ -564,6 +566,7 @@ pub(super) async fn run_turn(
                             turn,
                             &mut conversation,
                             &mut context_surgery,
+                            &mut compacted_source_owner,
                             CompactionReason::ProviderOverflow,
                             &config,
                             &cancellation,

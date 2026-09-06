@@ -274,6 +274,20 @@ impl SessionHistoryView for View {
             Arc::clone(&self.root),
         ))
     }
+    async fn conversation_fragment(
+        &self,
+        cursor: crate::engine::recovery::ConversationFragmentCursor,
+        max_bytes: usize,
+    ) -> Result<HistoryRead<crate::engine::recovery::ConversationFragment>, AgentLoopError> {
+        Ok(HistoryRead::new(
+            self.history
+                .lock()
+                .map_err(failure)?
+                .conversation_fragment(cursor, max_bytes)
+                .map_err(failure)?,
+            Arc::clone(&self.root),
+        ))
+    }
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
         Ok(HistoryRead::new((), Arc::clone(&self.root)))
     }

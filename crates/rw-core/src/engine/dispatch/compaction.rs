@@ -132,6 +132,7 @@ async fn compact_history(
     let owned = page
         .map_async(|page| async {
             let mut conversation = page.turns;
+            let mut compacted_source_owner = None;
             let mut context_surgery = page.context_actions.into_iter().flatten().collect();
             let result = async {
                 let pre_budget = evaluate_budget(
@@ -155,6 +156,7 @@ async fn compact_history(
                     summary_turn,
                     &mut conversation,
                     &mut context_surgery,
+                    &mut compacted_source_owner,
                     CompactionReason::Manual,
                     config,
                     cancellation,
