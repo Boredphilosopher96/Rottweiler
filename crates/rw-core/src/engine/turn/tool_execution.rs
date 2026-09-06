@@ -382,7 +382,7 @@ pub(super) async fn execute_prepared_tool(
         output,
         is_error,
     };
-    runtime.result_budget.admit_execution(&mut execution);
+    runtime.result_budget.admit_producer(&mut execution);
     let settlement = tool.settle_effects().await;
     if unproven || settlement.is_err() {
         let message = settlement.err().map_or_else(

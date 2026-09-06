@@ -60,11 +60,13 @@ impl ToolResultBudget {
     pub(super) fn admit_execution(&self, execution: &mut ToolExecution) {
         if self.admit(execution.call.index, &execution.output).is_err() {
             reject(execution);
-        } else {
-            // Release producer map capacity before any host callback/settlement await.
-            // The normalized destination is admitted while the producer value is consumed.
-            execution.output.prepare_allocations();
         }
+    }
+    pub(super) fn admit_producer(&self, execution: &mut ToolExecution) {
+        self.admit_execution(execution);
+        // Arbitrary producer maps are normalized once, before the first host await.
+        // Later redaction mutates scalar strings, leaving map backing unchanged.
+        execution.output.prepare_allocations();
     }
     pub(super) fn settled(&self, execution: &ToolExecution) {
         let Some(bytes) = execution
@@ -189,7 +191,7 @@ mod tests {
             retained: SLOT_BYTES,
         })));
         let normalization = stats_alloc::Region::new(&stats_alloc::INSTRUMENTED_SYSTEM);
-        budget.admit_execution(&mut execution);
+        budget.admit_producer(&mut execution);
         let change = normalization.change();
         assert!(
             change.bytes_deallocated > 1024 * 1024,
