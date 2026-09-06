@@ -65,7 +65,7 @@ fn terminal(turn: u64) -> PendingEvent {
     PendingEvent::TurnFinished {
         turn,
         status: AgentTurnStatus::Interrupted,
-        usage: Default::default(),
+        usage: crate::engine::SessionUsage::default(),
         cost: Cost::Unavailable {
             reason: "interrupted".into(),
         },
@@ -135,7 +135,7 @@ fn repeated_crash_repair_claims_one_accepted_body_without_duplicate_markers() {
     // Only the original source contains the attachment; every retry is metadata.
     let source = journal.read_view();
     let page = source
-        .page::<EngineEvent>(None, Default::default())
+        .page::<EngineEvent>(None, rw_store::session::SessionEventPageLimits::default())
         .expect("events");
     let attachment_bytes = "retained attachment\n".len() * 1024;
     assert!(page.page_bytes < u64::try_from(2 * attachment_bytes).expect("fixture bytes"));
@@ -212,7 +212,7 @@ fn retained_source_rejects_duplicate_wrong_phase_and_unclaimed_cross_turn_commit
             PendingEvent::TurnFinished {
                 turn: 1,
                 status: AgentTurnStatus::Completed,
-                usage: Default::default(),
+                usage: crate::engine::SessionUsage::default(),
                 cost: Cost::Unavailable {
                     reason: "fixture".into(),
                 },
@@ -242,7 +242,7 @@ fn retained_source_rejects_duplicate_wrong_phase_and_unclaimed_cross_turn_commit
         assert!(bootstrap(&journal).is_err());
         let events = journal
             .read_view()
-            .page::<EngineEvent>(None, Default::default())
+            .page::<EngineEvent>(None, rw_store::session::SessionEventPageLimits::default())
             .expect("events")
             .events
             .into_iter()
@@ -284,7 +284,7 @@ fn rewind_discards_pending_claims_without_resurrecting_accepted_input() {
     assert!(repair(&journal).is_empty());
     let events = journal
         .read_view()
-        .page::<EngineEvent>(None, Default::default())
+        .page::<EngineEvent>(None, rw_store::session::SessionEventPageLimits::default())
         .expect("events")
         .events
         .into_iter()
