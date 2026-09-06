@@ -101,3 +101,26 @@ async fn missing_stdio_still_has_an_owned_retirement_path() {
     .await
     .expect("failed handoff retires actual child");
 }
+
+#[tokio::test]
+async fn signal_failure_never_replaces_actual_reap_and_absence_proof() {
+    let (mut owner, child) = physical(None);
+    owner.0.as_mut().expect("physical owner").signal_result =
+        Some(Err("signal delivery: operation not permitted".into()));
+    let result = owner
+        .settle(Duration::ZERO)
+        .await
+        .expect_err("live child is unproven");
+    assert_eq!(result.kind(), io::ErrorKind::TimedOut);
+    assert!(owner.0.is_some(), "live physical owner remains charged");
+    rustix::process::kill_process_group(pid(child), rustix::process::Signal::KILL)
+        .expect("terminate physical fixture");
+    owner
+        .settle(Duration::from_secs(2))
+        .await
+        .expect("actual reap and group absence");
+    assert!(
+        owner.0.is_none(),
+        "proven retirement releases actual ownership"
+    );
+}

@@ -76,6 +76,7 @@ impl Physical {
             rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
                 .or_else(|failure| {
                     if failure == rustix::io::Errno::SRCH {
+                        self.group = None;
                         Ok(())
                     } else {
                         Err(failure)
@@ -94,7 +95,11 @@ impl Physical {
         result
     }
     async fn settle(&mut self, timeout: Duration) -> io::Result<()> {
-        self.signal()?;
+        // Signal delivery is only a request. A concurrent exit can make a
+        // second signal fail even though reap/group-absence proof is available.
+        if let Err(error) = self.signal() {
+            tracing::debug!(process_id = self.child.id(), %error, "protocol signal was not delivered; awaiting physical proof");
+        }
         if self.proxy_failed {
             return Err(io::Error::other("protocol proxy cleanup proof failed"));
         }
@@ -109,8 +114,12 @@ impl Physical {
                 loop {
                     match rustix::process::test_kill_process_group(group) {
                         Err(rustix::io::Errno::SRCH) => break,
+                        // Permission denial is not proof of absence. macOS can
+                        // retain departed group members until their reaper runs.
+                        Err(rustix::io::Errno::PERM) | Ok(()) => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
                         Err(error) => return Err(io::Error::from(error)),
-                        Ok(()) => tokio::time::sleep(Duration::from_millis(10)).await,
                     }
                 }
             }
