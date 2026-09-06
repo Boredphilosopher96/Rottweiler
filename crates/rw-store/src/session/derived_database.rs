@@ -201,6 +201,7 @@ fn open_file(directory: &File, name: &str) -> Result<File, DerivedDatabaseError>
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    use redb::ReadableDatabase as _;
 
     const CRASH_TABLE: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("crash_marker");
 
