@@ -253,7 +253,7 @@ fn mode_and_approved_plan_project_durably_with_conversation_pin() {
     };
     let context =
         plan_review_context_turn(&artifact, PlanDecision::Approve, None).expect("approved context");
-    let item_id = ContextItemId("conversation:0".to_owned());
+    let item_id = ContextItemId("conversation:3".to_owned());
     let kinds = vec![
         PendingEvent::ModeChanged {
             mode: wire_mode(SessionMode::Plan),

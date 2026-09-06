@@ -142,7 +142,10 @@ pub(super) async fn apply_accepted(
                 revisions: revisions.clone(),
             }];
             let context_turn = plan_review_context_turn(&artifact, decision, revisions.as_deref());
-            let item_id = ContextItemId(format!("conversation:{}", state.conversation_turns));
+            let plan_source = rw_types::SequenceId(
+                state.sequence.map_or(0, |sequence| sequence + 1) + durable.len() as u64,
+            );
+            let item_id = rw_types::context_source::conversation_item(plan_source);
             if let Some(turn) = context_turn.clone() {
                 durable.push(PendingEvent::ConversationTurnCommitted {
                     agent_turn: state.completed_turns,
@@ -165,7 +168,7 @@ pub(super) async fn apply_accepted(
             if result.is_ok() {
                 state.pending_plan = None;
                 if let Some(turn) = context_turn {
-                    state.append_conversation(turn);
+                    state.append_conversation(turn, plan_source);
                 }
                 if let Some(definition) = execute_definition {
                     state.approved_plan = Some(artifact);
@@ -248,7 +251,10 @@ pub(super) async fn apply_accepted(
             .await
             .map(|_| ());
             if result.is_ok() {
-                state.append_conversation(context);
+                state.append_conversation(
+                    context,
+                    rw_types::SequenceId(state.sequence.expect("acknowledged shell source")),
+                );
                 state.active_shell = None;
             }
             if let Some(complete) = completion.take() {

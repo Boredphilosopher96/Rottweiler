@@ -2,6 +2,7 @@ use crate::engine::AgentLoopError;
 use crate::engine::model::ModelContextMetadata;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
+use crate::engine::recovery::ConversationSource;
 use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::provider_messages::persist_event;
 use crate::engine::turn::provider_messages::tool_definition;
@@ -39,6 +40,8 @@ use rw_types::Turn;
 use rw_types::TurnId;
 use rw_types::TurnMeta;
 use rw_types::config::CompactionConfig;
+use rw_types::context_source::conversation_item;
+use rw_types::{ContextBlockId, SequenceId};
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
@@ -97,6 +100,7 @@ pub(super) fn prompt_tool_output(
 
 pub(in crate::engine) fn prompt_turn(
     turn: &Turn,
+    sequence: SequenceId,
     pruned_tool_outputs: &BTreeMap<String, u64>,
     toon: &mut ToonPromptEncoder,
 ) -> Turn {
@@ -104,13 +108,15 @@ pub(in crate::engine) fn prompt_turn(
     prompt.blocks = prompt
         .blocks
         .into_iter()
-        .map(|block| match block {
+        .enumerate()
+        .map(|(block_index, block)| match block {
             Block::ToolResult {
                 id,
                 output,
                 is_error,
             } => {
-                let is_pruned = pruned_tool_outputs.contains_key(&id.0);
+                let is_pruned =
+                    pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key());
                 Block::ToolResult {
                     id,
                     output: prompt_tool_output(&output, is_pruned, toon),
@@ -127,10 +133,16 @@ pub(in crate::engine) fn prompt_turn(
 pub(in crate::engine) fn assemble_session_context(
     config: &SessionActorConfig,
     conversation: &[Turn],
+    sources: &[ConversationSource],
     queued: &VecDeque<String>,
     surgery: &[ContextSurgeryAction],
     pruned_tool_outputs: &BTreeMap<String, u64>,
 ) -> Result<AssembledContext, AgentLoopError> {
+    if conversation.len() != sources.len() {
+        return Err(AgentLoopError::Persistence(
+            "context source alignment".into(),
+        ));
+    }
     let stable_prefix = config
         .initial_session_context
         .iter()
@@ -160,10 +172,11 @@ pub(in crate::engine) fn assemble_session_context(
         .iter()
         .enumerate()
         .map(|(index, turn)| {
-            let item_id = ContextItemId(format!("conversation:{index}"));
+            let sequence = sources[index].sequence;
+            let item_id = conversation_item(sequence);
             let (pinned, evicted) = context_action_state(surgery, &item_id);
-            let pruned = turn.blocks.iter().any(|block| {
-                matches!(block, Block::ToolResult { id, .. } if pruned_tool_outputs.contains_key(&id.0))
+            let pruned = turn.blocks.iter().enumerate().any(|(block_index, block)| {
+                matches!(block, Block::ToolResult { .. } if pruned_tool_outputs.contains_key(&block_source(sequence, block_index).key()))
             });
             AssemblyContextItem {
                 id: AssemblyContextItemId(item_id.0),
@@ -177,10 +190,10 @@ pub(in crate::engine) fn assemble_session_context(
                     ContextProvenance::UserPin
                 } else {
                     ContextProvenance::Conversation {
-                        sequence: u64::try_from(index).unwrap_or(u64::MAX),
+                        sequence: sequence.0,
                     }
                 },
-                turn: prompt_turn(turn, pruned_tool_outputs, &mut toon),
+                turn: prompt_turn(turn, sequence, pruned_tool_outputs, &mut toon),
                 pinned,
                 evicted,
                 summarized: turn.meta.summary,
@@ -271,6 +284,7 @@ pub(super) fn resolved_overflow_policy(
 pub(in crate::engine) fn context_snapshot(
     assembled: &AssembledContext,
     durable_conversation: &[Turn],
+    sources: &[ConversationSource],
     pruned_tool_outputs: &BTreeMap<String, u64>,
     metadata: ModelContextMetadata,
     compaction: &CompactionConfig,
@@ -297,11 +311,9 @@ pub(in crate::engine) fn context_snapshot(
         .items
         .iter()
         .filter(|item| {
-            let Some(index) = item
-                .id
-                .0
-                .strip_prefix("conversation:")
-                .and_then(|index| index.parse::<usize>().ok())
+            let Some(index) = sources
+                .iter()
+                .position(|source| conversation_item(source.sequence).0 == item.id.0)
             else {
                 return true;
             };
@@ -364,7 +376,8 @@ pub(in crate::engine) fn context_snapshot(
         if turn.role != Role::Tool {
             continue;
         }
-        let context_item_id = format!("conversation:{index}");
+        let sequence = sources[index].sequence;
+        let context_item_id = conversation_item(sequence).0;
         let parent = assembled
             .items
             .iter()
@@ -372,17 +385,13 @@ pub(in crate::engine) fn context_snapshot(
         let prompt_turn = parent
             .and_then(|item| item.assembled_turn_index)
             .and_then(|index| assembled.turns.get(index));
-        for block in &turn.blocks {
+        for (block_index, block) in turn.blocks.iter().enumerate() {
             if let Block::ToolResult { id, .. } = block {
                 let prompt_block = prompt_turn
-                    .and_then(|turn| {
-                        turn.blocks.iter().find(|block| {
-                            matches!(block, Block::ToolResult { id: prompt_id, .. } if prompt_id == id)
-                        })
-                    })
+                    .and_then(|turn| turn.blocks.get(block_index))
                     .unwrap_or(block);
                 items.push(ContextItemSnapshot {
-                    item_id: ContextItemId(format!("tool_result:{}", id.0)),
+                    item_id: block_source(sequence, block_index).item_id(),
                     kind: ContextItemKind::ToolResult,
                     label: format!("Tool result {}", id.0),
                     source: "conversation_tool_result".to_owned(),
@@ -396,7 +405,8 @@ pub(in crate::engine) fn context_snapshot(
                         pinned: parent.is_some_and(|item| item.pinned),
                         evicted: parent.is_some_and(|item| item.evicted),
                         summarized: parent.is_some_and(|item| item.summarized),
-                        pruned: pruned_tool_outputs.contains_key(&id.0),
+                        pruned: pruned_tool_outputs
+                            .contains_key(&block_source(sequence, block_index).key()),
                     },
                 });
             }
@@ -459,28 +469,30 @@ pub(in crate::engine) fn prompt_dump(
 
 pub(super) async fn prune_before_provider_request(
     conversation: &[Turn],
+    sources: &[ConversationSource],
     context_surgery: &[ContextSurgeryAction],
     pruned_tool_outputs: &mut BTreeMap<String, u64>,
     signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> Result<(), AgentLoopError> {
     let mut tool_names = BTreeMap::<String, String>::new();
-    for conversation_turn in conversation {
+    let mut records = Vec::new();
+    let mut identities = BTreeMap::new();
+    let mut toon = ToonPromptEncoder::default();
+    let prompt_conversation = conversation
+        .iter()
+        .zip(sources)
+        .map(|(turn, source)| prompt_turn(turn, source.sequence, pruned_tool_outputs, &mut toon))
+        .collect::<Vec<_>>();
+    for (turn_index, (conversation_turn, prompt_conversation_turn)) in
+        conversation.iter().zip(&prompt_conversation).enumerate()
+    {
         for block in &conversation_turn.blocks {
             if let Block::ToolCall { id, name, .. } = block {
                 tool_names.insert(id.0.clone(), name.clone());
             }
         }
-    }
-    let mut records = Vec::new();
-    let mut toon = ToonPromptEncoder::default();
-    let prompt_conversation = conversation
-        .iter()
-        .map(|turn| prompt_turn(turn, pruned_tool_outputs, &mut toon))
-        .collect::<Vec<_>>();
-    for (turn_index, (conversation_turn, prompt_conversation_turn)) in
-        conversation.iter().zip(&prompt_conversation).enumerate()
-    {
-        let context_id = ContextItemId(format!("conversation:{turn_index}"));
+        let sequence = sources[turn_index].sequence;
+        let context_id = conversation_item(sequence);
         let (pinned, evicted) = context_action_state(context_surgery, &context_id);
         if evicted {
             records.push(PruneRecord {
@@ -511,10 +523,11 @@ pub(super) async fn prune_before_provider_request(
                 pinned,
             });
         }
-        for (block, prompt_block) in conversation_turn
+        for (block_index, (block, prompt_block)) in conversation_turn
             .blocks
             .iter()
             .zip(&prompt_conversation_turn.blocks)
+            .enumerate()
         {
             let Block::ToolResult { id, .. } = block else {
                 continue;
@@ -524,15 +537,17 @@ pub(super) async fn prune_before_provider_request(
                 blocks: vec![prompt_block.clone()],
                 meta: TurnMeta::default(),
             });
-            let already_pruned = pruned_tool_outputs.contains_key(&id.0);
+            let identity = block_source(sequence, block_index);
+            let already_pruned = pruned_tool_outputs.contains_key(&identity.key());
+            identities.insert(identity.key(), identity);
             records.push(PruneRecord {
-                item_id: format!("{}:tool:{}", context_id.0, id.0),
+                item_id: identity.key(),
                 transcript_index: records.len(),
                 kind: if already_pruned {
                     PruneRecordKind::PrunedMarker
                 } else {
                     PruneRecordKind::ToolOutput {
-                        tool_call_id: id.0.clone(),
+                        output_id: identity.key(),
                         tool_name: tool_names
                             .get(&id.0)
                             .cloned()
@@ -550,12 +565,20 @@ pub(super) async fn prune_before_provider_request(
         persist_event(
             signals,
             PendingEvent::ToolOutputPruned {
-                tool_call_id: decision.tool_call_id.clone(),
+                source: identities[&decision.output_id],
                 reclaimed_tokens: decision.original_tokens,
             },
         )
         .await?;
-        pruned_tool_outputs.insert(decision.tool_call_id, decision.original_tokens);
+        pruned_tool_outputs.insert(decision.output_id, decision.original_tokens);
     }
     Ok(())
+}
+
+/// Block counts are bounded below u32 by canonical event admission.
+pub(in crate::engine) fn block_source(sequence: SequenceId, block_index: usize) -> ContextBlockId {
+    ContextBlockId {
+        sequence,
+        block_index: u32::try_from(block_index).expect("admitted canonical block index"),
+    }
 }

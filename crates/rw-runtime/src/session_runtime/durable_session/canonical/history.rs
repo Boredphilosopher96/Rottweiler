@@ -75,6 +75,21 @@ impl SessionHistoryView for CapturedHistory {
     fn conversation(&self) -> ConversationCut {
         self.cut
     }
+    async fn conversation_sources(
+        &self,
+        range: Range<u64>,
+    ) -> Result<HistoryRead<Vec<rw_core::recovery::ConversationSource>>, AgentLoopError> {
+        self.query(move |history| history.conversation_sources(range))
+            .await
+    }
+    async fn source_turn(
+        &self,
+        sequence: SequenceId,
+    ) -> Result<HistoryRead<Option<(u64, rw_core::recovery::ConversationSource)>>, AgentLoopError>
+    {
+        self.query(move |history| history.source_turn(sequence))
+            .await
+    }
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
         Ok(HistoryRead::new((), self.journal.retain_history()?))
     }
@@ -199,5 +214,17 @@ impl RetainedResult for RecoveryBootstrap {
 impl RetainedResult for ConversationPage {
     fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
         self.retained_bytes().map_err(persistence)
+    }
+}
+
+impl RetainedResult for Vec<rw_core::recovery::ConversationSource> {
+    fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
+        Ok(std::mem::size_of::<Self>()
+            + self.capacity() * std::mem::size_of::<rw_core::recovery::ConversationSource>())
+    }
+}
+impl RetainedResult for Option<(u64, rw_core::recovery::ConversationSource)> {
+    fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
+        Ok(std::mem::size_of::<Self>())
     }
 }

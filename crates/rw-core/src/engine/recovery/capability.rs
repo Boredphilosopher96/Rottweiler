@@ -23,6 +23,18 @@ pub trait SessionHistoryView: Send + Sync {
     fn through(&self) -> Option<SequenceId>;
     fn conversation(&self) -> ConversationCut;
 
+    /// Read only immutable selectors, bounded independently of historical bodies.
+    async fn conversation_sources(
+        &self,
+        range: Range<u64>,
+    ) -> Result<HistoryRead<Vec<super::ConversationSource>>, AgentLoopError>;
+
+    /// Resolve an effective source without materializing unrelated conversation.
+    async fn source_turn(
+        &self,
+        sequence: SequenceId,
+    ) -> Result<HistoryRead<Option<(u64, super::ConversationSource)>>, AgentLoopError>;
+
     /// Reserve the application-wide working allowance before context transformation.
     /// The owner must remain live through temporary buffers and delivered results.
     /// # Errors

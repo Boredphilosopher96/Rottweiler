@@ -34,6 +34,21 @@ impl SessionHistoryView for SmallView {
     fn conversation(&self) -> ConversationCut {
         self.0.conversation()
     }
+    async fn conversation_sources(
+        &self,
+        range: Range<u64>,
+    ) -> Result<HistoryRead<Vec<crate::engine::recovery::ConversationSource>>, AgentLoopError> {
+        self.0.conversation_sources(range).await
+    }
+    async fn source_turn(
+        &self,
+        sequence: SequenceId,
+    ) -> Result<
+        HistoryRead<Option<(u64, crate::engine::recovery::ConversationSource)>>,
+        AgentLoopError,
+    > {
+        self.0.source_turn(sequence).await
+    }
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
         self.0.reserve_working_set()
     }
@@ -101,7 +116,7 @@ async fn fixture(
         config
             .recovered
             .pruned_tool_outputs
-            .insert("masked-call".into(), 42);
+            .insert("1:0".into(), 42);
         config
             .recovered
             .context_surgery

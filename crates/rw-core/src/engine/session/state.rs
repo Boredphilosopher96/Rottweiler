@@ -392,7 +392,11 @@ impl ActorState {
         self.approved_plan_item = summary.approved_plan_item;
     }
     /// Consume a committed body into scalar metadata, releasing its allocation here.
-    pub(in crate::engine) fn append_conversation(&mut self, turn: Turn) {
+    pub(in crate::engine) fn append_conversation(
+        &mut self,
+        turn: Turn,
+        source: rw_types::SequenceId,
+    ) {
         if let Some(model) = turn.meta.model.as_ref().filter(|model| model.contains('/')) {
             self.resolved_model = Some(model.clone());
             if turn.role == rw_types::Role::System {
@@ -412,10 +416,7 @@ impl ActorState {
         if crate::engine::projection::approved_plan_context_item(std::slice::from_ref(&turn))
             .is_some()
         {
-            self.approved_plan_item = Some(rw_types::ContextItemId(format!(
-                "conversation:{}",
-                self.conversation_turns
-            )));
+            self.approved_plan_item = Some(rw_types::context_source::conversation_item(source));
         }
         self.conversation_turns = self.conversation_turns.saturating_add(1);
         drop(turn);

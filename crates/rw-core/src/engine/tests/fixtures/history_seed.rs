@@ -61,9 +61,21 @@ pub(super) fn events(
             }
         });
     }
-    for (tool_call_id, reclaimed_tokens) in &recovered.pruned_tool_outputs {
+    for (key, reclaimed_tokens) in &recovered.pruned_tool_outputs {
+        let (sequence, block_index) = key
+            .split_once(':')
+            .ok_or_else(|| AgentLoopError::InvalidConfiguration("fixture block source".into()))?;
+        let source =
+            rw_types::ContextBlockId {
+                sequence: SequenceId(sequence.parse().map_err(|_| {
+                    AgentLoopError::InvalidConfiguration("fixture sequence".into())
+                })?),
+                block_index: block_index.parse().map_err(|_| {
+                    AgentLoopError::InvalidConfiguration("fixture block index".into())
+                })?,
+            };
         pending.push(PendingEvent::ToolOutputPruned {
-            tool_call_id: tool_call_id.clone(),
+            source,
             reclaimed_tokens: *reclaimed_tokens,
         });
     }

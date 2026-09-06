@@ -23,6 +23,22 @@ pub struct ConversationPage {
 }
 
 impl CanonicalHistory {
+    /// Return a bounded selector interval without decoding conversation bodies.
+    /// # Errors
+    /// Rejects invalid intervals or selector counts exceeding materialization admission.
+    pub fn conversation_sources(
+        &self,
+        range: Range<u64>,
+    ) -> Result<Vec<ConversationSource>, RecoveryError> {
+        if range.start > range.end
+            || range.end > self.head.conversation.turns
+            || range.end - range.start > MAX_MATERIALIZED_HISTORY_TURNS as u64
+        {
+            return Err(RecoveryError::Limit("context selector interval"));
+        }
+        range.map(|ordinal| self.turn_source(ordinal)).collect()
+    }
+
     /// Decode allowance of an exact interval, using two metadata seeks.
     ///
     /// # Errors
@@ -98,19 +114,26 @@ impl CanonicalHistory {
             .clone()
             .map(|ordinal| self.turn_source(ordinal))
             .collect::<Result<Vec<_>, _>>()?;
-        let context_actions = selected
-            .clone()
-            .map(|ordinal| {
-                self.context_action(&rw_types::ContextItemId(format!("conversation:{ordinal}")))
+        let context_actions = sources
+            .iter()
+            .map(|source| {
+                self.context_action(&rw_types::context_source::conversation_item(
+                    source.sequence,
+                ))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut pruned_tool_outputs = std::collections::BTreeMap::new();
-        for turn in &turns {
-            for block in &turn.blocks {
-                if let rw_types::Block::ToolResult { id, .. } = block
-                    && let Some(tokens) = self.pruned_output(&id.0)?
+        for (turn, source) in turns.iter().zip(&sources) {
+            for (block_index, block) in turn.blocks.iter().enumerate() {
+                let identity = rw_types::ContextBlockId {
+                    sequence: source.sequence,
+                    block_index: u32::try_from(block_index)
+                        .map_err(|_| RecoveryError::Limit("context block index"))?,
+                };
+                if matches!(block, rw_types::Block::ToolResult { .. })
+                    && let Some(tokens) = self.pruned_output(identity)?
                 {
-                    pruned_tool_outputs.insert(id.0.clone(), tokens);
+                    pruned_tool_outputs.insert(identity.key(), tokens);
                 }
             }
         }

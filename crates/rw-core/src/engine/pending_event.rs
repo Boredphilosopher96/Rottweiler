@@ -230,7 +230,7 @@ pub(super) enum PendingEvent {
         result: rw_types::SubagentResult,
     },
     ToolOutputPruned {
-        tool_call_id: String,
+        source: rw_types::ContextBlockId,
         reclaimed_tokens: u64,
     },
     ContextItemPinned {
@@ -668,11 +668,11 @@ impl PendingEvent {
                 result,
             },
             Self::ToolOutputPruned {
-                tool_call_id,
+                source,
                 reclaimed_tokens,
             } => EngineEvent::ToolOutputPruned {
                 meta,
-                tool_call_id: ToolCallId(tool_call_id),
+                source,
                 reclaimed_tokens,
             },
             Self::ContextItemPinned {

@@ -14,6 +14,8 @@ pub mod attachment_contract;
 pub mod billing;
 pub mod citation_admission;
 pub mod config;
+pub mod context_source;
+pub use context_source::ContextBlockId;
 mod error;
 pub mod extension_contract;
 pub mod extension_control;

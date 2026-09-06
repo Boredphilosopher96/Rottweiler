@@ -9,12 +9,11 @@ use super::{
 use crate::engine::{
     AgentLoopError,
     pending_event::PendingEvent,
-    projection::ContextSurgeryAction,
     recovery::{ConversationPage, HistoryMaterializationLimits, HistoryRead, SessionHistoryView},
     session::SessionActorConfig,
 };
 use rw_tools::CancellationToken;
-use rw_types::{CompactionReason, ContextItemId, Turn, allocation::PrepareAllocation};
+use rw_types::{CompactionReason, Turn, allocation::PrepareAllocation};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -64,15 +63,19 @@ pub(in crate::engine) async fn compact(
         let mut summary = result?;
         summary.carry.extend(suffix);
         check_carry(&summary.carry, &summary.pins)?;
+        let mut committed = Vec::with_capacity(summary.carry.len());
         for value in &summary.carry {
-            persist_conversation_turn(signals, turn, value).await?;
+            committed.push(persist_conversation_turn(signals, turn, value).await?);
         }
-        for action in summary.pins {
+        for pin in summary.pins {
+            let sequence = committed
+                .get(pin.ordinal)
+                .ok_or_else(|| invalid("compaction pin position"))?;
             persist_event(
                 signals,
                 PendingEvent::ContextItemPinned {
-                    item_id: action.item_id,
-                    effective_after_agent_turn: action.effective_after_agent_turn,
+                    item_id: rw_types::context_source::conversation_item(*sequence),
+                    effective_after_agent_turn: pin.order,
                 },
             )
             .await?;
@@ -116,7 +119,7 @@ pub(in crate::engine) async fn compact(
 #[derive(Default)]
 struct Summary {
     carry: Vec<Turn>,
-    pins: Vec<ContextSurgeryAction>,
+    pins: Vec<CarryPin>,
     cost_micros: u64,
     credit_micros: u64,
     tokens: u64,
@@ -160,22 +163,21 @@ async fn summarize(
         }
         next = page.range.end;
         let (page, source) = page.into_parts();
-        for (mut value, action) in page.turns.into_iter().zip(page.context_actions) {
+        for ((mut value, source), action) in page
+            .turns
+            .into_iter()
+            .zip(page.sources)
+            .zip(page.context_actions)
+        {
             if action.as_ref().is_some_and(|action| !action.pinned) {
                 continue;
             }
-            for block in &mut value.blocks {
-                if let rw_types::Block::ToolResult { id, output, .. } = block
-                    && page.pruned_tool_outputs.contains_key(&id.0)
-                {
-                    *output = rw_types::ToolOutput::Text {
-                        text: rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT.into(),
-                    };
-                }
-            }
-            if let Some(mut action) = action {
-                action.item_id = ContextItemId(format!("conversation:{}", summary.carry.len()));
-                summary.pins.push(action);
+            apply_pruning(&mut value, source.sequence, &page.pruned_tool_outputs);
+            if let Some(action) = action {
+                summary.pins.push(CarryPin {
+                    ordinal: summary.carry.len(),
+                    order: action.effective_after_agent_turn,
+                });
             }
             summary.carry.push(value);
         }
@@ -186,7 +188,15 @@ async fn summarize(
         }
         let execution = execute_compaction(
             &summary.carry,
-            &summary.pins,
+            summary
+                .pins
+                .iter()
+                .map(|pin| rw_context::ConversationPin {
+                    item_id: format!("carry:{}", pin.ordinal),
+                    order: pin.order,
+                    turn: summary.carry[pin.ordinal].clone(),
+                })
+                .collect(),
             reason.clone(),
             instructions.clone(),
             config,
@@ -207,7 +217,7 @@ async fn summarize(
     Ok(summary)
 }
 
-fn check_carry(turns: &Vec<Turn>, pins: &[ContextSurgeryAction]) -> Result<(), AgentLoopError> {
+fn check_carry(turns: &Vec<Turn>, pins: &[CarryPin]) -> Result<(), AgentLoopError> {
     if pins.len() > MAX_PINS
         || turns
             .prepared_bytes()
@@ -305,13 +315,33 @@ impl Summary {
         self.pins = execution
             .remapped_pins
             .into_iter()
-            .map(|item_id| ContextSurgeryAction {
-                item_id,
-                pinned: true,
-                effective_after_agent_turn: turn,
+            .map(|ordinal| CarryPin {
+                ordinal,
+                order: turn,
             })
             .collect();
         check_carry(&self.carry, &self.pins)?;
         Ok(())
+    }
+}
+
+struct CarryPin {
+    ordinal: usize,
+    order: u64,
+}
+
+pub(super) fn apply_pruning(
+    value: &mut Turn,
+    sequence: rw_types::SequenceId,
+    pruned: &std::collections::BTreeMap<String, u64>,
+) {
+    for (index, block) in value.blocks.iter_mut().enumerate() {
+        if let rw_types::Block::ToolResult { output, .. } = block
+            && pruned.contains_key(&super::context::block_source(sequence, index).key())
+        {
+            *output = rw_types::ToolOutput::Text {
+                text: rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT.into(),
+            };
+        }
     }
 }

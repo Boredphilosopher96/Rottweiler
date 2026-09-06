@@ -381,11 +381,11 @@ pub(in crate::engine) fn recovered_pending_event(
             summary_turn: parse_turn_id(summary_turn_id)?,
         },
         EngineEvent::ToolOutputPruned {
-            tool_call_id,
+            source,
             reclaimed_tokens,
             ..
         } => PendingEvent::ToolOutputPruned {
-            tool_call_id: tool_call_id.0.clone(),
+            source: *source,
             reclaimed_tokens: *reclaimed_tokens,
         },
         EngineEvent::ContextItemPinned {

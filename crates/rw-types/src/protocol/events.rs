@@ -626,7 +626,7 @@ pub enum EngineEvent {
     },
     ToolOutputPruned {
         meta: EventMeta,
-        tool_call_id: ToolCallId,
+        source: crate::ContextBlockId,
         #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]

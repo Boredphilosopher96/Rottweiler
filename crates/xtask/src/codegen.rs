@@ -461,6 +461,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(DiffArtifact);
     declaration!(SubagentResult);
     declaration!(ContextItemId);
+    declaration!(rw_types::ContextBlockId);
     declaration!(ModelAlias);
     declaration!(SequenceId);
     declaration!(Role);
@@ -1328,7 +1329,10 @@ fn contract_fixture() -> ContractFixture {
             },
             EngineEvent::ToolOutputPruned {
                 meta: event_meta(),
-                tool_call_id: ToolCallId("tool-old".to_owned()),
+                source: rw_types::ContextBlockId {
+                    sequence: SequenceId(4),
+                    block_index: 0,
+                },
                 reclaimed_tokens: 21_000,
             },
             EngineEvent::ModeChanged {

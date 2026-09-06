@@ -271,7 +271,21 @@ impl CanonicalHistory {
             has_assistant_text: cut.has_assistant_text,
             approved_plan_item: cut
                 .approved_plan_ordinal
-                .map(|ordinal| rw_types::ContextItemId(format!("conversation:{ordinal}"))),
+                .map(|ordinal| {
+                    let row = self
+                        .read
+                        .get(super::projector::key(
+                            super::state::CONVERSATION,
+                            cut.generation,
+                            ordinal,
+                        ))?
+                        .ok_or(RecoveryError::Invalid("approved plan source"))?;
+                    let source: super::ConversationSource = serde_json::from_slice(&row.payload)?;
+                    Ok::<_, RecoveryError>(rw_types::context_source::conversation_item(
+                        source.sequence,
+                    ))
+                })
+                .transpose()?,
         })
     }
     fn resolved_model(

@@ -245,6 +245,35 @@ impl SessionHistoryView for View {
     fn conversation(&self) -> ConversationCut {
         self.cut
     }
+    async fn conversation_sources(
+        &self,
+        range: Range<u64>,
+    ) -> Result<HistoryRead<Vec<crate::engine::recovery::ConversationSource>>, AgentLoopError> {
+        Ok(HistoryRead::new(
+            self.history
+                .lock()
+                .map_err(failure)?
+                .conversation_sources(range)
+                .map_err(failure)?,
+            Arc::clone(&self.root),
+        ))
+    }
+    async fn source_turn(
+        &self,
+        sequence: SequenceId,
+    ) -> Result<
+        HistoryRead<Option<(u64, crate::engine::recovery::ConversationSource)>>,
+        AgentLoopError,
+    > {
+        Ok(HistoryRead::new(
+            self.history
+                .lock()
+                .map_err(failure)?
+                .source_turn(sequence)
+                .map_err(failure)?,
+            Arc::clone(&self.root),
+        ))
+    }
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
         Ok(HistoryRead::new((), Arc::clone(&self.root)))
     }

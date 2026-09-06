@@ -86,6 +86,7 @@ fn invalid_resolved_overflow_policy_disables_automatic_compaction() {
     let snapshot = turn::context_snapshot(
         &assembled,
         &[],
+        &[],
         &BTreeMap::new(),
         ModelContextMetadata {
             max_context_tokens: Some(10_000),
@@ -137,7 +138,7 @@ async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
     actor_config
         .recovered
         .pruned_tool_outputs
-        .insert("call-inspect".to_owned(), 100);
+        .insert("0:0".to_owned(), 100);
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await
         .expect("actor");
@@ -164,13 +165,13 @@ async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
     assert_eq!(tool_results.len(), 2, "no aggregate tool-turn duplicate");
     let pruned = tool_results
         .iter()
-        .find(|item| item.item_id.0 == "tool_result:call-inspect")
+        .find(|item| item.item_id.0 == "tool_result:0:0")
         .expect("first tool result");
     assert!(pruned.state.pinned);
     assert!(pruned.state.pruned);
     let second = tool_results
         .iter()
-        .find(|item| item.item_id.0 == "tool_result:call-second")
+        .find(|item| item.item_id.0 == "tool_result:0:1")
         .expect("second tool result");
     assert!(second.state.pinned);
     assert!(!second.state.pruned);
@@ -270,7 +271,12 @@ async fn pruning_uses_provider_visible_toon_size_and_persists_that_reclamation()
         meta: TurnMeta::default(),
     };
     let mut toon = ToonPromptEncoder::default();
-    let provider_candidate = prompt_turn(&candidate, &BTreeMap::new(), &mut toon);
+    let provider_candidate = prompt_turn(
+        &candidate,
+        rw_types::SequenceId(1),
+        &BTreeMap::new(),
+        &mut toon,
+    );
     let provider_visible_tokens = LocalTokenEstimator::turn(&provider_candidate);
     let durable_json_tokens = LocalTokenEstimator::turn(&candidate);
     assert!(provider_visible_tokens > 20_000);
@@ -322,9 +328,9 @@ async fn pruning_uses_provider_visible_toon_size_and_persists_that_reclamation()
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         PendingEvent::ToolOutputPruned {
-            tool_call_id,
+            source,
             reclaimed_tokens,
-        } if tool_call_id == "candidate-call" && *reclaimed_tokens == provider_visible_tokens
+        } if source.sequence == rw_types::SequenceId(1) && source.block_index == 0 && *reclaimed_tokens == provider_visible_tokens
     )));
     let requests = model.requests();
     assert_eq!(requests.len(), 1);
@@ -443,4 +449,36 @@ fn inventory_tool_turn() -> Turn {
         ],
         meta: TurnMeta::default(),
     }
+}
+
+#[test]
+fn output_pruning_targets_one_block_despite_repeated_provider_aliases() {
+    let output = |text: &str| Block::ToolResult {
+        id: ToolCallId("reused-provider-id".into()),
+        output: ToolOutput::Text { text: text.into() },
+        is_error: false,
+    };
+    let value = Turn {
+        role: Role::Tool,
+        blocks: vec![output("first"), output("second")],
+        meta: TurnMeta::default(),
+    };
+    let pruned = BTreeMap::from([("20:0".into(), 9)]);
+    let prompt = prompt_turn(
+        &value,
+        rw_types::SequenceId(20),
+        &pruned,
+        &mut ToonPromptEncoder::default(),
+    );
+    assert!(
+        matches!(&prompt.blocks[0], Block::ToolResult { output: ToolOutput::Text { text }, .. } if text == PRUNED_TOOL_OUTPUT_REPLACEMENT)
+    );
+    assert_eq!(prompt.blocks[1], value.blocks[1]);
+    let other = prompt_turn(
+        &value,
+        rw_types::SequenceId(21),
+        &pruned,
+        &mut ToonPromptEncoder::default(),
+    );
+    assert_eq!(other, value);
 }

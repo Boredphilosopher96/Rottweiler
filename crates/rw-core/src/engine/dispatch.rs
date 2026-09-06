@@ -370,7 +370,10 @@ pub(super) async fn handle_actor_command(
                 .await
                 .map(|_| ());
                 if persisted.is_ok() {
-                    state.append_conversation(context);
+                    state.append_conversation(
+                        context,
+                        rw_types::SequenceId(state.sequence.expect("acknowledged shell source")),
+                    );
                     state.active_shell = None;
                 }
                 persisted

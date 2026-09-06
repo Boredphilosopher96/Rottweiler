@@ -246,8 +246,23 @@ pub(super) async fn run_turn(
             status = AgentTurnStatus::BudgetExceeded;
             break;
         }
+        let mut sources =
+            match super::history_context::current_sources(&config, conversation.len()).await {
+                Ok(sources) => sources,
+                Err(error) => {
+                    send_event(
+                        &signals,
+                        PendingEvent::Error {
+                            message: error.to_string(),
+                        },
+                    );
+                    status = AgentTurnStatus::Failed;
+                    break;
+                }
+            };
         if prune_before_provider_request(
             &conversation,
+            &sources,
             &context_surgery,
             &mut pruned_tool_outputs,
             &signals,
@@ -261,6 +276,7 @@ pub(super) async fn run_turn(
         let mut assembled = match assemble_session_context(
             &config,
             &conversation,
+            &sources,
             &VecDeque::new(),
             &context_surgery,
             &pruned_tool_outputs,
@@ -321,9 +337,25 @@ pub(super) async fn run_turn(
                         break;
                     }
                 }
+                sources = match super::history_context::current_sources(&config, conversation.len())
+                    .await
+                {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        send_event(
+                            &signals,
+                            PendingEvent::Error {
+                                message: error.to_string(),
+                            },
+                        );
+                        status = AgentTurnStatus::Failed;
+                        break;
+                    }
+                };
                 assembled = match assemble_session_context(
                     &config,
                     &conversation,
+                    &sources,
                     &VecDeque::new(),
                     &context_surgery,
                     &pruned_tool_outputs,
@@ -346,6 +378,7 @@ pub(super) async fn run_turn(
         let mut snapshot = context_snapshot(
             &assembled,
             &conversation,
+            &sources,
             &pruned_tool_outputs,
             metadata,
             &compaction,

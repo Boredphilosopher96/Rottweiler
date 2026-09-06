@@ -34,14 +34,12 @@ use rw_tools::CancellationToken;
 use rw_types::AccountingAttribution;
 use rw_types::Block;
 use rw_types::CompactionReason;
-use rw_types::ContextItemId;
 use rw_types::Cost;
 use rw_types::Role;
 use rw_types::Turn;
 use rw_types::TurnMeta;
 use rw_types::hook_contract::HookCompactionInput;
 use rw_types::hook_contract::HookInput;
-use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 pub(super) struct CompactionExecution {
@@ -49,7 +47,7 @@ pub(super) struct CompactionExecution {
     pub(super) usage: SessionUsage,
     pub(super) cost: Cost,
     pub(super) reclaimed_tokens: u64,
-    pub(super) remapped_pins: Vec<ContextItemId>,
+    pub(super) remapped_pins: Vec<usize>,
     pub(super) hard_stop: bool,
     pub(super) failed_attempt_cost_micros: u64,
     pub(super) failed_attempt_credit_micros: u64,
@@ -103,7 +101,7 @@ pub(super) async fn persist_failed_compaction_attempt(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn execute_compaction(
     conversation: &[Turn],
-    surgery: &[ContextSurgeryAction],
+    pins: Vec<ConversationPin>,
     reason: CompactionReason,
     instructions: Option<String>,
     config: &SessionActorConfig,
@@ -158,28 +156,6 @@ pub(super) async fn execute_compaction(
             .map(|value| config.secret_redactor.redact(value)),
     };
     let automatic_continue = !streaming && !input.suppress_auto_continue;
-    let mut latest = BTreeMap::<String, &ContextSurgeryAction>::new();
-    for action in surgery {
-        latest.insert(action.item_id.0.clone(), action);
-    }
-    let pins = latest
-        .values()
-        .filter(|action| action.pinned)
-        .filter_map(|action| {
-            let index = action
-                .item_id
-                .0
-                .strip_prefix("conversation:")?
-                .parse::<usize>()
-                .ok()?;
-            let pinned_turn = conversation.get(index)?.clone();
-            Some(ConversationPin {
-                item_id: action.item_id.0.clone(),
-                order: action.effective_after_agent_turn,
-                turn: pinned_turn,
-            })
-        })
-        .collect();
     let compaction_config = config.model.compaction_config();
     let plan = Compactor::plan(CompactionInput {
         conversation: conversation.to_vec(),
@@ -515,7 +491,7 @@ pub(super) async fn execute_compaction(
         total.saturating_add(LocalTokenEstimator::turn(turn))
     });
     let remapped_pins = (0..plan.ordered_pins.len())
-        .map(|index| ContextItemId(format!("conversation:{}", index.saturating_add(1))))
+        .map(|index| index.saturating_add(1))
         .collect();
     Ok(CompactionExecution {
         conversation: compacted,
@@ -559,9 +535,37 @@ pub(in crate::engine) async fn compact_during_turn(
     )
     .await?;
     let transaction = async {
+        let view = config.history.capture_history().await?;
+        let page = super::history_context::read_view(&view).await?;
+        let mut compact_input = Vec::new();
+        let mut pins = Vec::new();
+        for ((value, source), action) in page
+            .turns
+            .iter()
+            .zip(&page.sources)
+            .zip(&page.context_actions)
+        {
+            if action.as_ref().is_some_and(|action| !action.pinned) {
+                continue;
+            }
+            let mut value = value.clone();
+            super::history_compaction::apply_pruning(
+                &mut value,
+                source.sequence,
+                &page.pruned_tool_outputs,
+            );
+            if let Some(action) = action {
+                pins.push(ConversationPin {
+                    item_id: action.item_id.0.clone(),
+                    order: action.effective_after_agent_turn,
+                    turn: value.clone(),
+                });
+            }
+            compact_input.push(value);
+        }
         let execution = execute_compaction(
-            conversation,
-            surgery,
+            &compact_input,
+            pins,
             reason,
             instructions,
             config,
@@ -576,11 +580,16 @@ pub(in crate::engine) async fn compact_during_turn(
             false,
         )
         .await?;
+        let mut committed = Vec::with_capacity(execution.conversation.len());
         for compacted_turn in &execution.conversation {
-            persist_conversation_turn(signals, turn, compacted_turn).await?;
+            committed.push(persist_conversation_turn(signals, turn, compacted_turn).await?);
         }
         surgery.clear();
-        for item_id in &execution.remapped_pins {
+        for ordinal in &execution.remapped_pins {
+            let source = committed
+                .get(*ordinal)
+                .ok_or_else(|| AgentLoopError::Persistence("compaction pin position".into()))?;
+            let item_id = rw_types::context_source::conversation_item(*source);
             persist_event(
                 signals,
                 PendingEvent::ContextItemPinned {
@@ -590,7 +599,7 @@ pub(in crate::engine) async fn compact_during_turn(
             )
             .await?;
             surgery.push(ContextSurgeryAction {
-                item_id: item_id.clone(),
+                item_id,
                 pinned: true,
                 effective_after_agent_turn: turn,
             });

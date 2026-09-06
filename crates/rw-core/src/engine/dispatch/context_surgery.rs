@@ -45,11 +45,22 @@ pub(super) async fn apply_registered_context_surgery(
                 .to_owned(),
         ));
     }
-    let known = item_id
+    let source = item_id
         .0
         .strip_prefix("conversation:")
-        .and_then(|ordinal| ordinal.parse::<u64>().ok())
-        .is_some_and(|ordinal| ordinal < state.conversation_turns);
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(rw_types::SequenceId);
+    let view = crate::engine::turn::history_context::capture(
+        config,
+        state.sequence.map(rw_types::SequenceId),
+    )
+    .await?;
+    let known = if let Some(source) = source {
+        rw_types::context_source::conversation_item(source) == item_id
+            && view.source_turn(source).await?.is_some()
+    } else {
+        false
+    };
     if !known {
         return Err(AgentLoopError::InvalidConfiguration(
             "unknown_context_item: context item is not present in the current inventory".to_owned(),

@@ -5,31 +5,29 @@ use super::{
     state::PRUNED_OUTPUTS,
 };
 use rw_store::session::recovery_index::{RecoveryKey, RecoveryRow};
-use rw_types::SequenceId;
+use rw_types::{ContextBlockId, SequenceId};
 
 const IDENTITIES: u8 = 3;
 const REVISIONS: u8 = 14;
 /// Source item, state, effective turn and immutable identity-index scope.
-type Mutation = (String, u64, u64);
+type Mutation = (ContextBlockId, u64, u64);
 
-fn identity(generation: u64, item: &str) -> Result<Vec<u8>, RecoveryError> {
-    if item.is_empty() || item.len() > rw_types::tool_admission::MAX_TOOL_CALL_ID_BYTES {
-        return Err(RecoveryError::Invalid("pruned tool identity"));
-    }
-    let mut key = Vec::with_capacity(8 + item.len());
+fn identity(generation: u64, item: ContextBlockId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(20);
     key.extend_from_slice(&generation.to_be_bytes());
-    key.extend_from_slice(item.as_bytes());
-    Ok(key)
+    key.extend_from_slice(&item.sequence.0.to_be_bytes());
+    key.extend_from_slice(&item.block_index.to_be_bytes());
+    key
 }
 
 pub(super) fn apply(
     rows: &mut BatchRows,
     generation: u64,
     sequence: SequenceId,
-    item: &str,
+    item: ContextBlockId,
     reclaimed_tokens: u64,
 ) -> Result<(), RecoveryError> {
-    let identity = identity(generation, item)?;
+    let identity = identity(generation, item);
     let scope = if let Some(scope) = rows.lookup::<u64>(IDENTITIES, &identity)? {
         scope
     } else {
@@ -52,8 +50,8 @@ impl CanonicalHistory {
     /// Resolve one effective output pruning entry without reading unrelated history.
     /// # Errors
     /// Rejects invalid identities, inconsistent revisions and storage failures.
-    pub fn pruned_output(&self, item: &str) -> Result<Option<u64>, RecoveryError> {
-        let identity = identity(self.head.conversation.generation, item)?;
+    pub fn pruned_output(&self, item: ContextBlockId) -> Result<Option<u64>, RecoveryError> {
+        let identity = identity(self.head.conversation.generation, item);
         let Some(bytes) = self.read.lookup(IDENTITIES, &identity)? else {
             return Ok(None);
         };

@@ -722,10 +722,10 @@ impl SessionProjector {
                     }
                 }
                 PendingEvent::ToolOutputPruned {
-                    tool_call_id,
+                    source,
                     reclaimed_tokens,
                 } => {
-                    pruned_tool_outputs.insert(tool_call_id.clone(), *reclaimed_tokens);
+                    pruned_tool_outputs.insert(source.key(), *reclaimed_tokens);
                 }
                 PendingEvent::ContextItemPinned {
                     item_id,

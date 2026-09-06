@@ -61,7 +61,7 @@ pub(super) async fn persist_conversation_turn(
     signals: &mpsc::UnboundedSender<TurnSignal>,
     agent_turn: u64,
     turn: &Turn,
-) -> Result<(), AgentLoopError> {
+) -> Result<rw_types::SequenceId, AgentLoopError> {
     persist_event(
         signals,
         PendingEvent::ConversationTurnCommitted {
@@ -70,7 +70,7 @@ pub(super) async fn persist_conversation_turn(
         },
     )
     .await
-    .map(|_| ())
+    .map(|meta| meta.sequence_id)
 }
 
 pub(in crate::engine) fn append_text(blocks: &mut Vec<Block>, delta: &str) {

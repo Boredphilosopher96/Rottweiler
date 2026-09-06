@@ -405,14 +405,15 @@ pub(super) fn reduce(
             effective_after_agent_turn,
         )?,
         PendingEvent::ToolOutputPruned {
-            tool_call_id,
+            source,
             reclaimed_tokens,
         } => {
+            validate_source(rows, &head.conversation, source.sequence)?;
             super::pruning::apply(
                 rows,
                 head.conversation.generation,
                 sequence,
-                &tool_call_id,
+                source,
                 reclaimed_tokens,
             )?;
             head.context_cut = sequence.0;
@@ -617,11 +618,18 @@ fn context_change(
     pinned: bool,
     effective: u64,
 ) -> Result<(), RecoveryError> {
-    let generation = head
-        .compacting
-        .as_ref()
-        .unwrap_or(&head.conversation)
-        .generation;
+    let cut = head.compacting.as_ref().unwrap_or(&head.conversation);
+    let source = item
+        .0
+        .strip_prefix("conversation:")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(SequenceId)
+        .ok_or(RecoveryError::Invalid("context item source"))?;
+    if rw_types::context_source::conversation_item(source) != *item {
+        return Err(RecoveryError::Invalid("context item canonical source"));
+    }
+    validate_source(rows, cut, source)?;
+    let generation = cut.generation;
     super::context_state::apply(rows, generation, sequence, item, pinned, effective)?;
     head.context_cut = sequence.0;
     Ok(())
@@ -701,4 +709,21 @@ fn tool_lifecycle(
         .checked_add(super::encoding::decode_bytes(source)?)
         .ok_or(RecoveryError::Limit("tool lifecycle decoded bytes"))?;
     rows.put(key(ACTIVE_TOOL_LIFECYCLE, turn, sequence.0), source)
+}
+
+fn validate_source(
+    rows: &BatchRows,
+    cut: &super::ConversationCut,
+    sequence: SequenceId,
+) -> Result<(), RecoveryError> {
+    let ordinal = rows
+        .get::<u64>(key(SOURCE_ORDINAL, cut.generation, sequence.0))?
+        .ok_or(RecoveryError::Invalid("context source is not effective"))?;
+    let source = rows
+        .get::<ConversationSource>(key(CONVERSATION, cut.generation, ordinal))?
+        .ok_or(RecoveryError::Invalid("context source selector missing"))?;
+    if ordinal >= cut.turns || source.sequence != sequence {
+        return Err(RecoveryError::Invalid("context source is not effective"));
+    }
+    Ok(())
 }

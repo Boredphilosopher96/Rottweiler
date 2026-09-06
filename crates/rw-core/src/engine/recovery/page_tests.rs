@@ -203,7 +203,10 @@ fn output_pruning_pages_follow_captured_revisions_and_rewind() {
             },
             finish(1),
             PendingEvent::ToolOutputPruned {
-                tool_call_id: "output".into(),
+                source: rw_types::ContextBlockId {
+                    sequence: rw_types::SequenceId(1),
+                    block_index: 0,
+                },
                 reclaimed_tokens: 12,
             },
         ],
@@ -217,7 +220,7 @@ fn output_pruning_pages_follow_captured_revisions_and_rewind() {
     let pruned = captured
         .conversation_page(0..1, HistoryMaterializationLimits::default())
         .expect("page");
-    assert_eq!(pruned.pruned_tool_outputs.get("output"), Some(&12));
+    assert_eq!(pruned.pruned_tool_outputs.get("1:0"), Some(&12));
     assert_eq!(pruned.turns, vec![tool.clone()]);
     append(
         &mut journal,
@@ -241,7 +244,12 @@ fn output_pruning_pages_follow_captured_revisions_and_rewind() {
             .is_empty()
     );
     assert_eq!(
-        captured.pruned_output("output").expect("captured"),
+        captured
+            .pruned_output(rw_types::ContextBlockId {
+                sequence: rw_types::SequenceId(1),
+                block_index: 0
+            })
+            .expect("captured"),
         Some(12)
     );
 }

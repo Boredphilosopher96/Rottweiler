@@ -14,6 +14,7 @@ use std::{
 pub(in crate::engine) struct CurrentContext {
     pub through: Option<SequenceId>,
     pub conversation: Vec<Turn>,
+    pub sources: Vec<crate::engine::recovery::ConversationSource>,
     pub pruned_tool_outputs: BTreeMap<String, u64>,
     pub assembled: AssembledContext,
 }
@@ -66,6 +67,7 @@ pub(in crate::engine) async fn assemble_view(
                 let assembled = super::context::assemble_session_context(
                     &config,
                     &page.turns,
+                    &page.sources,
                     &queued,
                     &surgery,
                     &page.pruned_tool_outputs,
@@ -73,6 +75,7 @@ pub(in crate::engine) async fn assemble_view(
                 Ok(page.map(|page| CurrentContext {
                     through,
                     conversation: page.turns,
+                    sources: page.sources,
                     pruned_tool_outputs: page.pruned_tool_outputs,
                     assembled,
                 }))
@@ -82,4 +85,19 @@ pub(in crate::engine) async fn assemble_view(
         .map_err(|error| {
             AgentLoopError::EffectsUnsettled(format!("context assembly worker failed: {error}"))
         })?
+}
+
+/// Exact selectors for the bounded request-local conversation. The provider loop
+/// has already acknowledged every body commit before requesting these identities.
+pub(super) async fn current_sources(
+    config: &SessionActorConfig,
+    turns: usize,
+) -> Result<HistoryRead<Vec<crate::engine::recovery::ConversationSource>>, AgentLoopError> {
+    let view = config.history.capture_history().await?;
+    if view.conversation().turns != turns as u64 {
+        return Err(AgentLoopError::Persistence(
+            "request conversation does not match canonical source".into(),
+        ));
+    }
+    view.conversation_sources(0..turns as u64).await
 }
