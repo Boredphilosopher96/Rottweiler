@@ -227,7 +227,7 @@ async fn sdk_child_provider_state_and_panels_have_private_generations_on_reopen(
     assert_eq!(initial["count"], 1);
     assert_eq!(initial["session"], "namespace-child");
     assert_ne!(
-        initial["pid"], parent_state["pid"],
+        initial["instance"], parent_state["instance"],
         "child does not reuse the parent process"
     );
     assert_eq!(
@@ -258,7 +258,7 @@ async fn sdk_child_provider_state_and_panels_have_private_generations_on_reopen(
         "child state is durable across generation replacement"
     );
     assert_ne!(
-        reopened_state["pid"], initial["pid"],
+        reopened_state["instance"], initial["instance"],
         "reopen starts a new native process"
     );
     assert_eq!(entry(&reopened, "provider").await["count"], 2);

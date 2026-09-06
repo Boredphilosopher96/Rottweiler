@@ -1,11 +1,13 @@
 import { definePlugin, runPlugin, type HandlerContext } from "../../src/index.ts"
 
+const instance = crypto.randomUUID()
+
 async function remember(context: HandlerContext, key: string) {
   const identity = await context.session.query()
   const previous = await context.state.read()
   const old = previous.entries.find(entry => entry.key === key)?.value
   const count = typeof old === "object" && old !== null && "count" in old && typeof old.count === "number" ? old.count + 1 : 1
-  const value = { count, session: identity.session_id, pid: process.pid }
+  const value = { count, session: identity.session_id, instance }
   const committed = await context.state.commit({ expected_revision: previous.revision, mutations: [{ action: "set", key, value }] })
   if (committed.outcome !== "committed") throw new Error("namespace commit rejected")
   return value

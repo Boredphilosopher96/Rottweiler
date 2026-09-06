@@ -7,12 +7,12 @@ const observe: EventHandler = async ({ cursor, event }, { state }) => {
   if (attempt === undefined) {
     const committed = await state.commit({
       expected_revision: snapshot.revision,
-      mutations: [{ action: "set", key: "attempt", value: { sequence: cursor.sequence, pid: process.pid } }],
+      mutations: [{ action: "set", key: "attempt", value: { sequence: cursor.sequence } }],
     })
     if (committed.outcome !== "committed") throw new Error("attempt did not commit")
     // No event outcome exists; only an atomic host acknowledgement can retire
     // this cursor. The next process must receive it again.
-    process.exit(23)
+    return await new Promise<never>(() => {})
   }
   const count = snapshot.entries.find(entry => entry.key === "deliveries")?.value
   return { mutations: [
@@ -24,11 +24,15 @@ export const plugin = definePlugin({
   manifest: {
     name: "event-recovery", version: "1", protocol: 3,
     capabilities: {
+      commands: [{ name: "crash-event-worker", description: "Crash with an unacknowledged event", allowed_tools: [] }],
       event_subscriptions: ["session_created", "mode_changed"],
       push: ["extension/state_read", "extension/state_commit"],
     },
   },
-  handlers: { events: { session_created: observe, mode_changed: observe } },
+  handlers: {
+    events: { session_created: observe, mode_changed: observe },
+    commands: { "crash-event-worker": async () => { process.exit(23) } },
+  },
 })
 if (import.meta.main) {
   if (process.argv.includes("--manifest")) console.log(JSON.stringify(plugin.manifest))

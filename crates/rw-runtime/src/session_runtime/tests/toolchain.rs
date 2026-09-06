@@ -329,7 +329,9 @@ async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
     assert!(result.completed(), "{:#?}", result.status());
     assert_eq!(
         std::fs::read_to_string(root.path().join("crate/src/lib.rs")).expect("formatted source"),
-        "pub fn bad(value: &Vec<u8>) -> usize {\n    value.len()\n}\n"
+        "pub fn bad(value: &Vec<u8>) -> usize {\n    value.len()\n}\n",
+        "toolchain outcome: {:?}",
+        result.input()
     );
     let rw_ext::HookInput::PostTool(input) = result.input() else {
         panic!("post_tool phase")

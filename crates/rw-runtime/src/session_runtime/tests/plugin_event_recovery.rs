@@ -8,6 +8,7 @@ async fn state_with(handle: &rw_core::SessionHandle, key: &str) -> ExtensionStat
     let capability = handle
         .plugin_session_capability("event-recovery")
         .expect("namespace");
+    let mut last = None;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let state = capability
@@ -17,11 +18,14 @@ async fn state_with(handle: &rw_core::SessionHandle, key: &str) -> ExtensionStat
             if state.entries.iter().any(|entry| entry.key == key) {
                 return state;
             }
+            last = Some(state);
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("delivery transition deadline waiting for {key}"))
+    .unwrap_or_else(|_| {
+        panic!("delivery transition deadline waiting for {key}; last namespace: {last:?}")
+    })
 }
 fn value<'a>(state: &'a ExtensionStateSnapshot, key: &str) -> &'a serde_json::Value {
     &state
@@ -77,21 +81,18 @@ async fn sdk_event_process_crash_replays_only_the_unacknowledged_delivery() {
         "handler-side state cannot acknowledge delivery"
     );
     let attempt = value(&attempted, "attempt");
-    let pid =
-        i32::try_from(attempt["pid"].as_i64().expect("native worker PID")).expect("PID range");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if matches!(
-                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
-                Err(nix::errno::Errno::ESRCH)
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
+    // A completed failed command proves the owned RPC observed process death;
+    // an SDK PID is local to its namespace and cannot be polled on the host.
+    let crash = tokio::time::timeout(
+        Duration::from_secs(5),
+        first.handle.send_message("/crash-event-worker"),
+    )
     .await
-    .expect("SDK worker exited before event outcome");
+    .expect("crashed worker settlement deadline");
+    assert!(
+        crash.is_err(),
+        "crashing command cannot complete successfully"
+    );
     first
         .handle
         .close()

@@ -115,7 +115,12 @@ async fn run_status(
         handle.send_message(format!("/task-workflow {argument}")),
     )
     .await
-    .expect("workflow callback deadline")
+    .unwrap_or_else(|_| {
+        panic!(
+            "workflow callback deadline during {argument}; latest event: {:?}",
+            events.try_recv()
+        )
+    })
     .expect("workflow command");
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut reads = 0;
