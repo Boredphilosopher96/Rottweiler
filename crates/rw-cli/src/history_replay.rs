@@ -10,7 +10,9 @@ use rw_core::{
 use rw_runtime::{TranscriptReader, session};
 
 #[cfg(unix)]
-use crate::runtime_paths::{RuntimeDirectoryGuard, allocate_runtime_paths, locate_js_host_executable};
+use crate::runtime_paths::{
+    RuntimeDirectoryGuard, allocate_runtime_paths, locate_js_host_executable,
+};
 use crate::{server, tui_config};
 
 #[derive(Clone)]
