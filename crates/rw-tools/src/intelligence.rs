@@ -100,7 +100,7 @@ fn path_has_symlink_provenance(path: &Path) -> bool {
 pub struct SandboxedLspSpawner {
     workspace_roots: Vec<PathBuf>,
     scratch: PathBuf,
-    helper_executable: PathBuf,
+    helper_executable: rw_sandbox::SandboxHelper,
     rustup_home: Option<PathBuf>,
     cargo_home: Option<PathBuf>,
 }
@@ -115,7 +115,7 @@ impl SandboxedLspSpawner {
     pub fn new(
         workspace_roots: &[PathBuf],
         scratch: impl AsRef<Path>,
-        helper_executable: impl AsRef<Path>,
+        helper_executable: &rw_sandbox::SandboxHelper,
     ) -> Result<Self, LspError> {
         let workspace_roots = workspace_roots
             .iter()
@@ -130,7 +130,7 @@ impl SandboxedLspSpawner {
         Ok(Self {
             workspace_roots,
             scratch,
-            helper_executable: helper_executable.as_ref().to_path_buf(),
+            helper_executable: helper_executable.clone(),
             rustup_home,
             cargo_home,
         })
@@ -680,7 +680,7 @@ mod tests {
         let spawner = SandboxedLspSpawner::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            &executable,
+            &rw_sandbox::SandboxHelper::from_running(&executable).expect("running helper"),
         )
         .expect("spawner");
         let policy = spawner.policy().expect("policy");
@@ -816,7 +816,10 @@ if "TYPE_ERROR" in text:
             SandboxedLspSpawner::new(
                 &[workspace.path().to_path_buf()],
                 scratch.path(),
-                std::env::current_exe().expect("helper executable"),
+                &rw_sandbox::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("helper executable"),
+                )
+                .expect("running helper"),
             )
             .expect("spawner"),
         );
@@ -883,7 +886,10 @@ if "TYPE_ERROR" in text:
         let spawner = SandboxedLspSpawner::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            std::env::current_exe().expect("helper executable"),
+            &rw_sandbox::SandboxHelper::from_running(
+                &std::env::current_exe().expect("helper executable"),
+            )
+            .expect("running helper"),
         )
         .expect("spawner");
         let mut process = spawner

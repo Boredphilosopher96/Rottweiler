@@ -581,8 +581,14 @@ pub(super) fn guarded_process(
         };
         let executable = std::env::current_exe()
             .map_err(|error| ToolError::Command(format!("sandbox helper unavailable: {error}")))?;
-        let plan = shell_launch_plan(&policy, &executable, Path::new("/bin/sh"), &shell_args)
-            .map_err(|error| ToolError::Command(error.to_string()))?;
+        let plan = shell_launch_plan(
+            &policy,
+            &rw_sandbox::SandboxHelper::from_running(&executable)
+                .map_err(|error| ToolError::Command(error.to_string()))?,
+            Path::new("/bin/sh"),
+            &shell_args,
+        )
+        .map_err(|error| ToolError::Command(error.to_string()))?;
         #[cfg(target_os = "linux")]
         let plan = {
             let mut plan = plan;

@@ -174,8 +174,10 @@ async fn acceptance_harness(executable: &Path, directory: &Path) -> AcceptanceHa
     let launcher = SandboxedProtocolLauncher::new(
         std::slice::from_ref(&workspace),
         scratch.path(),
-        std::fs::canonicalize(std::env::current_exe().expect("sandbox helper identity"))
-            .expect("canonical sandbox helper identity"),
+        &rw_tools::SandboxHelper::from_running(
+            &std::env::current_exe().expect("sandbox helper identity"),
+        )
+        .expect("running helper"),
         allowed_environment,
     )
     .expect("production launcher");

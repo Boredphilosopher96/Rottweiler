@@ -70,7 +70,7 @@ pub trait ProtocolChildLauncher: Send + Sync {
 pub struct SandboxedProtocolLauncher {
     workspace_roots: Vec<PathBuf>,
     scratch: PathBuf,
-    helper_executable: PathBuf,
+    helper_executable: rw_sandbox::SandboxHelper,
     allowed_environment: BTreeSet<String>,
     sandbox_unavailable: Option<String>,
 }
@@ -85,7 +85,7 @@ impl SandboxedProtocolLauncher {
     pub fn new(
         workspace_roots: &[PathBuf],
         scratch: impl AsRef<Path>,
-        helper_executable: impl AsRef<Path>,
+        helper_executable: &rw_sandbox::SandboxHelper,
         allowed_environment: impl IntoIterator<Item = String>,
     ) -> io::Result<Self> {
         let workspace_roots = workspace_roots
@@ -99,7 +99,7 @@ impl SandboxedProtocolLauncher {
                 "unsafe protocol scratch directory",
             ));
         }
-        let helper_executable = trusted_executable(helper_executable.as_ref(), &workspace_roots)?;
+        let helper_executable = helper_executable.clone();
         let capability = rw_sandbox::probe();
         Ok(Self {
             workspace_roots,
@@ -506,7 +506,7 @@ mod tests {
         let launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            helper,
+            &rw_sandbox::SandboxHelper::from_running(&helper).expect("running helper"),
             Vec::<String>::new(),
         )
         .expect("launcher");
@@ -534,7 +534,7 @@ mod tests {
         let mut launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            helper,
+            &rw_sandbox::SandboxHelper::from_running(&helper).expect("running helper"),
             Vec::<String>::new(),
         )
         .expect("launcher");
@@ -564,7 +564,7 @@ mod tests {
         let launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            helper,
+            &rw_sandbox::SandboxHelper::from_running(&helper).expect("running helper"),
             Vec::<String>::new(),
         )
         .expect("launcher");

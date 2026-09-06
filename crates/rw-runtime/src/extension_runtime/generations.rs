@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 #[derive(Clone)]
 pub(crate) struct PluginGenerationConfig {
     pub(crate) private_root: PathBuf,
-    pub(crate) helper: PathBuf,
+    pub(crate) helper: rw_tools::SandboxHelper,
     pub(crate) redactor: Arc<SharedPluginRedactor>,
     pub(crate) budget: Arc<PluginRuntimeBudget>,
     pub(crate) session_ui: Arc<ui::UiSessionBudget>,

@@ -348,7 +348,7 @@ pub(crate) struct DispatchingMcpConnector {
 pub(super) struct LazySandboxedStdioConnector {
     workspace_roots: Vec<PathBuf>,
     scratch: PathBuf,
-    helper: PathBuf,
+    helper: rw_tools::SandboxHelper,
     environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
     approvals: Arc<McpApprovalStore>,
 }
@@ -945,7 +945,7 @@ impl McpSessionRuntime {
         configs: &[DiscoveredMcpServer],
         workspace_roots: &[PathBuf],
         private_session_root: &Path,
-        helper: &Path,
+        helper: &rw_tools::SandboxHelper,
         credentials_path: &Path,
         upstream_proxy: Option<UpstreamProxy>,
     ) -> Result<Self> {
@@ -1014,7 +1014,7 @@ impl McpSessionRuntime {
         let stdio: Arc<dyn McpConnector> = Arc::new(LazySandboxedStdioConnector {
             workspace_roots: workspace_roots.to_vec(),
             scratch: scratch.path().to_owned(),
-            helper: helper.to_owned(),
+            helper: helper.clone(),
             environment: stdio_environment.clone(),
             approvals: approvals.clone(),
         });

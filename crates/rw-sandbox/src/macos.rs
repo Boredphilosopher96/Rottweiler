@@ -10,7 +10,7 @@ use std::{
 pub(super) const WORKER_ARG: &str = "--rw-macos-worker";
 pub(super) fn launch_plan(
     policy: &SandboxPolicy,
-    helper_executable: &Path,
+    helper_executable: &super::SandboxHelper,
     shell: &Path,
     shell_args: &[OsString],
 ) -> Result<LaunchPlan, SandboxError> {
@@ -45,7 +45,7 @@ pub(super) fn launch_plan(
         args.push(definition);
     }
     if !policy.allow_process_creation {
-        let helper = std::fs::canonicalize(helper_executable).map_err(|error| {
+        let helper = std::fs::canonicalize(helper_executable.launch_path()).map_err(|error| {
             SandboxError::Unavailable(format!("invalid macOS worker helper: {error}"))
         })?;
         args.push(OsString::from("-D"));
@@ -61,6 +61,7 @@ pub(super) fn launch_plan(
         program: PathBuf::from("/usr/bin/sandbox-exec"),
         args,
         warnings: Vec::new(),
+        _helper: helper_executable.clone(),
     })
 }
 

@@ -277,38 +277,33 @@ async fn plugin_http_registers_secret_and_respects_process_network_denial() {
 }
 
 #[cfg(unix)]
-fn production_roots_with_symlinked_helper()
--> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
-
+fn production_roots() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    rw_tools::SandboxHelper,
+    PathBuf,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
     let root = tempfile::tempdir().expect("root");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
     let workspace = root.path().join("workspace");
     let session = root.path().join("session");
-    let helper_root = root.path().join("helper-root");
-    for directory in [&workspace, &session, &helper_root] {
+    for directory in [&workspace, &session] {
         fs::create_dir(directory).expect("private directory");
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).expect("private mode");
     }
-    let helper = helper_root.join("rw");
-    fs::write(&helper, b"#!/bin/sh\nexit 0\n").expect("helper");
-    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).expect("helper mode");
-    let linked_root = root.path().join("linked-helper-root");
-    symlink(&helper_root, &linked_root).expect("helper parent symlink");
+    let helper =
+        rw_tools::SandboxHelper::from_running(&std::env::current_exe().expect("host executable"))
+            .expect("running helper authority");
     let credentials = root.path().join("credentials.toml");
-    (
-        root,
-        workspace,
-        session,
-        linked_root.join("rw"),
-        credentials,
-    )
+    (root, workspace, session, helper, credentials)
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn empty_or_http_only_production_runtime_does_not_validate_stdio_helper() {
-    let (_root, workspace, session, helper, credentials) = production_roots_with_symlinked_helper();
+async fn empty_or_http_only_production_runtime_never_launches_the_helper() {
+    let (_root, workspace, session, helper, credentials) = production_roots();
     let empty = McpSessionRuntime::start_production(
         &[],
         std::slice::from_ref(&workspace),
@@ -318,7 +313,7 @@ async fn empty_or_http_only_production_runtime_does_not_validate_stdio_helper() 
         None,
     )
     .await
-    .expect("empty hosted MCP runtime must not require a stdio helper");
+    .expect("empty hosted MCP runtime remains inert");
     assert!(empty.manager.statuses().await.is_empty());
     assert!(empty.shutdown().await.is_ok());
 
@@ -352,7 +347,7 @@ async fn empty_or_http_only_production_runtime_does_not_validate_stdio_helper() 
         None,
     )
     .await
-    .expect("HTTP-only MCP runtime must not require a stdio helper");
+    .expect("HTTP-only MCP runtime remains inert");
     assert_eq!(http_runtime.manager.statuses().await.len(), 1);
     assert!(http_runtime.shutdown().await.is_ok());
 }
@@ -432,23 +427,16 @@ async fn deferred_startup_does_not_resolve_mcp_credentials_or_connect() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn stdio_production_runtime_still_rejects_symlinked_helper_provenance() {
-    let (root, workspace, session, helper, credentials) = production_roots_with_symlinked_helper();
-    let config = approval_reconnect_config(root.path());
-    let result = McpSessionRuntime::start_production(
-        &[config],
-        &[workspace],
-        &session,
-        &helper,
-        &credentials,
-        None,
-    )
-    .await;
-    assert!(
-        result.is_err(),
-        "stdio helper provenance must remain fail-closed"
-    );
+#[test]
+fn unapproved_stdio_helper_cannot_enter_runtime_composition() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let root = tempfile::tempdir().expect("fixture");
+    let supplied = root.path().join("injected-rw");
+    fs::write(&supplied, b"#!/bin/sh\nexit 0\n").expect("injected helper");
+    fs::set_permissions(&supplied, fs::Permissions::from_mode(0o700)).expect("helper mode");
+    let linked = root.path().join("rw");
+    symlink(&supplied, &linked).expect("helper symlink");
+    assert!(rw_tools::SandboxHelper::from_running(&linked).is_err());
 }
 
 #[test]

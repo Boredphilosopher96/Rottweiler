@@ -50,7 +50,13 @@ mod linux {
     "#;
         let args = [OsString::from("-c"), OsString::from(script)];
         let helper = std::env::current_exe().expect("helper");
-        let plan = shell_launch_plan(&policy, &helper, &shell, &args).expect("view launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &rw_sandbox::SandboxHelper::from_running(&helper).expect("running helper"),
+            &shell,
+            &args,
+        )
+        .expect("view launch plan");
         let status = Command::new(&plan.program)
             .args(&plan.args)
             .status()
@@ -114,7 +120,13 @@ mod linux {
         fs::rename(&program, &previous).expect("retain approved inode");
         fs::copy("/bin/true", &program).expect("replace executable inode");
         let rejected = || {
-            let plan = shell_launch_plan(&policy, helper, &program, &[]).expect("launch plan");
+            let plan = shell_launch_plan(
+                &policy,
+                &rw_sandbox::SandboxHelper::from_running(helper).expect("running helper"),
+                &program,
+                &[],
+            )
+            .expect("launch plan");
             let output = Command::new(&plan.program)
                 .args(&plan.args)
                 .output()
@@ -163,8 +175,13 @@ mod linux {
                 if operation == "bundle" {
                     args.push(root.join("output").into_os_string());
                 }
-                let plan = shell_launch_plan(&policy, helper, Path::new(&host), &args)
-                    .expect("compiler plan");
+                let plan = shell_launch_plan(
+                    &policy,
+                    &rw_sandbox::SandboxHelper::from_running(helper).expect("running helper"),
+                    Path::new(&host),
+                    &args,
+                )
+                .expect("compiler plan");
                 let output = Command::new(&plan.program)
                     .args(&plan.args)
                     .output()

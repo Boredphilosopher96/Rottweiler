@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::expect_used)]
 //! Probe delegation through the inherited bootstrap namespace and a real Unix socket.
+mod common;
 use rw_sandbox::{
     EgressPolicy, NetworkPolicy, SandboxPolicy, SupervisedEgressProxy, shell_launch_plan,
 };
@@ -87,13 +88,8 @@ fn single_process_policy_denies_service_delegation_in_both_network_modes() {
             socket.as_os_str().to_owned(),
             OsString::from(allowed_port.to_string()),
         ];
-        let plan = shell_launch_plan(
-            &policy,
-            Path::new(env!("CARGO_BIN_EXE_rw-sandbox-helper")),
-            interpreter,
-            &args,
-        )
-        .expect("launch plan");
+        let plan =
+            shell_launch_plan(&policy, &common::helper(), interpreter, &args).expect("launch plan");
         let output = Command::new(plan.program)
             .args(plan.args)
             .output()

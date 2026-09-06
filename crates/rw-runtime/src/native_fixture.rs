@@ -12,25 +12,31 @@ pub(crate) async fn admit() -> SemaphorePermit<'static> {
 }
 
 /// The ordinary test harness cannot execute trusted worker bootstrap arguments.
-pub(crate) fn sandbox_helper() -> std::io::Result<std::path::PathBuf> {
-    let supplied = std::env::var_os("ROTTWEILER_TEST_SANDBOX_HELPER").ok_or_else(|| {
-        std::io::Error::other("native fixture prerequisite: build rw-sandbox-helper and set ROTTWEILER_TEST_SANDBOX_HELPER to its executable artifact")
+pub(crate) fn sandbox_helper() -> std::io::Result<rw_tools::SandboxHelper> {
+    static HELPER: std::sync::OnceLock<Result<rw_tools::SandboxHelper, String>> =
+        std::sync::OnceLock::new();
+    HELPER
+        .get_or_init(|| load_helper().map_err(|error| error.to_string()))
+        .clone()
+        .map_err(std::io::Error::other)
+}
+
+fn load_helper() -> std::io::Result<rw_tools::SandboxHelper> {
+    use std::io::Read as _;
+    let supplied = std::env::var_os("ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT").ok_or_else(|| {
+        std::io::Error::other("native fixture prerequisite: run scripts/build-test-helper.py and set ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT to its artifact receipt")
     })?;
-    let path = std::fs::canonicalize(supplied)?;
-    let metadata = path.metadata()?;
-    if !metadata.is_file() {
+    let mut bytes = Vec::new();
+    std::fs::File::open(supplied)?
+        .take(4097)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
         return Err(std::io::Error::other(
-            "native fixture sandbox helper is not a regular file",
+            "sandbox helper receipt exceeds 4096 bytes",
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(std::io::Error::other(
-                "native fixture sandbox helper is not executable",
-            ));
-        }
-    }
-    Ok(path)
+    let identity: rw_tools::HelperArtifactIdentity =
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    rw_tools::SandboxHelper::from_artifact(&identity)
+        .map_err(|error| std::io::Error::other(format!("sandbox helper receipt rejected: {error}")))
 }

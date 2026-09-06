@@ -28,7 +28,7 @@ pub(in crate::extension_runtime) struct ActivationRecipe {
     pub config: DiscoveredPlugin,
     pub private_root: PathBuf,
     pub workspace_roots: Vec<PathBuf>,
-    pub helper: PathBuf,
+    pub helper: rw_tools::SandboxHelper,
     pub redactor: Arc<SharedPluginRedactor>,
     pub push_handler: Arc<SessionPluginPushHandler>,
     pub budget: Arc<super::PluginRuntimeBudget>,
@@ -179,6 +179,7 @@ async fn prepare_process(
         DiscoveredPluginTarget::TypeScript { .. } => {
             let host = recipe
                 .helper
+                .installation_path()
                 .parent()
                 .ok_or_else(|| {
                     error(

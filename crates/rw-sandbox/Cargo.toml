@@ -24,6 +24,7 @@ harness = false
 [dependencies]
 base64.workspace = true
 blake3.workspace = true
+sha2.workspace = true
 rw-types.workspace = true
 rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true

@@ -77,7 +77,10 @@ mod linux {
     }
     fn exercise(root: &std::path::Path) {
         let package = root.join("package");
-        let helper = std::env::current_exe().expect("current helper");
+        let helper = rw_tools::SandboxHelper::from_running(
+            &std::env::current_exe().expect("current helper"),
+        )
+        .expect("running helper");
         let plugin = DiscoveredPlugin {
             name: "preparation-fixture".to_owned(),
             enabled: true,

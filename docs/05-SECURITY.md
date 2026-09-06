@@ -65,6 +65,13 @@ Commands classified before execution:
 2. **Everything else** → prompt (per Layer 1), then run **sandboxed** with write access scoped to the workspace + scratch dir.
 3. **Escape hatch**: user can approve unsandboxed execution for commands that legitimately need it (e.g. `docker`), pattern-rememberable.
 
+Sandbox bootstrap authority is an owned `SandboxHelper`. The running product
+captures its own executable identity. Hosts using a separately built helper must
+supply its exact device, inode, byte count, and SHA-256 approval receipt; the
+launcher executes a verified private snapshot, with sealed executable bytes on
+Linux. The process owner retains that authority through settlement. A filesystem
+path alone does not authorize an internal helper.
+
 Sandbox implementation (`rw-sandbox`):
 - **macOS**: Seatbelt profile generated per-invocation — FS read broad, write restricted to workspace + `$TMPDIR` scratch; network denied unless the call was granted `network`.
 - **Linux**: Landlock for filesystem scoping (kernel ≥ 5.13). **Network restriction is a separate mechanism, and plain seccomp-bpf cannot do address-based filtering** (BPF can't dereference the `connect()` sockaddr pointer). The design, in preference order:

@@ -97,3 +97,5 @@ pub use worktree::{
     DiffArtifactAuthority, WorktreeAllocation, WorktreeIsolation, WorktreeLease,
     WorktreeLeaseRecord, WorktreeLimits, validate_diff_artifact,
 };
+
+pub use rw_sandbox::{HelperArtifactIdentity, SandboxHelper};

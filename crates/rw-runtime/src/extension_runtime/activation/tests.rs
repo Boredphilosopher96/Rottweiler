@@ -281,7 +281,10 @@ async fn source_and_provider_metadata_registration_performs_no_activation() {
     let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
         crate::extension_runtime::generations::PluginGenerationConfig {
             private_root: fixture.root.path().to_path_buf(),
-            helper: fixture.root.path().join("missing-release/rw"),
+            helper: rw_tools::SandboxHelper::from_running(
+                &std::env::current_exe().expect("test executable"),
+            )
+            .expect("running helper"),
             redactor: fixture.endpoint.generation.recipe.redactor.clone(),
             budget: fixture.budget.clone(),
             session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
@@ -381,7 +384,10 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
         let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
             crate::extension_runtime::generations::PluginGenerationConfig {
                 private_root: fixture.root.path().to_path_buf(),
-                helper: fixture.root.path().join("unavailable-helper"),
+                helper: rw_tools::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("test executable"),
+                )
+                .expect("running helper"),
                 redactor: fixture.endpoint.generation.recipe.redactor.clone(),
                 budget: budget.clone(),
                 session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),

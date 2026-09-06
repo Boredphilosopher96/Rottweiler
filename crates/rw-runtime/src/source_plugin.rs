@@ -57,7 +57,7 @@ pub(crate) struct SourcePluginResolver {
 pub async fn resolve_plugin_process(
     plugin: &DiscoveredPlugin,
     private_root: &Path,
-    helper: &Path,
+    helper: &rw_tools::SandboxHelper,
 ) -> Result<PluginProcessConfig> {
     if matches!(plugin.target, DiscoveredPluginTarget::Executable { .. }) {
         return plugin.executable_process_config();
@@ -68,6 +68,7 @@ pub async fn resolve_plugin_process(
             .map_err(|error| miette!(error.to_string()))?,
     );
     let host = helper
+        .installation_path()
         .parent()
         .ok_or_else(|| miette!("Rottweiler executable has no release directory"))?
         .join("rottweiler-plugin-host");

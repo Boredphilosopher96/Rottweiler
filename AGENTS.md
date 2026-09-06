@@ -13,7 +13,7 @@ Keep communication concise and direct. A question alone is not authorization to 
 ## Build artifacts and cleanup
 
 - Use `python3 scripts/build-native-candidate.py` for native products. Pass its verified candidate directory to acceptance gates; do not hide compilation inside measurement scripts. The builder reuses an unchanged source/toolchain/target/profile and owns strict product size checks.
-- Before Rust tests that start native plugins, run `ROTTWEILER_TEST_SANDBOX_HELPER="$(python3 scripts/build-test-helper.py)" && export ROTTWEILER_TEST_SANDBOX_HELPER` using the same worktree target. Test harness binaries cannot dispatch sandbox worker entrypoints; the explicit helper keeps their process policy identical to native execution.
+- Before Rust tests that start native plugins, run `ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT="$(python3 scripts/build-test-helper.py)" && export ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT` using the same worktree target. Test harness binaries cannot dispatch sandbox worker entrypoints; the explicit helper keeps their process policy identical to native execution.
 - Give each concurrent worktree its own Cargo target directory. Never share a target directory between different source trees.
 - Reuse that worktree's target directory, build profile, and feature selection across checks. Avoid creating a fresh multi-gigabyte cache or dependency variant for each command.
 - Inspect free disk space and the cleanup inventory before large builds. After a disk-space failure, stop builds and clean inactive task output before retrying.

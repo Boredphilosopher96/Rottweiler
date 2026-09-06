@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = "rw-sandbox-helper"
-ENVIRONMENT_KEY = "ROTTWEILER_TEST_SANDBOX_HELPER"
+ENVIRONMENT_KEY = "ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT"
 
 
 def build() -> Path:
@@ -36,17 +37,38 @@ def build() -> Path:
     return executable.resolve(strict=True)
 
 
+def write_receipt(executable: Path) -> Path:
+    """Bind the Cargo artifact to the exact bytes approved by this host build."""
+    executable = executable.resolve(strict=True)
+    with executable.open("rb") as source:
+        before = os.fstat(source.fileno())
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+        after = os.fstat(source.fileno())
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, key) != getattr(after, key) for key in fields):
+        raise RuntimeError("sandbox helper changed while producing its receipt")
+    if before.st_size <= 0 or before.st_size > 256 * 1024 * 1024 or before.st_mode & 0o111 == 0:
+        raise RuntimeError("sandbox helper artifact size or mode is invalid")
+    receipt = executable.with_name(executable.name + ".identity.json")
+    body = {"executable": str(executable), "device": before.st_dev,
+            "inode": before.st_ino, "bytes": before.st_size, "sha256": digest}
+    temporary = receipt.with_suffix(".tmp")
+    temporary.write_text(json.dumps(body, separators=(",", ":")) + "\n")
+    temporary.replace(receipt)
+    return receipt
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--github-env", type=Path)
     args = parser.parse_args()
-    executable = build()
+    receipt = write_receipt(build())
     if args.github_env is not None:
-        if any(character in str(executable) for character in "\r\n"):
+        if any(character in str(receipt) for character in "\r\n"):
             raise ValueError("helper executable path cannot contain a line break")
         with args.github_env.open("a") as stream:
-            stream.write(f"{ENVIRONMENT_KEY}={executable}\n")
-    print(executable)
+            stream.write(f"{ENVIRONMENT_KEY}={receipt}\n")
+    print(receipt)
 
 
 if __name__ == "__main__":

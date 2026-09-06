@@ -50,7 +50,10 @@ async fn native_hooks_do_not_receive_sibling_tool_effect_authority() {
         let owner = crate::extension_runtime::generations::PluginGenerationOwner::compose(
             crate::extension_runtime::generations::PluginGenerationConfig {
                 private_root: root.path().to_path_buf(),
-                helper: root.path().join("unavailable-helper"),
+                helper: rw_tools::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("test executable"),
+                )
+                .expect("running helper"),
                 redactor: redactor.clone(),
                 budget: budget.clone(),
                 session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),

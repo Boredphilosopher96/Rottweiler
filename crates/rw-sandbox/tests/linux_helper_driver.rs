@@ -34,8 +34,13 @@ fn main() {
         SandboxPolicy::new([workspace.path()], NetworkPolicy::Deny).expect("sandbox policy");
     let executable = std::env::current_exe().expect("current executable");
     let shell_args = [OsString::from("-c"), OsString::from("placeholder")];
-    let mut plan = shell_launch_plan(&policy, &executable, Path::new("/bin/sh"), &shell_args)
-        .expect("self-hosted helper launch plan");
+    let mut plan = shell_launch_plan(
+        &policy,
+        &rw_sandbox::SandboxHelper::from_running(&executable).expect("running helper"),
+        Path::new("/bin/sh"),
+        &shell_args,
+    )
+    .expect("self-hosted helper launch plan");
     let helper_path = plan
         .args
         .iter()

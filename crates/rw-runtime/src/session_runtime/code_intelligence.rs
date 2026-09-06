@@ -65,10 +65,10 @@ impl MultiRootCodeIntelligence {
             discover_sandboxed_lsp_servers(roots)
         };
         let scratch = PrivateScratch::create("lsp")?;
-        let helper = std::env::current_exe()
+        let helper = crate::plugin_process::helper_executable()
             .map_err(|error| miette!("LSP sandbox helper could not resolve: {error}"))?;
         let spawner = Arc::new(
-            SandboxedLspSpawner::new(roots, scratch.path(), helper)
+            SandboxedLspSpawner::new(roots, scratch.path(), &helper)
                 .map_err(|error| miette!("LSP sandbox could not start: {error}"))?,
         );
         let uri_mapper = Arc::new(

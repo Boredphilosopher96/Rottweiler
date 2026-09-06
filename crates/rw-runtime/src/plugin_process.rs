@@ -35,18 +35,21 @@ mod handoff_tests;
 /// source of capability truth.
 pub struct SandboxedPluginLauncher {
     scratch: PathBuf,
-    helper: PathBuf,
+    helper: rw_tools::SandboxHelper,
 }
 
 impl SandboxedPluginLauncher {
-    /// Creates a launcher from canonical scratch and sandbox-helper paths.
+    /// Creates a launcher from canonical scratch and approved bootstrap authority.
     ///
     /// # Errors
-    /// Returns an error when either path is unsafe or sandbox enforcement is unavailable.
-    pub fn new(scratch: &Path, helper: &Path) -> Result<Self, PluginProcessError> {
+    /// Returns an error when scratch is unsafe or sandbox enforcement is unavailable.
+    pub fn new(
+        scratch: &Path,
+        helper: &rw_tools::SandboxHelper,
+    ) -> Result<Self, PluginProcessError> {
         let scratch = std::fs::canonicalize(scratch).map_err(|error| process_error(&error))?;
-        let helper = std::fs::canonicalize(helper).map_err(|error| process_error(&error))?;
-        if !scratch.is_dir() || !helper.is_file() {
+        let helper = helper.clone();
+        if !scratch.is_dir() {
             return Err(error("plugin launcher scratch/helper is invalid"));
         }
         if probe_sandbox().support != SandboxSupport::Enforced {
@@ -65,7 +68,7 @@ impl PluginLauncher for SandboxedPluginLauncher {
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
         let (child, proxy) = spawn_sandboxed_plugin(config, profile, &self.scratch, &self.helper)
             .map_err(PluginLaunchError::Rejected)?;
-        attach_supervisor(child, proxy, config).await
+        attach_supervisor(child, proxy, config, self.helper.clone()).await
     }
 }
 
@@ -112,7 +115,7 @@ fn spawn_sandboxed_plugin(
     config: &PluginProcessConfig,
     profile: &PluginSandboxProfile,
     scratch: &Path,
-    helper: &Path,
+    helper: &rw_tools::SandboxHelper,
 ) -> Result<(Child, Option<SupervisedEgressProxy>), PluginProcessError> {
     let roots = approved_write_roots(config, profile, scratch)?;
     let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, &roots)?;
@@ -197,6 +200,7 @@ async fn attach_supervisor(
     mut child: Child,
     proxy: Option<SupervisedEgressProxy>,
     config: &PluginProcessConfig,
+    helper: rw_tools::SandboxHelper,
 ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
     let process_group = child.id();
     let stdin = child.stdin.take();
@@ -204,6 +208,7 @@ async fn attach_supervisor(
     let stderr = child.stderr.take();
     let denials = proxy.as_ref().map(SupervisedEgressProxy::denials);
     let process = Arc::new(PluginChild {
+        _helper: helper,
         child: Mutex::new(child),
         process_group,
         violation: Arc::new(Mutex::new(None)),
@@ -286,6 +291,7 @@ impl Drop for PendingPluginHandoff {
 }
 
 struct PluginChild {
+    _helper: rw_tools::SandboxHelper,
     child: Mutex<Child>,
     process_group: Option<u32>,
     violation: Arc<Mutex<Option<String>>>,
@@ -805,7 +811,15 @@ mod tests {
         let config = PluginProcessConfig::new("/bin/sh").expect("identity");
         let outcome = tokio::time::timeout(
             Duration::from_secs(3),
-            attach_supervisor(child, Some(proxy), &config),
+            attach_supervisor(
+                child,
+                Some(proxy),
+                &config,
+                rw_tools::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("executable"),
+                )
+                .expect("helper"),
+            ),
         )
         .await
         .expect("failed handoff settles");
@@ -826,13 +840,14 @@ mod tests {
 mod child_signals;
 
 /// Selects the trusted helper owned by this executable host.
-pub(crate) fn helper_executable() -> std::io::Result<PathBuf> {
+pub(crate) fn helper_executable() -> std::io::Result<rw_tools::SandboxHelper> {
     #[cfg(test)]
     {
         crate::native_fixture::sandbox_helper()
     }
     #[cfg(not(test))]
     {
-        std::env::current_exe()
+        rw_tools::SandboxHelper::from_running(&std::env::current_exe()?)
+            .map_err(|error| std::io::Error::other(error.to_string()))
     }
 }

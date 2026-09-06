@@ -69,7 +69,7 @@ enum PluginTarget {
 async fn resolve_plugin_process(
     plugin: &DiscoveredPlugin,
     private_root: &Path,
-    helper: &Path,
+    helper: &SandboxHelper,
 ) -> Result<PluginProcessConfig>;
 ```
 

@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::expect_used)]
 //! Parent-held queue identity proves exec discards pending transferred authority.
+mod common;
 use rw_sandbox::{NetworkPolicy, SandboxPolicy, shell_launch_plan};
 use std::{path::Path, process::Command};
 
@@ -20,13 +21,8 @@ fn actual_exec_discards_receive_queue_with_pending_effect_right() {
     let policy = SandboxPolicy::new([directory.path()], NetworkPolicy::Deny)
         .expect("policy")
         .without_process_creation();
-    let plan = shell_launch_plan(
-        &policy,
-        Path::new(env!("CARGO_BIN_EXE_rw-sandbox-helper")),
-        Path::new(interpreter),
-        &[],
-    )
-    .expect("worker plan");
+    let plan = shell_launch_plan(&policy, &common::helper(), Path::new(interpreter), &[])
+        .expect("worker plan");
     let mut command = vec![plan.program.to_string_lossy().into_owned()];
     command.extend(
         plan.args

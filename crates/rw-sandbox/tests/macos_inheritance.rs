@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::expect_used)]
 //! Seed an owned effect port before the real sandbox/bootstrap exec chain.
+mod common;
 use rw_sandbox::{NetworkPolicy, SandboxPolicy, shell_launch_plan};
 use std::{ffi::OsString, path::Path, process::Command};
 
@@ -95,9 +96,7 @@ fn real_worker_revokes_inherited_bootstrap_effect_authority() {
         OsString::from(CHILD),
         OsString::from("worker"),
     ];
-    let helper = Path::new(env!("CARGO_BIN_EXE_rw-sandbox-helper"))
-        .canonicalize()
-        .expect("resolve fixture helper");
+    let helper = common::helper();
     let plan = shell_launch_plan(&policy, &helper, Path::new(interpreter), &child_args)
         .expect("worker plan");
     let mut worker = vec![plan.program.to_string_lossy().into_owned()];

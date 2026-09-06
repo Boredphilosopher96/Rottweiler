@@ -49,6 +49,10 @@ async fn kill_tree_signals_the_actual_child_after_it_changes_groups() {
         .stderr(std::process::Stdio::null());
     let child = command.spawn().expect("child");
     let owner = PluginChild {
+        _helper: rw_tools::SandboxHelper::from_running(
+            &std::env::current_exe().expect("executable"),
+        )
+        .expect("helper"),
         process_group: child.id(),
         child: Mutex::new(child),
         violation: Arc::new(Mutex::new(None)),

@@ -4,6 +4,9 @@
 //! policy into an argv-only launch plan consumed by `rw-tools`, and exposes the
 //! Linux helper entry point used immediately before `exec(2)`.
 
+mod helper;
+pub use helper::{HelperArtifactIdentity, SandboxHelper};
+
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -322,7 +325,8 @@ pub struct LaunchPlan {
     /// User-visible degradation warnings.  An enforceable plan never carries a
     /// warning; unsupported configurations return an error instead.
     pub warnings: Vec<String>,
-    /// Open descriptor pinning the exact already-running Linux engine inode
+    _helper: SandboxHelper,
+    /// Open descriptor pinning the approved immutable Linux helper executable
     /// until the namespace launcher crosses `exec(2)`.
     #[cfg(target_os = "linux")]
     helper_pin: Option<std::fs::File>,
@@ -694,7 +698,7 @@ fn unavailable(message: &str) -> SandboxCapability {
 /// platform has no sandbox implementation.
 pub fn shell_launch_plan(
     policy: &SandboxPolicy,
-    helper_executable: &Path,
+    helper_executable: &SandboxHelper,
     shell: &Path,
     shell_args: &[OsString],
 ) -> Result<LaunchPlan, SandboxError> {
@@ -713,7 +717,8 @@ pub fn shell_launch_plan(
         ) {
             return Err(SandboxError::PolicyProxyUnavailable);
         }
-        let (helper_executable, helper_pin) = pin_linux_helper(helper_executable)?;
+        let helper_owner = helper_executable.clone();
+        let (helper_executable, helper_pin) = helper_executable.pin()?;
         let encoded = serde_json::to_os_string(policy)?;
         let mut args = vec![OsString::from(HELPER_ARG), encoded];
         args.push(shell.as_os_str().to_owned());
@@ -735,6 +740,7 @@ pub fn shell_launch_plan(
                 program: unshare,
                 args: unshare_args,
                 warnings: Vec::new(),
+                _helper: helper_owner.clone(),
                 helper_pin: Some(helper_pin),
             });
         }
@@ -748,6 +754,7 @@ pub fn shell_launch_plan(
             program: unshare,
             args: unshare_args,
             warnings: Vec::new(),
+            _helper: helper_owner.clone(),
             helper_pin: Some(helper_pin),
         })
     }
@@ -782,40 +789,6 @@ fn linux_namespace_args(helper: &Path, preparation: bool) -> Vec<OsString> {
     args.push(OsString::from("--"));
     args.push(helper.as_os_str().to_owned());
     args
-}
-
-#[cfg(target_os = "linux")]
-fn pin_linux_helper(helper: &Path) -> Result<(PathBuf, std::fs::File), SandboxError> {
-    use std::fs::File;
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::MetadataExt as _;
-
-    let canonical = helper
-        .canonicalize()
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    if canonical != helper {
-        return Err(SandboxError::UntrustedHelper);
-    }
-    let before = canonical
-        .metadata()
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    if !before.is_file() || before.mode() & 0o111 == 0 {
-        return Err(SandboxError::UntrustedHelper);
-    }
-    let file = File::open(&canonical).map_err(|_| SandboxError::UntrustedHelper)?;
-    let pinned = file.metadata().map_err(|_| SandboxError::UntrustedHelper)?;
-    let running = Path::new("/proc/self/exe")
-        .metadata()
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    if (before.dev(), before.ino()) != (pinned.dev(), pinned.ino())
-        || (pinned.dev(), pinned.ino()) != (running.dev(), running.ino())
-    {
-        return Err(SandboxError::UntrustedHelper);
-    }
-    let descriptor = file.as_raw_fd();
-    rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    Ok((PathBuf::from(format!("/proc/self/fd/{descriptor}")), file))
 }
 
 #[cfg(target_os = "linux")]
@@ -1006,8 +979,13 @@ mod tests {
         let executable = std::env::current_exe().expect("current executable");
         let writable_target = executable.parent().expect("target directory");
         let policy = SandboxPolicy::new([writable_target], NetworkPolicy::Deny).expect("policy");
-        let mut plan = shell_launch_plan(&policy, &executable, Path::new("/usr/bin/true"), &[])
-            .expect("self-hosted launch plan");
+        let mut plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&executable).expect("running helper"),
+            Path::new("/usr/bin/true"),
+            &[],
+        )
+        .expect("self-hosted launch plan");
         assert!(plan.take_helper_pin().is_some());
         assert!(plan.args.iter().any(|argument| {
             argument
@@ -1022,7 +1000,7 @@ mod tests {
         let injected = replacement_dir.path().join("injected-helper");
         fs::copy(&executable, &injected).expect("injected helper copy");
         assert!(matches!(
-            shell_launch_plan(&policy, &injected, Path::new("/usr/bin/true"), &[]),
+            SandboxHelper::from_running(&injected),
             Err(SandboxError::UntrustedHelper)
         ));
     }
@@ -1041,7 +1019,13 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert!(matches!(
-                shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+                shell_launch_plan(
+                    &policy,
+                    &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                        .expect("running helper"),
+                    Path::new("/bin/sh"),
+                    &[]
+                ),
                 Err(SandboxError::PolicyProxyUnavailable)
             ));
             let proxy = SupervisedEgressProxy::start(EgressPolicy::default()).expect("proxy");
@@ -1054,18 +1038,36 @@ mod tests {
             )
             .expect("owned policy");
             assert!(
-                shell_launch_plan(&owned_policy, Path::new("rw"), Path::new("/bin/sh"), &[])
-                    .is_ok()
+                shell_launch_plan(
+                    &owned_policy,
+                    &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                        .expect("running helper"),
+                    Path::new("/bin/sh"),
+                    &[]
+                )
+                .is_ok()
             );
             drop(proxy);
             assert!(matches!(
-                shell_launch_plan(&owned_policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+                shell_launch_plan(
+                    &owned_policy,
+                    &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                        .expect("running helper"),
+                    Path::new("/bin/sh"),
+                    &[]
+                ),
                 Err(SandboxError::PolicyProxyUnavailable)
             ));
         }
         #[cfg(not(target_os = "macos"))]
         assert!(matches!(
-            shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+            shell_launch_plan(
+                &policy,
+                &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                    .expect("running helper"),
+                Path::new("/bin/sh"),
+                &[]
+            ),
             Err(SandboxError::PolicyProxyUnavailable)
         ));
     }
@@ -1131,8 +1133,14 @@ mod tests {
     fn seatbelt_broad_read_mode_explicitly_denies_user_credential_roots() {
         let directory = tempdir().expect("temporary directory");
         let policy = SandboxPolicy::new([directory.path()], NetworkPolicy::Deny).expect("policy");
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/true"), &[])
-            .expect("launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("/bin/true"),
+            &[],
+        )
+        .expect("launch plan");
         let profile = plan
             .args
             .get(1)
@@ -1175,8 +1183,14 @@ sys.exit(92)'
             workspace.as_os_str().to_owned(),
             outside.as_os_str().to_owned(),
         ];
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &args)
-            .expect("launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("/bin/sh"),
+            &args,
+        )
+        .expect("launch plan");
         let status = Command::new(&plan.program)
             .args(&plan.args)
             .status()
@@ -1210,8 +1224,14 @@ sys.exit(92)'
             second.as_os_str().to_owned(),
             blocked.as_os_str().to_owned(),
         ];
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &args)
-            .expect("launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("/bin/sh"),
+            &args,
+        )
+        .expect("launch plan");
         assert!(
             Command::new(plan.program)
                 .args(plan.args)
@@ -1263,8 +1283,14 @@ for target in [('127.0.0.1', upstream_port), ('127.0.0.1', proxy_port + 1), ('1.
         .replace("PROXY_PORT", &proxy.address().port().to_string())
         .replace("UPSTREAM_PORT", &upstream_address.port().to_string());
         let args = [OsString::from("-c"), OsString::from(script)];
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("python3"), &args)
-            .expect("proxy-only launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("python3"),
+            &args,
+        )
+        .expect("proxy-only launch plan");
         let status = Command::new(plan.program)
             .args(plan.args)
             .status()

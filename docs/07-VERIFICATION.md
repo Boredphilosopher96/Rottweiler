@@ -379,10 +379,12 @@ binary compiles in PR CI. Scheduled fuzzing derives targets from Cargo and its
 compiler from `fuzz/rust-toolchain.toml`.
 
 Rust tests that launch native plugins require an explicit sandbox worker binary.
-Run `ROTTWEILER_TEST_SANDBOX_HELPER="$(python3 scripts/build-test-helper.py)" && export ROTTWEILER_TEST_SANDBOX_HELPER`
+Run `ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT="$(python3 scripts/build-test-helper.py)" && export ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT`
 with the worktree's Cargo target before those tests. The script builds the
 `rw-sandbox-helper` binary and selects its executable from Cargo's artifact
-message. CI and coverage build this prerequisite before their test command;
+message, then writes its device, inode, byte count, and SHA-256 receipt. The
+fixture host validates that receipt and owns a private executable snapshot; Linux
+seals its bytes against mutation. CI and coverage build this prerequisite before their test command;
 the product executable owns its own worker entrypoint.
 
 `scripts/ci_evidence.py` preserves command exit status and writes bounded partial
