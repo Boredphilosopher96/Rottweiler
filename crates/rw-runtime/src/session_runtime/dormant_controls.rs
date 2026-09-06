@@ -20,6 +20,12 @@ impl RuntimeWorkspaceRootController {
         let workspace = workspace.to_path_buf();
         let session = session.clone();
         let journals = self.journal_service.clone();
+        let order = journals
+            .routing_projection_order(&session.0)
+            .map_err(failure)?
+            .acquire()
+            .await
+            .map_err(failure)?;
         let admission = journals.admit_read().map_err(failure)?;
         let allowance = journals.retain_history().await?;
         rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
@@ -35,12 +41,7 @@ impl RuntimeWorkspaceRootController {
                 trusted[0],
             );
             let modes = rw_ext::compose_mode_registry(&catalog).map_err(failure)?;
-            let order = journals
-                .routing_projection_order(&session.0)
-                .map_err(failure)?;
-            let _order = order
-                .lock()
-                .map_err(|_| failure("child source owner poisoned"))?;
+            let _order = order;
             let lease = admission.capture(&session.0).map_err(failure)?;
             summarize(&lease.view, &session, &modes)
         })

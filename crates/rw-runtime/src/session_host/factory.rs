@@ -108,6 +108,13 @@ impl SessionFactory for RuntimeSessionFactory {
         operation: PreparedForkOperation,
     ) -> Result<PreparedForkOperation, HostError> {
         let workspace = self.workspace_for_session(&operation.request.parent)?;
+        let order = self
+            .journal_service
+            .routing_projection_order(&operation.request.parent.session_id.0)
+            .map_err(|error| HostError::Persistence(error.to_string()))?
+            .acquire()
+            .await
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
         let factory = self.clone();
         rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _lock = factory.acquire_fork_journal_lock()?;
@@ -121,7 +128,7 @@ impl SessionFactory for RuntimeSessionFactory {
                 ));
             }
             let operation_id = Self::fork_operation_id(&operation.key);
-            let child = factory.expected_fork_state(&operation.request, &workspace)?;
+            let child = factory.expected_fork_state(&operation.request, &workspace, &order)?;
             let journal = ForkOperationJournal {
                 version: FORK_JOURNAL_VERSION,
                 operation_id,
@@ -177,6 +184,13 @@ impl SessionFactory for RuntimeSessionFactory {
         let include_idle_tail = request.include_idle_tail;
         let driver_client_id = request.driver_client_id.clone();
         let operation_key = request.operation_key.clone();
+        let order = self
+            .journal_service
+            .routing_projection_order(&parent_session_id)
+            .map_err(|error| HostError::Persistence(error.to_string()))?
+            .acquire()
+            .await
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
         let factory = self.clone();
         rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _lock = factory.acquire_fork_journal_lock()?;
@@ -191,7 +205,8 @@ impl SessionFactory for RuntimeSessionFactory {
             if matches!(journal.state, ForkJournalState::Prepared) {
                 // Recompose at commit time so extension changes between
                 // prepare and fork cannot bypass the persisted fingerprint.
-                let expected = factory.expected_fork_state(&request, &workspace_for_fork)?;
+                let expected =
+                    factory.expected_fork_state(&request, &workspace_for_fork, &order)?;
                 let operation_id = journal.operation_id.clone();
                 fork_hosted_session_storage(
                     &factory.journal_service,
@@ -205,6 +220,7 @@ impl SessionFactory for RuntimeSessionFactory {
                     driver_client_id,
                     Some(&operation_id),
                     &expected.modes,
+                    &order,
                 )
                 .map_err(|error| {
                     tracing::error!(reason = %error, "session fork storage failed");

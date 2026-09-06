@@ -125,6 +125,7 @@ impl RuntimeSessionFactory {
         &self,
         request: &ForkSessionRequest,
         workspace: &Path,
+        order: &crate::journal_service::ProjectionPermit,
     ) -> Result<ExpectedForkState, HostError> {
         let metadata =
             load_session_metadata_any(&self.options.storage_root, &request.parent.session_id.0)
@@ -147,6 +148,7 @@ impl RuntimeSessionFactory {
             fork_turn,
             request.through_sequence,
             request.include_idle_tail,
+            order,
         )
         .map_err(|error| HostError::Persistence(error.to_string()))?;
         let selected = route

@@ -2,6 +2,7 @@
 #![allow(clippy::expect_used)]
 use super::read_todos;
 use crate::journal_service::JournalService;
+use rw_core::HostError;
 use rw_store::session::journal::SegmentedJournal;
 use rw_types::{
     EngineEvent, EventMeta, PROTOCOL_VERSION, SequenceId, SessionId,
@@ -221,6 +222,95 @@ async fn concurrent_task_query_waits_for_publication_without_blocking_other_sess
     use std::future::{Future as _, poll_fn};
     use std::task::Poll;
 
+    let (_root, service) = task_query_service();
+    let (published, release, publisher) = withheld_task_publisher(Arc::clone(&service)).await;
+    published.await.expect("index publication held");
+    let mut pending: Vec<_> = (0..crate::journal_service::MAX_PROJECTION_WAITERS)
+        .map(|_| Box::pin(task_read(Arc::clone(&service))))
+        .collect();
+    poll_fn(|context| {
+        for query in &mut pending {
+            assert!(
+                query.as_mut().poll(context).is_pending(),
+                "same-session query waits"
+            );
+        }
+        Poll::Ready(())
+    })
+    .await;
+    assert!(
+        task_read(Arc::clone(&service)).await.is_err(),
+        "session wait queue is bounded"
+    );
+    drop(pending.pop());
+    let mut replacement = Box::pin(task_read(Arc::clone(&service)));
+    poll_fn(|context| {
+        assert!(
+            replacement.as_mut().poll(context).is_pending(),
+            "cancelled caller returns queue credit"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    pending.push(replacement);
+    let independent = read_todos(
+        Arc::clone(&service),
+        SessionId("independent".into()),
+        |_| Ok(()),
+    )
+    .await
+    .expect("independent session remains available");
+    assert!(matches!(independent, TodoReadResult::Ready { .. }));
+    // Queued callers consume neither journal credits nor Blocking workers.
+    poll_fn(|context| {
+        for query in &mut pending {
+            assert!(
+                query.as_mut().poll(context).is_pending(),
+                "publisher still owns the index"
+            );
+        }
+        Poll::Ready(())
+    })
+    .await;
+    release.send(()).expect("release publication");
+    publisher.join().expect("publisher settled");
+    for query in pending {
+        assert!(
+            matches!(query.await.expect("ordered read does not report Busy"),
+            TodoReadResult::Ready { todos } if todos.through == Some(SequenceId(0)))
+        );
+    }
+}
+
+async fn withheld_task_publisher(
+    service: Arc<JournalService>,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    let (published, ready) = tokio::sync::oneshot::channel();
+    let (release, hold) = std::sync::mpsc::channel();
+    let order = service
+        .task_projection_order("same")
+        .expect("projection order")
+        .acquire()
+        .await
+        .expect("publisher order");
+    let publisher = std::thread::spawn(move || {
+        let _order = order;
+        let lease = service.capture("same").expect("source");
+        let mut projector =
+            rw_core::todo_projection::TodoProjector::open(&lease.view).expect("writer");
+        projector.advance(&lease.view).expect("publication");
+        published.send(()).expect("reader waiting");
+        hold.recv().expect("release publication");
+        drop(projector);
+    });
+    (ready, release, publisher)
+}
+
+fn task_query_service() -> (tempfile::TempDir, Arc<JournalService>) {
     let root = tempfile::tempdir().expect("root");
     let service = JournalService::new(root.path()).expect("service");
     for session in ["same", "independent"] {
@@ -238,66 +328,56 @@ async fn concurrent_task_query_waits_for_publication_without_blocking_other_sess
             }])
             .expect("task state");
     }
-    let (published, release, publisher) = withheld_task_publisher(Arc::clone(&service));
-    published.await.expect("index publication held");
-    let mut pending = Box::pin(read_todos(
-        Arc::clone(&service),
-        SessionId("same".into()),
-        |_| Ok(()),
-    ));
-    poll_fn(|context| {
-        assert!(
-            pending.as_mut().poll(context).is_pending(),
-            "same-session query waits"
-        );
-        Poll::Ready(())
-    })
-    .await;
-    let independent = read_todos(
-        Arc::clone(&service),
-        SessionId("independent".into()),
-        |_| Ok(()),
-    )
-    .await
-    .expect("independent session remains available");
-    assert!(matches!(independent, TodoReadResult::Ready { .. }));
-    poll_fn(|context| {
-        assert!(
-            pending.as_mut().poll(context).is_pending(),
-            "publisher still owns the index"
-        );
-        Poll::Ready(())
-    })
-    .await;
-    release.send(()).expect("release publication");
-    publisher.join().expect("publisher settled");
-    assert!(
-        matches!(pending.await.expect("ordered read does not report Busy"),
-        TodoReadResult::Ready { todos } if todos.through == Some(SequenceId(0)))
-    );
+    (root, service)
 }
 
-fn withheld_task_publisher(
-    service: Arc<JournalService>,
-) -> (
-    tokio::sync::oneshot::Receiver<()>,
-    std::sync::mpsc::Sender<()>,
-    std::thread::JoinHandle<()>,
-) {
-    let (published, ready) = tokio::sync::oneshot::channel();
+async fn task_read(service: Arc<JournalService>) -> Result<TodoReadResult, HostError> {
+    read_todos(service, SessionId("same".into()), |_| Ok(())).await
+}
+
+#[tokio::test]
+async fn cancelled_running_task_query_keeps_publication_order_until_worker_settles() {
+    use std::future::{Future as _, poll_fn};
+    use std::task::Poll;
+
+    let (_root, service) = task_query_service();
+    let (started, running) = tokio::sync::oneshot::channel();
     let (release, hold) = std::sync::mpsc::channel();
-    let publisher = std::thread::spawn(move || {
-        let order = service
+    let query = tokio::spawn(read_todos(
+        Arc::clone(&service),
+        SessionId("same".into()),
+        move |_| {
+            started.send(()).expect("running observer");
+            hold.recv().expect("physical work release");
+            Ok(())
+        },
+    ));
+    running
+        .await
+        .expect("worker owns order and journal admission");
+    query.abort();
+    assert!(query.await.expect_err("caller cancelled").is_cancelled());
+    let mut next = Box::pin(
+        service
             .task_projection_order("same")
-            .expect("projection order");
-        let _order = order.lock().expect("publisher order");
-        let lease = service.capture("same").expect("source");
-        let mut projector =
-            rw_core::todo_projection::TodoProjector::open(&lease.view).expect("writer");
-        projector.advance(&lease.view).expect("publication");
-        published.send(()).expect("reader waiting");
-        hold.recv().expect("release publication");
-        drop(projector);
-    });
-    (ready, release, publisher)
+            .expect("same order after cancellation")
+            .acquire(),
+    );
+    poll_fn(|context| {
+        assert!(
+            next.as_mut().poll(context).is_pending(),
+            "physical owner still excludes publication"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    release.send(()).expect("release physical query");
+    drop(
+        next.await
+            .expect("order returns after actual worker completion"),
+    );
+    assert!(matches!(
+        task_read(service).await.expect("subsequent query"),
+        TodoReadResult::Ready { .. }
+    ));
 }

@@ -1,5 +1,8 @@
 //! Runtime-owned journal commit admission and acknowledged read prefixes.
 mod commits;
+mod projection_order;
+pub(crate) use projection_order::{ProjectionOrder, ProjectionPermit};
+use projection_order::{ProjectionOrders, projection_order};
 mod retained;
 use commits::JournalCommits;
 
@@ -14,15 +17,16 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MAX_ACTIVE_JOURNALS: usize = 1024;
 const MAX_READ_VIEWS: usize = 8;
+pub(crate) const MAX_PROJECTION_WAITERS: usize = 8;
 
 pub(crate) struct JournalService {
     pub(crate) commits: Arc<JournalCommits>,
     retained_history: retained::HistoryRetentions,
     root: JournalRoot,
     active: Mutex<HashMap<String, Weak<JournalPublication>>>,
-    child_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
-    routing_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
-    task_projection_orders: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    child_projection_orders: ProjectionOrders,
+    routing_projection_orders: ProjectionOrders,
+    task_projection_orders: ProjectionOrders,
     admission: Arc<Semaphore>,
 }
 
@@ -113,15 +117,15 @@ impl JournalService {
 
     /// All lifecycle and presentation readers serialize this session's derived writer.
     /// Acquire its lock before capturing a prefix so a waiting read cannot go behind the index.
-    pub(crate) fn child_projection_order(&self, session: &str) -> Result<Arc<Mutex<()>>> {
+    pub(crate) fn child_projection_order(&self, session: &str) -> Result<Arc<ProjectionOrder>> {
         projection_order(&self.child_projection_orders, session, "child")
     }
 
-    pub(crate) fn routing_projection_order(&self, session: &str) -> Result<Arc<Mutex<()>>> {
+    pub(crate) fn routing_projection_order(&self, session: &str) -> Result<Arc<ProjectionOrder>> {
         projection_order(&self.routing_projection_orders, session, "routing")
     }
 
-    pub(crate) fn task_projection_order(&self, session: &str) -> Result<Arc<Mutex<()>>> {
+    pub(crate) fn task_projection_order(&self, session: &str) -> Result<Arc<ProjectionOrder>> {
         projection_order(&self.task_projection_orders, session, "task")
     }
 
@@ -230,28 +234,6 @@ impl JournalService {
             _permit: Arc::new(permit),
         })
     }
-}
-
-fn projection_order(
-    registry: &Mutex<HashMap<String, Weak<Mutex<()>>>>,
-    session: &str,
-    projection: &str,
-) -> Result<Arc<Mutex<()>>> {
-    rw_types::SessionId::validate(session)
-        .map_err(|error| miette!("{projection} projection identity: {error}"))?;
-    let mut orders = registry
-        .lock()
-        .map_err(|_| miette!("{projection} projection registry is poisoned"))?;
-    orders.retain(|_, order| order.strong_count() > 0);
-    if let Some(order) = orders.get(session).and_then(Weak::upgrade) {
-        return Ok(order);
-    }
-    if orders.len() >= MAX_ACTIVE_JOURNALS {
-        return Err(miette!("{projection} projection admission exhausted"));
-    }
-    let order = Arc::new(Mutex::new(()));
-    orders.insert(session.to_owned(), Arc::downgrade(&order));
-    Ok(order)
 }
 
 #[cfg(test)]

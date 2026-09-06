@@ -22,6 +22,13 @@ impl HostQueryService for RuntimeSessionFactory {
             .root(&session)
             .map_err(|message| HostError::Protocol(message.into()))?
             .clone();
+        let order = self
+            .journal_service
+            .child_projection_order(&session.0)
+            .map_err(|error| HostError::Query(error.to_string()))?
+            .acquire()
+            .await
+            .map_err(|error| HostError::Query(error.to_string()))?;
         self.transcripts
             .blocking(move |reader| {
                 let metadata =
@@ -30,7 +37,7 @@ impl HostQueryService for RuntimeSessionFactory {
                             HostError::Persistence("session metadata is unavailable".into())
                         })?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
-                reader.read_children(&session, &scope)
+                reader.read_children(&session, &scope, &order)
             })
             .await
     }

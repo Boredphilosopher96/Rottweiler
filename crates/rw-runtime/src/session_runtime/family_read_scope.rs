@@ -14,21 +14,37 @@ pub(super) async fn resolve(
     target: ChildControlTarget,
 ) -> Result<ChildReadScopeResult, HostError> {
     target.validate().map_err(storage)?;
+    let mut parents = vec![root.0.clone()];
+    parents.extend(
+        target
+            .ancestry
+            .iter()
+            .take(target.ancestry.len().saturating_sub(1))
+            .map(|hop| hop.session_id.0.clone()),
+    );
+    parents.sort();
+    parents.dedup();
+    let mut orders = Vec::with_capacity(parents.len());
+    for parent in parents {
+        orders.push(
+            journals
+                .child_projection_order(&parent)
+                .map_err(storage)?
+                .acquire()
+                .await
+                .map_err(storage)?,
+        );
+    }
     let admission = journals.admit_read().map_err(storage)?;
     let (result, _source) =
         rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            let _orders = orders;
             let mut budget = ProjectionBudget::new();
             let mut parent = root.clone();
             let mut admission = Some(admission);
             let mut previous = None;
             let mut ancestry = Vec::with_capacity(target.ancestry.len());
             for hop in &target.ancestry {
-                let order = journals
-                    .child_projection_order(&parent.0)
-                    .map_err(storage)?;
-                let _order = order
-                    .lock()
-                    .map_err(|_| storage("child projection owner poisoned"))?;
                 let source = if let Some(source) = previous.take() {
                     journals.retarget(source, &parent.0).map_err(storage)?
                 } else {

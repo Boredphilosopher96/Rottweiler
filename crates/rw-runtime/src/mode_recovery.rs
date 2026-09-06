@@ -1,5 +1,5 @@
 //! Registry-independent routing is followed by exact mode-aware prefix validation.
-use crate::journal_service::{JournalReadLease, JournalService};
+use crate::journal_service::{JournalReadLease, JournalService, ProjectionPermit};
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::recovery::{CanonicalRecovery, SessionRoutingIndex};
 use rw_ext::{ExtensionCatalog, ModeRegistry, compose_mode_registry};
@@ -23,11 +23,8 @@ pub(crate) fn fork_route(
     turn: u64,
     requested: Option<SequenceId>,
     include_idle_tail: bool,
+    _order: &ProjectionPermit,
 ) -> Result<ForkRoute> {
-    let order = journals.routing_projection_order(session)?;
-    let _order = order
-        .lock()
-        .map_err(|_| miette!("routing owner poisoned"))?;
     let lease = journals.capture(session)?;
     let mut index = SessionRoutingIndex::open(&lease.view).into_diagnostic()?;
     while index.advance(&lease.view).into_diagnostic()? {}
@@ -46,11 +43,8 @@ pub(crate) fn fork_route(
 pub(crate) fn current_workspace_generation(
     journals: &JournalService,
     session: &str,
+    _order: &ProjectionPermit,
 ) -> Result<u64> {
-    let order = journals.routing_projection_order(session)?;
-    let _order = order
-        .lock()
-        .map_err(|_| miette!("routing owner poisoned"))?;
     let lease = journals.capture(session)?;
     let mut index = SessionRoutingIndex::open(&lease.view).into_diagnostic()?;
     while index.advance(&lease.view).into_diagnostic()? {}

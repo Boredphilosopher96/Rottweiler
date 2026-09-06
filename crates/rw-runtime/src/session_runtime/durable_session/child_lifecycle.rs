@@ -85,22 +85,23 @@ impl ChildLifecycleReader {
         SessionId::validate(&session.0)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let session = session.0.clone();
+        let order = self
+            .sink
+            .journal_service
+            .child_projection_order(&session)
+            .map_err(persistence)?
+            .acquire()
+            .await
+            .map_err(persistence)?;
         let admission = self
             .sink
             .journal_service
             .admit_read()
             .map_err(persistence)?;
-        let order = self
-            .sink
-            .journal_service
-            .child_projection_order(&session)
-            .map_err(persistence)?;
         self.sink
             .reads
             .run((Some(admission), order), move |(admission, order)| {
-                let _order = order
-                    .lock()
-                    .map_err(|_| persistence("child projection owner poisoned"))?;
+                let _order = order;
                 let admission = admission
                     .take()
                     .ok_or_else(|| persistence("child read already started"))?;

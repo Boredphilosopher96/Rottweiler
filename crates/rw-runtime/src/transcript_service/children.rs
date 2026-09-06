@@ -18,23 +18,24 @@ impl TranscriptReader {
         scope: SessionReadScope,
     ) -> Result<OwnedTranscriptRead<SessionChildrenResult>, HostError> {
         SessionId::validate(&session.0).map_err(storage)?;
-        self.blocking_owned(move |reader| reader.read_children(&session, &scope))
+        let order = self
+            .journals
+            .child_projection_order(&session.0)
+            .map_err(storage)?
+            .acquire()
+            .await
+            .map_err(storage)?;
+        self.blocking_owned(move |reader| reader.read_children(&session, &scope, &order))
             .await
     }
     pub(crate) fn read_children(
         &self,
         session: &SessionId,
         scope: &SessionReadScope,
+        _order: &crate::journal_service::ProjectionPermit,
     ) -> Result<SessionChildrenResult, HostError> {
         let mut budget = ProjectionBudget::new();
         self.authorize_scope(session, scope, &mut budget)?;
-        let order = self
-            .journals
-            .child_projection_order(&session.0)
-            .map_err(storage)?;
-        let _order = order
-            .lock()
-            .map_err(|_| storage("child projection owner poisoned"))?;
         let source = self.journals.capture(&session.0).map_err(storage)?;
         let mut index = SubagentLifecycleIndex::open(&source.view).map_err(storage)?;
         let ready = index.is_current(&source.view).map_err(storage)?;
