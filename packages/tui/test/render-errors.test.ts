@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { presentError, sanitizeErrorFragment } from "../src/render"
+import { MAX_ERROR_FRAGMENT_BYTES, MAX_ERROR_REQUEST_BYTES } from "../src/render/errors"
 
 describe("presentError", () => {
   test("uses stable copy for known engine and TUI codes", () => {
@@ -70,4 +71,15 @@ describe("presentError", () => {
     )
     expect(sanitizeErrorFragment("x".repeat(240))).toBe(`${"x".repeat(159)}…`)
   })
+
+  test("bounds retained combining graphemes and normalization input independently of cell width", () => {
+    const huge = `e${"\u0301".repeat(500_000)}`
+    const fragment = sanitizeErrorFragment(huge)
+    expect(Buffer.byteLength(fragment)).toBeLessThanOrEqual(MAX_ERROR_FRAGMENT_BYTES)
+    const result = presentError({ category: huge, code: huge, message: huge, requestId: huge })
+    expect(Buffer.byteLength(result.text)).toBeLessThan(MAX_ERROR_FRAGMENT_BYTES + MAX_ERROR_REQUEST_BYTES + 128)
+    expect(result.severity).toBe("error")
+    expect(sanitizeErrorFragment("🐕".repeat(500_000))).not.toContain("\ufffd")
+  })
+
 })
