@@ -314,6 +314,7 @@ mod checkpoints;
 mod child_plugin_sessions;
 mod dormant_controls;
 mod extensions;
+mod history_acceptance;
 mod model_initialization;
 mod native_search;
 mod plugin_command_session;

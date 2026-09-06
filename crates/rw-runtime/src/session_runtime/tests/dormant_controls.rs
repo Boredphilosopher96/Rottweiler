@@ -21,7 +21,7 @@ use std::{
     },
 };
 
-type RequestCapture = Arc<Mutex<Option<rw_providers::ProviderRequest>>>;
+pub(super) type RequestCapture = Arc<Mutex<Option<rw_providers::ProviderRequest>>>;
 fn command(request: &str) -> CommandMeta {
     CommandMeta {
         protocol_version: rw_types::PROTOCOL_VERSION,
@@ -29,7 +29,7 @@ fn command(request: &str) -> CommandMeta {
         request_id: RequestId(request.into()),
     }
 }
-fn artifact() -> PlanArtifact {
+pub(super) fn artifact() -> PlanArtifact {
     PlanArtifact {
         title: "Review saved plan".into(),
         summary_md: "Restore without inference".into(),
@@ -99,7 +99,7 @@ async fn config(
         )
         .await
 }
-fn factory(
+pub(super) fn factory(
     owner: Arc<RuntimeWorkspaceRootController>,
     storage: &Path,
     request: RequestCapture,
