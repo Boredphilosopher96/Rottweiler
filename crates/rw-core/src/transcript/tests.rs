@@ -399,7 +399,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
         assert!(progress.interpreted_events <= 64);
         assert!(projector.index().io_metrics().bytes_written - io.bytes_written < 4 * 1024 * 1024);
         if progress.rebuilding {
-            assert_eq!(progress.applied_next_sequence, 136);
+            assert_eq!(progress.applied_next_sequence, 137);
             assert!(matches!(
                 projector.index().page(0, 64, 1024 * 1024),
                 Err(TranscriptIndexError::Rebuilding)
@@ -408,7 +408,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
                 saw_rewind = true;
                 journal
                     .append_batch([EngineEvent::CommandFinished {
-                        meta: meta(139),
+                        meta: meta(141),
                         name: "status".into(),
                         message: "appended during repair".into(),
                         unrestorable_paths: vec![],
@@ -427,15 +427,15 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
             assert!(
                 page.rows
                     .iter()
-                    .all(|row| row.source.0 < 55 || row.source.0 >= 135)
+                    .all(|row| row.source.0 < 56 || row.source.0 >= 136)
             );
-            assert_eq!(page.rows.last().expect("last row").source, SequenceId(139));
+            assert_eq!(page.rows.last().expect("last row").source, SequenceId(141));
             let tool = page
                 .rows
                 .iter()
-                .find(|row| row.source == SequenceId(2))
+                .find(|row| row.source == SequenceId(3))
                 .expect("original tool row");
-            assert_eq!(tool.revision, SequenceId(53));
+            assert_eq!(tool.revision, SequenceId(54));
             let TranscriptContent::Tool {
                 status: TranscriptToolStatus::Finished { output, .. },
                 ..
@@ -447,11 +447,11 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
             assert_eq!(
                 projector
                     .index()
-                    .at_or_before_source(SequenceId(55))
+                    .at_or_before_source(SequenceId(56))
                     .expect("removed anchor")
                     .expect("replacement")
                     .source,
-                SequenceId(52)
+                SequenceId(53)
             );
             completed = true;
             break;
@@ -494,17 +494,11 @@ fn mixed_rewind_events() -> Vec<EngineEvent> {
             meta: meta(0),
             turn_id: TurnId("1".into()),
         },
-        turn(
-            1,
-            1,
-            Role::User,
-            vec![Block::Text {
-                text: "original prompt".into(),
-            }],
-        ),
-        start(2, 0),
+        input(1, 1, "original prompt".into())[0].clone(),
+        input(1, 1, "original prompt".into())[1].clone(),
+        start(3, 0),
     ];
-    for sequence in 3..53 {
+    for sequence in 4..54 {
         events.push(EngineEvent::CommandFinished {
             meta: meta(sequence),
             name: "status".into(),
@@ -512,12 +506,12 @@ fn mixed_rewind_events() -> Vec<EngineEvent> {
             unrestorable_paths: vec![],
         });
     }
-    events.push(finish(53, 0, "authoritative complete output"));
+    events.push(finish(54, 0, "authoritative complete output"));
     events.push(EngineEvent::TurnStarted {
-        meta: meta(54),
+        meta: meta(55),
         turn_id: TurnId("2".into()),
     });
-    for sequence in 55..135 {
+    for sequence in 56..136 {
         events.push(turn(
             sequence,
             2,
@@ -528,29 +522,22 @@ fn mixed_rewind_events() -> Vec<EngineEvent> {
         ));
     }
     events.push(EngineEvent::CommandFinished {
-        meta: meta(135),
+        meta: meta(136),
         name: "status".into(),
         message: "survives rewind".into(),
         unrestorable_paths: vec![],
     });
     events.push(EngineEvent::ConversationRewound {
-        meta: meta(136),
+        meta: meta(137),
         to_agent_turn: 1,
         operation_id: "rewind".into(),
         unrestorable_paths: vec![],
     });
     events.push(EngineEvent::TurnStarted {
-        meta: meta(137),
+        meta: meta(138),
         turn_id: TurnId("2".into()),
     });
-    events.push(turn(
-        138,
-        2,
-        Role::User,
-        vec![Block::Text {
-            text: "replacement prompt".into(),
-        }],
-    ));
+    events.extend(input(139, 2, "replacement prompt".into()));
     events
 }
 
@@ -615,16 +602,10 @@ fn encoded_row_budget_can_stop_mid_page_without_skipping_canonical_events() {
     let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
     for first in (0..160).step_by(16) {
         journal
-            .append_batch((first..first + 16).map(|sequence| {
-                turn(
-                    sequence,
-                    1,
-                    Role::User,
-                    vec![Block::Text {
-                        text: "\u{0}".repeat(20_000),
-                    }],
-                )
-            }))
+            .append_batch(
+                (first..first + 16)
+                    .flat_map(|ordinal| input(ordinal * 2, 1, "\u{0}".repeat(20_000))),
+            )
             .expect("bounded raw batch");
     }
     let view = journal.read_view();
@@ -649,7 +630,7 @@ fn encoded_row_budget_can_stop_mid_page_without_skipping_canonical_events() {
             break;
         }
         for row in page.rows {
-            assert_eq!(row.source, SequenceId(ordinal));
+            assert_eq!(row.source, SequenceId(ordinal * 2 + 1));
             assert_eq!(row.ordinal, ordinal);
             ordinal += 1;
         }
@@ -1258,4 +1239,21 @@ fn approval_diff_content_uses_its_exact_canonical_source() {
         )
         .is_err()
     );
+}
+
+fn input(sequence: u64, agent_turn: u64, content: String) -> [EngineEvent; 2] {
+    [
+        EngineEvent::UserMessageAccepted {
+            meta: meta(sequence),
+            agent_turn,
+            content,
+            attachments: vec![],
+        },
+        EngineEvent::ConversationInputCommitted {
+            meta: meta(sequence + 1),
+            agent_turn,
+            accepted_source: SequenceId(sequence),
+            selection: rw_types::conversation_input::InputSelection::Accepted {},
+        },
+    ]
 }
