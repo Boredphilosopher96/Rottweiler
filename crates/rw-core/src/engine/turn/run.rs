@@ -1096,10 +1096,18 @@ pub(super) async fn run_turn(
             mode,
         )
         .await;
-        let Ok(executions) = executions else {
-            status = AgentTurnStatus::Failed;
-            break;
+        let executions = match executions {
+            Ok(executions) => executions,
+            Err(error) => {
+                mark_unsettled(&signals, &cancellation, error.to_string());
+                status = AgentTurnStatus::Failed;
+                break;
+            }
         };
+        let super::tool_requests::CommittedToolBatch {
+            executions,
+            retained,
+        } = executions;
         let interrupted = cancellation.is_cancelled();
         let mut tool_blocks = Vec::new();
         let mut doom_triggered = false;
@@ -1123,23 +1131,16 @@ pub(super) async fn run_turn(
             meta: TurnMeta::default(),
         };
         let (tool_turn, logical, owner) =
-            match super::tool_result_profile::profile(tool_turn, &tasks, &config, &cancellation)
-                .await
-            {
+            match super::tool_result_profile::profile(tool_turn, &tasks, &config, retained).await {
                 Ok(profiled) => profiled,
                 Err(error) => {
-                    send_event(
-                        &signals,
-                        PendingEvent::Error {
-                            message: error.to_string(),
-                        },
-                    );
+                    mark_unsettled(&signals, &cancellation, error.to_string());
                     status = AgentTurnStatus::Failed;
                     break;
                 }
             };
         pending_tool_owner = Some(owner);
-        if persist_event(
+        if let Err(error) = persist_event(
             &signals,
             PendingEvent::ConversationToolResultsCommitted {
                 agent_turn: turn,
@@ -1148,8 +1149,8 @@ pub(super) async fn run_turn(
             },
         )
         .await
-        .is_err()
         {
+            mark_unsettled(&signals, &cancellation, error.to_string());
             status = AgentTurnStatus::Failed;
             break;
         }
@@ -1259,9 +1260,12 @@ pub(super) async fn run_turn(
         let _ = persist_conversation_turn(&signals, turn, &assistant).await;
     }
     let cost = turn_cost.unwrap_or_else(unavailable_cost);
+    let summary = crate::engine::session::ConversationSummary::from_turns(&conversation);
+    drop(conversation);
+    drop(pending_tool_owner);
     TurnOutcome {
         turn,
-        conversation: crate::engine::session::ConversationSummary::from_turns(&conversation),
+        conversation: summary,
         status,
         usage,
         cost,

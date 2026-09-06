@@ -50,6 +50,7 @@ mod titles;
 mod todos;
 mod tool_admission;
 mod tool_order;
+mod tool_result_admission;
 mod ui_actions;
 
 mod citations;

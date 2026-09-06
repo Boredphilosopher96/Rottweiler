@@ -28,6 +28,8 @@ mod todos;
 mod tool_admission;
 mod tool_execution;
 mod tool_requests;
+mod tool_result_budget;
+mod tool_result_closure;
 mod tool_result_profile;
 mod tool_scheduling;
 pub(super) use accounting::BudgetUsage;

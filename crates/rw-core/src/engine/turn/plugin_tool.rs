@@ -89,12 +89,18 @@ pub(in crate::engine) async fn start(
             mode,
         )
         .await;
-        let result = results.and_then(|mut results| {
-            results.pop().map(|result| result.execution).ok_or_else(|| {
-                AgentLoopError::EffectsUnsettled(
-                    "host tool scheduler returned no completion".into(),
-                )
-            })
+        let result = results.and_then(|mut batch| {
+            batch
+                .executions
+                .pop()
+                .map(|result| {
+                    crate::engine::recovery::HistoryRead::new(result.execution, batch.retained)
+                })
+                .ok_or_else(|| {
+                    AgentLoopError::EffectsUnsettled(
+                        "host tool scheduler returned no completion".into(),
+                    )
+                })
         });
         // The same FIFO carries ToolCallStarted/output/Finished first. The actor
         // commits them before exposing this completion to the plugin callback.
@@ -197,7 +203,7 @@ fn prepare(
 
 pub(in crate::engine) async fn finish(
     turn: u64,
-    result: Result<ToolExecution, AgentLoopError>,
+    result: Result<crate::engine::recovery::HistoryRead<ToolExecution>, AgentLoopError>,
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
     events: &crate::engine::live_events::LiveEvents,
@@ -242,6 +248,7 @@ pub(in crate::engine) async fn finish(
             return Ok(());
         }
     };
+    let (execution, _retained) = execution.into_parts();
     let status = if cancelled {
         AgentTurnStatus::Interrupted
     } else if execution.is_error {

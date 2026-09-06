@@ -82,6 +82,10 @@ pub(super) async fn apply_command_tool_calls(
     )
     .await
     .map_err(|error| error.to_string())?;
+    let super::tool_requests::CommittedToolBatch {
+        executions,
+        retained: _retained,
+    } = executions;
     for (call, committed) in calls.into_iter().zip(executions) {
         let execution = committed.execution;
         if execution.is_error {

@@ -112,6 +112,7 @@ pub(in crate::engine) fn validate_mutation_scope(
 
 #[derive(Clone)]
 pub(super) struct ToolExecutionRuntime {
+    pub(super) result_budget: super::tool_result_budget::ToolResultBudget,
     pub(super) coordinator: Arc<OrderedOutputCoordinator>,
     pub(super) checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     pub(super) hooks: Arc<HookDispatcher>,
@@ -360,21 +361,7 @@ pub(super) async fn execute_prepared_tool(
             None => Err(ToolError::Cancelled),
         }
     };
-    let settlement = tool.settle_effects().await;
-    if let Some(message) = settlement.err().map(|error| error.to_string()).or_else(|| {
-        if let Err(ToolError::EffectsUnsettled(message)) = &result {
-            Some(message.clone())
-        } else {
-            None
-        }
-    }) {
-        mark_unsettled(&runtime.signals, &cancellation, message.clone());
-        let mut execution = failed_execution(call, message);
-        execution.unsettled = true;
-        return (execution, true);
-    }
-    output_open.store(false, Ordering::Release);
-    drop(progress);
+    let unproven = matches!(&result, Err(ToolError::EffectsUnsettled(_)));
     let tool_cancelled = matches!(&result, Err(ToolError::Cancelled));
     let (output, is_error, presentation) = match result {
         Ok(mut result) => {
@@ -396,6 +383,20 @@ pub(super) async fn execute_prepared_tool(
         output,
         is_error,
     };
+    runtime.result_budget.admit_execution(&mut execution);
+    let settlement = tool.settle_effects().await;
+    if unproven || settlement.is_err() {
+        let message = settlement.err().map_or_else(
+            || "tool execution did not prove settlement".to_owned(),
+            |error| error.to_string(),
+        );
+        mark_unsettled(&runtime.signals, &cancellation, message.clone());
+        let mut execution = failed_execution(execution.call, message);
+        execution.unsettled = true;
+        return (execution, true);
+    }
+    output_open.store(false, Ordering::Release);
+    drop(progress);
     if !cancellation.is_cancelled() {
         execution = apply_post_tool_hook(
             execution,
@@ -403,9 +404,11 @@ pub(super) async fn execute_prepared_tool(
             runtime.secret_redactor.as_ref(),
             &cancellation,
             &runtime.signals,
+            &runtime.result_budget,
         )
         .await;
     }
+    runtime.result_budget.admit_execution(&mut execution);
     if execution.unsettled {
         return (execution, true);
     }
@@ -438,12 +441,14 @@ pub(super) async fn execute_prepared_tool(
     (execution, true)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_post_tool_hook(
     mut execution: ToolExecution,
     hooks: &HookDispatcher,
     secret_redactor: &dyn SecretRedactor,
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
+    result_budget: &super::tool_result_budget::ToolResultBudget,
 ) -> ToolExecution {
     redact_tool_output(&mut execution.output, secret_redactor);
     let displayed_arguments = redacted_json(
@@ -488,6 +493,13 @@ pub(super) async fn apply_post_tool_hook(
     let HookInput::PostTool(input) = post_tool.input() else {
         unreachable!("dispatcher preserves hook phase")
     };
+    if result_budget
+        .admit(execution.call.index, &input.output)
+        .is_err()
+    {
+        super::tool_result_budget::reject(&mut execution);
+        return execution;
+    }
     execution.output = input.output.clone();
     execution.is_error = input.is_error;
     execution

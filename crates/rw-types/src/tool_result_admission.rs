@@ -47,6 +47,50 @@ impl ToolResultAdmission {
                 "tool result IR requires only ordered result blocks",
             ));
         }
+        Self::measure_shape(turn)
+    }
+
+    /// Combine singleton result profiles without re-encoding their bodies.
+    /// # Errors
+    /// Rejects an empty/oversized batch, invalid component profile, or arithmetic overflow.
+    pub fn combine(parts: &[Self]) -> Result<Self, serde_json::Error> {
+        use serde::de::Error as _;
+        if parts.is_empty() || parts.len() > crate::tool_admission::MAX_PENDING_TOOL_INVOCATIONS {
+            return Err(serde_json::Error::custom("tool result profile count"));
+        }
+        let empty = Self::measure_shape(&Turn {
+            role: Role::Tool,
+            blocks: Vec::new(),
+            meta: TurnMeta::default(),
+        })?;
+        let mut combined = empty.clone();
+        for part in parts {
+            combined.encoded_bytes = part
+                .encoded_bytes
+                .checked_sub(empty.encoded_bytes)
+                .and_then(|n| combined.encoded_bytes.checked_add(n))
+                .ok_or_else(|| serde_json::Error::custom("tool result encoding overflow"))?;
+            combined.nodes = part
+                .nodes
+                .checked_sub(empty.nodes)
+                .and_then(|n| combined.nodes.checked_add(n))
+                .ok_or_else(|| serde_json::Error::custom("tool result structure overflow"))?;
+            combined.string_bytes = part
+                .string_bytes
+                .checked_sub(empty.string_bytes)
+                .and_then(|n| combined.string_bytes.checked_add(n))
+                .ok_or_else(|| serde_json::Error::custom("tool result string overflow"))?;
+            combined.depth = combined.depth.max(part.depth);
+        }
+        combined.encoded_bytes = combined
+            .encoded_bytes
+            .checked_add(parts.len() as u64 - 1)
+            .ok_or_else(|| serde_json::Error::custom("tool result separator overflow"))?;
+        Ok(combined)
+    }
+
+    fn measure_shape(turn: &Turn) -> Result<Self, serde_json::Error> {
+        use serde::de::Error as _;
         let mut bytes = Vec::new();
         JsonWriter::buffer(&mut bytes, MAX_TOOL_RESULT_IR_BYTES, 0)
             .map_err(serde_json::Error::io)?
@@ -66,5 +110,45 @@ impl ToolResultAdmission {
             string_bytes: shape.string_bytes as u64,
             depth: u32::try_from(shape.depth).map_err(serde_json::Error::custom)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+    #[test]
+    fn singleton_profiles_combine_to_exact_full_body_shape() {
+        let mut whole = Turn {
+            role: Role::Tool,
+            blocks: Vec::new(),
+            meta: TurnMeta::default(),
+        };
+        let mut profiles = Vec::new();
+        for (index, text) in ["plain", "escaped\n\0\"é", "nested"]
+            .into_iter()
+            .enumerate()
+        {
+            let block = Block::ToolResult {
+                id: crate::ToolCallId(format!("call-{index}")),
+                output: crate::ToolOutput::Structured {
+                    value: serde_json::json!({"a":[text,{"b":true}]}),
+                },
+                is_error: index == 1,
+            };
+            profiles.push(
+                ToolResultAdmission::measure(&Turn {
+                    role: Role::Tool,
+                    blocks: vec![block.clone()],
+                    meta: TurnMeta::default(),
+                })
+                .expect("singleton"),
+            );
+            whole.blocks.push(block);
+            assert_eq!(
+                ToolResultAdmission::combine(&profiles).expect("combined"),
+                ToolResultAdmission::measure(&whole).expect("whole")
+            );
+        }
     }
 }

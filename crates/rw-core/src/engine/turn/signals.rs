@@ -74,6 +74,14 @@ pub(in crate::engine) async fn handle_turn_signal(
                 state.pending_plan = Some(artifact);
             }
         }
+        TurnSignal::AdmitToolResults {
+            turn,
+            logical,
+            respond,
+        } => {
+            let result = super::tool_result_closure::validate(state, turn, &logical);
+            let _ = respond.send(result);
+        }
         TurnSignal::DurableEvent { kind, respond } => {
             let compaction_accounting = match &kind {
                 PendingEvent::CompactionAttemptFinished {
@@ -459,9 +467,17 @@ pub(in crate::engine) struct CompactionProgress {
 }
 
 pub(in crate::engine) enum TurnSignal {
+    AdmitToolResults {
+        turn: u64,
+        logical: rw_types::tool_result_admission::ToolResultAdmission,
+        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+    },
     PluginToolComplete {
         turn: u64,
-        result: Result<super::tool_requests::ToolExecution, AgentLoopError>,
+        result: Result<
+            crate::engine::recovery::HistoryRead<super::tool_requests::ToolExecution>,
+            AgentLoopError,
+        >,
     },
     Todo(super::todos::TodoRequest),
     EffectsUnsettled {

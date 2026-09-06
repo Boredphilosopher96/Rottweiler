@@ -133,6 +133,11 @@ pub(super) struct PendingToolCall {
     pub(super) index: usize,
 }
 
+pub(in crate::engine) struct CommittedToolBatch {
+    pub(super) executions: Vec<CommittedToolExecution>,
+    pub(super) retained: super::tool_result_budget::ToolResultBudget,
+}
+
 pub(super) struct CommittedToolExecution {
     pub execution: ToolExecution,
     pub source: rw_types::SequenceId,

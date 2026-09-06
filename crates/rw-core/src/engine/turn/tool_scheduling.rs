@@ -38,26 +38,32 @@ pub(super) async fn execute_tool_calls(
     approver: &dyn PermissionApprover,
     signals: &mpsc::UnboundedSender<TurnSignal>,
     mode: SessionMode,
-) -> Result<Vec<super::tool_requests::CommittedToolExecution>, crate::engine::AgentLoopError> {
+) -> Result<super::tool_requests::CommittedToolBatch, crate::engine::AgentLoopError> {
     let mut failure = None;
+    let retained =
+        super::tool_result_budget::ToolResultBudget::new(config, calls.calls.len()).await?;
     let super::tool_admission::AdmittedToolBatch { calls, mut budget } = calls;
+    let mut profiles =
+        super::tool_result_closure::ResultProfiles::new(calls.iter().map(|(call, _)| call))?;
     let mut prepared = Vec::with_capacity(calls.len());
     for (call, displayed) in calls {
-        prepared.push(
-            prepare_tool_call(
-                turn,
-                call,
-                config,
-                approver,
-                cancellation,
-                signals,
-                context,
-                mode,
-                &mut budget,
-                displayed,
-            )
-            .await,
-        );
+        let mut preparation = prepare_tool_call(
+            turn,
+            call,
+            config,
+            approver,
+            cancellation,
+            signals,
+            context,
+            mode,
+            &mut budget,
+            displayed,
+        )
+        .await;
+        if let PreparedToolCall::Complete(execution) = &mut preparation {
+            retained.admit_execution(execution);
+        }
+        prepared.push(preparation);
     }
     let coordinator = Arc::new(OrderedOutputCoordinator::new(
         turn,
@@ -79,6 +85,7 @@ pub(super) async fn execute_tool_calls(
         signals.clone(),
     ));
     let execution_runtime = ToolExecutionRuntime {
+        result_budget: retained.clone(),
         coordinator: Arc::clone(&coordinator),
         checkpoints: Arc::clone(&config.checkpoints),
         hooks: Arc::clone(&config.hooks),
@@ -185,7 +192,24 @@ pub(super) async fn execute_tool_calls(
             subagents.advance_after_tool(execution_index);
             continue;
         }
+        retained.admit_execution(&mut execution);
         redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
+        retained.admit_execution(&mut execution);
+        let admitted = profiles
+            .admit(next, execution, turn, tasks, config, &retained, signals)
+            .await;
+        let mut execution = match admitted {
+            Ok(execution) => execution,
+            Err(error) => {
+                mark_unsettled(signals, cancellation, error.to_string());
+                failure.get_or_insert(error);
+                next = next.saturating_add(1);
+                coordinator.advance(next);
+                subagents.advance_after_tool(next - 1);
+                continue;
+            }
+        };
+        retained.settled(&execution);
         let presentation = execution.presentation.as_ref().and_then(|plan| {
             plan.project(&execution.output, |text| {
                 config.secret_redactor.redact(text)
@@ -232,6 +256,9 @@ pub(super) async fn execute_tool_calls(
     }
     match failure {
         Some(error) => Err(error),
-        None => Ok(ordered),
+        None => Ok(super::tool_requests::CommittedToolBatch {
+            executions: ordered,
+            retained,
+        }),
     }
 }
