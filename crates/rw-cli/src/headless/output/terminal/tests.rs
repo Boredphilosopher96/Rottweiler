@@ -262,3 +262,47 @@ async fn output_stall_has_a_finite_refusal_and_restores_descriptor_flags() {
     );
     assert_eq!(terminal.output_slot.available_permits(), 1);
 }
+
+#[tokio::test]
+async fn cancelling_close_retains_receipt_until_physical_finalization() {
+    let (input, _input_peer) = UnixStream::pair().expect("input");
+    let (output, _output_peer) = UnixStream::pair().expect("output");
+    let budget = Arc::new(Semaphore::new(1));
+    let active = budget.clone().try_acquire_owned().expect("scope");
+    let (entered, finalizing) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let (_receive, _interrupts, mut terminal) = Terminal::spawn_with_finalizer(
+        duplicate(&input).expect("input descriptor"),
+        duplicate(&output).expect("output descriptor"),
+        active,
+        move || {
+            let _ = entered.send(());
+            wait.recv_timeout(Duration::from_secs(5))
+                .expect("release physical finalizer");
+        },
+    )
+    .await
+    .expect("worker");
+    {
+        let closing = terminal.close();
+        tokio::pin!(closing);
+        tokio::select! {
+            entered = finalizing => entered.expect("worker owns pending finalization"),
+            result = &mut closing => panic!("close finished before physical finalization: {result:?}"),
+        }
+    }
+    assert_eq!(budget.available_permits(), 0);
+    assert!(terminal.finished.is_some());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), terminal.close())
+            .await
+            .is_err()
+    );
+    release.send(()).expect("settle worker");
+    terminal
+        .close()
+        .await
+        .expect("retry observes actual completion");
+    assert_eq!(budget.available_permits(), 1);
+    assert!(terminal.finished.is_none());
+}

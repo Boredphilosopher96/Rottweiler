@@ -79,6 +79,15 @@ impl Terminal {
         output: OwnedFd,
         active: OwnedSemaphorePermit,
     ) -> Result<(InputReceiver, Interrupts, Self)> {
+        Self::spawn_with_finalizer(input, output, active, || {}).await
+    }
+
+    async fn spawn_with_finalizer(
+        input: OwnedFd,
+        output: OwnedFd,
+        active: OwnedSemaphorePermit,
+        finalize: impl FnOnce() + Send + 'static,
+    ) -> Result<(InputReceiver, Interrupts, Self)> {
         let lease = rw_resources::acquire(
             rw_resources::ResourceClass::Blocking,
             std::future::pending(),
@@ -113,6 +122,7 @@ impl Terminal {
                         &requests,
                         &interrupt_send,
                     );
+                    finalize();
                     drop(requests);
                     drop(send);
                     result
@@ -166,8 +176,10 @@ impl Terminal {
     }
     pub(super) async fn close(&mut self) -> Result<()> {
         self.wake.cancel();
-        if let Some(finished) = self.finished.take() {
-            finished.await.into_diagnostic()?.into_diagnostic()?;
+        if let Some(finished) = self.finished.as_mut() {
+            let result = finished.await;
+            self.finished = None;
+            result.into_diagnostic()?.into_diagnostic()?;
         }
         Ok(())
     }
