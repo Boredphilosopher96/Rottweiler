@@ -39,7 +39,7 @@ impl ChildControlTarget {
         let mut seen = std::collections::BTreeSet::new();
         for id in &self.ancestry {
             SessionId::validate(&id.session_id.0).map_err(|_| "child ancestry session identity")?;
-            if id.subagent_id.0.is_empty() || !seen.insert(&id.session_id) {
+            if id.subagent_id.0.is_empty() || !seen.insert(&id.session_id.0) {
                 return Err("child control ancestry identity");
             }
         }
