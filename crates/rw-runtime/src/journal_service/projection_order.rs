@@ -1,4 +1,4 @@
-//! Session-local publication waits precede shared journal and worker admission.
+//! Bounded publication waits precede shared journal and worker admission.
 use miette::{Result, miette};
 use std::{
     collections::HashMap,
@@ -22,14 +22,21 @@ pub(crate) struct ProjectionPermit {
 }
 
 impl ProjectionOrder {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            writer: Arc::new(Semaphore::new(1)),
+            waiters: Arc::new(Semaphore::new(MAX_PROJECTION_WAITERS)),
+        })
+    }
+
     pub(crate) async fn acquire(self: Arc<Self>) -> Result<ProjectionPermit> {
         let waiting = Arc::clone(&self.waiters)
             .try_acquire_owned()
-            .map_err(|_| miette!("session projection wait admission is exhausted"))?;
+            .map_err(|_| miette!("publication wait admission is exhausted"))?;
         let writer = Arc::clone(&self.writer)
             .acquire_owned()
             .await
-            .map_err(|_| miette!("session projection owner is closed"))?;
+            .map_err(|_| miette!("publication owner is closed"))?;
         drop(waiting);
         Ok(ProjectionPermit {
             _owner: self,
@@ -55,10 +62,7 @@ pub(super) fn projection_order(
     if orders.len() >= super::MAX_ACTIVE_JOURNALS {
         return Err(miette!("{projection} projection admission exhausted"));
     }
-    let order = Arc::new(ProjectionOrder {
-        writer: Arc::new(Semaphore::new(1)),
-        waiters: Arc::new(Semaphore::new(MAX_PROJECTION_WAITERS)),
-    });
+    let order = ProjectionOrder::new();
     orders.insert(session.to_owned(), Arc::downgrade(&order));
     Ok(order)
 }

@@ -1,6 +1,24 @@
 use super::*;
 
 impl RuntimeSessionFactory {
+    pub(super) async fn fork_journal_work<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Self) -> Result<R, HostError> + Send + 'static,
+    ) -> Result<R, HostError> {
+        let order = Arc::clone(&self.fork_journal_order)
+            .acquire()
+            .await
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        let factory = self.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            let _order = order;
+            let _lock = factory.acquire_fork_journal_lock()?;
+            work(&factory)
+        })
+        .await
+        .map_err(|_| HostError::Persistence("fork journal worker failed".into()))?
+    }
+
     pub(super) fn fork_journal_directory(&self) -> PathBuf {
         self.options
             .storage_root
@@ -99,17 +117,18 @@ impl RuntimeSessionFactory {
                 ));
             }
             let file = fs::File::from(descriptor);
-            rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-                .map_err(|_| HostError::Persistence("fork journal lock failed".to_owned()))?;
-            Ok(ForkJournalLock { _file: file })
+            let lock = rw_store::session::AdvisoryFileLock::try_exclusive(file).map_err(|_| {
+                HostError::Persistence("fork journal ownership is unavailable".to_owned())
+            })?;
+            Ok(ForkJournalLock { _file: lock })
         }
         #[cfg(not(unix))]
         {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             Ok(ForkJournalLock {
-                _guard: LOCK
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                _guard: LOCK.try_lock().map_err(|_| {
+                    HostError::Persistence("fork journal ownership is unavailable".into())
+                })?,
             })
         }
     }
@@ -662,8 +681,7 @@ impl RuntimeSessionFactory {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn recover_fork_operations(&self) -> Result<(), HostError> {
-        let _lock = self.acquire_fork_journal_lock()?;
+    pub(super) fn recover_fork_operations_unlocked(&self) -> Result<(), HostError> {
         let directory = self.ensure_fork_journal_directory()?;
         let mut completed = Vec::new();
         let mut pending = 0_usize;

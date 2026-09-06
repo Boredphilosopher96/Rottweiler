@@ -7,7 +7,7 @@ mod event_log;
 #[cfg(unix)]
 mod file_lock;
 #[cfg(unix)]
-pub(crate) use file_lock::AdvisoryFileLock;
+pub use file_lock::AdvisoryFileLock;
 mod index;
 mod index_read;
 /// Segmented journal storage and bounded read views.

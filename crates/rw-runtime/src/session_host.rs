@@ -181,7 +181,7 @@ impl ForkJournalState {
 
 struct ForkJournalLock {
     #[cfg(unix)]
-    _file: fs::File,
+    _file: rw_store::session::AdvisoryFileLock,
     #[cfg(not(unix))]
     _guard: std::sync::MutexGuard<'static, ()>,
 }
@@ -245,6 +245,7 @@ impl RuntimeHostOptions {
 #[derive(Clone)]
 pub struct RuntimeSessionFactory {
     receipt_io: Arc<tokio::sync::Mutex<()>>,
+    fork_journal_order: Arc<crate::journal_service::ProjectionOrder>,
     plugin_runtime_budget: Arc<crate::extension_runtime::PluginRuntimeBudget>,
     wasm_workers: Arc<rw_ext::WasmWorkerPool>,
     index_pool: Arc<rw_tools::WorkspaceIndexPool>,
@@ -441,6 +442,7 @@ impl RuntimeSessionFactory {
                 .map_err(|error| HostError::Persistence(error.to_string()))?;
         let factory = Self {
             receipt_io: Arc::default(),
+            fork_journal_order: crate::journal_service::ProjectionOrder::new(),
             provider_admission: Arc::new(provider_admission),
             transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(
                 &journal_service,
@@ -455,7 +457,9 @@ impl RuntimeSessionFactory {
             allowed_workspaces: Arc::new(allowed),
             model_catalog: Arc::new(CachedModelCatalog::with_initial(source, initial_catalog)),
         };
-        factory.recover_fork_operations()?;
+        factory
+            .fork_journal_work(Self::recover_fork_operations_unlocked)
+            .await?;
         Ok(factory)
     }
 

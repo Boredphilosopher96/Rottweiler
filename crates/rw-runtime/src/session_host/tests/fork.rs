@@ -663,7 +663,7 @@ async fn fork_journal_cross_process_lock_helper() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn fork_recovery_waits_for_cross_process_journal_lock() {
+async fn fork_recovery_rejects_active_cross_process_journal_owner() {
     let root = tempdir().expect("root");
     let workspace = private_test_directory(&root.path().join("workspace"));
     let factory = factory(root.path(), &workspace).await;
@@ -686,25 +686,21 @@ async fn fork_recovery_waits_for_cross_process_journal_lock() {
     }
     assert!(ready.exists(), "helper acquired cross-process lock");
 
-    let (send, receive) = std::sync::mpsc::channel();
-    let recovery = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().expect("recovery runtime");
-        let result = runtime.block_on(RuntimeSessionFactory::new(options));
-        send.send(result.is_ok()).expect("recovery result");
-        drop(result);
-    });
+    let recovery = tokio::time::timeout(
+        Duration::from_secs(2),
+        RuntimeSessionFactory::new(options.clone()),
+    )
+    .await
+    .expect("cross-process contention must not wait for lock release");
     assert!(
-        receive.recv_timeout(Duration::from_millis(100)).is_err(),
-        "recovery must wait while another process owns the journal lock"
+        recovery.is_err(),
+        "another process retains exclusive journal ownership"
     );
     fs::write(&release, b"release").expect("release marker");
     assert!(child.wait().expect("helper exit").success());
-    assert!(
-        receive
-            .recv_timeout(Duration::from_secs(5))
-            .expect("recovery completes")
-    );
-    recovery.join().expect("recovery thread");
+    RuntimeSessionFactory::new(options)
+        .await
+        .expect("recovery after explicit owner release");
 }
 
 #[tokio::test]

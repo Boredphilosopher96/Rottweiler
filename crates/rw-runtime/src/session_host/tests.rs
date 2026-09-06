@@ -12,6 +12,7 @@ use tempfile::tempdir;
 use super::*;
 mod command_receipts;
 mod fork;
+mod fork_admission;
 mod workspace;
 
 #[tokio::test]

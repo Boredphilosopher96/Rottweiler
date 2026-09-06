@@ -74,10 +74,8 @@ impl SessionFactory for RuntimeSessionFactory {
         &self,
         key: &ForkOperationKey,
     ) -> Result<ForkOperationState, HostError> {
-        let factory = self.clone();
         let key = key.clone();
-        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-            let _lock = factory.acquire_fork_journal_lock()?;
+        self.fork_journal_work(move |factory| {
             let Some(journal) = factory.load_fork_journal_unlocked(&key)? else {
                 return Ok(ForkOperationState::Missing);
             };
@@ -100,7 +98,6 @@ impl SessionFactory for RuntimeSessionFactory {
             }
         })
         .await
-        .map_err(|_| HostError::Persistence("fork journal worker failed".to_owned()))?
     }
 
     async fn prepare_fork_operation(
@@ -115,9 +112,7 @@ impl SessionFactory for RuntimeSessionFactory {
             .acquire()
             .await
             .map_err(|error| HostError::Persistence(error.to_string()))?;
-        let factory = self.clone();
-        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-            let _lock = factory.acquire_fork_journal_lock()?;
+        self.fork_journal_work(move |factory| {
             if let Some(existing) = factory.load_fork_journal_unlocked(&operation.key)? {
                 return Ok(Self::journal_operation(&existing));
             }
@@ -165,7 +160,6 @@ impl SessionFactory for RuntimeSessionFactory {
             }
         })
         .await
-        .map_err(|_| HostError::Persistence("fork journal worker failed".to_owned()))?
     }
 
     async fn fork(&self, request: ForkSessionRequest) -> Result<HostedSession, HostError> {
@@ -191,9 +185,7 @@ impl SessionFactory for RuntimeSessionFactory {
             .acquire()
             .await
             .map_err(|error| HostError::Persistence(error.to_string()))?;
-        let factory = self.clone();
-        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-            let _lock = factory.acquire_fork_journal_lock()?;
+        self.fork_journal_work(move |factory| {
             let mut journal = factory
                 .load_fork_journal_unlocked(&operation_key)?
                 .ok_or_else(|| {
@@ -232,8 +224,7 @@ impl SessionFactory for RuntimeSessionFactory {
             }
             Ok(())
         })
-        .await
-        .map_err(|_| HostError::Persistence("fork storage worker failed".to_owned()))??;
+        .await?;
         self.compose(child_session, workspace, None, true).await
     }
 
@@ -242,11 +233,9 @@ impl SessionFactory for RuntimeSessionFactory {
         key: &ForkOperationKey,
         result: &CompletedForkOperation,
     ) -> Result<CompletedForkOperation, HostError> {
-        let factory = self.clone();
         let key = key.clone();
         let result = result.clone();
-        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-            let _lock = factory.acquire_fork_journal_lock()?;
+        self.fork_journal_work(move |factory| {
             let mut journal = factory.load_fork_journal_unlocked(&key)?.ok_or_else(|| {
                 HostError::Persistence("fork operation was not prepared".to_owned())
             })?;
@@ -285,17 +274,14 @@ impl SessionFactory for RuntimeSessionFactory {
             Ok(Self::completed_fork_result(&result))
         })
         .await
-        .map_err(|_| HostError::Persistence("fork journal worker failed".to_owned()))?
     }
 
     async fn abandon_prepared_fork_operation(
         &self,
         key: &ForkOperationKey,
     ) -> Result<(), HostError> {
-        let factory = self.clone();
         let key = key.clone();
-        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-            let _lock = factory.acquire_fork_journal_lock()?;
+        self.fork_journal_work(move |factory| {
             let Some(journal) = factory.load_fork_journal_unlocked(&key)? else {
                 return Ok(());
             };
@@ -324,7 +310,6 @@ impl SessionFactory for RuntimeSessionFactory {
                 })
         })
         .await
-        .map_err(|_| HostError::Persistence("fork journal worker failed".to_owned()))?
     }
 
     async fn persisted_sessions(&self) -> Result<Vec<SessionDescriptor>, HostError> {

@@ -2,15 +2,23 @@
 
 use std::{fs::File, io};
 
+/// A nonblocking advisory lock released explicitly before its descriptor closes.
+/// The caller supplies an already validated file identity.
 #[derive(Debug)]
-pub(crate) struct AdvisoryFileLock(File);
+pub struct AdvisoryFileLock(File);
 
 impl AdvisoryFileLock {
-    pub(crate) fn try_exclusive(file: File) -> io::Result<Self> {
+    /// Acquires exclusive ownership without waiting for another process.
+    /// # Errors
+    /// Returns the operating-system error when ownership is unavailable.
+    pub fn try_exclusive(file: File) -> io::Result<Self> {
         Self::try_acquire(file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
     }
 
-    pub(crate) fn try_shared(file: File) -> io::Result<Self> {
+    /// Acquires shared capture ownership without waiting for an exclusive writer.
+    /// # Errors
+    /// Returns the operating-system error when ownership is unavailable.
+    pub fn try_shared(file: File) -> io::Result<Self> {
         Self::try_acquire(file, rustix::fs::FlockOperation::NonBlockingLockShared)
     }
 
