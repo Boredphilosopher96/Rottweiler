@@ -33,10 +33,7 @@ impl HistoricalReplayEngine {
         })
     }
 
-    async fn query(
-        &self,
-        command: ClientCommand,
-    ) -> std::result::Result<HostReadResult, HostError> {
+    fn validate_read(&self, command: &ClientCommand) -> std::result::Result<(), HostError> {
         let (ClientCommand::ReadTranscript {
             session_id: session,
             scope,
@@ -61,7 +58,7 @@ impl HistoricalReplayEngine {
             session_id: session,
             scope,
             ..
-        }) = &command
+        }) = command
         else {
             return Err(HostError::Protocol(
                 "query is unavailable in historical view".into(),
@@ -73,6 +70,14 @@ impl HistoricalReplayEngine {
         if root != &self.session_id {
             return Err(HostError::Protocol("historical read root mismatch".into()));
         }
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        command: ClientCommand,
+    ) -> std::result::Result<HostReadResult, HostError> {
+        self.validate_read(&command)?;
         let meta = rw_core::CommandAckMeta {
             protocol_version: rw_core::PROTOCOL_VERSION,
             client_id: command.meta().client_id.clone(),
