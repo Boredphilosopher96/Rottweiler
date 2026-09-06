@@ -2,6 +2,16 @@
 use super::{CanonicalHistory, RecoveryError, RecoveryHead, projector::key, state::PROMPTS};
 
 impl CanonicalHistory {
+    /// Resolve the latest effective prompt without visiting discarded source rows.
+    /// # Errors
+    /// Rejects index corruption or storage failure.
+    pub fn latest_prompt_turn(&self) -> Result<Option<u64>, RecoveryError> {
+        Ok(self
+            .read
+            .last_before(PROMPTS, 0, self.head.control.next_turn)?
+            .map(|row| row.key.ordinal))
+    }
+
     /// Select the first recorded context assembly for an effective agent turn.
     /// The index transaction and raw source remain pinned to this captured reader.
     /// # Errors

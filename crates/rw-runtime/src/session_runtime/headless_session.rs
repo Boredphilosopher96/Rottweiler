@@ -355,19 +355,24 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         LocalSessionPurpose::PromptDump { turn } => Some(turn),
     };
     let inspection = prompt_dump_turn.is_some();
-    let recorded_prompt_shape = if let Some(turn) = prompt_dump_turn.flatten() {
-        Some(
-            durable_sink
-                .prompt_shapes
-                .shape_for_turn(turn)?
-                .ok_or_else(|| {
-                    miette!(
-                        "exact request shape is unavailable for historical turn {turn}; its required prompt-shape metadata is missing"
-                    )
-                })?,
-        )
-    } else if inspection {
-        durable_sink.prompt_shapes.latest_shape()?
+    let recorded_prompt_shape = if inspection {
+        let requested = prompt_dump_turn.flatten();
+        let source = durable_sink
+            .read_canonical(move |history| {
+                let Some(turn) = requested.or(history.latest_prompt_turn()?) else {
+                    return Ok(None);
+                };
+                let selected = history.prompt_at_turn(turn)?;
+                let source = selected.head().next_sequence.checked_sub(1).ok_or(
+                    rw_core::recovery::RecoveryError::Invalid("historical prompt source is absent"),
+                )?;
+                Ok(Some((turn, source)))
+            })
+            .await
+            .map_err(display_agent_error)?;
+        source.map(|(turn, source)| durable_sink.prompt_shapes.shape_at_source(turn, source)?
+            .ok_or_else(|| miette!("exact request shape is unavailable for historical turn {turn}; its required prompt-shape metadata is missing")))
+            .transpose()?
     } else {
         None
     };

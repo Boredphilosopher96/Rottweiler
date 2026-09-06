@@ -54,6 +54,7 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
         .expect("snapshot")
         .bind_source(&journal.read_view())
         .expect("reader");
+    assert_eq!(before.latest_prompt_turn().expect("latest prompt"), Some(2));
     let prompt = before.prompt_at_turn(2).expect("indexed prompt");
     assert_eq!(prompt.head().next_sequence, 9);
     assert!(
@@ -102,6 +103,10 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
     );
     assert!(after.prompt_at_turn(1).is_ok());
     assert_eq!(
+        after.latest_prompt_turn().expect("retained prompt"),
+        Some(1)
+    );
+    assert_eq!(
         before
             .prompt_at_turn(2)
             .expect("pinned source")
@@ -116,6 +121,10 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
         .expect("snapshot")
         .bind_source(&journal.read_view())
         .expect("reader");
+    assert_eq!(
+        current.latest_prompt_turn().expect("replacement prompt"),
+        Some(2)
+    );
     let replacement = current.prompt_at_turn(2).expect("replacement prompt");
     assert_eq!(replacement.head().next_sequence, 16);
     assert_eq!(

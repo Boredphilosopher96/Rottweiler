@@ -191,6 +191,7 @@ impl PromptShapeJournal {
         active.recorded = true;
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn shape_for_turn(
         &self,
         turn: u64,
@@ -204,6 +205,7 @@ impl PromptShapeJournal {
     ) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
         self.read(Some(turn), Some(source))
     }
+    #[cfg(test)]
     pub(super) fn latest_shape(&self) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
         self.read(None, None)
     }
