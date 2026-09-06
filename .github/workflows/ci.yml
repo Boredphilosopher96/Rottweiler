@@ -258,6 +258,7 @@ jobs:
         with:
           workspaces: ". -> target/native-candidate"
           key: native-candidate
+          cache-on-failure: true
       - name: Build and enforce native component sizes
         id: candidate
         run: >-
@@ -311,6 +312,7 @@ jobs:
         with:
           workspaces: ". -> target/native-candidate"
           key: native-candidate
+          cache-on-failure: true
       - name: Build and enforce native component sizes
         id: candidate
         run: >-
