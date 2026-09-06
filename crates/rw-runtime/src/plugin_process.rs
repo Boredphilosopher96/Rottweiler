@@ -105,8 +105,8 @@ async fn handoff_in_worker(
     })
     .await
     .map_err(|failure| match failure {
-        rw_resources::WorkError::Admission(error) => {
-            PluginLaunchError::Rejected(process_error(&error))
+        rw_resources::WorkError::Admission(cause) => {
+            PluginLaunchError::Rejected(error(&cause.to_string()))
         }
         rw_resources::WorkError::Worker(_) => PluginLaunchError::EffectsUnsettled {
             message: "plugin launch worker exited without handoff proof".into(),
