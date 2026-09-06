@@ -17,17 +17,33 @@ fn profile() -> PluginSandboxProfile {
 }
 
 fn fixture(script: &str) -> (tempfile::TempDir, PluginProcessConfig) {
+    fixture_with_executable(std::path::Path::new("/bin/sh"), script)
+}
+
+fn native_fixture(script: &str) -> (tempfile::TempDir, PluginProcessConfig) {
+    let path = std::env::var_os("PATH").expect("PATH");
+    let bun = std::env::split_paths(&path)
+        .map(|directory| directory.join("bun"))
+        .find(|path| path.is_file())
+        .expect("Bun is required for native plugin conformance");
+    fixture_with_executable(&bun, script)
+}
+
+fn fixture_with_executable(
+    source: &std::path::Path,
+    script: &str,
+) -> (tempfile::TempDir, PluginProcessConfig) {
     let directory = tempfile::tempdir().expect("code fixture");
     let root = directory.path().canonicalize().expect("canonical code");
     let executable = root.join("interpreter");
-    fs::copy("/bin/sh", &executable).expect("fixture executable");
-    fs::write(root.join("entry.sh"), script).expect("approved entry");
+    fs::copy(source, &executable).expect("fixture executable");
+    fs::write(root.join("entry.js"), script).expect("approved entry");
     fs::write(root.join("unlisted"), b"not approved").expect("unlisted file");
     let config = PluginProcessConfig::new(executable)
         .and_then(|config| config.with_cwd(&root))
         .and_then(|config| config.with_code_root(&root))
-        .and_then(|config| config.with_argv(["entry.sh"]))
-        .and_then(|config| config.with_attested_files([root.join("entry.sh")]))
+        .and_then(|config| config.with_argv(["entry.js"]))
+        .and_then(|config| config.with_attested_files([root.join("entry.js")]))
         .expect("approved fixture config");
     (directory, config)
 }
@@ -39,19 +55,22 @@ fn copied_code_contains_only_attested_files_and_rejects_precapture_replacement()
     let entry = PathBuf::from(&bytes.args(&config)[0]);
     assert_eq!(fs::read(&entry).expect("copy"), b"printf approved");
     assert!(!bytes.cwd(&config).join("unlisted").exists());
-    fs::write(config.cwd().join("entry.sh"), "printf replaced").expect("same-length replacement");
+    fs::write(config.cwd().join("entry.js"), "printf replaced").expect("same-length replacement");
     assert!(LaunchBytes::capture(&config, &profile()).is_err());
     assert_eq!(fs::read(entry).expect("pinned copy"), b"printf approved");
 }
 
 #[tokio::test]
 async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execution() {
-    let (_directory, config) = fixture("test ! -e unlisted || exit 9; printf approved");
+    let _admission = crate::native_fixture::admit().await;
+    let (_directory, config) = native_fixture(
+        "import { existsSync } from 'node:fs'; if (existsSync('unlisted')) process.exit(9); process.stdout.write('approved');",
+    );
     let profile = profile();
     let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
     fs::write(config.executable(), b"not an executable anymore").expect("replace executable bytes");
-    fs::write(config.cwd().join("entry.sh"), "printf replaced").expect("replace code bytes");
+    fs::write(config.cwd().join("entry.js"), "printf replaced").expect("replace code bytes");
     let scratch = tempfile::tempdir().expect("scratch");
     let helper = helper_executable().expect("explicit immutable helper prerequisite");
     let SpawnedPlugin {
@@ -116,7 +135,10 @@ async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execu
 
 #[tokio::test]
 async fn dropped_handoff_keeps_code_until_physical_retirement() {
-    let (_directory, config) = fixture("while :; do :; done");
+    let _admission = crate::native_fixture::admit().await;
+    let (_directory, config) = native_fixture(
+        "process.stdout.write('ready'); await new Promise(() => { setInterval(() => {}, 1000); });",
+    );
     let profile = profile();
     let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
@@ -135,7 +157,7 @@ async fn dropped_handoff_keeps_code_until_physical_retirement() {
         &[scratch.path().to_path_buf()],
     )
     .expect("spawn");
-    let launched = attach_supervisor(
+    let mut launched = attach_supervisor(
         child,
         proxy,
         &config,
@@ -145,6 +167,7 @@ async fn dropped_handoff_keeps_code_until_physical_retirement() {
     )
     .await
     .expect("handoff");
+    assert_ready(&mut launched.stdout).await;
     assert!(pinned_root.exists());
     drop(launched);
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -171,7 +194,10 @@ fn writable_scratch_cannot_include_or_replace_the_approved_code_view() {
 
 #[tokio::test]
 async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
-    let (_directory, config) = fixture("while :; do :; done");
+    let _admission = crate::native_fixture::admit().await;
+    let (_directory, config) = native_fixture(
+        "process.stdout.write('ready'); await new Promise(() => { setInterval(() => {}, 1000); });",
+    );
     let profile = profile();
     let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
@@ -190,6 +216,8 @@ async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
         &[scratch.path().to_path_buf()],
     )
     .expect("spawn");
+    let mut child = child;
+    assert_ready(child.stdout.as_mut().expect("child stdout")).await;
     let pending = attach_supervisor(
         child,
         proxy,
@@ -210,4 +238,13 @@ async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
     })
     .await
     .expect("unpolled handoff transfers actual retirement, without leaked capacity");
+}
+
+async fn assert_ready(stdout: &mut (impl tokio::io::AsyncRead + Unpin)) {
+    let mut marker = [0; 5];
+    tokio::time::timeout(Duration::from_secs(3), stdout.read_exact(&mut marker))
+        .await
+        .expect("native fixture readiness deadline")
+        .expect("native fixture must execute before retirement");
+    assert_eq!(&marker, b"ready");
 }
