@@ -7,6 +7,7 @@ use super::{
     SubagentTurnResult,
 };
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use rw_tools::{CancellationToken, ToolRegistry};
 use rw_types::{DiffArtifact, SessionId};
 use std::{
@@ -14,6 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tracing::Instrument;
 
 pub(super) const POLICY_BUDGET: usize = 32 * 1024 * 1024;
 pub(super) fn admit_policy(
@@ -158,34 +160,45 @@ impl DeferredActorSession {
     }
 }
 fn spawn_preparation(state: Arc<Mutex<State>>, recipe: Arc<Recipe>, done: watch::Sender<bool>) {
-    tokio::spawn(async move {
-        // The task owns preparation even when its initiating run/cancel/close caller drops.
-        // This async bridge cannot hold a finite I/O permit across nested admitted work.
-        let builder = recipe.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            tokio::runtime::Handle::current().block_on(builder.prepare())
-        })
-        .await
-        .map_err(|error| {
-            OrchestrationError::EffectsUnsettled(format!("child preparation failed: {error}"))
-        })
-        .and_then(std::convert::identity)
-        .and_then(|config| {
-            crate::SessionActor::spawn(config)
-                .map_err(|error| OrchestrationError::Session(error.to_string()))
-        });
-        let mut state = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.phase = match result {
-            Ok(handle) => Phase::Live(Arc::new(ActorSubagentSession { handle })),
-            Err(error) => Phase::Failed {
-                _recipe: recipe,
-                reason: error.to_string(),
-            },
-        };
-        done.send_replace(true);
-    });
+    let span = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            // This owner outlives its initiating caller. Preparation awaits its own
+            // admitted I/O/CPU jobs without occupying a blocking thread or permit.
+            let result = std::panic::AssertUnwindSafe(recipe.prepare())
+                .catch_unwind()
+                .await
+                .map_err(|_| {
+                    OrchestrationError::EffectsUnsettled("child preparation panicked".into())
+                })
+                .and_then(std::convert::identity);
+            let result = match result {
+                Ok(config) => {
+                    rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+                        crate::SessionActor::spawn(config)
+                    })
+                    .await
+                    .map_err(|error| OrchestrationError::EffectsUnsettled(error.to_string()))
+                    .and_then(|result| {
+                        result.map_err(|error| OrchestrationError::Session(error.to_string()))
+                    })
+                }
+                Err(error) => Err(error),
+            };
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.phase = match result {
+                Ok(handle) => Phase::Live(Arc::new(ActorSubagentSession { handle })),
+                Err(error) => Phase::Failed {
+                    _recipe: recipe,
+                    reason: error.to_string(),
+                },
+            };
+            done.send_replace(true);
+        }
+        .instrument(span),
+    );
 }
 fn closed() -> OrchestrationError {
     OrchestrationError::Session("child session is closed".into())
