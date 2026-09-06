@@ -184,12 +184,20 @@ Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard 
 
 ### OpenTUI test surface
 
-OpenTUI 0.4.5 exposes a public `@opentui/core/testing` entry point. Its
+OpenTUI exposes a public `@opentui/core/testing` entry point.
 Source TUI suites require an explicit `ROTTWEILER_OPENTUI_LIBRARY` from
 `python3 scripts/build-opentui-native.py` before the test or measurement starts.
 The package preload verifies its source, artifact, license, and lifetime-proof
 receipt before OpenTUI imports the library. Missing or stale preparation fails;
 source tests do not fall back to the npm native binary or compile inside gates.
+
+Native renderer builds use the worktree's `target/opentui-native` cache by default.
+`ROTTWEILER_NATIVE_CACHE_DIR` selects an explicit absolute cache directory for
+CI jobs whose Cargo cache pruning does not preserve renderer receipts/licenses.
+Cache location does not change the native source/toolchain identity. Under its
+build lock, the explicit builder discards an incomplete or invalid cache key and
+rebuilds it with the required lifetime probe. Acceptance verification remains
+read-only and rejects every incomplete, stale, or modified artifact.
 
 `createTestRenderer` uses the native renderer with in-memory output and provides
 deterministic render flushing, mock keyboard/mouse input, resize control,

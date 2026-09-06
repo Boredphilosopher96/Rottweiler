@@ -80,3 +80,49 @@ class NativeRendererTests(unittest.TestCase):
             library.write_bytes(b"changed")
             with self.assertRaises(ValueError):
                 native.verify(directory, identity)
+
+    def test_invalid_restored_key_is_rebuilt_before_any_native_artifact_can_be_used(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(native.os.environ, {}, clear=True):
+            target = Path(temporary)
+            expected = {"bun": "fixture-bun", "source": {"fixture": True}}
+            key = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
+            entry = target / "opentui-native" / key
+            entry.mkdir(parents=True)
+            (entry / "libopentui.dylib").write_bytes(b"cache pruner removed the receipt")
+            unrelated = entry.parent / "other-key"
+            unrelated.mkdir()
+            with patch.object(native, "identity", return_value=expected), \
+                 patch.object(native.subprocess, "check_output", return_value="fixture-bun"), \
+                 patch.object(native, "download", side_effect=RuntimeError("fresh build requested")) as download:
+                with self.assertRaisesRegex(RuntimeError, "fresh build requested"):
+                    native.build(ROOT, target)
+            download.assert_called_once()
+            self.assertFalse(entry.exists())
+            self.assertTrue(unrelated.is_dir())
+
+    def test_builder_does_not_follow_an_invalid_key_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / "unowned"
+            outside.mkdir()
+            marker = outside / "keep"
+            marker.write_text("unowned content")
+            entry = root / "cache-key"
+            entry.symlink_to(outside, target_is_directory=True)
+            self.assertIsNone(native.cached_library(entry, {}))
+            self.assertFalse(entry.is_symlink())
+            self.assertEqual(marker.read_text(), "unowned content")
+
+    def test_cache_override_is_explicit_and_not_part_of_native_identity(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(native, "sdk_identity", return_value=None):
+            root = Path(temporary)
+            with patch.dict(native.os.environ, {}, clear=True):
+                self.assertEqual(native.cache_root(root), root / "opentui-native")
+                before = native.identity(ROOT, "darwin-arm64")
+            with patch.dict(native.os.environ, {"ROTTWEILER_NATIVE_CACHE_DIR": str(root / "external")}, clear=True):
+                self.assertEqual(native.cache_root(root), root / "external")
+                self.assertTrue((root / "external/CACHEDIR.TAG").is_file())
+                self.assertEqual(before, native.identity(ROOT, "darwin-arm64"))
+            with patch.dict(native.os.environ, {"ROTTWEILER_NATIVE_CACHE_DIR": "relative"}, clear=True):
+                with self.assertRaisesRegex(ValueError, "absolute"):
+                    native.cache_root(root)

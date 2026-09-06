@@ -10,6 +10,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -153,6 +154,39 @@ def verify(directory: Path, expected: dict) -> Path:
     return library
 
 
+def cache_root(target: Path) -> Path:
+    supplied = os.environ.get("ROTTWEILER_NATIVE_CACHE_DIR")
+    root = target / "opentui-native" if supplied is None else Path(supplied)
+    if not root.is_absolute():
+        raise ValueError("native cache root must be an absolute directory")
+    if root.is_symlink():
+        raise ValueError("native cache root cannot be a symlink")
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        with (root / "CACHEDIR.TAG").open("x") as tag:
+            tag.write("Signature: 8a477f597d28d172789f06886806bc55\n# Rottweiler native renderer cache.\n")
+    except FileExistsError:
+        pass
+    return root
+
+
+def cached_library(destination: Path, expected: dict) -> Path | None:
+    """Recover only an invalid builder-owned key while its build lock is held."""
+    if not destination.exists() and not destination.is_symlink():
+        return None
+    try:
+        if destination.is_symlink():
+            raise ValueError("native cache entry cannot be a symlink")
+        return verify(destination, expected)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"Rebuilding invalid native renderer cache {destination}: {error}", file=sys.stderr)
+        if destination.is_symlink() or not destination.is_dir():
+            destination.unlink()
+        else:
+            shutil.rmtree(destination)
+        return None
+
+
 def build(repo: Path, target: Path) -> Path:
     release = load_contract(repo / "contracts/release-contract.json")
     host = release.resolve_platform(platform.system(), platform.machine())
@@ -160,13 +194,13 @@ def build(repo: Path, target: Path) -> Path:
     if subprocess.check_output(["bun", "--version"], text=True).strip() != expected["bun"]:
         raise ValueError("native lifetime acceptance requires the source-pinned Bun version")
     key = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
-    root = target / "opentui-native"
-    root.mkdir(parents=True, exist_ok=True)
+    root = cache_root(target)
     with (root / ".build.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         destination = root / key
-        if destination.exists():
-            return verify(destination, expected)
+        cached = cached_library(destination, expected)
+        if cached is not None:
+            return cached
         archives = root / "archives"
         source_archive = download(expected["source"], archives)
         supplied = os.environ.get("ROTTWEILER_ZIG_ARCHIVE")
