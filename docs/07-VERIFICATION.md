@@ -277,8 +277,9 @@ the leader before the gate returns. Evidence records the active phase and each
 completed sample as it runs, including failures during warmup or sampling.
 Malformed, duplicate, negative, and out-of-interval timing markers fail the gate.
 
-The required pull-request and `main` TUI smoke measures input dispatch plus
-render compute with process CPU time, requiring every trial's p99 below 16ms.
+The required pull-request and `main` TUI smoke measures input dispatch through
+native frame capture with wall time, requiring every trial's median below 16ms.
+Input reports retain every wall/CPU sample and the selected statistic.
 The same-process UDS transport harness uses wall-clock median below 2ms for
 shared-runner smoke and wall-clock p99 below 2ms for controlled qualification.
 Transport reports retain every wall/CPU sample and the selected statistic;
