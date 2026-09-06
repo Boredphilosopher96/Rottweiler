@@ -170,6 +170,7 @@ impl ParentDeathWatchdog {
         };
         if let Some(stderr_task) = &mut self.stderr_task {
             let _ = stderr_task.await;
+            self.stderr_task.take();
         }
         control_result.and(result)
     }

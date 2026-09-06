@@ -25,7 +25,7 @@ use super::safety::{
 use super::execution_lease::ExecutionLease;
 use super::watchdog::{ParentDeathWatchdog, arm_parent_death_watchdog};
 
-use super::output::{copy_stream, finish_command_output};
+use super::output::{CommandOutputTasks, copy_stream, finish_command_output};
 
 use super::process_group::{terminate_and_wait_process_group, terminate_process_group};
 
@@ -232,6 +232,7 @@ impl CommandExecutor for TokioCommandExecutor {
                 output: None,
                 proxy: egress_proxy,
                 proxy_cleanup: None,
+                proxy_failure: None,
                 _lease: self.execution_lease.clone(),
             }),
             cleanup: Arc::clone(&self.native_cleanup),
@@ -295,7 +296,7 @@ impl TokioCommandExecutor {
                 "command output pipes were not created".to_owned(),
             ));
         };
-        native.output = Some((
+        native.output = Some(CommandOutputTasks::new(
             tokio::spawn(copy_stream(
                 stdout,
                 ToolOutputStream::Stdout,
@@ -463,11 +464,6 @@ impl NativeCleanup {
     }
 }
 
-pub(super) type CommandOutputTasks = (
-    tokio::task::JoinHandle<Result<(), ToolError>>,
-    tokio::task::JoinHandle<Result<(), ToolError>>,
-);
-
 pub(super) struct NativeCommandState {
     _helper: Option<rw_sandbox::SandboxHelper>,
     _process_credit: rw_resources::ResourceLease,
@@ -478,34 +474,46 @@ pub(super) struct NativeCommandState {
     output: Option<CommandOutputTasks>,
     proxy: Option<SupervisedEgressProxy>,
     proxy_cleanup: Option<tokio::task::JoinHandle<()>>,
+    proxy_failure: Option<Arc<str>>,
     _lease: Option<Arc<ExecutionLease>>,
 }
 
 impl NativeCommandState {
     async fn settle(&mut self) -> Result<(), ToolError> {
-        settle_command_child(&mut self.child, self.child_id).await?;
-        self.child_id = None;
+        if self.child_id.is_some() {
+            settle_command_child(&mut self.child, self.child_id).await?;
+            self.child_id = None;
+        }
         let watchdog_result = match self.watchdog.as_mut() {
             Some(watchdog) => watchdog.disarm().await,
             None => Ok(()),
         };
-        let output_result = match self.output.take() {
-            Some((stdout, stderr)) => finish_command_output(stdout, stderr).await,
+        let output_result = match self.output.as_mut() {
+            Some(output) => finish_command_output(output).await,
             None => Ok(()),
         };
+        let proxy_result = self.settle_proxy().await;
         watchdog_result
             .and(output_result)
-            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))?;
+            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
+            .and(proxy_result)
+    }
+
+    async fn settle_proxy(&mut self) -> Result<(), ToolError> {
         if let Some(proxy) = self.proxy.take() {
             self.proxy_cleanup = Some(tokio::task::spawn_blocking(move || drop(proxy)));
         }
         if let Some(cleanup) = self.proxy_cleanup.as_mut() {
-            cleanup.await.map_err(|error| {
-                ToolError::EffectsUnsettled(format!("command proxy cleanup failed: {error}"))
-            })?;
+            let result = cleanup.await;
             self.proxy_cleanup = None;
+            if let Err(error) = result {
+                self.proxy_failure =
+                    Some(Arc::from(format!("command proxy cleanup failed: {error}")));
+            }
         }
-        Ok(())
+        self.proxy_failure.as_ref().map_or(Ok(()), |error| {
+            Err(ToolError::EffectsUnsettled(error.to_string()))
+        })
     }
 }
 
@@ -840,3 +848,6 @@ pub(super) fn configure_proxy_environment(
             .env("no_proxy", "");
     }
 }
+
+#[cfg(all(test, unix))]
+mod settlement_tests;

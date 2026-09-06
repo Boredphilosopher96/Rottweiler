@@ -69,7 +69,9 @@ async fn stdout_failure_still_awaits_stderr_settlement() {
         stderr_finished.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     });
-    let mut drain = tokio::spawn(finish_command_output(stdout, stderr));
+    let mut drain = tokio::spawn(async move {
+        finish_command_output(&mut CommandOutputTasks::new(stdout, stderr)).await
+    });
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut drain)
             .await
@@ -86,7 +88,7 @@ async fn stdout_failure_still_awaits_stderr_settlement() {
 #[tokio::test(start_paused = true)]
 async fn hung_output_readers_are_aborted_after_a_bounded_drain() {
     let reader = tokio::spawn(async { std::future::pending::<Result<(), ToolError>>().await });
-    let drain = tokio::spawn(finish_output_task(reader));
+    let drain = tokio::spawn(async move { finish_output_task(&mut OutputTask::new(reader)).await });
     tokio::time::advance(Duration::from_secs(3)).await;
     assert!(drain.await.expect("drain join").is_ok());
 }
@@ -118,4 +120,53 @@ fn bash_declares_shared_capabilities_and_adds_write_only_for_foreground_calls() 
             .expect("background capabilities")
             .contains(&ToolCapability::WriteFilesystem)
     );
+}
+
+#[tokio::test]
+async fn cancelled_drain_keeps_output_handles_and_completed_failure_until_retry() {
+    for panic_output in [false, true] {
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (started, start) = tokio::sync::oneshot::channel();
+        let stdout = tokio::spawn(async move {
+            assert!(!panic_output, "controlled output task panic");
+            Err(ToolError::Output("controlled output failure".to_owned()))
+        });
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_finished = finished.clone();
+        let stderr = tokio::spawn(async move {
+            released.await.expect("release actual stderr task");
+            stderr_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        let owner = Arc::new(tokio::sync::Mutex::new(CommandOutputTasks::new(
+            stdout, stderr,
+        )));
+        let draining = owner.clone();
+        let waiter = tokio::spawn(async move {
+            let mut tasks = draining.lock().await;
+            started.send(()).expect("drain started");
+            finish_command_output(&mut tasks).await
+        });
+        start.await.expect("owned drain admission");
+        waiter.abort();
+        assert!(
+            waiter
+                .await
+                .expect_err("aborted cleanup waiter")
+                .is_cancelled()
+        );
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        release
+            .send(())
+            .expect("actual stderr owner still retained");
+        let mut tasks = owner.lock().await;
+        let first = finish_command_output(&mut tasks)
+            .await
+            .expect_err("persisted stdout failure");
+        let again = finish_command_output(&mut tasks)
+            .await
+            .expect_err("idempotent failed result");
+        assert_eq!(first.to_string(), again.to_string());
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }

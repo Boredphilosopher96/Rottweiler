@@ -89,28 +89,72 @@ pub(super) async fn emit_output_batch(
         .await
 }
 
-pub(super) async fn finish_command_output(
-    stdout: tokio::task::JoinHandle<Result<(), ToolError>>,
-    stderr: tokio::task::JoinHandle<Result<(), ToolError>>,
-) -> Result<(), ToolError> {
-    let (stdout, stderr) = tokio::join!(finish_output_task(stdout), finish_output_task(stderr));
+pub(super) struct CommandOutputTasks {
+    stdout: OutputTask,
+    stderr: OutputTask,
+}
+impl CommandOutputTasks {
+    pub(super) fn new(
+        stdout: tokio::task::JoinHandle<Result<(), ToolError>>,
+        stderr: tokio::task::JoinHandle<Result<(), ToolError>>,
+    ) -> Self {
+        Self {
+            stdout: OutputTask::new(stdout),
+            stderr: OutputTask::new(stderr),
+        }
+    }
+}
+
+pub(super) struct OutputTask {
+    task: Option<tokio::task::JoinHandle<Result<(), ToolError>>>,
+    completion: Option<Result<(), Arc<str>>>,
+}
+impl OutputTask {
+    pub(super) fn new(task: tokio::task::JoinHandle<Result<(), ToolError>>) -> Self {
+        Self {
+            task: Some(task),
+            completion: None,
+        }
+    }
+}
+
+pub(super) async fn finish_command_output(tasks: &mut CommandOutputTasks) -> Result<(), ToolError> {
+    let (stdout, stderr) = tokio::join!(
+        finish_output_task(&mut tasks.stdout),
+        finish_output_task(&mut tasks.stderr)
+    );
     stdout.and(stderr)
 }
 
-pub(super) async fn finish_output_task(
-    mut task: tokio::task::JoinHandle<Result<(), ToolError>>,
-) -> Result<(), ToolError> {
-    tokio::select! {
-        result = &mut task => result.map_err(|error| ToolError::Output(error.to_string()))?,
-        () = sleep(Duration::from_secs(2)) => {
-            task.abort();
-            match task.await {
-                Ok(result) => result,
-                Err(error) if error.is_cancelled() => Ok(()),
-                Err(error) => Err(ToolError::Output(error.to_string())),
+pub(super) async fn finish_output_task(owner: &mut OutputTask) -> Result<(), ToolError> {
+    if owner.completion.is_none() {
+        let task = owner.task.as_mut().ok_or_else(|| {
+            ToolError::EffectsUnsettled("output task ownership is unavailable".to_owned())
+        })?;
+        let result = tokio::select! {
+            result = &mut *task => result.map_err(|error| ToolError::Output(error.to_string())).and_then(|result| result),
+            () = sleep(Duration::from_secs(2)) => {
+                task.abort();
+                match (&mut *task).await {
+                    Ok(result) => result,
+                    Err(error) if error.is_cancelled() => Ok(()),
+                    Err(error) => Err(ToolError::Output(error.to_string())),
+                }
             }
-        }
+        };
+        // No await separates observed completion, handle removal, and sticky result.
+        owner.task.take();
+        owner.completion = Some(result.map_err(|error| Arc::from(error.to_string())));
     }
+    owner
+        .completion
+        .as_ref()
+        .ok_or_else(|| {
+            ToolError::EffectsUnsettled("output completion proof is unavailable".to_owned())
+        })?
+        .as_ref()
+        .copied()
+        .map_err(|error| ToolError::Output(error.to_string()))
 }
 
 pub(super) struct CapturingSink {
