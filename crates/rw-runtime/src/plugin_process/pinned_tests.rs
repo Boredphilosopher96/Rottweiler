@@ -85,7 +85,19 @@ async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execu
     .await
     .expect("execution deadline")
     .expect("output");
-    assert_eq!(output, "approved");
+    let mut diagnostics = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        launched.stderr.read_to_string(&mut diagnostics),
+    )
+    .await
+    .expect("bounded stderr deadline")
+    .expect("fixture stderr");
+    let status = launched.process.wait().await.expect("direct child status");
+    assert_eq!(
+        output, "approved",
+        "child status={status:?}; fixture stderr={diagnostics}"
+    );
     launched
         .process
         .settle_effects()
