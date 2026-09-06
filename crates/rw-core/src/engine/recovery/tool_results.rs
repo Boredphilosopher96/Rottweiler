@@ -1,7 +1,7 @@
 //! Ordered source references retain the same logical admission as an embedded tool turn.
 use super::{
     RecoveryError,
-    input::{EventSource, read_source},
+    input::{EventSource, read_source_with_limit},
 };
 use rw_store::session::journal::{MAX_JOURNAL_APPEND_BYTES, MAX_JOURNAL_DECODE_BYTES};
 use rw_types::{
@@ -39,6 +39,10 @@ pub(super) fn resolve(
         .prepared_bytes()
         .ok_or(RecoveryError::Limit("tool result allocation"))?;
     for result in results {
+        let remaining = MAX_JOURNAL_DECODE_BYTES
+            .checked_sub(retained)
+            .filter(|bytes| *bytes > 0)
+            .ok_or(RecoveryError::Limit("tool result source scratch allowance"))?;
         let EngineEvent::ToolCallFinished {
             turn_id,
             tool_call_id,
@@ -46,7 +50,7 @@ pub(super) fn resolve(
             output,
             is_error,
             ..
-        } = read_source(source, result.finished_source, meta)?
+        } = read_source_with_limit(source, result.finished_source, meta, remaining)?
         else {
             return Err(RecoveryError::Invalid(
                 "tool result reference is not a completion",
@@ -71,7 +75,7 @@ pub(super) fn resolve(
             )
             .ok_or(RecoveryError::Limit("logical tool result allocation"))?;
         // A reference cannot multiply individually legal sources into an oversized IR.
-        // The current source decoder owns at most 64 MiB beside this retained prefix.
+        // Prefix ownership reduces the next exact record's pre-decode allowance.
         if encoded > MAX_JOURNAL_APPEND_BYTES as u64
             || retained > super::MAX_MATERIALIZED_HISTORY_DECODE_BYTES as usize
         {

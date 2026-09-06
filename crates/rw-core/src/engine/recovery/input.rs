@@ -1,6 +1,6 @@
 //! Resolve a committed input against its one authoritative accepted body.
 use super::RecoveryError;
-use rw_store::session::{SessionEventPageLimits, journal::JournalReadView};
+use rw_store::session::journal::JournalReadView;
 use rw_types::{EngineEvent, Turn, conversation_input::InputSelection};
 use std::borrow::Cow;
 
@@ -82,37 +82,46 @@ pub(super) fn read_source(
     selected: rw_types::SequenceId,
     owner: &rw_types::EventMeta,
 ) -> Result<EngineEvent, RecoveryError> {
+    read_source_with_limit(
+        source,
+        selected,
+        owner,
+        rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES,
+    )
+}
+
+pub(super) fn read_source_with_limit(
+    source: EventSource<'_>,
+    selected: rw_types::SequenceId,
+    owner: &rw_types::EventMeta,
+    remaining: usize,
+) -> Result<EngineEvent, RecoveryError> {
+    use rw_types::allocation::PrepareAllocation;
     if selected >= owner.sequence_id {
         return Err(RecoveryError::Invalid(
             "conversation source must precede its commit",
         ));
     }
-    let limits = SessionEventPageLimits::default();
     let event = match source {
         EventSource::Journal(source) => {
             source
-                .page::<EngineEvent>(
-                    selected.0.checked_sub(1).map(rw_types::SequenceId),
-                    SessionEventPageLimits {
-                        max_page_events: 1,
-                        max_page_bytes: limits.max_line_bytes as u64 + 1,
-                        ..limits
-                    },
-                )?
-                .events
-                .into_iter()
-                .next()
-                .ok_or(RecoveryError::Invalid("missing conversation source"))?
+                .record_with_decode_limit::<EngineEvent>(selected, remaining)?
+                .envelope
                 .event
         }
-        EventSource::Audit(events) => events
-            .binary_search_by_key(&selected.0, |event| {
-                event.meta().map_or(u64::MAX, |meta| meta.sequence_id.0)
-            })
-            .ok()
-            .and_then(|index| events.get(index))
-            .cloned()
-            .ok_or(RecoveryError::Invalid("missing audit conversation source"))?,
+        EventSource::Audit(events) => {
+            let event = events
+                .binary_search_by_key(&selected.0, |event| {
+                    event.meta().map_or(u64::MAX, |meta| meta.sequence_id.0)
+                })
+                .ok()
+                .and_then(|index| events.get(index))
+                .ok_or(RecoveryError::Invalid("missing audit conversation source"))?;
+            if event.prepared_bytes().is_none_or(|bytes| bytes > remaining) {
+                return Err(RecoveryError::Limit("audit source retained allowance"));
+            }
+            event.clone()
+        }
     };
     if event.meta().is_none_or(|meta| {
         meta.sequence_id != selected

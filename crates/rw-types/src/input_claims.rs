@@ -136,6 +136,9 @@ impl InputClaimState {
                     return Err("input commit must own its active claim");
                 }
                 self.pending.remove(index);
+                // Prelude tools feed the selected input text; they are not a provider
+                // Tool turn. Its durable input commit closes that pre-inference phase.
+                self.finished.clear();
             }
             EngineEvent::TurnFinished {
                 turn_id, status, ..

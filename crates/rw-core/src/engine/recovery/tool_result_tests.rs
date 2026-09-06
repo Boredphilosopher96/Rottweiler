@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used)]
 use super::{
-    tests::{append, catch_up, finish},
+    tests::{append, catch_up, terminal},
     *,
 };
 use crate::engine::{PendingEvent, project_session_events};
@@ -50,7 +50,7 @@ fn result_body_has_one_durable_owner_and_exact_provider_ir_after_reopen() {
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let turn = output("one-authoritative-body-\n\\\"-é");
     let mut events = seed(&turn);
-    events.push(finish(1));
+    events.push(terminal(1));
     append(&mut journal, events);
     let source = journal.read_view();
     let events = source

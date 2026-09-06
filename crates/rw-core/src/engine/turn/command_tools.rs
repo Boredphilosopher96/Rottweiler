@@ -80,8 +80,10 @@ pub(super) async fn apply_command_tool_calls(
         runtime.signals,
         runtime.mode,
     )
-    .await;
-    for (call, execution) in calls.into_iter().zip(executions) {
+    .await
+    .map_err(|error| error.to_string())?;
+    for (call, committed) in calls.into_iter().zip(executions) {
+        let execution = committed.execution;
         if execution.is_error {
             return Err(format!("command prelude tool `{}` failed", call.name));
         }
