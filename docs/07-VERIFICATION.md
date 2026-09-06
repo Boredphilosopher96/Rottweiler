@@ -203,6 +203,13 @@ Property tests worth calling out:
 - **Doctor diagnostics**: injected fixtures independently seed a provider 401/403, a bounded connection failure, unavailable sandbox support, and `TERM=dumb`; each must produce its distinct stable code and a non-zero result. Loopback HTTP fixtures cover rejected API credentials and authenticated explicit-proxy routing. Credential-inventory tests assert two logical references cause exactly one shared vault read and that canary values never occur in text or JSON.
 - **Fail-soft extension discovery**: `rw-ext` regressions isolate malformed, oversized, non-UTF-8, unreadable, and symlinked artifacts while retaining valid siblings and deterministic path diagnostics. `rw-store` turns an incomplete project inventory into an empty, fingerprint-free `Untrustable` assessment and refuses grants; `rw-runtime` proves malformed user artifacts and uninventoriable untrusted roots still yield a usable startup catalog while runtime trust-grant mutation refuses them; `rw-cli` independently tests the same grant refusal. Missing workspace roots and trust-store assessment failures remain error paths rather than being mislabeled as fail-soft artifact diagnostics.
 
+The hosted Linux integration job configures its ephemeral runner to permit
+unprivileged user namespaces, then probes user, mount, network and PID namespace
+creation before running Rust tests. It requires sandbox enforcement in those
+tests. Namespace admission failure is a failed environment prerequisite; the
+job does not turn native sandbox tests into successful skips. The separate
+privileged Linux security gate exercises the syscall policy and mount topology.
+
 ## 3. Performance budgets (CI-enforced, p99 unless noted)
 
 | Metric | Budget | How measured |

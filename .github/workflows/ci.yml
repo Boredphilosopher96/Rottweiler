@@ -140,6 +140,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ". -> target"
+      - name: Prepare Linux sandbox namespace prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          timeout 10s unshare --user --map-root-user --mount --net --pid --fork /bin/true
+          echo "ROTTWEILER_REQUIRE_LINUX_SANDBOX=1" >> "$GITHUB_ENV"
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
