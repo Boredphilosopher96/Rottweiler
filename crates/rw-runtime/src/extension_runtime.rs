@@ -39,10 +39,12 @@ use rw_core::{
     ProductionMcpHttpConnector, SessionCommandAction, SessionCommandContext, SessionCommandOutput,
     ToonMcpEncoder, VaultMcpTokenProvider,
 };
+#[cfg(test)]
+use rw_ext::PluginProviderHttpHandler;
 use rw_ext::{
     ApprovalStore, ApprovalStoreError, HookHandler, HookRegistration, PluginBoundaryRedactor,
-    PluginEventRouter, PluginProviderHttpHandler, PluginRpcError, PushHandler, RpcCommandAdapter,
-    RpcHookHandler, RpcProviderAdapter, RpcToolAdapter, plugin_hook_registration,
+    PluginEventRouter, PluginRpcError, PushHandler, RpcCommandAdapter, RpcHookHandler,
+    RpcProviderAdapter, RpcToolAdapter, plugin_hook_registration,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
