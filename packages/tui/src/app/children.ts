@@ -1,3 +1,10 @@
+import { FamilyControlsController } from "../family-controls"
+import type { FamilyControlsReader } from "../family-controls-reader"
+import { resolveFamilyHistory } from "../family-history"
+import type { ChildControlResponse, ChildControlTarget, FamilyControlRow } from "../../../../protocol/types"
+import { readControls, resolvedApproval } from "../state/controls"
+import { childPassiveInteractionState } from "../subagent-state"
+import type { TranscriptRenderable } from "../components"
 import type { ProjectionAllocations } from "../state/allocation"
 import { childProgressSource } from "../child-source"
 import { TodoController } from "../todo-controller"
@@ -40,6 +47,7 @@ interface ChildUiHost {
   readonly diagnostics: ClientDiagnostics | undefined
   readonly pickerController: PickerController
   readonly requests: ProjectionRequestBroker
+  readonly familyControls: FamilyControlsReader | undefined
   readonly sessionReader: SessionReader
   focus(): void
   refresh(): void
@@ -61,6 +69,7 @@ const MAX_VISIBLE_SUBAGENTS = 256
 export class ChildUiController {
   readonly #host: ChildUiHost
   #scope: object = {}
+  #resetting = false
   #subagentListError: string | null = null
   #subagentDescriptors: readonly SubagentDescriptor[] = []
   get #activeChildState(): RottweilerState | null { return this.#host.allocations.child }
@@ -72,10 +81,26 @@ export class ChildUiController {
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   #parentReadTarget: SessionReadTarget | null = null
   #activeReadTarget: SessionReadTarget | null = null
+  readonly #family: FamilyControlsController | null
+  #familyChild: ChildControlTarget | null = null
+  #sourceRequest: AbortController | null = null
+  #sourceOwner: { target: SessionReadTarget; release(): void } | null = null
+  #sourceError: string | null = null
   readonly #todos: TodoController
   constructor(host: ChildUiHost) {
     this.draftStore = new ComposerDraftStore(undefined, undefined, host.history.controller.cache.allocations)
     this.#host = host
+    this.#family = host.familyControls === undefined ? null : new FamilyControlsController({
+      allocations: host.history.controller.cache.allocations, reader: host.familyControls,
+      changed: () => host.refresh(),
+      apply: snapshot => {
+        const state = this.#activeChildState
+        if (state === null) return
+        this.#activeChildState = snapshot === null ? { ...state, questions: {}, pendingPlan: null,
+          tools: Object.fromEntries(Object.entries(state.tools).map(([id, tool]) => [id, tool.status === "awaiting_approval" ? resolvedApproval(tool) : tool])),
+        } : readControls(state, snapshot)
+      },
+    })
     this.#todos = new TodoController({
       allocations: host.history.controller.cache.allocations,
       reader: host.sessionReader,
@@ -86,6 +111,64 @@ export class ChildUiController {
         this.#host.refresh()
       },
     })
+  }
+  syncFamily(): void {
+    if (this.#resetting) return
+    this.#family?.connect(this.#host.state.connection.phase === "connected" && !this.#host.state.replay.active ? this.#host.sessionId : null)
+    if (this.#activeSubagentId !== null && this.#familyChild === null && this.#historicalChild === null) {
+      const row = this.#family?.rows.find(value => value.target.ancestry.at(-1)?.subagent_id === this.#activeSubagentId)
+      if (row !== undefined) {
+        this.#familyChild = row.target
+        this.#family?.select(row.target)
+        this.#familyChild = this.#family?.target ?? null
+      }
+    }
+  }
+  get controlsPending(): boolean { return this.#family?.pendingResponses === true }
+  get sourceReady(): boolean { return this.#activeSubagentId === null || this.#activeReadTarget !== null }
+  get familyControlReady(): boolean { return this.#familyChild !== null && this.#family?.ready === true }
+  get selectedFamily(): boolean { return this.#familyChild !== null }
+  interactionState(state: RottweilerState): RottweilerState { return this.#activeSubagentId === null || this.familyControlReady ? state : childPassiveInteractionState(state) }
+  presentHistory(transcript: TranscriptRenderable): void {
+    if (this.sourceReady) this.#host.history.present(this.readTarget)
+    else this.#host.history.suspend()
+    const snapshot = this.#host.history.controller.snapshot
+    transcript.setHistory(this.sourceReady ? snapshot : { ...snapshot, page: null, total: 0n, loading: true, error: this.#sourceError, selection: null, anchor: null })
+  }
+  async respond(response: ChildControlResponse): Promise<boolean> {
+    const family = this.#family
+    if (family === null || this.#familyChild === null) return false
+    const scope = this.#scope, selected = this.#familyChild
+    using allocation = this.#host.requests.allocate()
+    try {
+      const outcome = await family.respond(response, async (session_id, target, expected_revision, response) => {
+        return await this.#host.requests.emit({ type: "resolve_child_control", meta: this.#host.requests.meta(), session_id, target, expected_revision, response }, allocation)
+      })
+      if (scope !== this.#scope || selected !== this.#familyChild) return outcome?.type === "accepted"
+      if (outcome?.type === "rejected") this.#host.projectRejection(outcome)
+      return outcome?.type === "accepted"
+    } catch (error) { if (scope === this.#scope && selected === this.#familyChild) this.#host.projectError("child_control_failed", safeErrorMessage(error), true); return false }
+  }
+  enterFamily(row: FamilyControlRow): void {
+    if (!this.saveComposerDraft()) return
+    const previousTarget = this.#familyChild
+    try { this.#familyChild = row.target; this.#family?.select(row.target) }
+    catch (error) { this.#familyChild = previousTarget; this.#host.projectError("child_control_admission", safeErrorMessage(error), true); return }
+    this.#familyChild = this.#family?.target ?? null
+    this.#sourceRequest?.abort()
+    const prior = this.#sourceOwner; this.#sourceOwner = null
+    this.#activeSubagentId = row.target.ancestry.at(-1)!.subagent_id
+    this.#historicalChild = null; this.#activeReadTarget = null; this.#sourceError = null
+    this.#activeChildState = { ...createInitialState(), connection: { ...createInitialState().connection, phase: "connected" } }
+    this.restoreComposerDraft(this.#activeSubagentId)
+    this.#host.refresh(); this.#host.focus(); prior?.release()
+    const request = new AbortController(); this.#sourceRequest = request
+    void resolveFamilyHistory(this.#host.sessionReader, this.#host.history.controller.cache.allocations, this.#host.sessionId, row.target, request.signal).then(source => {
+      if (request.signal.aborted) { source.release(); return }
+      this.#sourceOwner = source; this.#activeReadTarget = source.target
+      this.#todos.open(source.target)
+      this.#host.refresh()
+    }).catch(error => { if (!request.signal.aborted) { this.#sourceError = safeErrorMessage(error); this.#host.refresh() } })
   }
   retryTodos(): void { this.#todos.retry() }
   refreshTodos(): void {
@@ -108,18 +191,23 @@ export class ChildUiController {
       ...children.map(({ id, draft }) => ({ scope: `child:${id}`, draft }))])
   }
   reset(): void {
+    this.#resetting = true
+    this.#familyChild = null; this.#family?.close()
+     this.#sourceRequest?.abort(); this.#sourceRequest = null
+    this.#sourceOwner?.release(); this.#sourceOwner = null; this.#sourceError = null
     this.#todos.reset()
     this.#scope = {}
     this.#subagentListError = null; this.#subagentDescriptors = []; this.#activeChildState = null
     this.#historicalChild = null; this.#activeReadTarget = null; this.draftStore.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
     this.#subagentErrorBaseline = undefined
+    this.#resetting = false
   }
   pickerClosed(): void { this.#subagentActionId = null }
   acceptCatalog(values: readonly SubagentDescriptor[]): void {
     this.#subagentListError = null
     this.#subagentDescriptors = values.slice(0, MAX_VISIBLE_SUBAGENTS).map(sanitizeSubagentDescriptor)
       .filter((descriptor): descriptor is SubagentDescriptor => descriptor !== null)
-    if (this.#activeSubagentId !== null && this.subagentDescriptor(this.#activeSubagentId) === undefined && this.#historicalChild === null) this.leaveSubagent()
+    if (this.#familyChild === null && this.#activeSubagentId !== null && this.subagentDescriptor(this.#activeSubagentId) === undefined && this.#historicalChild === null) this.leaveSubagent()
     else this.#host.refresh()
   }
   openHistorical(child: { readonly sessionId: string; readonly subagentId: string; readonly task: string; readonly sourceSequence: string }): void {
@@ -130,6 +218,7 @@ export class ChildUiController {
     try { target = descendantSessionRead(this.readTarget, { session_id: child.sessionId, subagent_id: child.subagentId, source_sequence: child.sourceSequence }) }
     catch { this.#host.projectError("child_history_scope", "Child history exceeds the permitted ancestry path."); return }
     if (!this.saveComposerDraft()) return
+    this.#family?.select(null); this.#familyChild = null; this.#sourceRequest?.abort()
     this.#activeReadTarget = target
     this.#historicalChild = { sessionId: child.sessionId, task: boundedUiText(child.task, 512), target }
     this.#activeSubagentId = child.subagentId
@@ -219,6 +308,8 @@ export class ChildUiController {
   }
 
   async enterSubagent(subagentId: string): Promise<void> {
+    const family = this.#family?.rows.find(row => row.target.ancestry.at(-1)?.subagent_id === subagentId)
+    if (family !== undefined) { this.enterFamily(family); return }
     const descriptor = this.subagentDescriptor(subagentId)
     if (descriptor === undefined) return
     if (!this.saveComposerDraft()) return
@@ -227,8 +318,15 @@ export class ChildUiController {
     this.restoreComposerDraft(subagentId)
     this.#subagentErrorBaseline = this.#host.state.errors.at(-1)
     this.#activeChildState = initialSubagentState(this.#host.state, descriptor)
-    this.#activeReadTarget = directSessionRead(descriptor.child_session_id)
-    this.#todos.open(this.#activeReadTarget)
+    this.#activeReadTarget = null
+    this.#sourceRequest?.abort()
+    const request = new AbortController(); this.#sourceRequest = request
+    void resolveFamilyHistory(this.#host.sessionReader, this.#host.history.controller.cache.allocations, this.#host.sessionId,
+      { session_id: descriptor.child_session_id, ancestry: [{ subagent_id: subagentId, session_id: descriptor.child_session_id }] }, request.signal).then(source => {
+      if (request.signal.aborted) { source.release(); return }
+      this.#sourceOwner?.release(); this.#sourceOwner = source; this.#activeReadTarget = source.target
+      this.#todos.open(source.target); this.#host.refresh()
+    }).catch(error => { if (!request.signal.aborted) { this.#sourceError = safeErrorMessage(error); this.#host.refresh() } })
     this.#host.refresh()
     this.#host.focus()
   }
@@ -236,6 +334,9 @@ export class ChildUiController {
   leaveSubagent(): void {
     if (this.#activeSubagentId === null) return
     if (!this.saveComposerDraft()) return
+    this.#family?.select(null); this.#familyChild = null
+    this.#sourceRequest?.abort(); this.#sourceRequest = null
+    const source = this.#sourceOwner; this.#sourceOwner = null
     this.#todos.reset()
     this.#activeSubagentId = null
     this.#activeReadTarget = null
@@ -244,7 +345,7 @@ export class ChildUiController {
     this.restoreComposerDraft(null)
     this.#subagentActionId = null
     this.#subagentErrorBaseline = undefined
-    this.#host.refresh()
+    this.#host.refresh(); source?.release()
     this.#host.focus()
   }
 
@@ -288,7 +389,11 @@ export class ChildUiController {
     if (descriptor === undefined) return
     const previous = this.#activeChildState?.lastSequence
     if (previous !== null && previous !== undefined && BigInt(sequence) <= BigInt(previous)) return
-    this.#activeChildState = { ...initialSubagentState(this.#host.state, descriptor), lastSequence: sequence }
+    const current = this.#activeChildState ?? initialSubagentState(this.#host.state, descriptor)
+    this.#activeChildState = { ...initialSubagentState(this.#host.state, descriptor), lastSequence: sequence,
+      questions: current.questions, pendingPlan: current.pendingPlan, controls: current.controls,
+      tools: Object.fromEntries(Object.entries(current.tools).filter(([, tool]) => tool.status === "awaiting_approval")),
+    }
     this.#todos.open(this.readTarget, sequence)
     this.#host.refresh()
   }
@@ -313,6 +418,7 @@ export class ChildUiController {
   }
 
   isActiveSubagentRunning(): boolean {
+    if (this.#familyChild !== null) return !this.familyControlReady || (!Object.values(this.#activeChildState?.questions ?? {}).some(question => question.questions[0]?.response_kind === "text") && this.subagentDescriptor(this.#activeSubagentId!)?.activity !== "idle")
     return this.#activeSubagentId !== null &&
       this.subagentDescriptor(this.#activeSubagentId)?.activity === "running"
   }
@@ -332,7 +438,24 @@ export class ChildUiController {
   }
 
   updateSubagentBanner(state: RottweilerState): void {
-    if (this.#activeSubagentId === null) return
+    if (this.#activeSubagentId === null) {
+      const pending = this.#family?.pending.length ?? 0
+      if (this.#family?.error !== null && this.#family?.error !== undefined) {
+        this.#host.banner.visible = true; this.#host.banner.fg = this.#host.theme.warning
+        this.#host.banner.content = `Child controls unavailable · ${this.#host.binding("open_subagent_picker") ?? "/agents"} retry`
+        return
+      }
+      if (pending > 0) {
+        this.#host.banner.visible = true; this.#host.banner.fg = this.#host.theme.warning
+        this.#host.banner.content = `${pending} child ${pending === 1 ? "agent needs" : "agents need"} a response · ${this.#host.binding("open_subagent_picker") ?? "/agents"} inspect`
+      }
+      return
+    }
+    if (this.#familyChild !== null) {
+      this.#host.banner.visible = true
+      this.#host.banner.content = `Child ${this.#familyChild.session_id} · ${this.familyControlReady ? "controls ready" : "refreshing controls"}${this.#family?.error ? ` · ${this.#family.error}` : ""} · Esc parent`
+      return
+    }
     if (this.#historicalChild !== null) {
       this.#host.banner.visible = true
       this.#host.banner.content = `Child transcript · ${this.#historicalChild.task} · Esc parent`
@@ -490,33 +613,41 @@ export class ChildUiController {
   render(kind: "agents" | "agentActions"): void {
     switch (kind) {
       case "agents": {
-        if (this.#subagentListError !== null) {
+        const listingError = this.#subagentListError ?? this.#family?.error ?? null
+        if (listingError !== null && (this.#family?.pending.length ?? 0) === 0) {
           this.#host.pickerController.show(
             "Child agents · load failed",
             [{
               id: "agents.retry",
               label: "Retry loading child agents",
-              description: boundedUiText(this.#subagentListError, 160),
+              description: boundedUiText(listingError, 160),
               value: null,
             }],
-            () => this.requestSubagents(),
+            () => { this.#family?.refresh(); this.requestSubagents() },
           )
           break
         }
         if (
           this.#host.requests.current("subagents") !== null &&
-          this.#subagentDescriptors.length === 0
+          this.#subagentDescriptors.length === 0 && (this.#family?.pending.length ?? 0) === 0
         ) {
           this.#host.pickerController.showLoading("Child agents", "Loading child agents")
           break
         }
-        const items: PickerItem<SubagentDescriptor>[] = this.#subagentDescriptors.map((subagent) => ({
+        type Choice = { agent: SubagentDescriptor } | { control: FamilyControlRow }
+        const pending = this.#family?.pending ?? []
+        const items: PickerItem<Choice>[] = pending.map(row => ({ id: `control:${row.target.session_id}`,
+          label: `Response needed · ${row.target.session_id}`,
+          description: `${row.controls.questions} questions · ${row.controls.approvals} approvals${row.controls.pending_plan ? " · plan review" : ""}`,
+          value: { control: row },
+        }))
+        items.push(...this.#subagentDescriptors.filter(subagent => !pending.some(row => row.target.session_id === subagent.child_session_id)).map((subagent) => ({
           id: subagent.subagent_id,
           label: subagent.task,
           description: `${subagent.activity === "running" ? "Running" : "Idle"} · ${subagent.agent} · ${subagent.model} · ${subagent.isolation}`,
           searchText: `${subagent.task} ${subagent.agent} ${subagent.model} ${subagent.activity}`,
-          value: subagent,
-        }))
+          value: { agent: subagent },
+        })))
         if (items.length === 0) {
           this.#host.pickerController.showStatus(
             "Child agents",
@@ -527,7 +658,8 @@ export class ChildUiController {
         }
         this.#host.pickerController.show("Child agents · Enter to inspect", items, (item) => {
           this.#host.closePicker()
-          void this.enterSubagent(item.value.subagent_id)
+          if ("control" in item.value) this.enterFamily(item.value.control)
+          else void this.enterSubagent(item.value.agent.subagent_id)
         })
         break
       }

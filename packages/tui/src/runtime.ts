@@ -1,3 +1,4 @@
+import { familyControlsReader } from "./family-controls-reader"
 import { ClientAllocationOwner, commandReplyDomain } from "./client-allocation"
 import { collectSessionBootstrap, type SessionBootstrap } from "./runtime-bootstrap"
 import { TailChanged } from "./history/live-tail"
@@ -222,6 +223,8 @@ export class TuiEngineRuntime {
       }] })
     },
   )
+
+  readonly familyControls = familyControlsReader((command, signal, allocation) => this.#readSession(command, signal, allocation), () => this.#meta())
 
   readonly sessionReader: SessionReader = {
     children: async ({ sessionId, scope }, signal, allocation) => {
@@ -924,7 +927,7 @@ export class TuiEngineRuntime {
   }
 
   async #readSession(
-    command: Extract<ClientCommand, { type: "read_session_children" | "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
+    command: Extract<ClientCommand, { type: "read_family_controls" | "read_child_controls" | "read_session_children" | "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
     signal: AbortSignal,
     allocation: ReplyAllocation,
   ): Promise<Extract<CommandReply, { type: "read" }>> {

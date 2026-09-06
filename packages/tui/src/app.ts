@@ -69,7 +69,6 @@ import {
   reduceRottweilerState,
   type RottweilerState,
 } from "./state"
-import { childPassiveInteractionState } from "./subagent-state"
 import { createSyntaxStyle, kennelTheme, systemThemeFor, themeByName, type RottweilerTheme } from "./theme"
 import { durableSequenceId, isRecord } from "./transport"
 import { stabilizeTreeSitterClient } from "./tree-sitter-client"
@@ -351,7 +350,7 @@ export class RottweilerApp extends BoxRenderable {
 
     const app = this
     this.#children = new ChildUiController({
-      sessionReader: options.sessionReader,
+      sessionReader: options.sessionReader, familyControls: options.familyControls,
       allocations: this.#allocations,
       get state() { return app.#state }, set state(value) { app.#state = value },
       get sessionId() { return app.#sessionId }, get composer() { return app.composer },
@@ -965,6 +964,7 @@ export class RottweilerApp extends BoxRenderable {
     if (state.providerAuth.pending === null) {
       this.#providers.resetAuthentication()
     }
+    this.#children.syncFamily()
     const presented = this.#children.presentedState()
     this.composer.setImagePasteAvailable(this.#modelSupportsVision(presented))
     const viewingSubagent = this.#children.activeId !== null
@@ -975,19 +975,17 @@ export class RottweilerApp extends BoxRenderable {
       presented,
       viewingSubagent ? childDescriptor?.agent || "Child agent" : "Rottweiler",
     )
-    if (this.#history !== null) {
-      this.#history.present(this.#children.readTarget)
-      this.transcript.setHistory(this.#history.controller.snapshot)
-    }
+    this.#children.presentHistory(this.transcript)
     this.#updateToolsWorkspace(presented)
-    this.#outputViewerInvocationId = updateOutputViewer(
+    if (!this.#children.sourceReady) { this.#document.close(); this.outputViewer.closePresentation() }
+    this.#outputViewerInvocationId = !this.#children.sourceReady ? null : updateOutputViewer(
       this.outputViewer, this.#document, this.#children.readTarget, presented, this.#outputViewerInvocationId,
     )
     this.subagentTray.update(state)
     this.contextPanel.update(presented)
     this.#applyPrimaryViewVisibility()
     this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
-    this.interactionPanel.update(viewingSubagent ? childPassiveInteractionState(presented) : state)
+    this.interactionPanel.update(this.#children.interactionState(presented), !viewingSubagent)
     this.reviewPanel.update(state, !viewingSubagent && this.#reviewOpen)
     this.composer.setQueuedMessages(
       viewingSubagent || this.#primaryView === "tools" ? [] : state.queuedMessages,
@@ -1034,7 +1032,7 @@ export class RottweilerApp extends BoxRenderable {
       this.banner.fg = this.#theme.textMuted
       this.banner.content = this.#submission.notice
     }
-    if (viewingSubagent) this.#children.updateSubagentBanner(presented)
+    this.#children.updateSubagentBanner(presented)
     if (!this.#input.isInterruptible()) this.#input.clearInterruptEscape(false)
     if (this.#input.escapeArmed) {
       this.banner.visible = true
@@ -1187,7 +1185,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #openToolOutput(invocationId: string): void {
     const tool = this.#children.presentedState().tools[invocationId]
-    if (tool === undefined) return
+    if (tool === undefined || !this.#children.sourceReady) return
     this.#document?.close()
     if (tool.status === "finished" && tool.source !== null && this.#document !== null) {
       this.#outputViewerInvocationId = null

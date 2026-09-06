@@ -149,7 +149,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#layout(reservedRows)
   }
 
-  update(state: RottweilerState): void {
+  update(state: RottweilerState, allowPermissionChanges = true): void {
     if (state.replay.active) {
       this.#activeTool = null
       this.#activeQuestion = null
@@ -167,7 +167,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       return
     }
     if (tool !== undefined) {
-      this.#showTool(tool, permissionRuntimeMode(state.permissions))
+      this.#showTool(tool, permissionRuntimeMode(state.permissions), allowPermissionChanges)
       return
     }
     if (question !== undefined) {
@@ -183,7 +183,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.height = 0
   }
 
-  #showTool(tool: ToolProjection, permissionMode: PermissionModeDescriptor | null): void {
+  #showTool(tool: ToolProjection, permissionMode: PermissionModeDescriptor | null, allowPermissionChanges: boolean): void {
     this.#activeTool = tool
     this.#activeQuestion = null
     this.#activePlan = null
@@ -210,8 +210,8 @@ export class InteractionPanelRenderable extends BoxRenderable {
         { name: "Allow once", description: "Run only this invocation", value: "allow_once" },
         { name: "Allow session", description: "Remember for this session", value: "allow_session" },
         { name: "Allow project", description: "Remember this exact invocation in this project", value: "allow_project" },
-        { name: `Always allow ${toolDisplayName(tool.name)}`, description: "This session · any arguments", value: "allow_tool_session" },
-        ...(permissionMode === "auto-safe" || permissionMode === "yolo"
+        ...(allowPermissionChanges ? [{ name: `Always allow ${toolDisplayName(tool.name)}`, description: "This session · any arguments", value: "allow_tool_session" }] : []),
+        ...(!allowPermissionChanges || permissionMode === "auto-safe" || permissionMode === "yolo"
           ? []
           : [{ name: "Stop asking for safe actions", description: "Switch this session to auto-safe mode", value: "auto_safe_mode" }]),
         { name: "Deny", description: "Do not run the tool", value: "deny" },

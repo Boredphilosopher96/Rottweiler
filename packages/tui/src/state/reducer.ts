@@ -605,6 +605,8 @@ function applyKnownEvent(
     case "todos_read":
       if (activeSessionId !== null && event.session_id !== activeSessionId) return state
       return { ...state, todos: readTodos(state.todos, event.result) }
+    case "conversation_input_committed":
+      return { ...state, hasActivity: true }
     case "conversation_turn_committed": {
       const clearsTail =
         (event.turn.role === "assistant" || event.turn.role === "tool") &&

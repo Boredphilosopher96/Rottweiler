@@ -10,6 +10,10 @@ test("opening an idle child loads exact tasks and leaving retires a pending chil
   const reads: { session: string; signal: AbortSignal; resolve(result: TodoReadResult): void }[] = []
   const app = createRottweilerApp(setup.renderer, {
     sessionId: "parent", sessionReader: { ...emptySessionReader,
+      children: async target => {
+        expect(target).toEqual({ sessionId: "parent", scope: { type: "session" } })
+        return { type: "ready", snapshot: { through: "1", children: [{ subagent_id: "worker", child_session_id: "child", spawned: "1", spawned_turn: "1", task_preview: "Inspect internals", task_truncated: false }] } }
+      },
       todos: ({ sessionId: session }, signal) => new Promise(resolve => reads.push({ session, signal, resolve })),
     },
     onCommand: command => { commands.push(command); return { type: "accepted" } },

@@ -80,6 +80,13 @@ export class SubmissionController {
     if (this.host.ui.state.replay.active) {
       return false
     }
+    if (this.host.children.selectedFamily) {
+      const question = Object.values(this.host.children.presentedState().questions).find(value => value.questions[0]?.response_kind === "text")
+      if (question !== undefined) {
+        if (attachments.length > 0) { this.host.projectError("question_attachments_unsupported", "Answer this question with text only; attachments stay in your draft."); return false }
+        return await this.host.children.respond({ type: "question", question_id: question.questionId, answers: [{ question_id: question.questionId, values: [content] }] })
+      }
+    }
     if (content.startsWith("!")) {
       const originatingSubagentId = this.host.children.activeId
       const accepted = await this.startForegroundShell(content, attachments)
@@ -108,6 +115,10 @@ export class SubmissionController {
         return false
       }
       const subagentId = this.host.children.activeId
+      if (this.host.children.selectedFamily && this.host.children.subagentDescriptor(subagentId) === undefined) {
+        this.host.projectError("child_followup_unavailable", "This descendant view accepts pending control responses. Return to its parent for a new task.")
+        return false
+      }
       if (this.host.children.subagentDescriptor(subagentId)?.activity === "running") {
         this.host.projectError(
           "subagent_still_running",
@@ -318,6 +329,10 @@ export class SubmissionController {
     const scope = this.#scope
     try {
       if (tool.status !== "awaiting_approval" || tool.toolCallId === null) throw new Error("tool approval requires an authoritative pending approval")
+      if (this.host.children.selectedFamily) {
+        await this.host.children.respond({ type: "approval", tool_call_id: tool.toolCallId, invocation_id: tool.invocationId, decision, binding: approvalBinding(tool.diff) })
+        return
+      }
       const outcome = await this.host.requests.emit({
         type: "approve_tool",
         meta: this.host.requests.meta(),
@@ -352,6 +367,10 @@ export class SubmissionController {
   }
 
   answer(question: QuestionProjection, values: readonly string[]): void {
+    if (this.host.children.selectedFamily) {
+      void this.host.children.respond({ type: "question", question_id: question.questionId, answers: [{ question_id: question.questionId, values: [...values] }] })
+      return
+    }
     this.host.requests.dispatch({
       type: "answer_question",
       meta: this.host.requests.meta(),
@@ -362,6 +381,10 @@ export class SubmissionController {
   }
 
   reviewPlan(decision: PlanDecision): void {
+    if (this.host.children.selectedFamily) {
+      void this.host.children.respond({ type: "plan", decision, revisions: decision === "reject" ? "Revise the plan using the user's next message as feedback." : null })
+      return
+    }
     this.host.requests.dispatch({
       type: "approve_plan",
       meta: this.host.requests.meta(),

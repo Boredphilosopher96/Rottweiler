@@ -236,6 +236,18 @@ async function main(): Promise<void> {
     onComposerInput: (value) => {
       if (transcriptPainted && value.length > 0) composerAcceptedInput = true
     },
+    familyControls: {
+      async watch(root, after, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.watch(root, after, signal, allocation)
+      },
+      async child(root, target, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.child(root, target, signal, allocation)
+      },
+    },
     sessionReader: {
       children: async (target, signal, allocation) => {
         const { runtime } = await runtimeBootstrap

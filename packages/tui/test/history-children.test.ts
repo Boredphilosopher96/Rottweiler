@@ -20,12 +20,15 @@ async function childHarness(activity: "running" | "idle", sourceReader?: import(
   const app = createRottweilerApp(harness.renderer, {
     sessionId: "parent", treeSitterClient: new MockTreeSitterClient(),
     sessionReader: {
-      children: emptySessionReader.children,
+      children: async target => {
+        expect(target).toEqual({ sessionId: "parent", scope: { type: "session" } })
+        return { type: "ready", snapshot: { through: "1", children: [{ subagent_id: "child", child_session_id: "child-session", spawned: "1", spawned_turn: "1", task_preview: "Inspect child history", task_truncated: false }] } }
+      },
       tail: emptySessionReader.tail,
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),
   todos: async () => ({ type: "ready", todos: { through: "1000", snapshot: { items: [] } } }),
-      page: async (target, read, signal, allocation) => { sessions.push(target.sessionId); return sourceReader?.page(target, read, signal, allocation) ?? { type: "ready", page: fixturePage(target.sessionId, read) } },
+      page: async (target, read, signal, allocation) => { if (target.sessionId === "child-session") expect(target.scope).toEqual({ type: "descendant", root_session_id: "parent", ancestry: [{ subagent_id: "child", session_id: "child-session", source_sequence: "1" }] }); sessions.push(target.sessionId); return sourceReader?.page(target, read, signal, allocation) ?? { type: "ready", page: fixturePage(target.sessionId, read) } },
       content: async () => { throw new Error("unused content") },
     },
     onCommand(command) { commands.push(command); return { type: "accepted" } },

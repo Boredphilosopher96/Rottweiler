@@ -89,6 +89,15 @@ export class HistoryController {
     }
   }
 
+  suspend(): void {
+    if (this.#target === null) return
+    this.#request?.abort(); this.#request = null
+    this.#target = null; this.#targetKey = ""; this.#sessionId = null
+    this.#loading = false; this.#error = null; this.#selection = null
+    const prior = this.#active; this.#active = null
+    try { this.#changed() } finally { prior?.release() }
+  }
+
   async open(target: SessionReadTarget): Promise<void> {
     if (this.#disposed) return
     const sessionId = target.sessionId

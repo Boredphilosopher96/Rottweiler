@@ -103,7 +103,7 @@ export class ClientRestoreController {
   /** Return no handoff while an interaction needs its current process or cannot fit the private cap. */
   recycleState(): AppClientState | null {
     const kind = this.host.pickerController.kind
-    if (this.host.children.activeId !== null || this.host.children.draftStore.usage.pending > 0 || this.host.submissionsInFlight > 0
+    if (this.host.children.controlsPending || this.host.children.activeId !== null || this.host.children.draftStore.usage.pending > 0 || this.host.submissionsInFlight > 0
       || this.host.submission.terminalSuspended || this.host.ui.state.shell.active || this.host.ui.state.replay.active
       || this.host.providers.hasPendingAction
       || this.host.ui.state.providerAuth.pending !== null || this.host.mcp.hasDraft

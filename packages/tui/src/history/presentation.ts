@@ -40,6 +40,11 @@ export class HistoryPresentation {
     this.#schedule()
   }
 
+  suspend(): void {
+    this.#dirty = false; this.#queuedAt = undefined; this.#clearTimer()
+    this.controller.suspend()
+  }
+
   dispose(): void {
     this.#disposed = true
     this.#clearTimer()
