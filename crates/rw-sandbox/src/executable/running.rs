@@ -1,5 +1,5 @@
-//! One verified snapshot per running image; requested descriptors are checked on every call.
-use super::{ApprovedExecutable, ExecutableArtifactIdentity, hex_digest, invalid};
+//! Live helper owners share a verified snapshot; requested descriptors are checked on every call.
+use super::{ApprovedExecutable, ExecutableArtifactIdentity, OwnedExecutable, hex_digest, invalid};
 use crate::SandboxError;
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -7,7 +7,7 @@ use std::{
     io::Read as _,
     os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex, Weak},
 };
 
 #[derive(Eq, PartialEq)]
@@ -35,7 +35,7 @@ impl ImageIdentity {
 }
 struct RunningImage {
     identity: ImageIdentity,
-    executable: ApprovedExecutable,
+    executable: Weak<OwnedExecutable>,
 }
 static IMAGE: Mutex<Option<RunningImage>> = Mutex::new(None);
 
@@ -52,7 +52,9 @@ pub(super) fn capture(
         {
             return Err(SandboxError::UntrustedHelper);
         }
-        return Ok(image.executable.clone());
+        if let Some(executable) = image.executable.upgrade() {
+            return Ok(ApprovedExecutable(executable));
+        }
     }
     if identity.bytes == 0 {
         return Err(SandboxError::UntrustedHelper);
@@ -87,7 +89,10 @@ pub(super) fn capture(
     }
     *cache = Some(RunningImage {
         identity,
-        executable: executable.clone(),
+        executable: Arc::downgrade(&executable.0),
     });
     Ok(executable)
 }
+
+#[cfg(test)]
+mod tests;
