@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 #[derive(Default)]
 pub(in crate::engine::tests) struct RecordingCheckpoints {

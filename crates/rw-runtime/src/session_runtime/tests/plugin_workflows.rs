@@ -117,8 +117,8 @@ async fn run_status(
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "workflow callback deadline during {argument}; latest event: {:?}",
-            events.try_recv()
+            "workflow callback deadline during {argument}; next buffered event: {:?}",
+            futures_util::FutureExt::now_or_never(events.recv())
         )
     })
     .expect("workflow command");
