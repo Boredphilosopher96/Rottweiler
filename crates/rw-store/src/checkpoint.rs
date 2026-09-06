@@ -960,9 +960,39 @@ fn hash_inventory_file(
     Ok(hash)
 }
 
+// Persist each new directory's entry before a child publication can become clean.
+fn create_directory_durable(path: &Path) -> Result<(), CheckpointError> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        match fs::metadata(current) {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => return Err(CheckpointError::UnsafePath),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if missing.len() >= 64 {
+            return Err(CheckpointError::OperationLimit("directory depth"));
+        }
+        missing.push(current);
+        current = current.parent().ok_or(CheckpointError::UnsafePath)?;
+    }
+    for directory in missing.into_iter().rev() {
+        match fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(error) => return Err(error.into()),
+        }
+        File::open(directory)?.sync_all()?;
+        File::open(directory.parent().ok_or(CheckpointError::UnsafePath)?)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
     let parent = path.parent().ok_or(CheckpointError::UnsafePath)?;
-    fs::create_dir_all(parent)?;
+    create_directory_durable(parent)?;
     let nonce = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(".rw-{}-{nonce}.tmp", std::process::id()));
     let mut file = OpenOptions::new()

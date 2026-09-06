@@ -313,3 +313,80 @@ fn unexpected_blob_directory_is_rejected_without_deleting_it() -> TestResult {
     assert_eq!(fs::read(old.join("retained"))?, b"source");
     Ok(())
 }
+
+#[test]
+fn interrupted_initializer_is_replaced_before_any_blob_admission() -> TestResult {
+    let fixture = Fixture::new(8)?;
+    let store = fixture.store("session")?;
+    fs::create_dir_all(&fixture.blobs.root)?;
+    fs::write(
+        fixture.blobs.root.join("quota-initialize.sqlite"),
+        b"partial database",
+    )?;
+    fs::write(
+        fixture.blobs.root.join("quota-initialize.sqlite-journal"),
+        b"partial rollback",
+    )?;
+    fixture.capture(&store, 1, b"original")?;
+    assert_eq!(fixture.used()?, 8);
+    assert!(!fixture.blobs.root.join("quota-initialize.sqlite").exists());
+    Ok(())
+}
+
+#[test]
+fn published_manifest_survives_a_crash_before_the_quota_clean_marker() -> TestResult {
+    let fixture = Fixture::new(8)?;
+    let store = fixture.store("session")?;
+    let mut operation = CheckpointOperation::default();
+    let mut writer = fixture.blobs.begin(&store.root, &mut operation)?;
+    let state = writer.capture(&mut b"original".as_slice(), None, &mut operation)?;
+    let manifest = store.persist_manifest(
+        "session",
+        1,
+        std::collections::BTreeMap::from([("file".to_owned(), state)]),
+    )?;
+    drop(writer);
+    assert!(matches!(
+        fixture.capture(&store, 2, b"changed!"),
+        Err(CheckpointError::BlobQuotaExceeded)
+    ));
+    let CheckpointFileState::Present { blob, bytes, .. } = &manifest.files["file"] else {
+        return Err("missing source".into());
+    };
+    assert_eq!(store.read_valid_blob(blob, *bytes)?, b"original");
+    Ok(())
+}
+
+#[test]
+fn abandoning_an_empty_fork_store_does_not_create_dangling_registration() -> TestResult {
+    let fixture = Fixture::new(8)?;
+    let empty = fixture.store("uncommitted-fork/root-0")?;
+    assert!(!fixture.blobs.root.exists());
+    drop(empty);
+    fs::remove_dir_all(fixture.root.path().join("uncommitted-fork"))?;
+    let active = fixture.store("active/root-0")?;
+    fixture.capture(&active, 1, b"original")?;
+    let namespaces: i64 = Connection::open(fixture.blobs.root.join("quota.sqlite"))?.query_row(
+        "SELECT count(*) FROM namespaces",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(namespaces, 1);
+    assert_eq!(fixture.used()?, 8);
+    Ok(())
+}
+
+#[test]
+fn removing_a_registered_namespace_is_an_incomplete_reference_inventory() -> TestResult {
+    let fixture = Fixture::new(8)?;
+    let removed = fixture.store("removed")?;
+    let manifest = fixture.capture(&removed, 1, b"original")?;
+    fs::remove_dir_all(&removed.root)?;
+    let active = fixture.store("active")?;
+    assert!(fixture.capture(&active, 1, b"changed!").is_err());
+    let CheckpointFileState::Present { blob, bytes, .. } = &manifest.files["file"] else {
+        return Err("missing source".into());
+    };
+    assert_eq!(active.read_valid_blob(blob, *bytes)?, b"original");
+    Ok(())
+}

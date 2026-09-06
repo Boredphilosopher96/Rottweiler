@@ -43,15 +43,15 @@ impl CheckpointStore {
         if !workspace.is_dir() {
             return Err(CheckpointError::WorkspaceNotDirectory);
         }
-        let root = namespace_root.join("checkpoints");
+        let root = std::path::absolute(namespace_root)?.join("checkpoints");
         blobs.validate_workspace(&workspace)?;
         if root.join("blobs").exists() && fs::read_dir(root.join("blobs"))?.next().is_some() {
             return Err(CheckpointError::UnexpectedBlobDirectory);
         }
-        fs::create_dir_all(root.join("manifests"))?;
-        fs::create_dir_all(root.join("pending"))?;
-        fs::create_dir_all(root.join("rewinds"))?;
-        fs::create_dir_all(root.join("reviews"))?;
+        super::create_directory_durable(&root.join("manifests"))?;
+        super::create_directory_durable(&root.join("pending"))?;
+        super::create_directory_durable(&root.join("rewinds"))?;
+        super::create_directory_durable(&root.join("reviews"))?;
         let root = fs::canonicalize(root)?;
         let mut storage_relative = Vec::new();
         for path in [root.as_path(), blobs.storage_path()] {

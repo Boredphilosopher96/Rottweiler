@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 
+mod ledger;
 mod reconcile;
 #[cfg(test)]
 mod tests;
@@ -69,8 +70,8 @@ impl CheckpointBlobStore {
         operation: &mut CheckpointOperation,
     ) -> Result<BlobWriteGuard<'a>, CheckpointError> {
         self.validate_workspace(&self.workspace)?;
-        fs::create_dir_all(self.directory())?;
-        fs::create_dir_all(self.root.join("staging"))?;
+        super::create_directory_durable(&self.directory())?;
+        super::create_directory_durable(&self.root.join("staging"))?;
         let lock = loop {
             operation.check()?;
             let file = OpenOptions::new()
@@ -82,7 +83,7 @@ impl CheckpointBlobStore {
             match AdvisoryFileLock::try_exclusive(file) {
                 Ok(lock) => break lock,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5))
+                    std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -106,42 +107,6 @@ impl CheckpointBlobStore {
             guard.reconcile(operation, true)?;
         }
         Ok(guard)
-    }
-
-    fn open_ledger(&self) -> Result<Connection, CheckpointError> {
-        let path = self.root.join("quota.sqlite");
-        let fresh = !path.exists();
-        if fresh && fs::read_dir(self.directory())?.next().is_some() {
-            return Err(CheckpointError::CorruptBlobQuota);
-        }
-        let connection = Connection::open(path)?;
-        connection.execute_batch("PRAGMA page_size=4096; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
-            PRAGMA cache_size=-256; PRAGMA temp_store=FILE; PRAGMA max_page_count=16384; PRAGMA temp.max_page_count=16384;")?;
-        let page_size: u32 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-        if page_size != 4096 {
-            return Err(CheckpointError::CorruptBlobQuota);
-        }
-        if fresh {
-            connection.execute_batch("BEGIN IMMEDIATE;
-                CREATE TABLE quota(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL,
-                    lineage TEXT NOT NULL, dirty INTEGER NOT NULL, staged INTEGER NOT NULL, used_bytes INTEGER NOT NULL, blob_count INTEGER NOT NULL);
-                CREATE TABLE blobs(digest TEXT PRIMARY KEY, bytes INTEGER NOT NULL CHECK(bytes>=0));
-                CREATE TABLE namespaces(path TEXT PRIMARY KEY);
-                CREATE TRIGGER blob_added AFTER INSERT ON blobs BEGIN UPDATE quota SET used_bytes=used_bytes+new.bytes,blob_count=blob_count+1 WHERE id=1; END;
-                CREATE TRIGGER blob_removed AFTER DELETE ON blobs BEGIN UPDATE quota SET used_bytes=used_bytes-old.bytes,blob_count=blob_count-1 WHERE id=1; END;")?;
-            connection.execute("INSERT INTO quota VALUES(1,1,?1,1,0,0,0)", [&self.lineage])?;
-            connection.execute_batch("COMMIT")?;
-            File::open(&self.root)?.sync_all()?;
-        }
-        let identity: (u32, String) =
-            connection.query_row("SELECT version,lineage FROM quota WHERE id=1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
-        if identity != (1, self.lineage.clone()) {
-            return Err(CheckpointError::CorruptBlobQuota);
-        }
-        connection.execute_batch("CREATE TEMP TABLE protected(digest TEXT PRIMARY KEY);")?;
-        Ok(connection)
     }
 }
 

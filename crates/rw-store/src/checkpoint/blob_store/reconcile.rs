@@ -105,7 +105,7 @@ impl BlobWriteGuard<'_> {
                     let name = session.file_name();
                     let name = name.to_str().ok_or(CheckpointError::CorruptManifest)?;
                     // A durable fork staging directory also protects its references.
-                    let identity = if name.starts_with(".rw-") && name.ends_with(".tmp") {
+                    let identity = if is_private_temporary(std::ffi::OsStr::new(name)) {
                         &manifest.session_id
                     } else {
                         name
