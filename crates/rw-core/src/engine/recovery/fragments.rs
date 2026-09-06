@@ -1,10 +1,10 @@
 //! One admitted source encoding supplies every bounded summary continuation.
-use super::{CanonicalHistory, HistoryMaterializationLimits, RecoveryError};
+use super::{CanonicalHistory, RecoveryError};
+use rw_types::allocation::PrepareAllocation;
 use rw_types::{Block, ContextBlockId, Role, SequenceId, Turn, TurnMeta};
 use std::{io::Write, ops::Range};
 
 pub const MAX_SUMMARY_FRAGMENT_BYTES: usize = 256 * 1024;
-const MAX_ENCODED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Offsets refer to the canonical JSON representation of one effective block.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -56,16 +56,12 @@ impl CanonicalHistory {
                 blocks: Vec::new(),
             });
         }
-        let mut turns = self.materialize(
-            ordinal
-                ..ordinal
-                    .checked_add(1)
-                    .ok_or(RecoveryError::Limit("fragment ordinal"))?,
-            HistoryMaterializationLimits::default(),
-        )?;
-        let mut turn = turns
-            .pop()
-            .ok_or(RecoveryError::Invalid("fragment source turn"))?;
+        let mut turn = self.fragment_turn(&source)?;
+        let mut encoded_limit = source.serialized_bytes;
+        let replacement = rw_types::ToolOutput::Text {
+            text: rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT.into(),
+        };
+        let replacement_bytes = super::encoding::serialized_size(&replacement)?;
         for (index, block) in turn.blocks.iter_mut().enumerate() {
             let identity = ContextBlockId {
                 sequence: source.sequence,
@@ -77,31 +73,64 @@ impl CanonicalHistory {
                 let Block::ToolResult { output, .. } = block else {
                     unreachable!()
                 };
-                *output = rw_types::ToolOutput::Text {
-                    text: rw_context::PRUNED_TOOL_OUTPUT_REPLACEMENT.into(),
-                };
+                // A replacement can be larger than a tiny original. Charge its
+                // entire encoding, so no hidden original bytes need another pass.
+                encoded_limit = encoded_limit
+                    .checked_add(replacement_bytes)
+                    .ok_or(RecoveryError::Limit("fragment pruning encoded growth"))?;
+                *output = replacement.clone();
             }
         }
-        ConversationFragmentSource::encode(ordinal, source.sequence, turn)
+        ConversationFragmentSource::encode(ordinal, source.sequence, turn, encoded_limit)
     }
 }
 impl ConversationFragmentSource {
-    fn encode(ordinal: u64, sequence: SequenceId, turn: Turn) -> Result<Self, RecoveryError> {
-        let mut writer = SourceWriter(Vec::new());
+    fn encode(
+        ordinal: u64,
+        sequence: SequenceId,
+        turn: Turn,
+        encoded_limit: u64,
+    ) -> Result<Self, RecoveryError> {
+        let encoded_limit = usize::try_from(encoded_limit)
+            .map_err(|_| RecoveryError::Limit("fragment source size"))?;
+        let metadata = turn
+            .blocks
+            .len()
+            .checked_mul(std::mem::size_of::<EncodedBlock>())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+            .ok_or(RecoveryError::Limit("fragment block metadata"))?;
+        let working = turn
+            .prepared_bytes()
+            .and_then(|bytes| bytes.checked_add(encoded_limit))
+            .and_then(|bytes| bytes.checked_add(metadata))
+            .ok_or(RecoveryError::Limit("fragment source working allocation"))?;
+        if working > super::MAX_HISTORY_RESULT_BYTES {
+            return Err(RecoveryError::Limit("fragment source working admission"));
+        }
+        // Canonical metadata supplies the upper bound before allocation. Exact
+        // reservation avoids a geometric doubling above a legal combined source.
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(encoded_limit)
+            .map_err(|_| RecoveryError::Limit("fragment encoded allocation"))?;
+        let mut writer = SourceWriter {
+            bytes: buffer,
+            limit: encoded_limit,
+        };
         let mut blocks = Vec::with_capacity(turn.blocks.len());
         for block in &turn.blocks {
-            let start = writer.0.len();
+            let start = writer.bytes.len();
             serde_json::to_writer(&mut writer, block)?;
             blocks.push(EncodedBlock {
                 kind: kind(block),
-                range: start..writer.0.len(),
+                range: start..writer.bytes.len(),
             });
         }
         Ok(Self {
             ordinal,
             sequence,
             role: turn.role,
-            bytes: writer.0,
+            bytes: writer.bytes,
             blocks,
         })
     }
@@ -195,24 +224,16 @@ fn kind(block: &Block) -> &'static str {
         Block::Citation { .. } => "citation",
     }
 }
-struct SourceWriter(Vec<u8>);
+struct SourceWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
 impl Write for SourceWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let total = self
-            .0
-            .len()
-            .checked_add(bytes.len())
-            .filter(|total| *total <= MAX_ENCODED_SOURCE_BYTES)
-            .ok_or_else(|| std::io::Error::other("summary source encoded admission"))?;
-        if total > self.0.capacity() {
-            let capacity = total
-                .next_power_of_two()
-                .clamp(4096, MAX_ENCODED_SOURCE_BYTES);
-            self.0
-                .try_reserve_exact(capacity - self.0.len())
-                .map_err(std::io::Error::other)?;
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("summary source encoded admission"));
         }
-        self.0.extend_from_slice(bytes);
+        self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -263,6 +284,7 @@ mod tests {
                 blocks: vec![block],
                 meta: TurnMeta::default(),
             },
+            expected.len() as u64,
         )
         .expect("one encoding");
         let allocation = source.bytes.as_ptr();

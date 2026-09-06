@@ -130,3 +130,6 @@ mod context_selection_tests;
 
 #[cfg(test)]
 mod test_source;
+
+#[cfg(test)]
+mod fragment_input_tests;

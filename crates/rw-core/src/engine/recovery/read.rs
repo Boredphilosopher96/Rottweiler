@@ -135,6 +135,23 @@ impl CanonicalHistory {
             .ok_or(RecoveryError::Invalid("cumulative conversation bytes"))
     }
 
+    /// Prepare one oversized source for bounded fragmentation, independently of
+    /// the aggregate provider window's encoded-byte ceiling.
+    pub(super) fn fragment_turn(&self, row: &ConversationSource) -> Result<Turn, RecoveryError> {
+        if row.decoded_bytes > MAX_MATERIALIZED_HISTORY_DECODE_BYTES {
+            return Err(RecoveryError::Limit("fragment decoded source admission"));
+        }
+        let turn = SourceReader {
+            source: &self.source,
+            events: VecDeque::new(),
+        }
+        .turn(row)?;
+        if turn.role != row.role || serialized_size(&turn)? != row.serialized_bytes {
+            return Err(RecoveryError::Invalid("fragment canonical source metadata"));
+        }
+        Ok(turn)
+    }
+
     /// Materialize exactly the selected canonical interval after metadata admission.
     /// This never substitutes a recent tail when the requested history exceeds capacity.
     ///
