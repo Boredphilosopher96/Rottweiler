@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct FixtureExecutor;
 #[async_trait]
 impl CommandExecutor for FixtureExecutor {
+    async fn settle_effects(&self) -> std::result::Result<(), ToolError> {
+        Ok(())
+    }
     async fn run(
         &self,
         _: CommandRequest,
