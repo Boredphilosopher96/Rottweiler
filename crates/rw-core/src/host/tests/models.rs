@@ -232,8 +232,12 @@ async fn pending_switch_is_not_persisted_and_each_context_choice_persists_on_com
         );
         let question_id = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if let EngineEvent::QuestionAsked { question_id, .. } =
-                    events.recv().await.expect("question event")
+                if let EngineEvent::QuestionAsked { question_id, .. } = events
+                    .recv()
+                    .await
+                    .expect("question event")
+                    .as_ref()
+                    .clone()
                 {
                     break question_id;
                 }

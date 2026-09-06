@@ -459,6 +459,9 @@ pub(super) async fn run_actor(
     state.closing = true;
     super::control_observation::publish(&state);
     active_turn.store(0, Ordering::Release);
+    // Quarantined effects can outlive the actor loop; event consumers still
+    // need a close fence and the final acknowledged durable prefix.
+    events.close();
     if let Some(message) = state.unsettled.clone() {
         shutdown.complete(Err(message));
         shutdown::retain_unproven((state, config, cleanup, commands, signals)).await;

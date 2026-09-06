@@ -522,7 +522,7 @@ impl SubagentSession for ActorSubagentSession {
                 }
                 final_text.push_str(&text[..end]);
             }
-            let encoded = super::progress::encode(sequence, &event)?;
+            let encoded = super::progress::encode(sequence, event.as_ref())?;
             progress.progress(sequence, encoded).await?;
             if let EngineEvent::TurnFinished {
                 status,

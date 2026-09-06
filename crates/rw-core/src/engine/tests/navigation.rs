@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use rw_ext::{CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation};
 use rw_tools::ToolRegistry;
 use rw_types::{
-    ClientCommand, ClientId, CommandOutcome, EngineEvent, SequenceId,
+    ClientCommand, CommandOutcome, EngineEvent, SequenceId,
     config::PermissionDecision,
     extension_control::{ExtensionControl, ExtensionControlOutcome, SessionNavigationTarget},
 };
