@@ -209,6 +209,7 @@ impl CommandExecutor for TokioCommandExecutor {
             state: Some(NativeCommandState {
                 _admission: admission,
                 _process_credit: process_credit,
+                _helper: guarded.helper.take(),
                 child_id: child.id(),
                 child,
                 watchdog: None,
@@ -448,6 +449,7 @@ pub(super) type CommandOutputTasks = (
 );
 
 pub(super) struct NativeCommandState {
+    _helper: Option<rw_sandbox::SandboxHelper>,
     _process_credit: rw_resources::ResourceLease,
     _admission: tokio::sync::OwnedSemaphorePermit,
     child: Child,
@@ -600,6 +602,7 @@ pub(super) fn guarded_process(
     );
     #[cfg(target_os = "linux")]
     let mut helper_pin = None;
+    let mut helper = None;
     let (program, args) = if let Some(base_policy) = sandbox {
         let policy = if network {
             let proxy = egress_proxy.ok_or_else(|| {
@@ -617,20 +620,17 @@ pub(super) fn guarded_process(
         };
         let executable = std::env::current_exe()
             .map_err(|error| ToolError::Command(format!("sandbox helper unavailable: {error}")))?;
-        let plan = shell_launch_plan(
-            &policy,
-            &rw_sandbox::SandboxHelper::from_running(&executable)
-                .map_err(|error| ToolError::Command(error.to_string()))?,
-            Path::new("/bin/sh"),
-            &shell_args,
-        )
-        .map_err(|error| ToolError::Command(error.to_string()))?;
+        let approved_helper = rw_sandbox::SandboxHelper::from_running(&executable)
+            .map_err(|error| ToolError::Command(error.to_string()))?;
+        let plan = shell_launch_plan(&policy, &approved_helper, Path::new("/bin/sh"), &shell_args)
+            .map_err(|error| ToolError::Command(error.to_string()))?;
         #[cfg(target_os = "linux")]
         let plan = {
             let mut plan = plan;
             helper_pin = plan.take_helper_pin();
             plan
         };
+        helper = Some(approved_helper);
         (plan.program, plan.args)
     } else {
         (PathBuf::from("/bin/sh"), shell_args)
@@ -653,6 +653,7 @@ pub(super) fn guarded_process(
     command.process_group(0);
     Ok(GuardedCommand {
         command,
+        helper,
         #[cfg(target_os = "linux")]
         helper_pin,
     })
@@ -660,6 +661,7 @@ pub(super) fn guarded_process(
 
 pub(super) struct GuardedCommand {
     command: Command,
+    helper: Option<rw_sandbox::SandboxHelper>,
     #[cfg(target_os = "linux")]
     helper_pin: Option<std::fs::File>,
 }
