@@ -16,7 +16,7 @@ ALLOWED = {
     "rw-macos-bootstrap": set(),
     "rw-plugin-protocol": {"rw-operation-contract", "rw-types"},
     "rw-types": {"rw-operation-contract", "rw-memory-derive"},
-    "rw-store": {"rw-types"},
+    "rw-store": {"rw-resources", "rw-types"},
     "rw-providers": {"rw-resources", "rw-types"},
     "rw-context": {"rw-providers", "rw-types"},
     "rw-sandbox": {"rw-types", "rw-macos-bootstrap"},

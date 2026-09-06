@@ -53,25 +53,14 @@ pub(super) fn resolve_git_executable(_workspace: &Path) -> Option<PathBuf> {
     resolve_git_executable_for_caller_path(caller_path.as_deref())
 }
 
-#[cfg(unix)]
-pub(super) fn kill_git_process_group(child: &mut std::process::Child) {
-    if let Ok(raw_pid) = i32::try_from(child.id())
-        && let Some(pid) = rustix::process::Pid::from_raw(raw_pid)
-    {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 // One caller owns process and pipe; drain deadlines never wait for a reader thread.
 #[cfg(unix)]
 fn capture_git_output(
-    child: &mut std::process::Child,
+    child: &mut rw_resources::process::BlockingProcess,
     maximum: usize,
     deadline: Duration,
 ) -> Option<(ExitStatus, Vec<u8>, bool)> {
-    let mut stdout = child.stdout.take()?;
+    let mut stdout = child.child_mut().ok()?.stdout.take()?;
     let flags = rustix::fs::fcntl_getfl(&stdout).ok()?;
     rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK).ok()?;
     let started = Instant::now();
@@ -101,7 +90,7 @@ fn capture_git_output(
         captured.extend_from_slice(&buffer[..retained]);
         overflow |= retained < read;
         if status.is_none() {
-            if let Some(exited) = child.try_wait().ok()? {
+            if let Some(exited) = child.child_mut().ok()?.try_wait().ok()? {
                 status = Some(exited);
                 exited_at = Some(Instant::now());
             } else if started.elapsed() >= deadline {
@@ -118,7 +107,7 @@ fn capture_git_output(
             if killed_at.is_none()
                 && exited_at.is_some_and(|at| at.elapsed() >= GIT_READER_DEADLINE)
             {
-                kill_git_process_group(child);
+                child.settle();
                 killed_at = Some(Instant::now());
             }
         }
@@ -167,11 +156,11 @@ pub(super) fn run_bounded_git(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child = command.spawn().ok()?;
+    let mut child = rw_resources::process::BlockingProcess::spawn(&mut command).ok()?;
     let output = capture_git_output(&mut child, maximum, deadline);
     // Closing this scope closes the nonblocking pipe even if a descendant kept
     // it open after leaving the process group; no detached reader survives us.
-    kill_git_process_group(&mut child);
+    child.settle();
     let (status, stdout, overflow) = output?;
     let identity_unchanged = open_workspace_directory(workspace)
         .and_then(|current| {

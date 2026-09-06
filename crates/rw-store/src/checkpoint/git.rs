@@ -3,17 +3,16 @@ use super::operation::CheckpointCancellation;
 use super::{CheckpointError, CheckpointOperation};
 use std::{
     io::{self, Read},
-    process::{Child, ChildStdout, Command, Stdio},
+    process::{ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 pub(super) struct GitPipe {
-    child: Child,
+    child: rw_resources::process::BlockingProcess,
     stdout: ChildStdout,
     cancellation: CheckpointCancellation,
     deadline: Instant,
-    reaped: bool,
 }
 
 impl GitPipe {
@@ -30,10 +29,9 @@ impl GitPipe {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn()?;
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+        let mut child = rw_resources::process::BlockingProcess::spawn(command)?;
+        let Some(stdout) = child.child_mut()?.stdout.take() else {
+            child.settle();
             return Err(io::Error::other("Git stdout was not captured"));
         };
         let pipe = Self {
@@ -41,7 +39,6 @@ impl GitPipe {
             stdout,
             cancellation: operation.cancellation(),
             deadline: operation.deadline(),
-            reaped: false,
         };
         #[cfg(unix)]
         {
@@ -74,8 +71,8 @@ impl GitPipe {
     pub(super) fn finish(mut self) -> io::Result<bool> {
         loop {
             self.check()?;
-            if let Some(status) = self.child.try_wait()? {
-                self.reaped = true;
+            if let Some(status) = self.child.child_mut()?.try_wait()? {
+                self.child.settle();
                 return Ok(status.success());
             }
             thread::sleep(Duration::from_millis(1));
@@ -93,22 +90,6 @@ impl Read for GitPipe {
                 }
                 result => return result,
             }
-        }
-    }
-}
-
-impl Drop for GitPipe {
-    fn drop(&mut self) {
-        if !self.reaped {
-            #[cfg(unix)]
-            if let Some(pid) = i32::try_from(self.child.id())
-                .ok()
-                .and_then(rustix::process::Pid::from_raw)
-            {
-                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-            }
-            let _ = self.child.kill();
-            let _ = self.child.wait();
         }
     }
 }
@@ -149,9 +130,10 @@ mod tests {
             &operation,
         )
         .expect("child");
-        let pid =
-            rustix::process::Pid::from_raw(i32::try_from(pipe.child.id()).expect("native pid"))
-                .expect("pid");
+        let pid = rustix::process::Pid::from_raw(
+            i32::try_from(pipe.child.child_mut().expect("owned child").id()).expect("native pid"),
+        )
+        .expect("pid");
         pipe.read_exact(&mut [0]).expect("child started");
         operation.cancellation().cancel();
         assert!(pipe.read(&mut [0]).is_err());

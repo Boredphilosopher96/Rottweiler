@@ -880,6 +880,7 @@ mod creation;
 pub use creation::WorktreeAllocation;
 
 mod git;
+mod git_process;
 use git::{
     append_untracked_patches, bounded_diagnostic, git_common_directory, git_index_path,
     path_from_stdout, require_success, run_git, run_git_with_paths, text_stdout, truncate_utf8,

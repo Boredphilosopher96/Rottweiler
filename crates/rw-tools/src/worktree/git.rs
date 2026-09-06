@@ -1,10 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::bash::audited_system_git;
 use crate::registry::{CancellationToken, ToolError};
@@ -236,80 +233,8 @@ where
     let git = audited_system_git().ok_or_else(|| {
         ToolError::Command("no audited root-owned system git executable is available".to_owned())
     })?;
-    let mut command = configured_git_command(git, cwd, args, index_file, work_tree);
-    let mut child = command
-        .spawn()
-        .map_err(|source| ToolError::Command(format!("could not spawn audited git: {source}")))?;
-    let child_id = child.id();
-    let mut child_stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| ToolError::Command("git stdin pipe was unavailable".to_owned()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ToolError::Command("git stdout pipe was unavailable".to_owned()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ToolError::Command("git stderr pipe was unavailable".to_owned()))?;
-    let stdout_task = tokio::spawn(read_bounded(stdout, MAX_GIT_OUTPUT_BYTES));
-    let stderr_task = tokio::spawn(read_bounded(stderr, DIAGNOSTIC_LIMIT));
-    let write = async {
-        if let Some(bytes) = stdin {
-            child_stdin.write_all(bytes).await.map_err(|source| {
-                ToolError::Command(format!("could not write git input: {source}"))
-            })?;
-        }
-        child_stdin
-            .shutdown()
-            .await
-            .map_err(|source| ToolError::Command(format!("could not close git input: {source}")))
-    };
-    let write_result = tokio::select! {
-        result = write => result,
-        () = cancellation.cancelled() => Err(ToolError::Cancelled),
-    };
-    drop(child_stdin);
-    if let Err(error) = write_result {
-        terminate_process_group(child_id);
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
-        return Err(error);
-    }
-    let status = tokio::select! {
-        status = child.wait() => status.map_err(|source| ToolError::Command(format!("could not wait for git: {source}")))?,
-        () = cancellation.cancelled() => {
-            terminate_process_group(child_id);
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return Err(ToolError::Cancelled);
-        }
-    };
-    let (stdout, stdout_truncated) = stdout_task
-        .await
-        .map_err(|source| ToolError::Output(source.to_string()))??;
-    let (stderr, stderr_truncated) = stderr_task
-        .await
-        .map_err(|source| ToolError::Output(source.to_string()))??;
-    if stdout_truncated || stderr_truncated {
-        return Err(ToolError::SizeLimit {
-            limit: if stdout_truncated {
-                MAX_GIT_OUTPUT_BYTES
-            } else {
-                DIAGNOSTIC_LIMIT
-            },
-        });
-    }
-    Ok(GitOutput {
-        status,
-        stdout,
-        stderr,
-    })
+    let command = configured_git_command(git, cwd, args, index_file, work_tree);
+    super::git_process::run(command, stdin, cancellation).await
 }
 
 pub(super) fn configured_git_command<I>(
@@ -340,8 +265,7 @@ where
         .env("LC_ALL", "C")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     if let Some(index_file) = index_file {
         command.env("GIT_INDEX_FILE", index_file);
     }
@@ -352,42 +276,6 @@ where
     command.process_group(0);
     command
 }
-
-pub(super) async fn read_bounded(
-    mut reader: impl tokio::io::AsyncRead + Unpin,
-    limit: usize,
-) -> Result<(Vec<u8>, bool), ToolError> {
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut chunk = [0_u8; 16 * 1024];
-    loop {
-        let read = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|source| ToolError::Output(source.to_string()))?;
-        if read == 0 {
-            break;
-        }
-        let remaining = limit.saturating_sub(bytes.len());
-        let retain = remaining.min(read);
-        bytes.extend_from_slice(&chunk[..retain]);
-        truncated |= retain < read;
-    }
-    Ok((bytes, truncated))
-}
-
-#[cfg(unix)]
-pub(super) fn terminate_process_group(child_id: Option<u32>) {
-    let Some(raw) = child_id.and_then(|id| i32::try_from(id).ok()) else {
-        return;
-    };
-    if let Some(pid) = rustix::process::Pid::from_raw(raw) {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-    }
-}
-
-#[cfg(not(unix))]
-pub(super) fn terminate_process_group(_child_id: Option<u32>) {}
 
 pub(super) fn path_from_stdout(bytes: &[u8], label: &str) -> Result<PathBuf, ToolError> {
     Ok(PathBuf::from(text_stdout(bytes, label)?))

@@ -5,6 +5,9 @@
 //! does not claim to count arbitrary descendants created inside that group.
 //! Resource acquisition never authorizes an effect or replaces a caller's deadline.
 
+#[cfg(unix)]
+pub mod process;
+
 use std::{
     future::Future,
     sync::{Arc, OnceLock},
