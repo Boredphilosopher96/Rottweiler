@@ -495,8 +495,8 @@ transaction replaces the canonical conversation generation.
   publication. Interrupted operations reconcile before new admission. Reclamation
   validates every registered manifest and rewind reference before removing only
   unreferenced content; malformed or incomplete inventory fails closed. Referenced
-  history is never evicted to make room. Nonempty per-session blob layouts require
-  explicit migration and cannot silently bypass this shared quota.
+  history is never evicted to make room. Checkpoint namespaces reject unexpected blob directories; all captured content
+  must belong to the shared workspace authority.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.
 
 A rewind spanning multiple workspace roots has one session-level durable

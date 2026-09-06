@@ -1088,9 +1088,9 @@ pub enum CheckpointError {
     CorruptBlobQuota,
     /// Unregistered per-session blob layouts cannot silently bypass shared admission.
     #[error(
-        "per-session checkpoint blobs require an explicit migration to shared workspace storage"
+        "checkpoint namespace contains an unexpected blob directory; shared workspace blob authority is required"
     )]
-    LegacyBlobLayout,
+    UnexpectedBlobDirectory,
     /// Durable quota ledger failure.
     #[error("checkpoint blob quota ledger failed")]
     BlobLedger(#[from] rusqlite::Error),

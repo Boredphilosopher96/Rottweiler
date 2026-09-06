@@ -46,7 +46,7 @@ impl Fixture {
         )
     }
     fn used(&self) -> Result<u64, CheckpointError> {
-        Ok(
+        super::nonnegative(
             Connection::open(self.blobs.root.join("quota.sqlite"))?.query_row(
                 "SELECT used_bytes FROM quota WHERE id=1",
                 [],
@@ -262,7 +262,7 @@ fn abandoned_staging_credit_is_released_only_after_exclusive_reconciliation() ->
     let writer = fixture.blobs.begin(&store.root, &mut operation)?;
     writer.connection.execute(
         "UPDATE quota SET staged=?1 WHERE id=1",
-        [MAX_CAPTURE_FILE_BYTES],
+        [super::sql_integer(MAX_CAPTURE_FILE_BYTES)?],
     )?;
     fs::write(
         fixture.blobs.root.join("staging/capture-abandoned"),
@@ -270,7 +270,7 @@ fn abandoned_staging_credit_is_released_only_after_exclusive_reconciliation() ->
     )?;
     drop(writer);
     fixture.capture(&store, 1, b"new")?;
-    let staged: u64 = Connection::open(fixture.blobs.root.join("quota.sqlite"))?.query_row(
+    let staged: i64 = Connection::open(fixture.blobs.root.join("quota.sqlite"))?.query_row(
         "SELECT staged FROM quota WHERE id=1",
         [],
         |row| row.get(0),
@@ -301,14 +301,14 @@ fn read_open_never_erases_an_active_writers_unpublished_manifest() -> TestResult
 }
 
 #[test]
-fn unregistered_local_blob_layout_is_rejected_without_deleting_it() -> TestResult {
+fn unexpected_blob_directory_is_rejected_without_deleting_it() -> TestResult {
     let fixture = Fixture::new(8)?;
     let old = fixture.root.path().join("session/checkpoints/blobs");
     fs::create_dir_all(&old)?;
     fs::write(old.join("retained"), b"source")?;
     assert!(matches!(
         fixture.store("session"),
-        Err(CheckpointError::LegacyBlobLayout)
+        Err(CheckpointError::UnexpectedBlobDirectory)
     ));
     assert_eq!(fs::read(old.join("retained"))?, b"source");
     Ok(())

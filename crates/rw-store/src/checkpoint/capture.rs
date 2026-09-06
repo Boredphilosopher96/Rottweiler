@@ -46,7 +46,7 @@ impl CheckpointStore {
         let root = namespace_root.join("checkpoints");
         blobs.validate_workspace(&workspace)?;
         if root.join("blobs").exists() && fs::read_dir(root.join("blobs"))?.next().is_some() {
-            return Err(CheckpointError::LegacyBlobLayout);
+            return Err(CheckpointError::UnexpectedBlobDirectory);
         }
         fs::create_dir_all(root.join("manifests"))?;
         fs::create_dir_all(root.join("pending"))?;

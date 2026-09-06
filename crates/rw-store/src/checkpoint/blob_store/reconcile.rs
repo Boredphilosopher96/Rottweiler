@@ -178,18 +178,22 @@ impl BlobWriteGuard<'_> {
             {
                 return Err(CheckpointError::CorruptBlob);
             }
-            let old: Option<u64> = self
+            let old: Option<i64> = self
                 .connection
                 .query_row("SELECT bytes FROM live WHERE digest=?1", [blob], |row| {
                     row.get(0)
                 })
                 .optional()?;
-            if old.is_some_and(|old| old != *bytes) {
+            if old
+                .map(super::nonnegative)
+                .transpose()?
+                .is_some_and(|old| old != *bytes)
+            {
                 return Err(CheckpointError::CorruptBlob);
             }
             self.connection.execute(
                 "INSERT OR IGNORE INTO live VALUES(?1,?2)",
-                rusqlite::params![blob, bytes],
+                rusqlite::params![blob, super::sql_integer(*bytes)?],
             )?;
         }
         Ok(())
@@ -240,7 +244,7 @@ impl BlobWriteGuard<'_> {
                 }
                 self.connection.execute(
                     "INSERT INTO observed VALUES(?1,?2)",
-                    rusqlite::params![digest, bytes],
+                    rusqlite::params![digest, super::sql_integer(bytes)?],
                 )?;
             }
         }

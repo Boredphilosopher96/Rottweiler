@@ -18,7 +18,7 @@ impl BlobWriteGuard<'_> {
         // This permits deduplication even when retained storage is full.
         self.connection.execute(
             "UPDATE quota SET staged=?1 WHERE id=1",
-            [MAX_CAPTURE_FILE_BYTES],
+            [super::sql_integer(MAX_CAPTURE_FILE_BYTES)?],
         )?;
         let mut temporary = tempfile::Builder::new()
             .prefix("capture-")
@@ -64,7 +64,7 @@ impl BlobWriteGuard<'_> {
         File::open(self.owner.root.join("staging"))?.sync_all()?;
         self.connection.execute(
             "INSERT OR IGNORE INTO blobs VALUES(?1,?2)",
-            rusqlite::params![digest, bytes],
+            rusqlite::params![digest, super::sql_integer(bytes)?],
         )?;
         self.connection
             .execute("INSERT OR IGNORE INTO protected VALUES(?1)", [&digest])?;
@@ -92,11 +92,13 @@ impl BlobWriteGuard<'_> {
     }
 
     fn fits(&self, bytes: u64) -> Result<bool, CheckpointError> {
-        let (used, count): (u64, u64) = self.connection.query_row(
+        let (used, count): (i64, i64) = self.connection.query_row(
             "SELECT used_bytes,blob_count FROM quota WHERE id=1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        let used = super::nonnegative(used)?;
+        let count = super::nonnegative(count)?;
         Ok(bytes <= self.owner.retained_bytes.saturating_sub(used) && count < MAX_BLOBS)
     }
 }

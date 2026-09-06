@@ -1,7 +1,7 @@
 //! One workspace's shared, crash-reconciled checkpoint byte authority.
 
 use super::{CheckpointError, CheckpointOperation, MAX_CAPTURE_FILE_BYTES};
-use crate::session::ExclusiveFileLock;
+use crate::session::AdvisoryFileLock;
 use rusqlite::{Connection, OptionalExtension};
 use std::{
     fs::{self, File, OpenOptions},
@@ -79,7 +79,7 @@ impl CheckpointBlobStore {
                 .read(true)
                 .write(true)
                 .open(self.root.join("writer.lock"))?;
-            match ExclusiveFileLock::try_acquire(file) {
+            match AdvisoryFileLock::try_exclusive(file) {
                 Ok(lock) => break lock,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5))
@@ -148,7 +148,7 @@ impl CheckpointBlobStore {
 pub(super) struct BlobWriteGuard<'a> {
     owner: &'a CheckpointBlobStore,
     connection: Connection,
-    _lock: ExclusiveFileLock,
+    _lock: AdvisoryFileLock,
 }
 
 impl BlobWriteGuard<'_> {
@@ -163,10 +163,10 @@ impl BlobWriteGuard<'_> {
             .query_row("SELECT 1 FROM namespaces WHERE path=?1", [path], |_| Ok(()))
             .optional()?
             .is_some();
-        let count: u64 =
+        let count: i64 =
             self.connection
                 .query_row("SELECT count(*) FROM namespaces", [], |row| row.get(0))?;
-        if !exists && count >= MAX_NAMESPACES {
+        if !exists && nonnegative(count)? >= MAX_NAMESPACES {
             return Err(CheckpointError::BlobQuotaExceeded);
         }
         self.connection
@@ -202,4 +202,11 @@ fn workspace_identity(workspace: &Path) -> Result<String, CheckpointError> {
     }
     let path = workspace.to_str().ok_or(CheckpointError::UnsafePath)?;
     Ok(blake3::hash(path.as_bytes()).to_hex().to_string())
+}
+
+fn nonnegative(value: i64) -> Result<u64, CheckpointError> {
+    u64::try_from(value).map_err(|_| CheckpointError::CorruptBlobQuota)
+}
+fn sql_integer(value: u64) -> Result<i64, CheckpointError> {
+    i64::try_from(value).map_err(|_| CheckpointError::CorruptBlobQuota)
 }
