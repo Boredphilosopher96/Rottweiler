@@ -68,23 +68,23 @@ impl DerivedDatabase {
             sync_event_file(&file)?;
         }
         let size = file.metadata()?.len();
-        let was_empty = size == 0;
+        let mut was_empty = size == 0;
         check_extent(max_bytes, 0, size)?;
         let counters = Arc::new(IoCounters::default());
-        let backend = BoundedFile {
-            inner: redb::backends::FileBackend::new(file).map_err(storage)?,
-            counters: Arc::clone(&counters),
-            max_bytes,
+        let database = match create_database(file.try_clone()?, cache_bytes, max_bytes, &counters) {
+            Ok(database) => database,
+            Err(DerivedDatabaseError::Storage(redb::Error::RepairAborted)) if !was_empty => {
+                // The journal owns every projection fact. A crashed database must
+                // not force an unbounded redb repair scan or prevent session resume.
+                // Keep the independent writer lock and reset the same verified
+                // descriptor, never reopen an untrusted replacement path.
+                file.set_len(0)?;
+                sync_event_file(&file)?;
+                was_empty = true;
+                create_database(file, cache_bytes, max_bytes, &counters)?
+            }
+            Err(error) => return Err(error),
         };
-        let mut builder = Database::builder();
-        builder
-            .set_cache_size(cache_bytes)
-            .set_repair_callback(move |repair| {
-                if !was_empty {
-                    repair.abort();
-                }
-            });
-        let database = builder.create_with_backend(backend).map_err(storage)?;
         Ok(Self {
             database,
             directory,
@@ -93,6 +93,24 @@ impl DerivedDatabase {
             was_empty,
         })
     }
+}
+
+fn create_database(
+    file: File,
+    cache_bytes: usize,
+    max_bytes: u64,
+    counters: &Arc<IoCounters>,
+) -> Result<Database, DerivedDatabaseError> {
+    let backend = BoundedFile {
+        inner: redb::backends::FileBackend::new(file).map_err(storage)?,
+        counters: Arc::clone(counters),
+        max_bytes,
+    };
+    Database::builder()
+        .set_cache_size(cache_bytes)
+        .set_repair_callback(redb::RepairSession::abort)
+        .create_with_backend(backend)
+        .map_err(storage)
 }
 
 fn storage(error: impl Into<redb::Error>) -> DerivedDatabaseError {
@@ -183,6 +201,55 @@ fn open_file(directory: &File, name: &str) -> Result<File, DerivedDatabaseError>
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    const CRASH_TABLE: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("crash_marker");
+
+    #[test]
+    fn unclean_projection_is_reset_under_its_original_writer_lock() {
+        const CHILD_ROOT: &str = "ROTTWEILER_DERIVED_CRASH_FIXTURE";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let log = super::super::SessionEventLog::open(std::path::Path::new(&root), "crash")
+                .expect("child journal");
+            let owner = DerivedDatabase::open(
+                &log.read_view(),
+                "recovery",
+                1024 * 1024,
+                16 * 1024 * 1024,
+                false,
+            )
+            .expect("child projection");
+            let transaction = owner.database.begin_write().expect("transaction");
+            transaction
+                .open_table(CRASH_TABLE)
+                .expect("table")
+                .insert(1, 2)
+                .expect("insert");
+            transaction.commit().expect("durable index transaction");
+            // Exit without running redb's clean-shutdown destructors.
+            std::process::exit(0);
+        }
+        let root = tempfile::tempdir().expect("root");
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "session::derived_database::tests::unclean_projection_is_reset_under_its_original_writer_lock", "--nocapture"])
+            .env(CHILD_ROOT, root.path())
+            .status().expect("crashed projection process");
+        assert!(status.success());
+        let log =
+            super::super::SessionEventLog::open(root.path(), "crash").expect("source survives");
+        let view = log.read_view();
+        let owner = DerivedDatabase::open(&view, "recovery", 1024 * 1024, 16 * 1024 * 1024, false)
+            .expect("unclean projection resets for bounded source catch-up");
+        assert!(owner.was_empty);
+        let read = owner.database.begin_read().expect("reader");
+        assert!(matches!(
+            read.open_table(CRASH_TABLE),
+            Err(redb::TableError::TableDoesNotExist(_))
+        ));
+        assert!(matches!(
+            DerivedDatabase::open(&view, "recovery", 1024 * 1024, 16 * 1024 * 1024, false),
+            Err(DerivedDatabaseError::Busy)
+        ));
+    }
 
     #[test]
     fn owner_drop_releases_its_lock_even_when_a_fork_inherited_the_description() {

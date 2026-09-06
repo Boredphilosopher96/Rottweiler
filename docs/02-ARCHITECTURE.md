@@ -410,6 +410,10 @@ transaction replaces the canonical conversation generation.
 - `sessions/<id>/journal/` — bounded sealed JSONL segments, `active.jsonl`, and a
   stable `writer.lock`. An append batch is synchronized before publication.
   Captured committed-prefix views support bounded cursor pages (ADR-029).
+- Derived projection databases refuse database-wide crash repair. An unclean
+  projection resets only its verified descriptor while retaining the writer lock,
+  then catches up from bounded journal pages. Authoritative journal data and
+  request-shape metadata are preserved.
 - Connection-scoped acknowledgements are excluded from session journals/replay.
 - `rw sessions verify <id>` checks every segment and typed event identity in an
   offline journal. Normal tail reads verify only referenced segments.
