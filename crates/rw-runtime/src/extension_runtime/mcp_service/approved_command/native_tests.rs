@@ -15,12 +15,14 @@ async fn approved_mcp_bytes_survive_replacement_without_losing_workspace_authori
     )
     .expect("discover exact MCP command");
     let discovered = &catalog.mcp_servers[0];
-    let config = discovered
+    let mut config = discovered
         .runtime_config(|_| unreachable!("no credentials"))
         .expect("runtime request");
     let store =
         McpApprovalStore::open(&fixture.private, &catalog.mcp_servers).expect("approval owner");
     let roots = [fixture.workspace.clone()];
+    assert!(!config.enabled);
+    config.enabled = true; // The manager may explicitly enable an approved server.
     assert!(
         store
             .capture_stdio(&config, &roots, &fixture.workspace)
@@ -140,7 +142,7 @@ process.stdout.write(result);",
         fs::write(user.join("payload.txt"), b"approved").expect("approved input");
         fs::write(workspace.join("workspace.txt"), b"workspace").expect("workspace input");
         fs::write(user.join(".rottweiler/mcp.toml"), format!(
-            "[servers.pinned]\nargv=['{}','{}','{}']\ncwd='{}'\nread_roots=['{}']\nwrite_roots=['{}']\n",
+            "[servers.pinned]\nenabled=false\nargv=['{}','{}','{}']\ncwd='{}'\nread_roots=['{}']\nwrite_roots=['{}']\n",
             executable.display(), user.join("entry.js").display(), user.join("payload.txt").display(),
             workspace.display(), workspace.display(), workspace.display(),
         )).expect("MCP configuration");

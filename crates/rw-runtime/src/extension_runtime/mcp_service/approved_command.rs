@@ -122,8 +122,8 @@ fn request(config: &McpServerConfig) -> Result<ProtocolChildRequest> {
 }
 
 fn same_transport(discovered: &DiscoveredMcpServer, config: &McpServerConfig) -> bool {
-    if discovered.enabled != config.enabled
-        || discovered.defer_tools != config.defer_tools
+    // Enablement is a manager control, not part of the approved fingerprint.
+    if discovered.defer_tools != config.defer_tools
         || discovered.tool_capabilities != config.tool_capabilities
     {
         return false;
