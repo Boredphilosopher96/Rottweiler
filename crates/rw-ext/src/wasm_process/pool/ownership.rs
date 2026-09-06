@@ -199,7 +199,11 @@ impl Drop for DetachedRetirement {
     fn drop(&mut self) {
         for mut worker in self.0.drain(..) {
             let _ = worker.child.start_kill();
-            std::mem::forget(worker);
+            tracing::error!(
+                process_id = worker.child.id(),
+                "WASM worker owner quarantined without settlement proof"
+            );
+            let _ = Box::leak(Box::new(worker));
         }
     }
 }

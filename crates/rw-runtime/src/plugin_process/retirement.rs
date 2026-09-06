@@ -51,7 +51,8 @@ impl Drop for Retirement {
         if let Some(owner) = self.0.take() {
             // No executor, failed wait/proxy proof, or dropped cleanup task:
             // retain child, helper bytes, proxy state and charged capacity.
-            std::mem::forget(owner);
+            tracing::error!("plugin process owner quarantined without settlement proof");
+            let _ = Box::leak(Box::new(owner));
         }
     }
 }

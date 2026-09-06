@@ -166,7 +166,11 @@ impl Drop for Retirement {
     fn drop(&mut self) {
         if let Some(owner) = self.0.take() {
             // Keep the actual child, helper, proxy worker and credit on missing proof.
-            std::mem::forget(owner);
+            tracing::error!(
+                process_id = owner.child.id(),
+                "protocol process owner quarantined without settlement proof"
+            );
+            let _ = Box::leak(Box::new(owner));
         }
     }
 }
