@@ -1,3 +1,4 @@
+import { TextRenderable } from "../text"
 import type { ToolOutputText } from "../../state/output-reader"
 import type { ClientDiagnostics } from "../../client-diagnostics"
 import { bindSelectableClick } from "../selectable-click"
@@ -7,7 +8,6 @@ import {
   BoxRenderable,
   CodeRenderable,
   DiffRenderable,
-  TextRenderable,
   fg,
   t,
   type RenderContext,

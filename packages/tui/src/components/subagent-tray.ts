@@ -1,4 +1,5 @@
-import { BoxRenderable, TextRenderable, type RenderContext } from "@opentui/core"
+import { TextRenderable } from "./text"
+import { BoxRenderable, type RenderContext } from "@opentui/core"
 
 import type { RottweilerState, SubagentProjection } from "../state"
 import type { RottweilerTheme } from "../theme"

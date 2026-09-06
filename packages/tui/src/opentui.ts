@@ -1,7 +1,7 @@
 import "rottweiler-opentui-native"
+import { TextRenderable } from "./components/text"
 import {
   CliRenderEvents,
-  TextRenderable,
   addDefaultParsers,
   createCliRenderer,
   destroyTreeSitterClient,

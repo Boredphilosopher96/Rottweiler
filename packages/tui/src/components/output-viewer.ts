@@ -1,3 +1,4 @@
+import { TextRenderable } from "./text"
 import { ToolOutputReader } from "../state/output-reader"
 import { UiActionsRenderable } from "./ui-actions"
 import type { UiPresentation } from "../protocol"
@@ -7,7 +8,6 @@ import type { DocumentSnapshot } from "../history/document"
 import {
   BoxRenderable,
   ScrollBoxRenderable,
-  TextRenderable,
   type RenderContext,
 } from "@opentui/core"
 

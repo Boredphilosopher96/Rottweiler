@@ -1,10 +1,10 @@
+import { TextRenderable } from "./text"
 import {
   BoxRenderable,
   InputRenderable,
   InputRenderableEvents,
   SelectRenderable,
   SelectRenderableEvents,
-  TextRenderable,
   type KeyEvent,
   type RenderContext,
 } from "@opentui/core"

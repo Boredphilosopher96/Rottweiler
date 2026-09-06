@@ -1,6 +1,6 @@
+import { TextRenderable } from "./text"
 import { statusContext } from "../state/context-usage"
 import {
-  TextRenderable,
   bg,
   bold,
   fg,

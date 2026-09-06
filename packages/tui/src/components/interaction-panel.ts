@@ -1,9 +1,9 @@
+import { TextRenderable } from "./text"
 import {
   BoxRenderable,
   DiffRenderable,
   SelectRenderable,
   SelectRenderableEvents,
-  TextRenderable,
   type RenderContext,
   type SyntaxStyle,
   type TreeSitterClient

@@ -1,3 +1,4 @@
+import { TextRenderable } from "./text"
 import type { HistorySnapshot, HistoryViewport } from "../history/controller"
 import { TranscriptRowRenderable } from "./transcript/row"
 import { TranscriptScrollWindow } from "./transcript/scroll-window"
@@ -14,7 +15,6 @@ import {
   BoxRenderable,
   MarkdownRenderable,
   ScrollBarRenderable,
-  TextRenderable,
   bold,
   fg,
   t,

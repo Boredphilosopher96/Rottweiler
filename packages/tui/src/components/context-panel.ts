@@ -1,9 +1,9 @@
+import { TextRenderable } from "./text"
 import { statusContext } from "../state/context-usage"
 import {
   BoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
-  TextRenderable,
   bold,
   fg,
   t,

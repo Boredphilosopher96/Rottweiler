@@ -1,5 +1,6 @@
+import { TextRenderable } from "../text"
 import { bindSelectableClick } from "../selectable-click"
-import { BoxRenderable, CodeRenderable, MarkdownRenderable, TextRenderable, t, fg, bold, type RenderContext, type SyntaxStyle, type TreeSitterClient } from "@opentui/core"
+import { BoxRenderable, CodeRenderable, MarkdownRenderable, t, fg, bold, type RenderContext, type SyntaxStyle, type TreeSitterClient } from "@opentui/core"
 import type { TranscriptBodyPreview, TranscriptContent, TranscriptContentSource, TranscriptItem } from "../../protocol"
 import type { RottweilerTheme } from "../../theme"
 import { ReasoningBlockRenderable } from "./blocks"

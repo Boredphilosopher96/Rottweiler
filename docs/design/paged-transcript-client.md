@@ -176,3 +176,10 @@ result is synthetic and no credential value appears in the report. Native termin
 output drains through a stream; the test renderer's accumulating ANSI capture is
 disabled. These observations distinguish filled-cache behavior from initial growth;
 they do not replace the complete application's RSS gate.
+
+Display labels replace their native text-buffer contents. An empty replacement
+resets the reusable rope arena instead of retaining editable history; nonempty
+styled replacements preserve formatting and selection behavior. Composer undo
+remains a separate bounded edit owner. The held-view probe records JS heap and
+native allocation counts alongside RSS, with an explicit validity flag when
+the native allocator cannot report requested bytes.

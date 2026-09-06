@@ -1,6 +1,6 @@
+import { TextRenderable } from "./text"
 import {
   BoxRenderable,
-  TextRenderable,
   bg,
   fg,
   t,

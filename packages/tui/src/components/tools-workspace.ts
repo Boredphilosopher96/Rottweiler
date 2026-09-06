@@ -1,8 +1,8 @@
+import { TextRenderable } from "./text"
 import type { ClientBlockState } from "../recycle-state"
 import {
   BoxRenderable,
   ScrollBoxRenderable,
-  TextRenderable,
   fg,
   t,
   type RenderContext,
