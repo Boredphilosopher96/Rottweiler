@@ -316,6 +316,7 @@ async fn declarative_pre_tool_hook_matches_and_blocks_through_shared_executor() 
 
 #[test]
 fn root_recomposition_reuses_the_validated_wasm_generation() {
+    use std::os::unix::fs::PermissionsExt as _;
     let fixture = tempdir().expect("fixture");
     let helper = fixture.path().join("validated-helper");
     std::fs::write(&helper, b"validated before generation was retained").expect("helper");
@@ -328,7 +329,6 @@ fn root_recomposition_reuses_the_validated_wasm_generation() {
             }"#,
     )
     .expect("manifest");
-    use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
         .expect("executable fixture");
     let approved = rw_tools::ApprovedExecutable::from_installed(

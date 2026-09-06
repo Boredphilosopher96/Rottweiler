@@ -24,6 +24,7 @@ use rw_tools::ToolRegistry;
 use rw_types::ToolCapability;
 use rw_types::config::ToolchainConfig;
 use rw_types::hook_contract::HookClass;
+use std::io::Read as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -198,7 +199,6 @@ pub fn locate_wasm_host_executable() -> Result<rw_tools::ApprovedExecutable> {
     let directory = receipt
         .parent()
         .ok_or_else(|| miette!("WASM receipt directory is missing"))?;
-    use std::io::Read as _;
     let mut bytes = Vec::new();
     std::fs::File::open(&receipt)
         .into_diagnostic()?
