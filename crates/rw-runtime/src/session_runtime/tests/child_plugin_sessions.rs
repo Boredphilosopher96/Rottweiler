@@ -75,8 +75,6 @@ fn controller(private: &Path, primary: &Path) -> RuntimeWorkspaceRootController 
         extension_user_home: private.clone(),
         extension_user_rottweiler: private.join(".rottweiler"),
         dangerously_trust: true,
-        // Simulate a trusted parent. Child extension discovery must still
-        // use the child's independently assessed trust state.
         instruction_workspace_roots: Arc::new(RwLock::new(vec![primary.clone()])),
         active_nested_instruction_sources: Arc::new(RwLock::new(BTreeSet::new())),
         pending_instruction_roots: Mutex::new(HashMap::new()),

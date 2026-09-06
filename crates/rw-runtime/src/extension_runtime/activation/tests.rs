@@ -363,7 +363,18 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
     for count in [0, 10, 50] {
         let configs = (0..count)
             .map(|index| {
-                rollback_plugin(fixture.root.path(), &format!("installed_{count}_{index}")).0
+                let (config, mut manifest) = rollback_plugin(
+                    fixture.root.path(),
+                    &format!("installed_{count}_{index}"),
+                );
+                manifest.capabilities = serde_json::from_value(serde_json::json!({
+                    "tools": [{"name":format!("fixture_{index}"),"description":"Inert tool","schema":{"type":"object"},"caps":[]}],
+                    "commands": [{"name":format!("fixture-{index}"),"description":"Inert command","allowed_tools":[]}],
+                    "providers": [{"alias-prefix":format!("fixture{index}/")}]
+                })).expect("declared adapters");
+                std::fs::write(&config.manifest_path, serde_json::to_vec(&manifest).expect("manifest"))
+                    .expect("declared metadata");
+                config
             })
             .collect::<Vec<_>>();
         let budget = Arc::new(PluginRuntimeBudget::default());
@@ -381,6 +392,9 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
         .expect("metadata composition");
         let runtime = owner.current();
         assert_eq!(runtime.endpoints.len(), count);
+        assert_eq!(runtime.tools.len(), count);
+        assert_eq!(runtime.commands.len(), count);
+        assert_eq!(runtime.providers.len(), count);
         assert!(runtime.pending.is_empty());
         owner.shutdown().await.expect("inert closure");
         budget.close().expect("no activation slots consumed");
