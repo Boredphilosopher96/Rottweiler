@@ -1,4 +1,5 @@
 //! Bound native compiler, executable hashing, and sandbox fixtures before their deadlines.
+#[path = "native_fixture/tests/activation_trace.rs"]
 mod activation_trace;
 
 use tokio::sync::{Semaphore, SemaphorePermit};

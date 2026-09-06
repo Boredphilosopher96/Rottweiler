@@ -17,12 +17,12 @@ pub const MAX_TOOL_RESULT_REFERENCE_BYTES: usize = 256 * 1024;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResultAdmission {
-    #[serde(with = "crate::decimal_u64")]
+    #[serde(with = "crate::protocol::decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub encoded_bytes: u64,
     pub nodes: u32,
-    #[serde(with = "crate::decimal_u64")]
+    #[serde(with = "crate::protocol::decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub string_bytes: u64,
