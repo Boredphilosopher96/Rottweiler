@@ -21,9 +21,11 @@ pub(super) async fn arm_parent_death_watchdog(
     command_group_id: Option<u32>,
     execution_lease: Option<&ExecutionLease>,
 ) -> Result<(), ToolError> {
-    let group_id = command_group_id
-        .ok_or_else(|| ToolError::Command("command process id was unavailable".to_owned()))?;
-    let script = r#"
+    arm_with_script(owner, command_group_id, execution_lease, WATCHDOG_SCRIPT).await
+}
+
+#[cfg(unix)]
+const WATCHDOG_SCRIPT: &str = r#"
 if ! : >&1; then exit 126; fi
 printf 'ready\n' >&2
 if [ -n "$2" ]; then printf '%s\n' "$$" > "$2"; fi
@@ -32,6 +34,17 @@ if [ -n "$3" ]; then while [ -e "$3" ]; do sleep 0.01; done; fi
 kill -KILL "-$1" 2>/dev/null || :
 while kill -0 "-$1" 2>/dev/null; do sleep 0.01; done
 "#;
+
+#[cfg(unix)]
+async fn arm_with_script(
+    owner: &mut Option<ParentDeathWatchdog>,
+    command_group_id: Option<u32>,
+    execution_lease: Option<&ExecutionLease>,
+    script: &str,
+) -> Result<(), ToolError> {
+    let group_id = command_group_id
+        .ok_or_else(|| ToolError::Command("command process id was unavailable".to_owned()))?;
+
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
@@ -68,18 +81,30 @@ while kill -0 "-$1" 2>/dev/null; do sleep 0.01; done
         .take()
         .ok_or_else(|| ToolError::Command("watchdog ready pipe was not created".to_owned()))?;
     let mut stderr = BufReader::new(stderr);
-    let mut readiness = String::new();
-    let ready =
-        tokio::time::timeout(Duration::from_secs(2), stderr.read_line(&mut readiness)).await;
-    if !matches!(ready, Ok(Ok(_))) || readiness != "ready\n" {
+    let (send_ready, ready) = tokio::sync::oneshot::channel();
+    // The watchdog owns its readiness pipe before awaiting it. Caller loss
+    // must not close stderr while the watchdog is publishing its ready frame.
+    watchdog.stderr_task = Some(tokio::spawn(async move {
+        let mut readiness = String::new();
+        let result = stderr.read_line(&mut readiness).await.and_then(|_| {
+            if readiness == "ready\n" {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("invalid watchdog readiness"))
+            }
+        });
+        let _ = send_ready.send(result);
+        let mut sink = tokio::io::sink();
+        tokio::io::copy(&mut stderr, &mut sink).await
+    }));
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(2), ready).await,
+        Ok(Ok(Ok(())))
+    ) {
         return Err(ToolError::Command(
             "command watchdog did not confirm its execution lease".to_owned(),
         ));
     }
-    watchdog.stderr_task = Some(tokio::spawn(async move {
-        let mut sink = tokio::io::sink();
-        tokio::io::copy(&mut stderr, &mut sink).await
-    }));
     Ok(())
 }
 
@@ -173,3 +198,6 @@ impl ParentDeathWatchdog {
         Ok(())
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;
