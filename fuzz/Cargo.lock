@@ -1336,6 +1336,7 @@ dependencies = [
  "getrandom 0.4.3",
  "regex",
  "reqwest",
+ "rustix",
  "rw-resources",
  "rw-types",
  "schemars",
