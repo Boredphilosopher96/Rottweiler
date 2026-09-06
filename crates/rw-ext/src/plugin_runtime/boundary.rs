@@ -36,6 +36,11 @@ pub struct LaunchedPluginProcess {
 pub trait PluginBoundaryRedactor: Send + Sync {
     fn redact(&self, value: Value) -> Value;
 
+    /// Redact one reply string with at most two `max_bytes` temporary buffers.
+    /// # Errors
+    /// Rejects before a replacement would exceed its admitted allocation.
+    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError>;
+
     /// Redacts known credential bytes before an HTTP response chunk is encoded
     /// onto the plugin wire.
     fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
@@ -66,6 +71,13 @@ pub(crate) struct NoopPluginBoundaryRedactor;
 impl PluginBoundaryRedactor for NoopPluginBoundaryRedactor {
     fn redact(&self, value: Value) -> Value {
         value
+    }
+
+    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError> {
+        if text.len() > max_bytes {
+            return Err(rpc_error("reply_admission", "reply string too large"));
+        }
+        Ok(text.to_owned())
     }
 
     fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
@@ -157,7 +169,16 @@ pub trait PluginLauncher: Send + Sync {
 /// delegated actor command. Teardown drains this future before releasing callers.
 #[async_trait]
 pub trait PushHandler: Send + Sync {
-    async fn handle_push(&self, method: &str, params: Value) -> Result<Value, PluginRpcError>;
+    /// Declare the typed response ceiling before the host admits this callback.
+    /// # Errors
+    /// Rejects unsupported methods without constructing a response.
+    fn reply_limits(&self, method: &str) -> Result<PushReplyLimits, PluginRpcError>;
+    async fn handle_push(
+        &self,
+        method: &str,
+        params: Value,
+        reply: &mut PushReplySlot,
+    ) -> Result<PushReply, PluginRpcError>;
 }
 
 /// Rejects every push. Useful when a host surface has no interactive session attached.
@@ -165,7 +186,18 @@ pub struct DenyPushHandler;
 
 #[async_trait]
 impl PushHandler for DenyPushHandler {
-    async fn handle_push(&self, _method: &str, _params: Value) -> Result<Value, PluginRpcError> {
+    fn reply_limits(&self, _method: &str) -> Result<PushReplyLimits, PluginRpcError> {
+        Err(rpc_error(
+            "push_unavailable",
+            "plugin push is unavailable on this host surface",
+        ))
+    }
+    async fn handle_push(
+        &self,
+        _method: &str,
+        _params: Value,
+        _reply: &mut PushReplySlot,
+    ) -> Result<PushReply, PluginRpcError> {
         Err(PluginRpcError {
             code: "push_unavailable".to_owned(),
             message: "plugin push is unavailable on this host surface".to_owned(),

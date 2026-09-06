@@ -9,6 +9,7 @@ use super::{
 use crate::engine::{
     AgentLoopError, AgentTurnStatus, SessionUsage,
     pending_event::PendingEvent,
+    recovery::HistoryRead,
     session::{ActorState, SessionActorConfig},
     wire_turn_id,
 };
@@ -24,12 +25,12 @@ use tokio::sync::oneshot;
 
 pub(in crate::engine) struct PendingPluginTool {
     turn: u64,
-    respond: oneshot::Sender<Result<ExtensionToolOutcome, AgentLoopError>>,
+    respond: oneshot::Sender<Result<HistoryRead<ExtensionToolOutcome>, AgentLoopError>>,
 }
 
 pub(in crate::engine) async fn start(
     request: ExtensionToolCall,
-    respond: oneshot::Sender<Result<ExtensionToolOutcome, AgentLoopError>>,
+    respond: oneshot::Sender<Result<HistoryRead<ExtensionToolOutcome>, AgentLoopError>>,
     state: &mut ActorState,
     runtime: StartTurnRuntime<'_>,
 ) {
@@ -248,7 +249,6 @@ pub(in crate::engine) async fn finish(
             return Ok(());
         }
     };
-    let (execution, _retained) = execution.into_parts();
     let status = if cancelled {
         AgentTurnStatus::Interrupted
     } else if execution.is_error {
@@ -275,14 +275,17 @@ pub(in crate::engine) async fn finish(
         return Err(error);
     }
     state.completed_turns = state.completed_turns.saturating_add(1);
-    let output = within_json_limit(&execution.output, MAX_EXTENSION_TOOL_OUTPUT_BYTES)
-        .then_some(execution.output);
-    let _ = pending.respond.send(Ok(ExtensionToolOutcome {
-        turn_id: wire_turn_id(turn),
-        invocation_id: execution.call.invocation_id,
-        is_error: execution.is_error,
-        output,
-    }));
+    let outcome = execution.map(|execution| {
+        let output = within_json_limit(&execution.output, MAX_EXTENSION_TOOL_OUTPUT_BYTES)
+            .then_some(execution.output);
+        ExtensionToolOutcome {
+            turn_id: wire_turn_id(turn),
+            invocation_id: execution.call.invocation_id,
+            is_error: execution.is_error,
+            output,
+        }
+    });
+    let _ = pending.respond.send(Ok(outcome));
     Ok(())
 }
 fn invalid(message: impl Into<String>) -> AgentLoopError {

@@ -228,6 +228,17 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
     if state.enforcer.check_push_method(&request.method).is_err() {
         return false;
     }
+    let limits = if request.method == rw_plugin_protocol::METHOD_EFFECT_TOOL_CALL {
+        PushReplyLimits::CONTENT
+    } else {
+        let Ok(limits) = state.push_handler.reply_limits(&request.method) else {
+            return false;
+        };
+        limits
+    };
+    let Ok(mut reply) = PushReplySlot::try_acquire(limits) else {
+        return false;
+    };
     let Ok(mut active) = state.host_commands.lock() else {
         return false;
     };
@@ -255,11 +266,18 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         // Keep this permit through the actual actor reply, even after teardown starts.
         let params = redactor.redact(request.params.unwrap_or(Value::Null));
         let response = if request.method == rw_plugin_protocol::METHOD_EFFECT_TOOL_CALL {
-            handle_tool_effect(&pending, params).await
+            handle_tool_effect(&pending, params, &mut reply).await
         } else {
             match validate_control_origin(&pending, &request.method, &params).await {
                 Ok(()) => {
-                    handle_push_request(&enforcer, handler.as_ref(), &request.method, params).await
+                    handle_push_request(
+                        &enforcer,
+                        handler.as_ref(),
+                        &request.method,
+                        params,
+                        &mut reply,
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             }
@@ -277,22 +295,20 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
             return;
         }
         let response = match response {
-            Ok(result) => RpcFrame::Success(RpcSuccess {
-                jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                id: request.id,
-                result: redactor.redact(result),
-            }),
-            Err(error) => RpcFrame::Failure(RpcFailure {
-                jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
-                id: Some(request.id),
-                error: rw_plugin_protocol::RpcErrorObject {
-                    code: -32000,
-                    message: error.message,
-                    data: Some(json!({"code":error.code})),
-                },
-            }),
+            Ok(result) => {
+                drop(reply);
+                match result.redact(request.id, redactor.as_ref()) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        termination.begin();
+                        lease.complete();
+                        return;
+                    }
+                }
+            }
+            Err(error) => reply.failure(request.id, error),
         };
-        if !tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, writer.send(response))
+        if !tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, writer.send_reply(response))
             .await
             .is_ok_and(|result| result.is_ok())
             || enforcer.violated()
@@ -304,7 +320,11 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
     true
 }
 
-async fn handle_tool_effect(pending: &Pending, params: Value) -> Result<Value, PluginRpcError> {
+async fn handle_tool_effect(
+    pending: &Pending,
+    params: Value,
+    reply: &mut PushReplySlot,
+) -> Result<PushReply, PluginRpcError> {
     let request: rw_types::extension_tools::ExtensionEffectCall = serde_json::from_value(params)
         .map_err(|_| rpc_error("invalid_params", "invalid nested tool effect request"))?;
     request
@@ -335,8 +355,7 @@ async fn handle_tool_effect(pending: &Pending, params: Value) -> Result<Value, P
             };
             rpc_error(code, &error.to_string())
         })?;
-    serde_json::to_value(result)
-        .map_err(|_| rpc_error("invalid_result", "nested tool result could not encode"))
+    reply.encode(&result)
 }
 
 pub(super) async fn validate_control_origin(
@@ -494,12 +513,13 @@ async fn handle_push_request(
     handler: &dyn PushHandler,
     method: &str,
     params: Value,
-) -> Result<Value, PluginRpcError> {
+    reply: &mut PushReplySlot,
+) -> Result<PushReply, PluginRpcError> {
     enforcer
         .check_push_method(method)
         .map_err(|error| rpc_error("capability_violation", &error.to_string()))?;
     validate_push_params(method, &params)?;
-    handler.handle_push(method, params).await
+    handler.handle_push(method, params, reply).await
 }
 
 pub(super) fn validate_push_params(method: &str, params: &Value) -> Result<(), PluginRpcError> {

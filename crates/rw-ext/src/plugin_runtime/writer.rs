@@ -38,6 +38,7 @@ impl QueuedFrame {
 struct PreparedFrame {
     frame: RpcFrame,
     bytes: usize,
+    retained: Option<super::push_reply::ReplyRetention>,
 }
 
 impl PreparedFrame {
@@ -48,6 +49,7 @@ impl PreparedFrame {
         Ok(Self {
             frame,
             bytes: size.0 + 1,
+            retained: None,
         })
     }
 }
@@ -99,12 +101,25 @@ impl RpcWriter {
         let mut bytes = Vec::with_capacity(prepared.bytes);
         serde_json::to_writer(&mut bytes, &prepared.frame).map_err(|_| ())?;
         bytes.push(b'\n');
-        drop(prepared);
+        drop(prepared.frame);
+        drop(prepared.retained);
         Ok(bytes)
     }
 
     pub(super) async fn send(&self, frame: RpcFrame) -> Result<(), ()> {
-        let prepared = PreparedFrame::new(frame)?;
+        self.send_prepared(PreparedFrame::new(frame)?).await
+    }
+
+    pub(super) async fn send_reply(
+        &self,
+        reply: super::push_reply::OwnedPushFrame,
+    ) -> Result<(), ()> {
+        let mut prepared = PreparedFrame::new(reply.frame)?;
+        prepared.retained = Some(reply.retained);
+        self.send_prepared(prepared).await
+    }
+
+    async fn send_prepared(&self, prepared: PreparedFrame) -> Result<(), ()> {
         let count = u32::try_from(prepared.bytes).map_err(|_| ())?;
         let permit = Arc::clone(&self.control_bytes)
             .acquire_many_owned(count)
@@ -183,6 +198,50 @@ mod tests {
             id: RpcId::Number(id),
             result: json!(null),
         })
+    }
+
+    #[tokio::test]
+    async fn host_result_owner_survives_caller_loss_until_encoded_queue_transfer() {
+        use super::super::{NoopPluginBoundaryRedactor, PushReplySlot};
+        let source = Arc::new(());
+        let weak = Arc::downgrade(&source);
+        let pool = Arc::new(Semaphore::new(64 * 1024 * 1024));
+        let reply = PushReplySlot::from_pool(pool.clone(), super::super::PushReplyLimits::CONTENT)
+            .expect("slot")
+            .encode(&json!({"body":"retained"}))
+            .expect("reply")
+            .retain(source)
+            .redact(RpcId::Number(1), &NoopPluginBoundaryRedactor)
+            .expect("redaction");
+        let (writer, mut receiver) = RpcWriter::channel();
+        let blocked = writer
+            .control_bytes
+            .clone()
+            .acquire_many_owned(u32::try_from(CONTROL_QUEUE_BYTES).expect("count"))
+            .await
+            .expect("block");
+        let owned_writer = writer.clone();
+        let mut write = Box::pin(async move { owned_writer.send_reply(reply).await });
+        assert!(futures_util::poll!(&mut write).is_pending());
+        assert!(weak.upgrade().is_some());
+        assert!(pool.available_permits() < 64 * 1024 * 1024);
+        // Losing the callback waiter does not cancel the independently owned write task.
+        let owner = tokio::spawn(async move { write.await });
+        drop(owner);
+        drop(blocked);
+        let frame = receiver.recv().await.expect("queued reply");
+        assert!(
+            weak.upgrade().is_none(),
+            "source released only after encoding"
+        );
+        assert_eq!(pool.available_permits(), 64 * 1024 * 1024);
+        assert!(frame.bytes.windows(8).any(|bytes| bytes == b"retained"));
+        assert!(writer.control_bytes.available_permits() < CONTROL_QUEUE_BYTES);
+        frame.complete();
+        assert_eq!(
+            writer.control_bytes.available_permits(),
+            CONTROL_QUEUE_BYTES
+        );
     }
 
     #[tokio::test]

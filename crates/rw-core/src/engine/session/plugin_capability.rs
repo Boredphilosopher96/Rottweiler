@@ -60,7 +60,10 @@ impl PluginSessionCapability {
     pub async fn call_tool(
         &self,
         request: rw_types::extension_tools::ExtensionToolCall,
-    ) -> Result<rw_types::extension_tools::ExtensionToolOutcome, AgentLoopError> {
+    ) -> Result<
+        crate::engine::recovery::HistoryRead<rw_types::extension_tools::ExtensionToolOutcome>,
+        AgentLoopError,
+    > {
         request
             .validate()
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.into()))?;

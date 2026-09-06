@@ -1,5 +1,7 @@
 //! Supervised JSON-RPC plugin runtime and public extension adapters.
 
+mod push_reply;
+pub use push_reply::{PushReply, PushReplyLimits, PushReplySlot};
 mod boundary;
 pub use boundary::*;
 mod host;

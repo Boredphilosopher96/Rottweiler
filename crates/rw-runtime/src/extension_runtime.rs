@@ -416,11 +416,36 @@ impl SessionPluginPushHandler {
 
 #[async_trait]
 impl PushHandler for SessionPluginPushHandler {
+    fn reply_limits(
+        &self,
+        method: &str,
+    ) -> std::result::Result<rw_ext::PushReplyLimits, PluginRpcError> {
+        match method {
+            METHOD_SESSION_SET_STATUS
+            | METHOD_UI_NOTIFY
+            | METHOD_SESSION_INJECT_MESSAGE
+            | METHOD_SESSION_CONTROL
+            | METHOD_EXTENSION_STATE_COMMIT
+            | METHOD_SESSION_QUERY
+            | rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => {
+                Ok(rw_ext::PushReplyLimits::ACKNOWLEDGEMENT)
+            }
+            METHOD_EVENT_READ => Ok(rw_ext::PushReplyLimits::EVENT_CHUNK),
+            METHOD_SESSION_CONTEXT_READ
+            | METHOD_EXTENSION_STATE_READ
+            | rw_plugin_protocol::METHOD_SESSION_TOOL_CALL => Ok(rw_ext::PushReplyLimits::CONTENT),
+            _ => Err(plugin_push_error(
+                "invalid_push",
+                "plugin push method is unknown",
+            )),
+        }
+    }
     async fn handle_push(
         &self,
         method: &str,
         params: serde_json::Value,
-    ) -> std::result::Result<serde_json::Value, PluginRpcError> {
+        reply: &mut rw_ext::PushReplySlot,
+    ) -> std::result::Result<rw_ext::PushReply, PluginRpcError> {
         let capability = self.bound(&params)?;
         match method {
             rw_plugin_protocol::METHOD_SESSION_TOOL_CALL => {
@@ -432,36 +457,37 @@ impl PushHandler for SessionPluginPushHandler {
                     .call_tool(request)
                     .await
                     .map_err(|error| plugin_push_error("host_tool_failed", &error.to_string()))?;
-                serde_json::to_value(result).map_err(|_| {
-                    plugin_push_error("host_tool_failed", "host tool result encoding failed")
-                })
+                Ok(reply.encode(&*result)?.retain(result))
             }
-            rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => self.publish_panel(params),
+            rw_plugin_protocol::METHOD_UI_PUBLISH_PANEL => {
+                reply.encode(&self.publish_panel(params)?)
+            }
             METHOD_EVENT_READ => {
                 let read = serde_json::from_value(params).map_err(|_| {
                     plugin_push_error("invalid_event_read", "invalid event source parameters")
                 })?;
-                serde_json::to_value(self.event_sources.read(&read)?).map_err(|_| {
-                    plugin_push_error("event_read_failed", "event source encoding failed")
-                })
+                reply.encode(&self.event_sources.read(&read)?)
             }
             METHOD_SESSION_CONTEXT_READ => {
                 let request = serde_json::from_value(params)
                     .map_err(|_| plugin_push_error("invalid_push", "invalid context read"))?;
-                plugin_push_result(capability.read_context(request).await)
+                plugin_push_result(reply, capability.read_context(request).await)
             }
             METHOD_SESSION_CONTROL => {
                 let request: rw_types::extension_invocation::ExtensionControlRequest =
                     serde_json::from_value(params).map_err(|_| {
                         plugin_push_error("invalid_push", "invalid session control")
                     })?;
-                plugin_push_result(capability.control(request.origin, request.control).await)
+                plugin_push_result(
+                    reply,
+                    capability.control(request.origin, request.control).await,
+                )
             }
-            METHOD_SESSION_QUERY => plugin_push_result(capability.query().await),
-            METHOD_EXTENSION_STATE_READ => plugin_push_result(capability.read_state().await),
+            METHOD_SESSION_QUERY => plugin_push_result(reply, capability.query().await),
+            METHOD_EXTENSION_STATE_READ => plugin_push_result(reply, capability.read_state().await),
             METHOD_EXTENSION_STATE_COMMIT => {
                 let transaction = plugin_state_transaction(params)?;
-                plugin_push_result(capability.commit_state(transaction).await)
+                plugin_push_result(reply, capability.commit_state(transaction).await)
             }
             METHOD_SESSION_INJECT_MESSAGE => {
                 let content = plugin_push_string(&params, "content")?;
@@ -480,17 +506,14 @@ impl PushHandler for SessionPluginPushHandler {
                         rw_plugin_protocol::InjectionDisposition::Command
                     }
                 };
-                serde_json::to_value(rw_plugin_protocol::InjectMessageResult { disposition })
-                    .map_err(|_| {
-                        plugin_push_error("push_failed", "cannot encode injection disposition")
-                    })
+                reply.encode(&rw_plugin_protocol::InjectMessageResult { disposition })
             }
             METHOD_SESSION_SET_STATUS => {
                 capability
                     .set_status(plugin_push_string(&params, "status")?)
                     .await
                     .map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
-                Ok(serde_json::Value::Null)
+                reply.encode(&serde_json::Value::Null)
             }
             METHOD_UI_NOTIFY => {
                 capability
@@ -500,7 +523,7 @@ impl PushHandler for SessionPluginPushHandler {
                     )
                     .await
                     .map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
-                Ok(serde_json::Value::Null)
+                reply.encode(&serde_json::Value::Null)
             }
             _ => Err(plugin_push_error(
                 "invalid_push",
@@ -511,11 +534,11 @@ impl PushHandler for SessionPluginPushHandler {
 }
 
 fn plugin_push_result<T: serde::Serialize>(
+    reply: &mut rw_ext::PushReplySlot,
     result: std::result::Result<T, rw_core::AgentLoopError>,
-) -> std::result::Result<serde_json::Value, PluginRpcError> {
+) -> std::result::Result<rw_ext::PushReply, PluginRpcError> {
     let value = result.map_err(|error| plugin_push_error("push_failed", &error.to_string()))?;
-    serde_json::to_value(value)
-        .map_err(|_| plugin_push_error("push_failed", "cannot encode host command outcome"))
+    reply.encode(&value)
 }
 
 fn plugin_push_string(
@@ -580,6 +603,20 @@ impl SharedPluginRedactor {
     }
 }
 impl PluginBoundaryRedactor for SharedPluginRedactor {
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+    ) -> std::result::Result<String, PluginRpcError> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .redact_text_bounded(text, max_bytes)
+            .map_err(|_| {
+                plugin_push_error("reply_admission", "redacted reply string exceeds admission")
+            })
+    }
+
     fn redact(&self, mut value: serde_json::Value) -> serde_json::Value {
         redact_plugin_value(
             &self

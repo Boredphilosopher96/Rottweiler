@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock, atomic::Ordering};
 #[derive(Default)]
 struct BrokerCommand {
     session: OnceLock<PluginSessionCapability>,
-    outcome: OnceLock<ExtensionToolOutcome>,
+    outcome: OnceLock<crate::engine::recovery::HistoryRead<ExtensionToolOutcome>>,
     origin: OnceLock<rw_types::extension_invocation::ExtensionInvocationId>,
 }
 #[async_trait]
@@ -55,7 +55,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for BrokerComma
             })
             .await
             .expect("host tool completes without actor deadlock");
-        self.outcome.set(outcome).expect("one completion");
+        assert!(self.outcome.set(outcome).is_ok(), "one completion");
         session
             .set_status("tool complete")
             .await

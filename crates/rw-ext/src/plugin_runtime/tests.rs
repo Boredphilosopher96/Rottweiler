@@ -197,18 +197,33 @@ struct RecordingPush(StdMutex<Vec<(String, Value)>>);
 
 #[async_trait]
 impl PushHandler for RecordingPush {
-    async fn handle_push(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
+    fn reply_limits(&self, _method: &str) -> Result<PushReplyLimits, PluginRpcError> {
+        Ok(PushReplyLimits::ACKNOWLEDGEMENT)
+    }
+    async fn handle_push(
+        &self,
+        method: &str,
+        params: Value,
+        reply: &mut PushReplySlot,
+    ) -> Result<PushReply, PluginRpcError> {
         self.0
             .lock()
             .expect("push lock")
             .push((method.to_owned(), params));
-        Ok(Value::Null)
+        reply.encode(&Value::Null)
     }
 }
 
 struct CanaryRedactor;
 
 impl PluginBoundaryRedactor for CanaryRedactor {
+    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError> {
+        if text.len() > max_bytes {
+            return Err(rpc_error("reply_admission", "reply string too large"));
+        }
+        Ok(text.replace("PLUGIN_CANARY_SECRET", "[REDACTED]"))
+    }
+
     fn redact(&self, mut value: Value) -> Value {
         fn visit(value: &mut Value) {
             match value {
@@ -230,6 +245,13 @@ const HTTP_SECRET: &str = "PLUGIN_HTTP_SECRET_CANARY";
 struct HttpSecretRedactor;
 
 impl PluginBoundaryRedactor for HttpSecretRedactor {
+    fn redact_reply_text(&self, text: &str, max_bytes: usize) -> Result<String, PluginRpcError> {
+        if text.len() > max_bytes {
+            return Err(rpc_error("reply_admission", "reply string too large"));
+        }
+        Ok(text.replace(HTTP_SECRET, "[REDACTED]"))
+    }
+
     fn redact(&self, mut value: Value) -> Value {
         fn visit(value: &mut Value) {
             match value {
@@ -523,14 +545,22 @@ struct DelayedActorPush {
 
 #[async_trait]
 impl PushHandler for DelayedActorPush {
-    async fn handle_push(&self, _method: &str, _params: Value) -> Result<Value, PluginRpcError> {
+    fn reply_limits(&self, _method: &str) -> Result<PushReplyLimits, PluginRpcError> {
+        Ok(PushReplyLimits::ACKNOWLEDGEMENT)
+    }
+    async fn handle_push(
+        &self,
+        _method: &str,
+        _params: Value,
+        reply: &mut PushReplySlot,
+    ) -> Result<PushReply, PluginRpcError> {
         let release = Arc::clone(&self.release);
         let committed = Arc::clone(&self.committed);
-        let (reply, outcome) = oneshot::channel();
+        let (acknowledge, outcome) = oneshot::channel();
         tokio::spawn(async move {
             release.notified().await;
             committed.store(true, Ordering::Release);
-            let _ = reply.send(());
+            let _ = acknowledge.send(());
         });
         self.started.notify_one();
         assert!(
@@ -538,7 +568,7 @@ impl PushHandler for DelayedActorPush {
             "fixture owner panicked after actor admission"
         );
         outcome.await.expect("actor outcome");
-        Ok(Value::Null)
+        reply.encode(&Value::Null)
     }
 }
 

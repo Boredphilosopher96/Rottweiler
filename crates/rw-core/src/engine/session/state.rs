@@ -103,7 +103,12 @@ pub(in crate::engine) enum ActorCommand {
     PluginToolCall {
         request: rw_types::extension_tools::ExtensionToolCall,
         respond: oneshot::Sender<
-            Result<rw_types::extension_tools::ExtensionToolOutcome, AgentLoopError>,
+            Result<
+                crate::engine::recovery::HistoryRead<
+                    rw_types::extension_tools::ExtensionToolOutcome,
+                >,
+                AgentLoopError,
+            >,
         >,
     },
     PluginControl {
