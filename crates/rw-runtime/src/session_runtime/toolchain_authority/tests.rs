@@ -68,44 +68,14 @@ async fn runtime_reads_are_toolchain_only_read_only_and_generation_scoped() {
         &safety,
     )
     .expect("toolchain executor");
-    let read_first = format!(
-        "cat {}",
-        shell_words::quote(first_file.to_str().expect("UTF-8"))
-    );
-    let read_second = format!(
-        "cat {}",
-        shell_words::quote(second_file.to_str().expect("UTF-8"))
-    );
-    assert_eq!(
-        run(&toolchain, workspace.path(), read_first.clone()).await,
-        0
-    );
-    assert_ne!(
-        run(&ordinary, workspace.path(), read_first.clone()).await,
-        0,
-        "ordinary Bash must not inherit toolchain read authority"
-    );
-    assert_ne!(
-        run(&toolchain, workspace.path(), read_second.clone()).await,
-        0,
-        "a configured runtime root must not authorize its sibling"
-    );
-    assert_ne!(
-        run(
-            &toolchain,
-            workspace.path(),
-            format!(
-                "printf changed > {}",
-                shell_words::quote(first_file.to_str().expect("UTF-8"))
-            )
-        )
-        .await,
-        0
-    );
-    assert_eq!(
-        std::fs::read_to_string(&first_file).expect("unchanged runtime"),
-        "first"
-    );
+    assert_scoped_reads(
+        &ordinary,
+        &toolchain,
+        workspace.path(),
+        &first_file,
+        &second_file,
+    )
+    .await;
     let runtime = ToolchainRuntime::new_with_read_only(
         ordinary.clone(),
         toolchain,
@@ -133,12 +103,55 @@ async fn runtime_reads_are_toolchain_only_read_only_and_generation_scoped() {
     runtime.commit(1);
     let current = runtime.current();
     assert_eq!(
-        run(&current.toolchain_executor, workspace.path(), read_second).await,
+        run(
+            &current.toolchain_executor,
+            workspace.path(),
+            read(&second_file)
+        )
+        .await,
         0
     );
     assert_ne!(
-        run(&current.toolchain_executor, workspace.path(), read_first).await,
+        run(
+            &current.toolchain_executor,
+            workspace.path(),
+            read(&first_file)
+        )
+        .await,
         0,
         "replacement must not retain retired runtime read grants"
+    );
+}
+
+fn read(path: &Path) -> String {
+    format!("cat {}", shell_words::quote(path.to_str().expect("UTF-8")))
+}
+
+async fn assert_scoped_reads(
+    ordinary: &Arc<dyn CommandExecutor>,
+    toolchain: &Arc<dyn CommandExecutor>,
+    workspace: &Path,
+    first: &Path,
+    second: &Path,
+) {
+    assert_eq!(run(toolchain, workspace, read(first)).await, 0);
+    assert_ne!(
+        run(ordinary, workspace, read(first)).await,
+        0,
+        "ordinary Bash must not inherit toolchain read authority"
+    );
+    assert_ne!(
+        run(toolchain, workspace, read(second)).await,
+        0,
+        "a configured runtime root must not authorize its sibling"
+    );
+    let write = format!(
+        "printf changed > {}",
+        shell_words::quote(first.to_str().expect("UTF-8"))
+    );
+    assert_ne!(run(toolchain, workspace, write).await, 0);
+    assert_eq!(
+        std::fs::read_to_string(first).expect("unchanged runtime"),
+        "first"
     );
 }

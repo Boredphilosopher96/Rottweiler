@@ -1162,8 +1162,10 @@ fn toolchain_runtime_read_roots_reject_relative_and_unbounded_paths() {
         vec!["/opt/toolchain".to_owned(); 33],
         vec![format!("/{}", "x".repeat(4096))],
     ] {
-        let mut config = rw_types::config::ToolchainConfig::default();
-        config.runtime_read_roots = paths.into_iter().map(std::path::PathBuf::from).collect();
+        let config = rw_types::config::ToolchainConfig {
+            runtime_read_roots: paths.into_iter().map(std::path::PathBuf::from).collect(),
+            ..rw_types::config::ToolchainConfig::default()
+        };
         let text = format!(
             "[toolchain]\n{}",
             toml::to_string(&config).expect("fixture config")
