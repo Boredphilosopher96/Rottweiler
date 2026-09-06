@@ -1,3 +1,4 @@
+mod mapping;
 use super::runtime_options::MAX_WORKSPACE_ROOTS;
 use super::session_metadata::validate_session_id;
 use super::session_selection::checkpoint_root;
@@ -75,9 +76,9 @@ pub(super) fn open_checkpoint_stores(
             committed: true,
         }],
     };
-    match std::fs::read(&mapping_path) {
+    match mapping::read(&mapping_path) {
         Ok(bytes) => {
-            let existing: CheckpointRootMapping = serde_json::from_slice(&bytes)
+            let existing: CheckpointRootMapping = mapping::decode(&bytes)
                 .map_err(|error| miette!("checkpoint root mapping is corrupt: {error}"))?;
             if existing.version != CHECKPOINT_ROOTS_VERSION
                 || existing.generations.last().map(|entry| &entry.roots)
@@ -89,7 +90,7 @@ pub(super) fn open_checkpoint_stores(
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            persist_private_json(&mapping_path, &initial)?;
+            persist_root_mapping(&mapping_path, &initial)?;
         }
         Err(error) => return Err(miette!("checkpoint root mapping could not load: {error}")),
     }
@@ -115,8 +116,8 @@ pub(super) fn append_checkpoint_root_generation(
     effective_from_turn: u64,
 ) -> Result<()> {
     let path = root.join("workspace-roots.json");
-    let mut mapping: CheckpointRootMapping = serde_json::from_slice(
-        &std::fs::read(&path)
+    let mut mapping: CheckpointRootMapping = mapping::decode(
+        &mapping::read(&path)
             .map_err(|error| miette!("checkpoint root journal could not load: {error}"))?,
     )
     .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
@@ -141,13 +142,13 @@ pub(super) fn append_checkpoint_root_generation(
         roots: roots.to_vec(),
         committed: false,
     });
-    persist_private_json(&path, &mapping)
+    persist_root_mapping(&path, &mapping)
 }
 
 pub(super) fn commit_checkpoint_root_generation(root: &Path, generation: u64) -> Result<()> {
     let path = root.join("workspace-roots.json");
-    let mut mapping: CheckpointRootMapping = serde_json::from_slice(
-        &std::fs::read(&path)
+    let mut mapping: CheckpointRootMapping = mapping::decode(
+        &mapping::read(&path)
             .map_err(|error| miette!("checkpoint root journal could not load: {error}"))?,
     )
     .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
@@ -157,13 +158,13 @@ pub(super) fn commit_checkpoint_root_generation(root: &Path, generation: u64) ->
         .filter(|entry| entry.generation == generation)
         .ok_or_else(|| miette!("prepared workspace generation is unavailable"))?;
     entry.committed = true;
-    persist_private_json(&path, &mapping)
+    persist_root_mapping(&path, &mapping)
 }
 
 pub(super) fn abort_checkpoint_root_generation(root: &Path, generation: u64) -> Result<()> {
     let path = root.join("workspace-roots.json");
-    let mut mapping: CheckpointRootMapping = serde_json::from_slice(
-        &std::fs::read(&path)
+    let mut mapping: CheckpointRootMapping = mapping::decode(
+        &mapping::read(&path)
             .map_err(|error| miette!("checkpoint root journal could not load: {error}"))?,
     )
     .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
@@ -178,7 +179,7 @@ pub(super) fn abort_checkpoint_root_generation(root: &Path, generation: u64) -> 
                 "checkpoint root journal cannot remove its base generation"
             ));
         }
-        persist_private_json(&path, &mapping)?;
+        persist_root_mapping(&path, &mapping)?;
     }
     Ok(())
 }
@@ -188,12 +189,12 @@ pub(super) fn load_checkpoint_root_generation(
     root: &Path,
 ) -> Result<Option<CheckpointRootGeneration>> {
     let path = root.join("workspace-roots.json");
-    let bytes = match std::fs::read(&path) {
+    let bytes = match mapping::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
     };
-    let mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
+    let mapping: CheckpointRootMapping = mapping::decode(&bytes)
         .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
     if mapping.version != CHECKPOINT_ROOTS_VERSION {
         return Err(miette!("checkpoint root journal version is unsupported"));
@@ -211,12 +212,12 @@ pub(super) fn load_checkpoint_root_generation_exact(
     generation: u64,
 ) -> Result<Option<CheckpointRootGeneration>> {
     let path = root.join("workspace-roots.json");
-    let bytes = match std::fs::read(&path) {
+    let bytes = match mapping::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
     };
-    let mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
+    let mapping: CheckpointRootMapping = mapping::decode(&bytes)
         .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
     if mapping.version != CHECKPOINT_ROOTS_VERSION {
         return Err(miette!("checkpoint root journal version is unsupported"));
@@ -267,7 +268,7 @@ pub(super) fn restore_persisted_workspace_roots(
     committed_generation: u64,
 ) -> Result<Option<CheckpointRootGeneration>> {
     let path = root.join("workspace-roots.json");
-    let bytes = match std::fs::read(&path) {
+    let bytes = match mapping::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && committed_generation == 0 => {
             return Ok(None);
@@ -279,7 +280,7 @@ pub(super) fn restore_persisted_workspace_roots(
         }
         Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
     };
-    let mut mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
+    let mut mapping: CheckpointRootMapping = mapping::decode(&bytes)
         .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
     let Some(position) = mapping
         .generations
@@ -297,7 +298,7 @@ pub(super) fn restore_persisted_workspace_roots(
     }
     mapping.generations[position].committed = true;
     if needs_rewrite {
-        persist_private_json(&path, &mapping)?;
+        persist_root_mapping(&path, &mapping)?;
     }
     let Some(mut generation) = mapping.generations.last().cloned() else {
         return Ok(None);
@@ -323,7 +324,7 @@ pub(super) fn preview_persisted_workspace_roots(
     committed_generation: u64,
 ) -> Result<Option<CheckpointRootGeneration>> {
     let path = root.join("workspace-roots.json");
-    let bytes = match std::fs::read(&path) {
+    let bytes = match mapping::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && committed_generation == 0 => {
             return Ok(None);
@@ -335,7 +336,7 @@ pub(super) fn preview_persisted_workspace_roots(
         }
         Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
     };
-    let mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
+    let mapping: CheckpointRootMapping = mapping::decode(&bytes)
         .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
     if mapping.version != CHECKPOINT_ROOTS_VERSION {
         return Err(miette!("checkpoint root journal version is unsupported"));
@@ -358,8 +359,13 @@ pub(super) fn preview_persisted_workspace_roots(
     Ok(Some(generation))
 }
 
+pub(super) fn persist_root_mapping(path: &Path, mapping: &CheckpointRootMapping) -> Result<()> {
+    mapping::validate(mapping)?;
+    persist_private_json(path, mapping)
+}
+
 pub(super) fn persist_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(value).into_diagnostic()?;
+    let bytes = mapping::encode(value)?;
     let parent = path
         .parent()
         .ok_or_else(|| miette!("private JSON path has no parent"))?;
@@ -421,7 +427,7 @@ pub(super) fn load_rewind_coordinator(
         return Err(miette!("rewind coordinator exceeds its size limit"));
     }
     let decision: RewindCoordinatorDecision = serde_json::from_slice(
-        &std::fs::read(path)
+        &mapping::read_limit(&path, MAX_REWIND_COORDINATOR_BYTES as usize)
             .map_err(|error| miette!("rewind coordinator could not load: {error}"))?,
     )
     .map_err(|error| miette!("rewind coordinator is corrupt: {error}"))?;

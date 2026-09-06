@@ -3,7 +3,7 @@ use super::checkpoint_journal::CheckpointRootGeneration;
 use super::checkpoint_journal::CheckpointRootMapping;
 use super::checkpoint_journal::load_checkpoint_root_generation_exact;
 use super::checkpoint_journal::open_checkpoint_stores;
-use super::checkpoint_journal::persist_private_json;
+use super::checkpoint_journal::persist_root_mapping;
 use super::session_metadata::SESSION_METADATA_VERSION;
 use super::session_metadata::SessionMetadata;
 use super::session_metadata::encode_session_metadata;
@@ -91,7 +91,7 @@ pub(crate) fn fork_hosted_session_storage(
 
     let result = (|| -> Result<()> {
         std::fs::create_dir_all(&target_checkpoint_root).into_diagnostic()?;
-        persist_private_json(
+        persist_root_mapping(
             &target_checkpoint_root.join("workspace-roots.json"),
             &mapping,
         )?;
