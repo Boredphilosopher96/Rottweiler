@@ -1,8 +1,5 @@
-import { embeddedParserConfigurations, materializeTreeSitterRuntime } from "../tree-sitter-runtime"
+import { createMemoryRenderer } from "./memory-renderer"
 import { exerciseLiveOwners } from "./memory-live"
-import { addDefaultParsers, getTreeSitterClient } from "@opentui/core"
-import { stabilizeTreeSitterClient } from "../tree-sitter-client"
-import { createTestRenderer } from "@opentui/core/testing"
 import { writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createRottweilerApp, type RottweilerApp } from "../app"
@@ -21,13 +18,7 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
   if (!Number.isSafeInteger(cycles) || cycles < 1 || cycles > 200) throw new Error("memory probe cycles must be 1..200")
   const allocations = new ClientAllocationOwner()
   const fixture = new MemoryFixture(join(workDirectory, `transport-${process.pid}.sock`), allocations)
-  const parserRuntime = await materializeTreeSitterRuntime()
-  process.env.OTUI_ASSET_ROOT = parserRuntime.root
-  process.env.OTUI_TREE_SITTER_WORKER_PATH = parserRuntime.workerPath
-  addDefaultParsers(embeddedParserConfigurations(parserRuntime.assetsPath))
-  const treeSitter = stabilizeTreeSitterClient(getTreeSitterClient())
-  await treeSitter.initialize()
-  const setup = await createTestRenderer({ width: 110, height: 36, useThread: false })
+  const { setup, treeSitter } = await createMemoryRenderer()
   const samples: Sample[] = []
   let app: RottweilerApp | null = null
   let captured = false

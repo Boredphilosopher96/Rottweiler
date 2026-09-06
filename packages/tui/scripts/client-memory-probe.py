@@ -52,16 +52,50 @@ def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
     print(json.dumps({key: value for key, value in summary.items() if key != "processes"}, sort_keys=True))
 
 
+def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
+    receipt = native_candidate.verify(candidate, REPO)
+    executable = candidate / receipt["components"]["tui"]["path"]
+    output.mkdir(parents=True, exist_ok=True)
+    report = output / f"held-{view}.json"
+    with tempfile.TemporaryDirectory(prefix="rw-held-memory-", dir="/tmp") as temporary:
+        private = Path(temporary)
+        environment = dict(os.environ, ROTTWEILER_HOME=str(private / "home"),
+                           ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT=str(report),
+                           ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY=str(private),
+                           ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
+                           ROTTWEILER_CLIENT_MEMORY_HELD_VIEW=view)
+        with (output / f"held-{view}.log").open("wb") as log:
+            result = subprocess.run([str(executable)], cwd=private, env=environment,
+                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=300)
+        if result.returncode != 0:
+            raise ValueError(f"held {view} probe exited {result.returncode}; see its log")
+        data = json.loads(report.read_text())
+        if data["cycles"] != cycles or data["view"] != view or data["finalAllocationBytes"] != 0:
+            raise ValueError("held-view probe did not complete its admitted lifetime")
+    summary = {"schema_version": 1, "candidate_identity": receipt["identity_sha256"],
+               "source": receipt["identity"]["source"], "view": view, "cycles": cycles,
+               "max_resident_bytes": max(sample["highWaterBytes"] for sample in data["samples"]),
+               "qualification": "One mounted view held for all cycles; complete application RSS gate is separate",
+               "process": data}
+    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps({key: value for key, value in summary.items() if key != "process"}, sort_keys=True))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cycles", type=int, default=20)
     parser.add_argument("--generations", type=int, default=3)
+    parser.add_argument("--held-view", choices=["output", "review", "secret", "action"])
     args = parser.parse_args()
-    if not 1 <= args.cycles <= 200 or not 1 <= args.generations <= 10:
-        parser.error("cycles must be 1..200 and generations 1..10")
-    run(args.candidate.resolve(), args.output.resolve(), args.cycles, args.generations)
+    maximum_cycles = 1000 if args.held_view is not None else 200
+    if not 1 <= args.cycles <= maximum_cycles or not 1 <= args.generations <= 10:
+        parser.error(f"cycles must be 1..{maximum_cycles} and generations 1..10")
+    if args.held_view is not None:
+        run_held(args.candidate.resolve(), args.output.resolve(), args.cycles, args.held_view)
+    else:
+        run(args.candidate.resolve(), args.output.resolve(), args.cycles, args.generations)
 
 
 if __name__ == "__main__":

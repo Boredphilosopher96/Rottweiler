@@ -38,6 +38,9 @@ export class MemoryFixture {
     this.reader = sessionReader(read, () => this.meta())
     this.family = familyControlsReader(read, () => this.meta())
   }
+  connectionCompletion(command: ClientCommand): EngineEvent | null {
+    return command.type === "get_session_review" ? this.#event(command) : null
+  }
   meta(): ClientCommand["meta"] { return { protocol_version: PROTOCOL_VERSION, client_id: "memory-client", request_id: `memory-${++this.#request}` } }
   hold(): void { this.#held = true }
   invalidateNext(): void { this.#invalid = true }
@@ -97,6 +100,10 @@ export class MemoryFixture {
       case "get_todos": return { type: "todos_read", meta, session_id: command.session_id, result: { type: "ready", todos: { through: SOURCE, snapshot: { items: [] } } } }
       case "read_session_children": return { type: "session_children_ready", meta, session_id: command.session_id, result: { type: "ready", snapshot: { through: SOURCE, children: [] } } }
       case "list_runtime_services": return { type: "runtime_services_listed", meta, session_id: SESSION, services: [] }
+      case "list_models": return { type: "models_listed", meta, models: [], aliases: [], providers: [], cached: false, truncated: false }
+      case "get_session_review": return { type: "session_review_ready", meta, session_id: SESSION,
+        review: { session_id: SESSION, files: [{ path: "held-review.txt", unified_diff: "--- a/held-review.txt\n+++ b/held-review.txt\n@@ -1,256 +1,256 @@\n" + "-old content\n+new content\n".repeat(256),
+          status: "pending", truncated: false, unrestorable_reason: null, original_hash: "old", current_hash: "new" }] } }
       case "get_ui_catalog": return { type: "ui_catalog_ready", meta, session_id: SESSION, catalog: { entries: [] } }
       case "get_ui_panels": return { type: "ui_panels_ready", meta, session_id: SESSION, panels: { panels: [] } }
       case "read_family_controls": return { type: "family_controls_ready", meta, session_id: SESSION, snapshot: { revision: "1", children: [{ target: MEMORY_CHILD,

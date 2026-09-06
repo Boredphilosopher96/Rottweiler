@@ -163,3 +163,16 @@ Renderer handoff retains the local composer, highlighted control option, and sel
 Interactive composer text is limited to 128 KiB UTF-8 before mutation; larger content uses file attachments. Set, restore, native insertion, selected replacement, external-editor return and private handoff use the same limit. Pending submissions reserve their rollback text capacity. Native undo shares unchanged document roots and charges edit deltas rather than a full-document copy per keystroke.
 
 Handoff admits at most 8 MiB encoded and 64 MiB prepared, using the same JSON shape calculation before writing and before decoding. Editable drafts must also fit the aggregate draft owner. Handoff serialization holds shared preparation credit. Private-file decoding opens a single descriptor without following symlinks, bounds bytes before reading, and holds decode credit through application adoption. The private file is consumed only after editable state has been admitted; reconnect queries begin after this transfer, preserving allocation headroom. Pending view/selection restoration has its own retained allocation until completion, cancellation or teardown. In-flight submissions, external input operations, secret-entry forms and source navigation still require settlement before handoff.
+
+The same compiled probe accepts `--held-view output|review|secret|action --cycles 1000`
+to keep one document, review, unsubmitted masked credential, or unresolved credential
+submission open through 1,000 paced streaming cycles. Sixteen invocations each receive
+four 4 KiB chunks per cycle (250 MiB total), alongside a 4 KiB assistant delta.
+Each cycle pauses 50 ms and renders the mounted application. The probe checks exact
+consumed bytes and view identity throughout, then settles the view and verifies
+that all application allocations retire. Reports include current RSS, the production
+resident high-water measurement, elapsed time, and allocation domains. The credential
+result is synthetic and no credential value appears in the report. Native terminal
+output drains through a stream; the test renderer's accumulating ANSI capture is
+disabled. These observations distinguish filled-cache behavior from initial growth;
+they do not replace the complete application's RSS gate.
