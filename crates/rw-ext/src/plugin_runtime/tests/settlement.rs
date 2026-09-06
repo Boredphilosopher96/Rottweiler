@@ -504,7 +504,17 @@ async fn expired_http_proof_reports_failure_but_eventual_cleanup_returns_capacit
     http_cancellation_proof(true).await;
 }
 
-async fn http_cancellation_proof(expire: bool) {
+struct HttpCancellationFixture {
+    client: Arc<JsonRpcPluginClient>,
+    http: Arc<IgnoringCancellationHttp>,
+    cancellation: CancellationToken,
+    task: tokio::task::JoinHandle<Result<Value, PluginRpcError>>,
+    _root: TempDir,
+    _input: BufReader<tokio::io::DuplexStream>,
+    _output: tokio::io::DuplexStream,
+}
+
+async fn admitted_http_cancellation() -> HttpCancellationFixture {
     let process = Arc::new(FakeProcess::default());
     let (host_stdin, plugin_input) = tokio::io::duplex(4096);
     let (mut plugin_output, host_stdout) = tokio::io::duplex(4096);
@@ -565,6 +575,27 @@ async fn http_cancellation_proof(expire: bool) {
     tokio::time::timeout(Duration::from_secs(2), http.started.notified())
         .await
         .expect("HTTP started");
+    HttpCancellationFixture {
+        client,
+        http,
+        cancellation,
+        task,
+        _root: root,
+        _input: input,
+        _output: plugin_output,
+    }
+}
+
+async fn http_cancellation_proof(expire: bool) {
+    let HttpCancellationFixture {
+        client,
+        http,
+        cancellation,
+        task,
+        _root,
+        _input,
+        _output,
+    } = admitted_http_cancellation().await;
     cancellation.cancel();
     tokio::time::timeout(Duration::from_secs(2), http.settling.notified())
         .await

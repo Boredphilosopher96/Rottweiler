@@ -266,7 +266,7 @@ struct FixtureProviderHttp {
 }
 
 impl FixtureProviderHttp {
-    async fn respond(
+    fn respond(
         &self,
         params: Value,
         cancellation: &CancellationToken,
@@ -335,9 +335,7 @@ struct FixtureHttpOperation {
 #[async_trait]
 impl PluginProviderHttpOperation for FixtureHttpOperation {
     async fn response(&self) -> Result<PluginHttpStreamResponse, PluginRpcError> {
-        self.owner
-            .respond(self.params.clone(), &self.cancellation)
-            .await
+        self.owner.respond(self.params.clone(), &self.cancellation)
     }
     async fn settle_effects(&self) -> Result<(), PluginRpcError> {
         self.owner

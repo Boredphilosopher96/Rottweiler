@@ -90,6 +90,10 @@ pub struct PluginHttpStreamResponse {
 /// Factory for inert, individually owned authenticated HTTP operations.
 /// Returning an error must not leave locally owned effects.
 pub trait PluginProviderHttpHandler: Send + Sync {
+    /// Validates and admits an inert operation without starting external work.
+    ///
+    /// # Errors
+    /// Rejects invalid authority, unsupported requests, or exhausted admission.
     fn prepare(
         &self,
         params: Value,

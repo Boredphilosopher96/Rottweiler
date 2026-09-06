@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use super::{ToolEffectsOwner, unsettled};
 use async_trait::async_trait;
 use rw_tools::{CapabilityManifest, ToolEffectGrant, ToolEffectHost, ToolError, ToolResult};
@@ -38,25 +39,32 @@ impl ToolEffectHost for Host {
     }
 }
 fn grant() -> ToolEffectGrant {
-    ToolEffectGrant::new(CapabilityManifest::default(), &[]).unwrap()
+    ToolEffectGrant::new(CapabilityManifest::default(), &[]).expect("empty effect grant")
 }
 
 #[tokio::test]
 async fn abandoned_invocation_retains_actual_host_until_proof() {
     let owner = Arc::new(ToolEffectsOwner::default());
     let host = Arc::new(Host::new(false));
-    drop(owner.begin(host.clone(), grant()).unwrap());
+    drop(
+        owner
+            .begin(host.clone(), grant())
+            .expect("effect admission"),
+    );
     let settling = tokio::spawn({
         let owner = owner.clone();
         async move { owner.settle().await }
     });
     host.started.notified().await;
     assert!(!settling.is_finished());
-    assert_eq!(owner.entries.lock().unwrap().len(), 1);
+    assert_eq!(owner.entries.lock().expect("effect registry").len(), 1);
     host.release.notify_one();
-    settling.await.unwrap().unwrap();
+    settling
+        .await
+        .expect("settlement task")
+        .expect("effect proof");
     assert!(host.finished.load(Ordering::Acquire));
-    assert!(owner.entries.lock().unwrap().is_empty());
+    assert!(owner.entries.lock().expect("effect registry").is_empty());
 }
 
 #[tokio::test]
@@ -64,7 +72,11 @@ async fn panicking_proof_retains_host_and_closes_admission() {
     let owner = Arc::new(ToolEffectsOwner::default());
     let host = Arc::new(Host::new(true));
     let weak = Arc::downgrade(&host);
-    drop(owner.begin(host.clone(), grant()).unwrap());
+    drop(
+        owner
+            .begin(host.clone(), grant())
+            .expect("effect admission"),
+    );
     assert!(matches!(
         owner.settle().await,
         Err(ToolError::EffectsUnsettled(_))
@@ -72,6 +84,6 @@ async fn panicking_proof_retains_host_and_closes_admission() {
     assert!(owner.begin(host.clone(), grant()).is_err());
     drop(host);
     assert!(weak.upgrade().is_some());
-    assert_eq!(owner.entries.lock().unwrap().len(), 1);
+    assert_eq!(owner.entries.lock().expect("effect registry").len(), 1);
     assert!(owner.settle().await.is_err());
 }
