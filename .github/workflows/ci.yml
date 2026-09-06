@@ -86,6 +86,12 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
+      - name: Prepare TUI source native prerequisite
+        if: matrix.package == 'tui'
+        run: |
+          python3 scripts/ci_inventory.py install tui --build-dependencies
+          library=$(python3 scripts/build-opentui-native.py)
+          echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
       - run: python3 scripts/ci_evidence.py --gate package --output ci-results/package.json -- python3 scripts/ci_inventory.py package "${{ matrix.package }}"
       - name: Retain gate evidence
         if: always()
@@ -157,6 +163,10 @@ jobs:
 
       - name: Frozen integration dependencies
         run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install js-host --build-dependencies
+      - name: Prepare verified source renderer
+        run: |
+          library=$(python3 scripts/build-opentui-native.py)
+          echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
       - run: python3 scripts/ci_evidence.py --gate fmt --output ci-results/fmt.json -- cargo fmt --all -- --check
       - name: Check isolated test dependency graphs
         run: |
@@ -379,6 +389,10 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
+      - name: Prepare verified source renderer
+        run: |
+          library=$(python3 scripts/build-opentui-native.py)
+          echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
       - name: Enforce TUI transport and render-loop budgets
         env:
           ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/ci-results/tui-metrics.json

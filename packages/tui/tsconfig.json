@@ -25,6 +25,7 @@
     "scripts/generate-event-validator.ts",
     "../../protocol/**/*.ts",
     "scripts/tui-visual-harness.ts",
-    "scripts/client-timings-probe.ts"
+    "scripts/client-timings-probe.ts",
+    "scripts/native-preload.ts"
   ]
 }

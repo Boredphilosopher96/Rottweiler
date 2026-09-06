@@ -185,6 +185,12 @@ Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard 
 ### OpenTUI test surface
 
 OpenTUI 0.4.5 exposes a public `@opentui/core/testing` entry point. Its
+Source TUI suites require an explicit `ROTTWEILER_OPENTUI_LIBRARY` from
+`python3 scripts/build-opentui-native.py` before the test or measurement starts.
+The package preload verifies its source, artifact, license, and lifetime-proof
+receipt before OpenTUI imports the library. Missing or stale preparation fails;
+source tests do not fall back to the npm native binary or compile inside gates.
+
 `createTestRenderer` uses the native renderer with in-memory output and provides
 deterministic render flushing, mock keyboard/mouse input, resize control,
 character-frame capture, and styled cell/span capture. The contract test in

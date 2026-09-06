@@ -347,6 +347,8 @@ jobs:
       - name: Install integration test dependencies
         run: |
           python3 scripts/ci_inventory.py install js-host --build-dependencies
+          library=$(python3 scripts/build-opentui-native.py)
+          echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
       - name: Install CI Python dependencies
         run: |
           python3 -m venv "$RUNNER_TEMP/ci-python"

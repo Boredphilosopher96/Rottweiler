@@ -11,7 +11,7 @@ import {
 declare global {
   // Set immediately before importing OpenTUI core. This removes
   // dependency top-level await so Bun can emit startup bytecode while keeping
-  // the platform-native library selected by the package's own matrix.
+  // the verified, adjacent native library selected by the product build.
   // eslint-disable-next-line no-var
   var __rottweilerOpenTuiNativeLibrary: string | undefined
 }
