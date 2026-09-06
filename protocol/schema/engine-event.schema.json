@@ -2510,8 +2510,8 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
+        "source": {
+          "$ref": "#/$defs/ContextBlockId"
         },
         "reclaimed_tokens": {
           "type": "string"
@@ -2525,7 +2525,7 @@
       "required": [
         "type",
         "meta",
-        "tool_call_id",
+        "source",
         "reclaimed_tokens"
       ]
     },
@@ -8344,6 +8344,25 @@
         "modified",
         "deleted",
         "type_changed"
+      ]
+    },
+    "ContextBlockId": {
+      "description": "A block inside one authoritative conversation source event.",
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "block_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "block_index"
       ]
     },
     "PlanDecision": {

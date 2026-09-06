@@ -892,7 +892,10 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
-      "tool_call_id": "tool-old",
+      "source": {
+        "sequence": "4",
+        "block_index": 0
+      },
       "reclaimed_tokens": "21000"
     },
     {

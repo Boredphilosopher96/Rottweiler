@@ -196,6 +196,8 @@ export type SubagentResult = { subagent_id: SubagentId, session_id: SessionId, s
 
 export type ContextItemId = string;
 
+export type ContextBlockId = { sequence: SequenceId, block_index: number, };
+
 export type ModelAlias = string;
 
 export type SequenceId = string;
@@ -513,7 +515,7 @@ context_window_known: boolean, context_window_reason?: string, stable_prefix_has
  * Null invalidates child history at the required canonical `child_sequence`.
  * A non-null value is a bounded preview; complete content remains in the child log.
  */
-event: JsonValue, } | { "type": "tool_output_pruned", meta: EventMeta, tool_call_id: ToolCallId, reclaimed_tokens: string, } | { "type": "mode_changed", meta: EventMeta, mode: ModeId,
+event: JsonValue, } | { "type": "tool_output_pruned", meta: EventMeta, source: ContextBlockId, reclaimed_tokens: string, } | { "type": "mode_changed", meta: EventMeta, mode: ModeId,
 /**
  * BLAKE3 hash of the canonical mode semantics.
  */
