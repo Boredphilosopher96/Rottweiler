@@ -83,7 +83,7 @@ impl HostEventBudget {
         let event = AllocationPlan::new(event.clone())
             .map_err(|_| limit_error())?
             .prepare();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
             let _encoder = encoder;
             let sequence = event.value().meta().map(|meta| meta.sequence_id);
             let mut writer = EventWriter {

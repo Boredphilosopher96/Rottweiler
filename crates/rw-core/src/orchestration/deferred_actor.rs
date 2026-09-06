@@ -161,7 +161,7 @@ fn spawn_preparation(state: Arc<Mutex<State>>, recipe: Arc<Recipe>, done: watch:
     tokio::spawn(async move {
         // The task owns preparation even when its initiating run/cancel/close caller drops.
         let builder = recipe.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             tokio::runtime::Handle::current().block_on(builder.prepare())
         })
         .await

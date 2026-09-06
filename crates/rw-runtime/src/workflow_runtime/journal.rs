@@ -36,10 +36,12 @@ impl DurableWorkflowJournal {
                 .map(|step| (step.id().to_owned(), WorkflowTaskState::Pending))
                 .collect(),
         };
-        let store = tokio::task::spawn_blocking(move || WorkflowRunStore::open(&root, expected))
-            .await
-            .map_err(|error| WorkflowRunError::Persistence(error.to_string()))?
-            .map_err(|error| WorkflowRunError::Persistence(error.to_string()))?;
+        let store = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            WorkflowRunStore::open(&root, expected)
+        })
+        .await
+        .map_err(|error| WorkflowRunError::Persistence(error.to_string()))?
+        .map_err(|error| WorkflowRunError::Persistence(error.to_string()))?;
         Ok(Arc::new(Self {
             parent_session_id,
             store: Arc::new(Mutex::new(store)),
@@ -52,7 +54,7 @@ impl DurableWorkflowJournal {
     ) -> Result<T, WorkflowRunError> {
         let store = Arc::clone(&self.store);
         // The worker owns the mutex and run lock even if its waiter disappears.
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             apply(
                 &mut store
                     .lock()

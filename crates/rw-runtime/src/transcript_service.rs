@@ -63,7 +63,7 @@ impl TranscriptReader {
             .try_acquire_owned()
             .map_err(|_| HostError::Query("transcript worker admission is exhausted".into()))?;
         let service = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _permit = permit;
             operation(&service)
         })

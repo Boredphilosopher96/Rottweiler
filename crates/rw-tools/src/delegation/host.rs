@@ -146,7 +146,7 @@ impl ToolEffectHost for DelegatedTools {
             let grant = grant.clone();
             let tool = tool.clone();
             let cancellation = self.cancellation.clone();
-            tokio::task::spawn_blocking(move || {
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                 let _finished = AuthorizationFinished(authorized);
                 let scope = scope.get_or_init(|| {
                     ToolEffectScope::new(&context, approved, &checkpoint)

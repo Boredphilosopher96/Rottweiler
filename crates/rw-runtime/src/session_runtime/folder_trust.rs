@@ -71,7 +71,7 @@ impl FolderTrustController for RuntimeFolderTrustController {
     ) -> std::result::Result<String, AgentLoopError> {
         let store = self.store.clone();
         let workspaces = self.workspaces.clone();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let trust_error = |_error: rw_store::trust::FolderTrustError| {
                 AgentLoopError::Persistence("folder trust operation failed".to_owned())
             };

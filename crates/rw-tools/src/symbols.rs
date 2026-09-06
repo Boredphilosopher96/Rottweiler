@@ -287,10 +287,12 @@ impl Tool for SymbolsTool {
             languages: input.languages,
             limit: input.limit.min(self.limits.max_search_results),
         };
-        let matches = tokio::task::spawn_blocking(move || index.query(&query))
-            .await
-            .map_err(|error| ToolError::Intelligence(error.to_string()))?
-            .map_err(|error| ToolError::Intelligence(error.to_string()))?;
+        let matches = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            index.query(&query)
+        })
+        .await
+        .map_err(|error| ToolError::Intelligence(error.to_string()))?
+        .map_err(|error| ToolError::Intelligence(error.to_string()))?;
         context.cancellation.check()?;
         let mut retained = Vec::new();
         let mut model_text = String::new();

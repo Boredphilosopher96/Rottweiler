@@ -83,7 +83,9 @@ impl CheckpointWorkers {
         let credit = WorkerCredit(self.active.clone());
         let operation = CheckpointOperation::default();
         let _caller_cancellation = CallerCancellation(operation.cancellation());
-        let task = tokio::task::spawn_blocking(move || work(operation));
+        let task = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            work(operation)
+        });
         let (reply, receiver) = oneshot::channel();
         // Dropping the caller cannot detach disk work from this completion owner.
         tokio::spawn(async move {

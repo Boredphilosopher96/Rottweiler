@@ -124,7 +124,7 @@ impl ReadLease {
         let completion = WorkerCompletion(Arc::clone(&self.job));
         self.started = true;
         // Construct before spawn so dropping a queued closure records failed proof.
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
                 .unwrap_or_else(|_| {
                     Err(ProviderError::new(

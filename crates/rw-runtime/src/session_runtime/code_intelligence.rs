@@ -120,10 +120,12 @@ impl MultiRootCodeIntelligence {
 
     pub(super) async fn ensure_indexed(&self) -> std::result::Result<(), String> {
         let symbols = Arc::clone(&self.symbols);
-        tokio::task::spawn_blocking(move || symbols.ensure_current())
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
+        rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            symbols.ensure_current()
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn virtualize_path(root_index: usize, path: &mut PathBuf) {
@@ -272,10 +274,12 @@ impl Tool for LazySymbolsTool {
             return Err(ToolError::Cancelled);
         }
         let index = Arc::clone(&self.index);
-        tokio::task::spawn_blocking(move || index.ensure_current())
-            .await
-            .map_err(|error| ToolError::Intelligence(error.to_string()))?
-            .map_err(|error| ToolError::Intelligence(error.to_string()))?;
+        rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            index.ensure_current()
+        })
+        .await
+        .map_err(|error| ToolError::Intelligence(error.to_string()))?
+        .map_err(|error| ToolError::Intelligence(error.to_string()))?;
         self.inner.execute(context, input).await
     }
 }

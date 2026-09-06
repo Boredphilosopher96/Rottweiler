@@ -98,7 +98,7 @@ impl EngineHost {
         // now holds both the global mutation lock and the session lifecycle;
         // disconnect and takeover may no longer cancel or interleave the write.
         let persisted = if let Some(persistence) = completion.take_persistence() {
-            tokio::task::spawn_blocking(persistence)
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, persistence)
                 .await
                 .map_err(|_| {
                     HostError::Persistence("provider credential storage failed".to_owned())

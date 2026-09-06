@@ -103,7 +103,7 @@ impl DeferredToolProxy {
                 let password_credential = self.password_credential.clone();
                 let redactor = self.redactor.clone();
                 let resolver = Arc::clone(&self.resolver);
-                tokio::task::spawn_blocking(move || {
+                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                     resolve_tool_proxy_parts(
                         &configured,
                         username.as_deref(),
@@ -179,7 +179,7 @@ impl DeferredWebSearchHeaders {
                 let config = self.config.clone();
                 let redactor = self.redactor.clone();
                 let resolver = Arc::clone(&self.resolver);
-                tokio::task::spawn_blocking(move || {
+                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                     resolve_websearch_headers_with(&config, false, &redactor, |reference| {
                         resolver(reference).map_err(miette::Report::msg)
                     })

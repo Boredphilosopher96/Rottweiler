@@ -225,7 +225,7 @@ impl DeferredCommandExecutor {
                 let command_fixture_mode = self.command_fixture_mode.clone();
                 let execution_lease = Arc::clone(&self.execution_lease);
                 let command_safety = Arc::clone(&self.command_safety);
-                tokio::task::spawn_blocking(move || {
+                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                     build_command_executor(
                         &workspace_roots,
                         &workspace,

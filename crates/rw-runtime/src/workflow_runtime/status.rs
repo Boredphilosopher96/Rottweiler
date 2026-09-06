@@ -20,7 +20,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for WorkflowSta
             .map_err(|error| CommandExecutionError::new("invalid_workflow_run", error))?;
         let root = self.storage_root.clone();
         let parent = context.session_id().clone();
-        let state = tokio::task::spawn_blocking(move || {
+        let state = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             WorkflowRunStore::snapshot(&root, &run_id, &parent)
         })
         .await

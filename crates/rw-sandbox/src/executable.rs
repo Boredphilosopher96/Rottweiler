@@ -100,13 +100,13 @@ impl ApprovedExecutable {
                 }
                 hasher.update(&buffer[..count]);
             }
-            return Self::from_artifact(&ExecutableArtifactIdentity {
+            Self::from_artifact(&ExecutableArtifactIdentity {
                 executable: path,
                 device: running_identity.0,
                 inode: running_identity.1,
                 bytes: metadata.len(),
                 sha256: hex_digest(&hasher.finalize()),
-            });
+            })
         }
         #[cfg(not(target_os = "macos"))]
         Ok(Self(Arc::new(OwnedExecutable {

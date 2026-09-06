@@ -30,18 +30,23 @@ pub(super) fn start_workspace_initialization(
     let checkpoints = Arc::clone(&config.checkpoints);
     if let Err(error) = tasks.spawn(config, CancellationToken::default(), async move {
         let result = async {
-            let plan = tokio::task::spawn_blocking(move || {
-                plan_init(&workspace, depth, crate::DEFAULT_INIT_FILE_BUDGET_BYTES)
-            })
-            .await
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+            let plan =
+                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                    plan_init(&workspace, depth, crate::DEFAULT_INIT_FILE_BUDGET_BYTES)
+                })
+                .await
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
             let scope = MutationScope::Paths(plan.files().keys().cloned().collect());
             validate_mutation_scope(&scope)?;
             let checkpoint = checkpoints
                 .begin(&session_id, mutation_turn, &call_id, &scope)
                 .await?;
-            let applied = tokio::task::spawn_blocking(move || apply_init_plan(&plan)).await;
+            let applied =
+                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                    apply_init_plan(&plan)
+                })
+                .await;
             let applied = match applied {
                 Ok(result) => {
                     result.map_err(|error| AgentLoopError::Persistence(error.to_string()))

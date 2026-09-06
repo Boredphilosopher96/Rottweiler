@@ -154,12 +154,13 @@ pub(crate) async fn compose_hosted_actor(
         .map_err(|error| miette!("session log could not open: {error}"))?;
     if options.resume {
         let source = log.read_view();
-        let committed = tokio::task::spawn_blocking(move || {
-            rw_core::recovery::WorkspaceBootstrap::read(&source)
-        })
-        .await
-        .map_err(|error| miette!("workspace bootstrap worker failed: {error}"))?
-        .map_err(|error| miette!("workspace bootstrap failed: {error}"))?;
+        let committed =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                rw_core::recovery::WorkspaceBootstrap::read(&source)
+            })
+            .await
+            .map_err(|error| miette!("workspace bootstrap worker failed: {error}"))?
+            .map_err(|error| miette!("workspace bootstrap failed: {error}"))?;
         if let Some(generation) = preview_persisted_workspace_roots(
             &checkpoint_root(&options.storage_root, &workspace, &session_id),
             &workspace,
@@ -213,12 +214,13 @@ pub(crate) async fn compose_hosted_actor(
     }
     let execution_lease_path = workspace_execution_lease_path(&options.storage_root, &workspace)?;
     let wait_for_execution_lease = options.wait_for_execution_lease;
-    let execution_lease = tokio::task::spawn_blocking(move || {
-        acquire_shared_execution_lease(&execution_lease_path, wait_for_execution_lease)
-    })
-    .await
-    .map_err(|error| miette!("execution lease worker failed: {error}"))?
-    .map_err(|error| miette!("execution lease could not lock: {error}"))?;
+    let execution_lease =
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            acquire_shared_execution_lease(&execution_lease_path, wait_for_execution_lease)
+        })
+        .await
+        .map_err(|error| miette!("execution lease worker failed: {error}"))?
+        .map_err(|error| miette!("execution lease could not lock: {error}"))?;
 
     let configured_model_alias = options
         .requested_model
@@ -257,7 +259,7 @@ pub(crate) async fn compose_hosted_actor(
     let session_checkpoint_root = checkpoint_root(&options.storage_root, &workspace, &session_id);
     let checkpoint_stores = open_checkpoint_stores(&session_checkpoint_root, &workspace_roots)?;
     let recovery_stores = Arc::clone(&checkpoint_stores);
-    tokio::task::spawn_blocking(move || {
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
         let mut operation = rw_store::checkpoint::CheckpointOperation::default();
         for store in recovery_stores.iter() {
             store.recover_opaque_mutations(&mut operation)?;
@@ -269,7 +271,7 @@ pub(crate) async fn compose_hosted_actor(
     .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
     let rewind_stores = Arc::clone(&checkpoint_stores);
     let rewind_checkpoint_root = session_checkpoint_root.clone();
-    let log = tokio::task::spawn_blocking(move || {
+    let log = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
         let mut log = log;
         recover_rewind_transactions(&rewind_checkpoint_root, &rewind_stores, &mut log)?;
         Ok::<_, miette::Report>(log)
@@ -372,28 +374,29 @@ pub(crate) async fn compose_hosted_actor(
         .collect::<Vec<_>>();
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
     let tool_index_pool = Arc::clone(&options.index_pool);
-    let mut built_tools = tokio::task::spawn_blocking(move || {
-        build_tools(BuildToolsInput {
-            index_pool: tool_index_pool,
-            workspace_roots: &tool_workspace_roots,
-            trusted_lsp_roots: &trusted_lsp_roots,
-            question_asker: tool_question_asker,
-            offline,
-            global_proxy: global_proxy.as_ref(),
-            deferred_global_proxy,
-            command_fixture_mode,
-            execution_lease: tool_execution_lease,
-            command_safety: &tool_command_safety,
-            websearch_config: &websearch_config,
-            websearch_headers: &websearch_headers,
-            deferred_websearch_headers,
-            native_websearch_possible,
-            background_redactor,
-            background_manager: None,
+    let mut built_tools =
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            build_tools(BuildToolsInput {
+                index_pool: tool_index_pool,
+                workspace_roots: &tool_workspace_roots,
+                trusted_lsp_roots: &trusted_lsp_roots,
+                question_asker: tool_question_asker,
+                offline,
+                global_proxy: global_proxy.as_ref(),
+                deferred_global_proxy,
+                command_fixture_mode,
+                execution_lease: tool_execution_lease,
+                command_safety: &tool_command_safety,
+                websearch_config: &websearch_config,
+                websearch_headers: &websearch_headers,
+                deferred_websearch_headers,
+                native_websearch_possible,
+                background_redactor,
+                background_manager: None,
+            })
         })
-    })
-    .await
-    .map_err(|error| miette!("tool startup worker failed: {error}"))??;
+        .await
+        .map_err(|error| miette!("tool startup worker failed: {error}"))??;
 
     let executable_catalog = if offline {
         crate::extension_config::ExecutableConfigCatalog::default()

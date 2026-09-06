@@ -60,14 +60,15 @@ impl ReadOperations {
         query: impl FnOnce(&mut R) -> Result<T, AgentLoopError> + Send + 'static,
     ) -> Result<T, AgentLoopError> {
         let (operation, permit) = self.admit()?;
-        let (result, _retained, _permit) = tokio::task::spawn_blocking(move || {
-            let result = query(&mut retained);
-            drop(operation);
-            // The completed unconsumed reply remains charged until delivery/drop.
-            (result, retained, permit)
-        })
-        .await
-        .map_err(|error| persistence(format!("session read worker failed: {error}")))?;
+        let (result, _retained, _permit) =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                let result = query(&mut retained);
+                drop(operation);
+                // The completed unconsumed reply remains charged until delivery/drop.
+                (result, retained, permit)
+            })
+            .await
+            .map_err(|error| persistence(format!("session read worker failed: {error}")))?;
         result
     }
     pub(super) async fn settle(&self) -> Result<(), AgentLoopError> {

@@ -15,15 +15,16 @@ pub(crate) async fn read_todos(
     // Admission is held during queued authorization, descriptor capture, index
     // work, and the completed-but-unconsumed result. Caller drop cannot detach it.
     let admission = journals.admit_read().map_err(storage)?;
-    let (result, _lease) = tokio::task::spawn_blocking(move || {
-        let mut budget = ProjectionBudget::new();
-        authorize(&mut budget)?;
-        let lease = admission.capture(&session.0).map_err(storage)?;
-        let result = read(&lease.view, &mut budget);
-        Ok::<_, HostError>((result, lease))
-    })
-    .await
-    .map_err(|_| HostError::Query("task projection worker failed".into()))??;
+    let (result, _lease) =
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            let mut budget = ProjectionBudget::new();
+            authorize(&mut budget)?;
+            let lease = admission.capture(&session.0).map_err(storage)?;
+            let result = read(&lease.view, &mut budget);
+            Ok::<_, HostError>((result, lease))
+        })
+        .await
+        .map_err(|_| HostError::Query("task projection worker failed".into()))??;
     result
 }
 fn read(

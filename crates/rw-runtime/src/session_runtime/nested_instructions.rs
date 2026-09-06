@@ -283,18 +283,17 @@ impl HookHandler for NestedInstructionsPreToolGuard {
                 "registered file mutation did not declare a workspace path",
             ));
         }
-        let stack =
-            tokio::task::spawn_blocking(move || load_nested_instruction_stack(&roots, &touched))
-                .await
-                .map_err(|_| {
-                    HookError::new(
-                        "nested_instruction_discovery",
-                        "nested project instruction discovery did not complete",
-                    )
-                })?
-                .map_err(|error| {
-                    HookError::new("nested_instruction_discovery", error.to_string())
-                })?;
+        let stack = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            load_nested_instruction_stack(&roots, &touched)
+        })
+        .await
+        .map_err(|_| {
+            HookError::new(
+                "nested_instruction_discovery",
+                "nested project instruction discovery did not complete",
+            )
+        })?
+        .map_err(|error| HookError::new("nested_instruction_discovery", error.to_string()))?;
         let active = self
             .active_sources
             .read()

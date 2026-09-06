@@ -98,6 +98,12 @@ an already running effect. Nested work transfers ownership or uses a different
 class instead of reacquiring its own exhausted pool. A process-group credit
 counts one supervised group, not arbitrary descendants within it. These limits
 complement per-session queues and permission policy; they do not grant authority.
+Finite filesystem/database work enters the blocking pool at its async execution
+boundary; context assembly, event encoding, and symbol queries enter the CPU
+pool. Cleanup joins and persistent service pumps remain separately owned: they
+must keep progressing when ordinary execution admission is exhausted. Failed
+settlement retains the physical owner and its capacity rather than admitting
+replacement work over effects whose termination is unknown.
 
 Each piece of contract data and each feature catalog has one hand-maintained
 owner. Other crates, clients, scripts, tests, and docs either consume that owner

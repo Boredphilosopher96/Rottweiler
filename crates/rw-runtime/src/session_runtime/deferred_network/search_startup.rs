@@ -37,7 +37,7 @@ impl SearchStartup {
             .get_or_insert_with(|| {
                 Startup(
                     async move {
-                        tokio::task::spawn_blocking(build)
+                        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, build)
                             .await
                             .map_err(|error| {
                                 Failure::Unsettled(format!("search startup worker failed: {error}"))

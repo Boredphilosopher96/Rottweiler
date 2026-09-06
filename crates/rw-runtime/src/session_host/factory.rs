@@ -76,7 +76,7 @@ impl SessionFactory for RuntimeSessionFactory {
     ) -> Result<ForkOperationState, HostError> {
         let factory = self.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _lock = factory.acquire_fork_journal_lock()?;
             let Some(journal) = factory.load_fork_journal_unlocked(&key)? else {
                 return Ok(ForkOperationState::Missing);
@@ -109,7 +109,7 @@ impl SessionFactory for RuntimeSessionFactory {
     ) -> Result<PreparedForkOperation, HostError> {
         let workspace = self.workspace_for_session(&operation.request.parent)?;
         let factory = self.clone();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _lock = factory.acquire_fork_journal_lock()?;
             if let Some(existing) = factory.load_fork_journal_unlocked(&operation.key)? {
                 return Ok(Self::journal_operation(&existing));
@@ -178,7 +178,7 @@ impl SessionFactory for RuntimeSessionFactory {
         let driver_client_id = request.driver_client_id.clone();
         let operation_key = request.operation_key.clone();
         let factory = self.clone();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _lock = factory.acquire_fork_journal_lock()?;
             let mut journal = factory
                 .load_fork_journal_unlocked(&operation_key)?
@@ -229,7 +229,7 @@ impl SessionFactory for RuntimeSessionFactory {
         let factory = self.clone();
         let key = key.clone();
         let result = result.clone();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _lock = factory.acquire_fork_journal_lock()?;
             let mut journal = factory.load_fork_journal_unlocked(&key)?.ok_or_else(|| {
                 HostError::Persistence("fork operation was not prepared".to_owned())
@@ -278,7 +278,7 @@ impl SessionFactory for RuntimeSessionFactory {
     ) -> Result<(), HostError> {
         let factory = self.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _lock = factory.acquire_fork_journal_lock()?;
             let Some(journal) = factory.load_fork_journal_unlocked(&key)? else {
                 return Ok(());
@@ -315,7 +315,9 @@ impl SessionFactory for RuntimeSessionFactory {
         let factory = self.clone();
         tokio::time::timeout(
             SESSION_QUERY_DEADLINE,
-            tokio::task::spawn_blocking(move || factory.persisted_sessions_blocking()),
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                factory.persisted_sessions_blocking()
+            }),
         )
         .await
         .map_err(|_| HostError::Query("session listing deadline exceeded".to_owned()))?

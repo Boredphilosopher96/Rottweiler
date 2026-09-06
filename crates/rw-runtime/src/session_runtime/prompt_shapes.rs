@@ -97,7 +97,7 @@ impl PromptShapeJournal {
         let permit = std::sync::Arc::clone(&self.records)
             .try_acquire_owned()
             .into_diagnostic()?;
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _permit = permit;
             self.record_request(&alias, &request, cache)?;
             Ok(request)

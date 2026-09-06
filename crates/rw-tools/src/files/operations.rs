@@ -95,6 +95,15 @@ impl FileOperations {
                     ToolError::Command("file operation capacity exhausted".to_owned())
                 }
             })?;
+        let physical = rw_resources::acquire(
+            rw_resources::ResourceClass::Blocking,
+            context.cancellation.cancelled(),
+        )
+        .await
+        .map_err(|error| match error {
+            rw_resources::AdmissionError::Cancelled => ToolError::Cancelled,
+            error => ToolError::Command(error.to_string()),
+        })?;
         let (proof, completion) = watch::channel(None);
         let call = Arc::new(FileCall {
             context,
@@ -115,6 +124,7 @@ impl FileOperations {
         };
         let worker_call = Arc::clone(&call);
         let worker = tokio::task::spawn_blocking(move || {
+            let _physical = physical;
             let mut transaction = worker_call
                 .transaction
                 .lock()

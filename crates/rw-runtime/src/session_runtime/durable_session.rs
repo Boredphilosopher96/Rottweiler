@@ -399,10 +399,12 @@ impl DurableEventSink {
     ) -> std::result::Result<Arc<AdmittedEventBatch>, AgentLoopError> {
         let owner = Arc::clone(&self);
         let submitted = Arc::clone(&batch);
-        tokio::task::spawn_blocking(move || owner.append_and_publish(submitted.events()))
-            .await
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
-        let batch = tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            owner.append_and_publish(submitted.events())
+        })
+        .await
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
+        let batch = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let persisted = batch.events();
             for event in persisted {
                 match event {

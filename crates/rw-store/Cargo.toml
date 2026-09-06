@@ -7,7 +7,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-rw-resources.workspace = true
 redb.workspace = true
 blake3.workspace = true
 globset.workspace = true

@@ -19,7 +19,7 @@ impl RuntimeSessionFactory {
         let fingerprint = fingerprint.to_owned();
         let factory = self.clone();
         let io = self.receipt_io.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _io = io;
             if let Some(workspace) = workspace {
                 factory.authorize_workspace(&workspace)?;
@@ -56,7 +56,7 @@ impl RuntimeSessionFactory {
         let fingerprint = fingerprint.to_owned();
         let root = self.options.storage_root.clone();
         let io = self.receipt_io.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let _io = io;
             let mut store = CommandReceipts::open(&root.join("command-receipts.sqlite"))
                 .map_err(|error| receipt_error(&error))?;

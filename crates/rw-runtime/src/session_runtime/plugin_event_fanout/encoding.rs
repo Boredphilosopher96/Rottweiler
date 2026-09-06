@@ -20,9 +20,11 @@ pub(super) async fn prepare(
     budget: Arc<PluginDeliveryBudget>,
     cancellation: &CancellationToken,
 ) -> Result<(Arc<PluginEventSource>, ExtensionEventContent), AgentLoopError> {
-    let prepared = tokio::task::spawn_blocking(move || encode(event, &redactor))
-        .await
-        .map_err(error)??;
+    let prepared = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+        encode(event, &redactor)
+    })
+    .await
+    .map_err(error)??;
     let retained = budget
         .retain(prepared.charge, cancellation)
         .await

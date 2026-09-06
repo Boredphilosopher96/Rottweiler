@@ -39,7 +39,7 @@ pub(crate) async fn compose_and_validate(
             .map_err(|error| miette!("mode registry could not compose: {error}"))?,
     );
     let selected = std::sync::Arc::clone(&modes);
-    tokio::task::spawn_blocking(move || {
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
         let mut recovery = rw_core::recovery::CanonicalRecovery::open(
             &source,
             &selected,

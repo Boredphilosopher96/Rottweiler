@@ -29,6 +29,8 @@ pub enum AdmissionError {
     QueueFull,
     #[error("resource execution capacity is full")]
     Busy,
+    #[error("resource admission deadline exceeded")]
+    Deadline,
     #[error("resource admission is closed")]
     Closed,
 }
@@ -132,6 +134,39 @@ pub async fn acquire(
 /// Returns capacity exhaustion or closure before granting a lease.
 pub fn try_acquire(class: ResourceClass) -> Result<ResourceLease, AdmissionError> {
     pool(class).try_acquire()
+}
+
+/// Failure before execution or while joining the admitted physical worker.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkError {
+    #[error("{0}")]
+    Admission(#[from] AdmissionError),
+    #[error("physical worker failed: {0}")]
+    Worker(#[from] tokio::task::JoinError),
+}
+
+/// Run a finite blocking operation with process-wide execution admission.
+/// The real worker retains capacity if its async caller disappears. Cleanup
+/// that allows existing operations to finish must not queue behind their pool.
+///
+/// # Errors
+/// Rejects exhausted admission or a failed worker before returning its result.
+pub async fn run_blocking<T: Send + 'static>(
+    class: ResourceClass,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, WorkError> {
+    let lease = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        acquire(class, std::future::pending()),
+    )
+    .await
+    .map_err(|_| AdmissionError::Deadline)??;
+    let span = tracing::Span::current();
+    Ok(tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        span.in_scope(work)
+    })
+    .await?)
 }
 
 #[cfg(test)]

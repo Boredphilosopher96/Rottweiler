@@ -174,7 +174,10 @@ impl HostQueryService for RuntimeSessionFactory {
         let workspace = self.workspace_for_session(session)?;
         let config_loader = self.settings_loader_for(&workspace);
         let project_loader = config_loader.clone();
-        let effective = tokio::task::spawn_blocking(move || config_loader.load())
+        let effective =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                config_loader.load()
+            })
             .await
             .map_err(|_| HostError::Query("user settings worker failed".to_owned()))?
             .map_err(|error| HostError::Query(error.to_string()))?;
@@ -218,37 +221,40 @@ impl HostQueryService for RuntimeSessionFactory {
         let value = value.to_owned();
         let project_model_write = matches!(&setting_key, EditableSettingKey::ProjectDefaultModel);
         let persisted_project_model = project_model_write.then(|| value.clone());
-        let effective = tokio::task::spawn_blocking(move || match setting_key {
-            EditableSettingKey::ProjectDefaultModel => {
-                config_loader.persist_tui_project_model(&value)
-            }
-            EditableSettingKey::KeybindingPreset => {
-                config_loader.persist_tui_keybinding_preset(&value)?;
-                config_loader.load()
-            }
-            EditableSettingKey::McpServerEnabled(server) => {
-                let enabled = match value.as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => {
-                        return Err(rw_store::config::ConfigError::InvalidUserSetting {
-                            key: rendered_key,
-                            reason: "MCP enablement must be true or false".to_owned(),
-                        });
+        let effective =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                match setting_key {
+                    EditableSettingKey::ProjectDefaultModel => {
+                        config_loader.persist_tui_project_model(&value)
                     }
-                };
-                config_loader.persist_tui_mcp_enabled(&server, enabled)?;
-                config_loader.load()
-            }
-            EditableSettingKey::McpAddHttp(server) => {
-                config_loader.persist_tui_mcp_http_server(&server, &value)?;
-                config_loader.load()
-            }
-            _ => config_loader.persist_tui_setting(&rendered_key, &value),
-        })
-        .await
-        .map_err(|_| HostError::Persistence("user setting worker failed".to_owned()))?
-        .map_err(|error| HostError::Persistence(error.to_string()))?;
+                    EditableSettingKey::KeybindingPreset => {
+                        config_loader.persist_tui_keybinding_preset(&value)?;
+                        config_loader.load()
+                    }
+                    EditableSettingKey::McpServerEnabled(server) => {
+                        let enabled = match value.as_str() {
+                            "true" => true,
+                            "false" => false,
+                            _ => {
+                                return Err(rw_store::config::ConfigError::InvalidUserSetting {
+                                    key: rendered_key,
+                                    reason: "MCP enablement must be true or false".to_owned(),
+                                });
+                            }
+                        };
+                        config_loader.persist_tui_mcp_enabled(&server, enabled)?;
+                        config_loader.load()
+                    }
+                    EditableSettingKey::McpAddHttp(server) => {
+                        config_loader.persist_tui_mcp_http_server(&server, &value)?;
+                        config_loader.load()
+                    }
+                    _ => config_loader.persist_tui_setting(&rendered_key, &value),
+                }
+            })
+            .await
+            .map_err(|_| HostError::Persistence("user setting worker failed".to_owned()))?
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
         let project_model = if let Some(model) = persisted_project_model {
             Some(model)
         } else {
@@ -279,10 +285,12 @@ impl HostQueryService for RuntimeSessionFactory {
         let workspace = self.workspace_for_session(session)?;
         let loader = self.settings_loader_for(&workspace);
         let model = model.0.clone();
-        tokio::task::spawn_blocking(move || loader.persist_tui_project_model(&model))
-            .await
-            .map_err(|_| HostError::Persistence("project model worker failed".to_owned()))?
-            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            loader.persist_tui_project_model(&model)
+        })
+        .await
+        .map_err(|_| HostError::Persistence("project model worker failed".to_owned()))?
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
         Ok(())
     }
 
@@ -371,7 +379,7 @@ impl HostQueryService for RuntimeSessionFactory {
         profile: rw_core::BuiltinProviderProfile,
     ) -> Result<(), HostError> {
         let config_loader = self.settings_loader();
-        tokio::task::spawn_blocking(move || {
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             config_loader.configure_provider_profile(profile.canonical_id(), profile.config_kind())
         })
         .await
@@ -393,7 +401,9 @@ impl HostQueryService for RuntimeSessionFactory {
             .clamp(1, MAX_SEARCH_RESULTS);
         tokio::time::timeout(
             QUERY_DEADLINE,
-            tokio::task::spawn_blocking(move || search_workspaces(&workspaces, &query, limit)),
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                search_workspaces(&workspaces, &query, limit)
+            }),
         )
         .await
         .map_err(|_| HostError::Query("workspace search deadline exceeded".to_owned()))?
@@ -423,7 +433,7 @@ impl HostQueryService for RuntimeSessionFactory {
         }
         tokio::time::timeout(
             QUERY_DEADLINE,
-            tokio::task::spawn_blocking(move || {
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                 let mut preview = preview_file(&workspace, &relative, maximum)?;
                 preview.path = rendered_path;
                 Ok(preview)
@@ -442,7 +452,9 @@ impl HostQueryService for RuntimeSessionFactory {
         let name = session.workspace_name.clone();
         tokio::time::timeout(
             WORKSPACE_STATUS_DEADLINE,
-            tokio::task::spawn_blocking(move || read_workspace_status(&workspace, name)),
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                read_workspace_status(&workspace, name)
+            }),
         )
         .await
         .map_err(|_| HostError::Query("workspace status deadline exceeded".to_owned()))?
@@ -472,7 +484,7 @@ impl HostQueryService for RuntimeSessionFactory {
         }
         tokio::time::timeout(
             WORKSPACE_DIFF_DEADLINE,
-            tokio::task::spawn_blocking(move || {
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                 let mut diff = read_workspace_diff(&workspace, &relative, maximum)?;
                 diff.path = rendered_path;
                 Ok(diff)
@@ -500,7 +512,7 @@ impl HostQueryService for RuntimeSessionFactory {
         let session = session.clone();
         tokio::time::timeout(
             SESSION_EXPORT_DEADLINE,
-            tokio::task::spawn_blocking(move || {
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                 factory.export_session_blocking(&session, format, &output_path, force)
             }),
         )

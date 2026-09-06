@@ -272,7 +272,10 @@ impl RecomposableHostedModel {
         // cancelled, the private result owns no live session state and cannot
         // commit late.
         let alias_owned = alias.to_owned();
-        let mut initialized = tokio::task::spawn_blocking(move || initialize(&alias_owned))
+        let mut initialized =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                initialize(&alias_owned)
+            })
             .await
             .map_err(|_| AgentLoopError::Provider("provider initialization failed".to_owned()))??;
         if let Some(pre_commit) = initialized.pre_commit.take() {
@@ -497,7 +500,7 @@ impl ModelDriver for RecomposableHostedModel {
         let inflight = Arc::clone(&self.activation_inflight);
         let mut activated = tokio::time::timeout(
             self.activation_deadline,
-            tokio::task::spawn_blocking(move || {
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
                 struct ClearInflight(Arc<AtomicBool>);
                 impl Drop for ClearInflight {
                     fn drop(&mut self) {

@@ -118,7 +118,10 @@ pub(super) async fn persist_catalog_snapshot(path: PathBuf, snapshot: ModelCatal
     // Catalog persistence is a cache optimization. A successful authenticated
     // provider operation must not be relabelled as failed if the private cache
     // cannot be refreshed.
-    let _ = tokio::task::spawn_blocking(move || store_model_catalog_cache(&path, &snapshot)).await;
+    let _ = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        store_model_catalog_cache(&path, &snapshot)
+    })
+    .await;
 }
 
 #[async_trait]
@@ -131,7 +134,7 @@ impl ModelCatalogSource for ReloadingHostedCatalogSource {
         let user_config_path = self.user_config_path.clone();
         let project_config_path = self.project_config_path.clone();
         let base_config = self.base_config.clone();
-        let config = tokio::task::spawn_blocking(move || {
+        let config = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             ConfigLoader::new(user_config_path, project_config_path)
                 .load()
                 .map(|loaded| merge_reloaded_provider_config(base_config, loaded.config))
@@ -154,7 +157,7 @@ impl ModelCatalogSource for ReloadingHostedCatalogSource {
         let user_config_path = self.user_config_path.clone();
         let project_config_path = self.project_config_path.clone();
         let base_config = self.base_config.clone();
-        let config = tokio::task::spawn_blocking(move || {
+        let config = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             ConfigLoader::new(user_config_path, project_config_path)
                 .load()
                 .map(|loaded| merge_reloaded_provider_config(base_config, loaded.config))
