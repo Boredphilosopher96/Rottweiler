@@ -20,10 +20,10 @@ impl TerminalIo {
     pub fn open(input: OwnedFd, output: OwnedFd) -> io::Result<Self> {
         let input_flags = fcntl_getfl(&input)?;
         let output_flags = fcntl_getfl(&output)?;
-        let mode = match termios::tcgetattr(&input) {
-            Ok(mode) => Some(mode),
-            Err(rustix::io::Errno::NOTTY) => None,
-            Err(error) => return Err(error.into()),
+        let mode = if termios::isatty(&input) {
+            Some(termios::tcgetattr(&input)?)
+        } else {
+            None
         };
         let owner = Self {
             input,
