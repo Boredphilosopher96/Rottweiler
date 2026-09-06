@@ -13,20 +13,25 @@ use std::{sync::Arc, time::Duration};
 #[tokio::test]
 async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir() {
     let root = tempfile::tempdir().expect("root");
-    let model = Arc::new(ScriptedModel::new([tool_script(
-        &[
-            ("first", "large", serde_json::json!({})),
-            ("second", "large", serde_json::json!({})),
-        ],
-        &[],
-    )]));
+    // Every result fits the registry's 256 KiB per-tool limit; their combined
+    // logical IR exceeds 16 MiB, exercising the batch owner itself.
+    const CALLS: usize = 96;
+    const BODY_BYTES: usize = 192 * 1024;
+    let ids = (0..CALLS)
+        .map(|index| format!("call-{index}"))
+        .collect::<Vec<_>>();
+    let calls = ids
+        .iter()
+        .map(|id| (id.as_str(), "large", serde_json::json!({})))
+        .collect::<Vec<_>>();
+    let model = Arc::new(ScriptedModel::new([tool_script(&calls, &[])]));
     let mut tools = ToolRegistry::new();
     tools
         .register(Arc::new(StubTool::new(
             "large",
             vec![],
             StubOutcome::Success(ToolResult::new(
-                "x".repeat(9 * 1024 * 1024),
+                "x".repeat(BODY_BYTES),
                 serde_json::Value::Null,
             )),
         )))
@@ -45,7 +50,7 @@ async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir()
         .await
         .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
-    handle.send_message("run both").await.expect("message");
+    handle.send_message("run the batch").await.expect("message");
     // This acceptance includes three CPU-admitted encodings of multi-megabyte bodies.
     // It checks closure, not the small-event inactivity clock used by streaming tests.
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -74,30 +79,27 @@ async fn excess_batch_output_is_rejected_before_completion_and_closes_exact_ir()
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(completed.len(), 2);
-    assert!(!completed[0].1);
-    assert!(completed[1].1);
-    assert!(matches!(completed[0].0, ToolOutput::Text { text } if text.len() == 9 * 1024 * 1024));
-    assert!(
-        matches!(completed[1].0, ToolOutput::Text { text } if text.contains("aggregate result") && text.len() < 256)
-    );
+    assert_eq!(completed.len(), CALLS);
+    assert!(completed.iter().any(|(_, error)| !error));
+    assert!(completed.iter().any(|(_, error)| *error));
+    for (output, is_error) in &completed {
+        assert!(matches!(output, ToolOutput::Text { text } if if *is_error {
+            text.contains("aggregate result") && text.len() < 256
+        } else { text.len() == BODY_BYTES }));
+    }
     let recovered = project_session_events(&source).expect("complete canonical claim");
     assert!(recovered.interrupted_turn.is_none());
-    let blocks = recovered
+    let tool_turn = recovered
         .conversation
         .iter()
         .find(|turn| turn.role == Role::Tool)
         .expect("Tool IR");
-    assert!(matches!(
-        blocks.blocks.as_slice(),
-        [
-            Block::ToolResult {
-                is_error: false,
-                ..
-            },
-            Block::ToolResult { is_error: true, .. }
-        ]
-    ));
+    assert_eq!(tool_turn.blocks.len(), CALLS);
+    for (block, (expected, error)) in tool_turn.blocks.iter().zip(completed) {
+        assert!(
+            matches!(block, Block::ToolResult { output, is_error, .. } if output == expected && *is_error == error)
+        );
+    }
     handle.close().await.expect("settled actor");
 }
 
@@ -136,24 +138,29 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
         .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run once").await.expect("message");
-    next_matching(&mut events, |event| matches!(event, crate::engine::PendingEvent::Error { message } if message.contains("settlement is unproven"))).await;
-    assert!(
-        handle.close().await.is_err(),
-        "unpublished result closure remains explicit"
-    );
+    next_matching(&mut events, |event| {
+        matches!(
+            event,
+            crate::engine::PendingEvent::TurnFinished {
+                turn: 1,
+                status: AgentTurnStatus::Interrupted,
+                ..
+            }
+        )
+    })
+    .await;
+    handle
+        .close()
+        .await
+        .expect("journal repair settled the actor");
     let source = sink.test_events_after(None).await.expect("source");
-    assert!(
-        !source
-            .iter()
-            .any(|event| matches!(event, EngineEvent::TurnFinished { .. }))
-    );
-    let recovered = project_session_events(&source).expect("repairable prefix");
-    assert_eq!(recovered.interrupted_turn, Some(1));
+    assert_repaired_order(&source);
+    let recovered = project_session_events(&source).expect("repaired prefix");
+    assert!(recovered.interrupted_turn.is_none());
     assert!(
         recovered.interrupted_tool_repairs.is_empty(),
         "completed effects are never replayed"
     );
-    assert!(recovered.interrupted_tool_turn.is_some());
     let reopen_model = Arc::new(ScriptedModel::default());
     let mut settings = config(
         root.path(),
@@ -202,4 +209,35 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
             .is_none()
     );
     reopened.close().await.expect("settled reopen");
+}
+
+fn assert_repaired_order(source: &[EngineEvent]) {
+    assert_eq!(
+        source
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::TurnFinished { .. }))
+            .count(),
+        1
+    );
+    let completion = source
+        .iter()
+        .position(|event| matches!(event, EngineEvent::ToolCallFinished { .. }))
+        .expect("durable completion");
+    let selector = source
+        .iter()
+        .position(|event| matches!(event, EngineEvent::ConversationToolResultsCommitted { .. }))
+        .expect("repair selector");
+    let terminal = source
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                EngineEvent::TurnFinished {
+                    status: rw_types::TurnStatus::Interrupted,
+                    ..
+                }
+            )
+        })
+        .expect("repaired terminal");
+    assert!(completion < selector && selector < terminal);
 }

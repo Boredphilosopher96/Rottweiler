@@ -49,6 +49,13 @@ pub(in crate::engine) async fn handle_turn_signal(
     events: &crate::engine::live_events::LiveEvents,
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {
+    // Journal repair may finish this turn before its worker reports closure failure.
+    // An old worker cannot poison the recovered actor or a newly admitted turn.
+    if let TurnSignal::ToolResultsUnsettled { turn, .. } = &signal
+        && state.running.as_ref().map(|running| running.id) != Some(*turn)
+    {
+        return Ok(());
+    }
     match signal {
         TurnSignal::Todo(request) => super::todos::handle(request, state, config, events).await?,
         TurnSignal::Event(event) | TurnSignal::ToolOutput { event, .. } => {
@@ -347,7 +354,8 @@ pub(in crate::engine) async fn handle_turn_signal(
                 }
             }
         }
-        TurnSignal::EffectsUnsettled { message } => {
+        TurnSignal::EffectsUnsettled { message }
+        | TurnSignal::ToolResultsUnsettled { message, .. } => {
             state.tasks.cancel();
             state.poisoned = true;
             state.unsettled = Some(message.clone());
@@ -480,6 +488,10 @@ pub(in crate::engine) enum TurnSignal {
         >,
     },
     Todo(super::todos::TodoRequest),
+    ToolResultsUnsettled {
+        turn: u64,
+        message: String,
+    },
     EffectsUnsettled {
         message: String,
     },

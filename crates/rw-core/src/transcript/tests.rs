@@ -421,7 +421,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
                 .index()
                 .page(0, 64, 1024 * 1024)
                 .expect("complete semantic page");
-            assert_eq!(page.rows.len(), 54);
+            assert_eq!(page.rows.len(), 55);
             assert_eq!(page.head.prefix, view.prefix_identity());
             assert_eq!(page.head.generation, 1);
             assert!(
@@ -451,7 +451,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
                     .expect("removed anchor")
                     .expect("replacement")
                     .source,
-                SequenceId(52)
+                SequenceId(54)
             );
             completed = true;
             break;

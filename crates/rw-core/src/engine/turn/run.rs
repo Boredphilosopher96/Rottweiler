@@ -1099,7 +1099,12 @@ pub(super) async fn run_turn(
         let executions = match executions {
             Ok(executions) => executions,
             Err(error) => {
-                mark_unsettled(&signals, &cancellation, error.to_string());
+                super::tool_result_closure::mark_unsettled(
+                    turn,
+                    &signals,
+                    &cancellation,
+                    error.to_string(),
+                );
                 status = AgentTurnStatus::Failed;
                 break;
             }
@@ -1134,7 +1139,12 @@ pub(super) async fn run_turn(
             match super::tool_result_profile::profile(tool_turn, &tasks, &config, retained).await {
                 Ok(profiled) => profiled,
                 Err(error) => {
-                    mark_unsettled(&signals, &cancellation, error.to_string());
+                    super::tool_result_closure::mark_unsettled(
+                        turn,
+                        &signals,
+                        &cancellation,
+                        error.to_string(),
+                    );
                     status = AgentTurnStatus::Failed;
                     break;
                 }
@@ -1150,7 +1160,12 @@ pub(super) async fn run_turn(
         )
         .await
         {
-            mark_unsettled(&signals, &cancellation, error.to_string());
+            super::tool_result_closure::mark_unsettled(
+                turn,
+                &signals,
+                &cancellation,
+                error.to_string(),
+            );
             status = AgentTurnStatus::Failed;
             break;
         }

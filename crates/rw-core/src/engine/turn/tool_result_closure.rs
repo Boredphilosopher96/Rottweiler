@@ -9,6 +9,16 @@ use rw_types::{EventMeta, SequenceId, tool_result_admission::ToolResultAdmission
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
+pub(super) fn mark_unsettled(
+    turn: u64,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    cancellation: &rw_tools::CancellationToken,
+    message: String,
+) {
+    cancellation.cancel();
+    let _ = signals.send(TurnSignal::ToolResultsUnsettled { turn, message });
+}
+
 pub(super) struct ResultProfiles {
     // Published prefix followed by reserved error completions for every remaining call.
     parts: Vec<ToolResultAdmission>,

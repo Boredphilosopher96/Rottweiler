@@ -201,7 +201,12 @@ pub(super) async fn execute_tool_calls(
         let execution = match admitted {
             Ok(execution) => execution,
             Err(error) => {
-                mark_unsettled(signals, cancellation, error.to_string());
+                super::tool_result_closure::mark_unsettled(
+                    turn,
+                    signals,
+                    cancellation,
+                    error.to_string(),
+                );
                 failure.get_or_insert(error);
                 next = next.saturating_add(1);
                 coordinator.advance(next);
