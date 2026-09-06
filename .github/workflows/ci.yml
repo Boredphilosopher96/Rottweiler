@@ -68,9 +68,6 @@ jobs:
 
   packages:
     name: Package ${{ matrix.package }} (${{ matrix.os }})
-    env:
-      ROTTWEILER_PERF_SMOKE: 1
-      ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/ci-results/package-perf.json
     needs: package-inventory
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

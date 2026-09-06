@@ -47,11 +47,12 @@ impl Repository {
         let mut source = String::with_capacity(FILE_BYTES);
         for slot in 0..DEFINITIONS {
             let name = Self::name(file, revision, slot);
-            source.push_str(&match file % 3 {
-                0 => format!("pub fn {name}() -> u64 {{ 7 }}\n"),
-                1 => format!("def {name}():\n    return 7\n"),
-                _ => format!("export function {name}(): number {{ return 7; }}\n"),
-            });
+            use std::fmt::Write as _;
+            match file % 3 {
+                0 => writeln!(source, "pub fn {name}() -> u64 {{ 7 }}")?,
+                1 => writeln!(source, "def {name}():\n    return 7")?,
+                _ => writeln!(source, "export function {name}(): number {{ return 7; }}")?,
+            }
         }
         source.push_str(if file % 3 == 1 { "#" } else { "//" });
         while source.len() < FILE_BYTES - 1 {
@@ -69,7 +70,6 @@ impl Repository {
     }
 
     pub fn verify_file(
-        &self,
         index: &WorkspaceSymbolIndex,
         file: usize,
         revision: Option<char>,
@@ -121,7 +121,7 @@ impl Repository {
         let mut digest = blake3::Hasher::new();
         for file in 0..self.files {
             let revision = if file < replacement { 'b' } else { 'a' };
-            self.verify_file(index, file, Some(revision))?;
+            Self::verify_file(index, file, Some(revision))?;
             for slot in 0..DEFINITIONS {
                 digest.update(Self::name(file, revision, slot).as_bytes());
                 digest.update(b"\n");

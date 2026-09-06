@@ -14,10 +14,9 @@ const BRANCH_SAMPLES: usize = 3;
 #[test]
 #[ignore = "release acceptance: 100/1k/10k real source files; external process RSS measurement"]
 fn qualify_shared_repository_index() -> TestResult {
-    assert!(
-        !cfg!(debug_assertions),
-        "precompile this acceptance in release mode"
-    );
+    if cfg!(debug_assertions) {
+        return Err("precompile this acceptance in release mode".into());
+    }
     let selected = std::env::var("ROTTWEILER_INTELLIGENCE_ACCEPTANCE_FILES")
         .ok()
         .map(|value| value.parse::<usize>())
@@ -198,9 +197,9 @@ fn incremental(repository: &Repository) -> TestResult {
             sessions[0].indexes[0].generation(),
         );
         assert!(sessions[0].indexes[0].generation() > before);
-        repository.verify_file(&sessions[(sample + 1) % SESSIONS], sample, Some('b'))?;
-        repository.verify_file(&sessions[0], repository.files + sample, Some('b'))?;
-        repository.verify_file(&sessions[0], repository.files - 1 - sample, None)?;
+        Repository::verify_file(&sessions[(sample + 1) % SESSIONS], sample, Some('b'))?;
+        Repository::verify_file(&sessions[0], repository.files + sample, Some('b'))?;
+        Repository::verify_file(&sessions[0], repository.files - 1 - sample, None)?;
         assert!(!sessions[0].indexes[0].is_partial());
     }
     for sample in 0..INCREMENTAL_SAMPLES {
