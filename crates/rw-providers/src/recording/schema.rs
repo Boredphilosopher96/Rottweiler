@@ -83,6 +83,8 @@ macro_rules! optional_projection {
             struct Owned(#[serde(with = $fields)] $ty);
             #[derive(Serialize)]
             struct Borrowed<'a>(#[serde(with = $fields)] &'a $ty);
+            // Serde field serializers receive a reference to the complete field.
+            #[allow(clippy::ref_option)]
             pub(in super::super) fn serialize<S: Serializer>(
                 value: &Option<$ty>,
                 serializer: S,

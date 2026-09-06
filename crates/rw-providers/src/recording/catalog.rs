@@ -135,11 +135,11 @@ fn scan(
 
 pub(super) fn decode_fixture(bytes: &[u8]) -> Result<RecordFixture, ProviderError> {
     admit(bytes, replay_reads::MAX_FIXTURE_BYTES)?;
-    serde_json::from_slice(bytes).map_err(invalid)
+    serde_json::from_slice(bytes).map_err(|error| invalid(&error))
 }
 pub(super) fn decode_manifest(bytes: &[u8]) -> Result<CapabilityManifest, ProviderError> {
     admit(bytes, MANIFEST_BYTES)?;
-    serde_json::from_slice(bytes).map_err(invalid)
+    serde_json::from_slice(bytes).map_err(|error| invalid(&error))
 }
 pub(super) fn admit_fixture(bytes: &[u8]) -> Result<(), ProviderError> {
     admit(bytes, replay_reads::MAX_FIXTURE_BYTES)
@@ -162,7 +162,7 @@ fn encode(value: &impl serde::Serialize, limit: usize) -> Result<Vec<u8>, Provid
     let mut bytes = Vec::new();
     let mut writer = rw_types::json_encoding::JsonWriter::buffer(&mut bytes, limit, 1024)
         .map_err(|_| exhausted("recording encoded allocation admission exceeded"))?;
-    serde_json::to_writer_pretty(&mut writer, value).map_err(invalid)?;
+    serde_json::to_writer_pretty(&mut writer, value).map_err(|error| invalid(&error))?;
     Ok(bytes)
 }
 
@@ -176,7 +176,7 @@ fn admit(bytes: &[u8], encoded_limit: usize) -> Result<(), ProviderError> {
             max_depth: 128,
         },
     )
-    .map_err(invalid)?;
+    .map_err(|error| invalid(&error))?;
     // Direct JSON owns all map storage. Typed slot accounting additionally covers
     // the largest source container and serde's tagged-content intermediates; JSON
     // string bytes and vector growth are included in the shared structural owner.
@@ -206,7 +206,7 @@ fn admit(bytes: &[u8], encoded_limit: usize) -> Result<(), ProviderError> {
     }
     Ok(())
 }
-fn invalid(error: serde_json::Error) -> ProviderError {
+fn invalid(error: &serde_json::Error) -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Protocol,
         format!("invalid recording: {error}"),

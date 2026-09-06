@@ -115,7 +115,7 @@ impl ReplayReads {
 }
 impl ReadLease {
     pub(super) async fn read(self, path: PathBuf) -> Result<Vec<u8>, ProviderError> {
-        self.run(move || read_fixture(path)).await
+        self.run(move || read_fixture(&path)).await
     }
     async fn run(
         mut self,
@@ -188,8 +188,8 @@ async fn prove(job: &Job) -> Result<(), ProviderError> {
         Err(unsettled("replay read settlement timed out"))
     }
 }
-fn read_fixture(path: PathBuf) -> Result<Vec<u8>, ProviderError> {
-    read_bounded(&path, MAX_FIXTURE_BYTES, || Ok(()))
+fn read_fixture(path: &std::path::Path) -> Result<Vec<u8>, ProviderError> {
+    read_bounded(path, MAX_FIXTURE_BYTES, || Ok(()))
 }
 pub(super) fn read_bounded(
     path: &std::path::Path,
