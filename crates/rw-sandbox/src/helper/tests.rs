@@ -89,3 +89,13 @@ fn approved_snapshot_is_sealed_against_all_later_writes() {
     assert!(writable.write_all(b"mutate").is_err());
     assert!(writable.set_len(0).is_err());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn running_image_capture_reuses_one_owned_snapshot() {
+    let path = std::env::current_exe().expect("running image");
+    let first = SandboxHelper::from_running(&path).expect("first capture");
+    let second = SandboxHelper::from_running(&path).expect("revalidated capture");
+    assert_eq!(first.launch_path(), second.launch_path());
+    assert_ne!(first.launch_path(), first.installation_path());
+}

@@ -90,23 +90,7 @@ impl ApprovedExecutable {
         }
         #[cfg(target_os = "macos")]
         {
-            let mut hasher = Sha256::new();
-            let mut input = (&executable).take(MAX_EXECUTABLE_BYTES + 1);
-            let mut buffer = [0_u8; 16 * 1024];
-            loop {
-                let count = input.read(&mut buffer).map_err(invalid)?;
-                if count == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..count]);
-            }
-            Self::from_artifact(&ExecutableArtifactIdentity {
-                executable: path,
-                device: running_identity.0,
-                inode: running_identity.1,
-                bytes: metadata.len(),
-                sha256: hex_digest(&hasher.finalize()),
-            })
+            running::capture(&path, &executable, &metadata)
         }
         #[cfg(not(target_os = "macos"))]
         Ok(Self(Arc::new(OwnedExecutable {
@@ -315,3 +299,6 @@ pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     }
     value
 }
+
+#[cfg(target_os = "macos")]
+mod running;
