@@ -51,6 +51,8 @@ export const MAX_SESSION_CHILDREN_PREPARED_BYTES = 8388608 as const;
 export const MAX_SESSION_STATE_BYTES = 2097152 as const;
 export const MAX_SESSION_STATE_PREPARED_BYTES = 16777216 as const;
 export const MAX_SESSION_QUEUE_PREVIEW_BYTES = 1024 as const;
+export const MAX_SESSION_PLUGIN_STATUSES = 64 as const;
+export const MAX_PLUGIN_STATUS_BYTES = 1024 as const;
 export const MAX_SESSION_QUEUE_ITEMS = 128 as const;
 export const MAX_SESSION_CONTROLS_BYTES = 7340032 as const;
 export const MAX_SESSION_CONTROLS_PREPARED_BYTES = 67108864 as const;
@@ -130,7 +132,9 @@ export type SessionControls = { questions: Array<SessionQuestion>, approvals: Ar
 
 export type SessionControlsSnapshot = { through: SequenceId | null, controls: SessionControls, };
 
-export type SessionStateSnapshot = { through: SequenceId | null, driver_client_id: ClientId | null, title: string | null, model_alias: ModelAlias, provider: string | null, thinking: ThinkingLevel, mode_id: ModeId, active_turn: SessionActiveTurn | null, completed_turns: string, shell: SessionShellState | null, compaction: SessionCompactionState | null, queued_messages: Array<SessionQueuedPreview>, budget: SessionBudgetState | null, };
+export type SessionStateSnapshot = { through: SequenceId | null, driver_client_id: ClientId | null, title: string | null, model_alias: ModelAlias, provider: string | null, thinking: ThinkingLevel, mode_id: ModeId, active_turn: SessionActiveTurn | null, completed_turns: string, shell: SessionShellState | null, compaction: SessionCompactionState | null, queued_messages: Array<SessionQueuedPreview>, plugin_statuses: Array<SessionPluginStatus>, budget: SessionBudgetState | null, };
+
+export type SessionPluginStatus = { plugin_id: string, status: string, source: SequenceId, };
 
 export type SessionChildState = { subagent_id: SubagentId, child_session_id: SessionId, spawned: SequenceId, spawned_turn: string, task_preview: string, task_truncated: boolean, };
 
@@ -718,12 +722,12 @@ export const CLIENT_COMMAND_EXECUTION = {
   continue_subagent: "control",
   create_session: "control",
   detach_development_plugin: "control",
-  dump_prompt: "control",
+  dump_prompt: "read",
   evict_context: "control",
   export_session: "control",
   fork: "control",
-  get_context: "control",
-  get_cost: "control",
+  get_context: "read",
+  get_cost: "read",
   get_session_controls: "read",
   get_session_review: "control",
   get_session_state: "read",

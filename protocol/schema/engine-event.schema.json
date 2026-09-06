@@ -3072,6 +3072,13 @@
           },
           "maxItems": 128
         },
+        "plugin_statuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionPluginStatus"
+          },
+          "maxItems": 64
+        },
         "budget": {
           "anyOf": [
             {
@@ -3097,6 +3104,7 @@
         "shell",
         "compaction",
         "queued_messages",
+        "plugin_statuses",
         "budget"
       ]
     },
@@ -3261,6 +3269,32 @@
         "position",
         "preview",
         "truncated"
+      ]
+    },
+    "SessionPluginStatus": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9_.-]+$"
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "source": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plugin_id",
+        "status",
+        "source"
       ]
     },
     "SessionBudgetState": {
