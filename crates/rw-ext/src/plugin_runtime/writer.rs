@@ -226,7 +226,7 @@ mod tests {
         assert!(weak.upgrade().is_some());
         assert!(pool.available_permits() < 64 * 1024 * 1024);
         // Losing the callback waiter does not cancel the independently owned write task.
-        let owner = tokio::spawn(async move { write.await });
+        let owner = tokio::spawn(write);
         drop(owner);
         drop(blocked);
         let frame = receiver.recv().await.expect("queued reply");
