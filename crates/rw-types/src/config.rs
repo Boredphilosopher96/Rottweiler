@@ -710,12 +710,17 @@ pub struct SandboxConfig {
     pub safe_list: Vec<String>,
 }
 
+/// Maximum explicitly configured toolchain runtime read roots.
+pub const MAX_TOOLCHAIN_RUNTIME_READ_ROOTS: usize = 32;
+/// Maximum UTF-8 bytes in one toolchain runtime read root.
+pub const MAX_TOOLCHAIN_RUNTIME_ROOT_BYTES: usize = 4096;
+
 /// Declarative commands registered onto the shared post-tool hook pipeline.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolchainConfig {
     /// Absolute runtime paths read only by configured formatter, linter, and test commands.
-    #[schemars(length(max = 32))]
+    #[schemars(length(max = MAX_TOOLCHAIN_RUNTIME_READ_ROOTS))]
     pub runtime_read_roots: Vec<std::path::PathBuf>,
     /// Formatter applied when no more-specific rule overrides it.
     pub formatter: Option<String>,
@@ -731,12 +736,12 @@ pub struct ToolchainConfig {
 /// Whether explicitly supplied toolchain runtime paths fit the configuration contract.
 #[must_use]
 pub fn valid_toolchain_runtime_read_roots(roots: &[std::path::PathBuf]) -> bool {
-    roots.len() <= 32
+    roots.len() <= MAX_TOOLCHAIN_RUNTIME_READ_ROOTS
         && roots.iter().all(|root| {
             root.is_absolute()
-                && root
-                    .to_str()
-                    .is_some_and(|text| text.len() <= 4096 && !text.contains('\0'))
+                && root.to_str().is_some_and(|text| {
+                    text.len() <= MAX_TOOLCHAIN_RUNTIME_ROOT_BYTES && !text.contains('\0')
+                })
         })
 }
 

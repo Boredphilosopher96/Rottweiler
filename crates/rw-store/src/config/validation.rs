@@ -251,9 +251,11 @@ pub(super) fn validate_toolchain(
     config: &rw_types::config::ToolchainConfig,
 ) -> Result<(), ConfigError> {
     if !rw_types::config::valid_toolchain_runtime_read_roots(&config.runtime_read_roots) {
-        return Err(ConfigError::Validation(
-            "toolchain.runtime_read_roots requires at most 32 absolute UTF-8 paths of at most 4096 bytes".to_owned(),
-        ));
+        return Err(ConfigError::Validation(format!(
+            "toolchain.runtime_read_roots requires at most {} absolute UTF-8 paths of at most {} bytes",
+            rw_types::config::MAX_TOOLCHAIN_RUNTIME_READ_ROOTS,
+            rw_types::config::MAX_TOOLCHAIN_RUNTIME_ROOT_BYTES,
+        )));
     }
     for (label, command) in [
         ("toolchain.formatter", config.formatter.as_deref()),
