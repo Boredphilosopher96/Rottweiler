@@ -100,6 +100,29 @@ impl LaunchBytes {
             Self::Harness { .. } => _config.argv(),
         }
     }
+    pub(super) fn validate_write_roots(&self, roots: &[PathBuf]) -> Result<(), PluginProcessError> {
+        let (executable, code) = match self {
+            Self::Native { executable, code } => (executable, code),
+            #[cfg(target_os = "linux")]
+            Self::Preparation { .. } => return Ok(()),
+            #[cfg(test)]
+            Self::Harness { .. } => return Ok(()),
+        };
+        for root in roots {
+            let root = root.canonicalize().map_err(|cause| process_error(&cause))?;
+            let overlaps = |pinned: &Path| pinned.starts_with(&root) || root.starts_with(pinned);
+            if (cfg!(target_os = "macos") && overlaps(executable.path()))
+                || matches!(code, CodeView::Attested { directory, .. }
+                    if overlaps(&directory.path().canonicalize().map_err(|cause| process_error(&cause))?))
+            {
+                return Err(error(
+                    "plugin writable scratch overlaps its approved immutable bytes",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn read_roots(&self) -> Vec<PathBuf> {
         match self {
             Self::Native { executable, code } => {
@@ -129,6 +152,12 @@ impl CodeView {
             .prefix("rw-approved-plugin-")
             .tempdir()
             .map_err(|cause| process_error(&cause))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+                .map_err(|cause| process_error(&cause))?;
+        }
         let root = directory
             .path()
             .canonicalize()

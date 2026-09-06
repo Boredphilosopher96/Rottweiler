@@ -143,3 +143,16 @@ async fn dropped_handoff_keeps_code_until_physical_retirement() {
     .await
     .expect("code view retires after actual child settlement");
 }
+
+#[test]
+fn writable_scratch_cannot_include_or_replace_the_approved_code_view() {
+    let (_directory, config) = fixture("printf approved");
+    let bytes = LaunchBytes::capture(&config, &profile()).expect("capture");
+    let cwd = bytes.cwd(&config).to_path_buf();
+    assert!(bytes.validate_write_roots(&[cwd]).is_err());
+    assert!(bytes.validate_write_roots(&[std::env::temp_dir()]).is_err());
+    let unrelated = tempfile::tempdir().expect("unrelated scratch");
+    bytes
+        .validate_write_roots(&[unrelated.path().to_path_buf()])
+        .expect("disjoint write authority");
+}

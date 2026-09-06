@@ -189,6 +189,7 @@ fn spawn_pinned_plugin(
     bytes: Arc<LaunchBytes>,
     roots: &[PathBuf],
 ) -> Result<SpawnedPlugin, PluginProcessError> {
+    bytes.validate_write_roots(roots)?;
     let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, roots, &bytes)?;
     #[allow(unused_mut)]
     let mut plan = shell_launch_plan(&policy, helper, bytes.program(config), bytes.args(config))

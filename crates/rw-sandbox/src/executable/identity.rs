@@ -74,6 +74,9 @@ pub(super) fn verify_copy(
 }
 
 fn file_identity(metadata: &std::fs::Metadata) -> Result<(u64, u64), SandboxError> {
+    if !metadata.is_file() {
+        return Err(SandboxError::UntrustedHelper);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
