@@ -16,6 +16,9 @@ async fn sdk_task_reopen_preserves_receipt_and_rebinds_rich_actions() {
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&storage).expect("storage");
     std::fs::create_dir(&workspace).expect("workspace");
+    let workspace = workspace
+        .canonicalize()
+        .expect("canonical workspace identity");
     #[cfg(unix)]
     std::fs::set_permissions(
         &storage,

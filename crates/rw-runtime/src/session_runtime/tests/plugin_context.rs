@@ -15,6 +15,9 @@ async fn sdk_context_workflow_pins_and_evicts_committed_conversation() {
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&storage).expect("storage");
     std::fs::create_dir(&workspace).expect("workspace");
+    let workspace = workspace
+        .canonicalize()
+        .expect("canonical workspace identity");
     #[cfg(unix)]
     std::fs::set_permissions(
         &storage,
