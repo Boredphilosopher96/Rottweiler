@@ -218,6 +218,7 @@ fn fragment_json(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::fragment_json;
     #[test]

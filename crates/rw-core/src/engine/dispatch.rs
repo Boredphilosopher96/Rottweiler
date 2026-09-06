@@ -355,7 +355,7 @@ pub(super) async fn handle_actor_command(
                     .map(|active| active.command.clone())
                     .unwrap_or_default();
                 let context = shell_context_turn(&command, status, captured_output.as_deref());
-                let persisted = emit(
+                emit(
                     state,
                     events,
                     &config.event_sink,
@@ -371,8 +371,7 @@ pub(super) async fn handle_actor_command(
                 .map(|meta| {
                     state.append_conversation(context, meta.sequence_id);
                     state.active_shell = None;
-                });
-                persisted
+                })
             };
             let _ = respond.send(result);
         }

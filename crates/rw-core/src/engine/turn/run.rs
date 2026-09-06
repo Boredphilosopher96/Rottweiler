@@ -261,7 +261,7 @@ pub(super) async fn run_turn(
                 }
             };
         let reservation = if let Some(working) = context_working.take() {
-            Reservation::Retained(working)
+            Reservation::Retained(Box::new(working))
         } else {
             match super::history_context::reserve_working(&config).await {
                 Ok(reserved) => Reservation::Fresh(reserved),
@@ -370,7 +370,7 @@ pub(super) async fn run_turn(
                 };
                 (working, assembled) = match context_worker
                     .assemble(
-                        Reservation::Retained(working),
+                        Reservation::Retained(Box::new(working)),
                         Selection {
                             conversation: &mut conversation,
                             sources: &sources,

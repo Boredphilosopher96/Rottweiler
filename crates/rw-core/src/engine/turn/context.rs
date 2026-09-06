@@ -334,6 +334,7 @@ pub(super) fn resolved_overflow_policy(
     .map_err(|error| error.to_string())
 }
 
+#[derive(Clone, Copy)]
 pub(in crate::engine) struct ContextSnapshotSource<'a> {
     pub conversation: &'a [Turn],
     pub sources: &'a [ConversationSource],

@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 
 pub(super) enum Reservation {
     Fresh(HistoryRead<()>),
-    Retained(ContextWorkingSet),
+    Retained(Box<ContextWorkingSet>),
 }
 impl Reservation {
     fn admit(
@@ -38,7 +38,7 @@ impl Reservation {
                 context_memory::admit(reserved, config, conversation, sources, &VecDeque::new())
             }
             Self::Retained(working) => {
-                context_memory::readmit(working, config, conversation, sources, &VecDeque::new())
+                context_memory::readmit(*working, config, conversation, sources, &VecDeque::new())
             }
         }
     }

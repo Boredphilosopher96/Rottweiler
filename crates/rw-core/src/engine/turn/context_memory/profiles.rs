@@ -45,13 +45,12 @@ impl Profiles {
             return Err(invalid("duplicate context allocation source"));
         }
         self.turns.retain(|sequence, _| selected.contains(sequence));
-        let mut total = match self.stable {
-            Some(profile) => profile,
-            None => {
-                let profile = stable_profile(config)?;
-                self.stable = Some(profile);
-                profile
-            }
+        let mut total = if let Some(profile) = self.stable {
+            profile
+        } else {
+            let profile = stable_profile(config)?;
+            self.stable = Some(profile);
+            profile
         };
         for (turn, source) in conversation.iter().zip(sources) {
             let profile = match self.turns.entry(source.sequence.0) {

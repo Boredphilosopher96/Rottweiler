@@ -29,25 +29,7 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
     let modes = ModeRegistry::builtins().expect("modes");
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("source");
     let mut index = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("index");
-    for turn in 1..=2 {
-        append(
-            &mut journal,
-            vec![
-                PendingEvent::TurnStarted { turn },
-                PendingEvent::ConversationTurnCommitted {
-                    agent_turn: turn,
-                    turn: text(Role::User, &format!("request {turn}")),
-                },
-                usage(turn),
-                PendingEvent::ConversationTurnCommitted {
-                    agent_turn: turn,
-                    turn: text(Role::Assistant, &format!("answer {turn}")),
-                },
-                usage(turn),
-                terminal(turn),
-            ],
-        );
-    }
+    append_two_completed_prompts(&mut journal);
     catch_up(&mut index, &journal.read_view(), &modes);
     let before = index
         .snapshot()
@@ -134,4 +116,26 @@ fn prompt_cut_precedes_answer_and_tracks_effective_reused_turn_identity() {
             .turns,
         vec![text(Role::User, "replacement")]
     );
+}
+
+fn append_two_completed_prompts(journal: &mut SegmentedJournal) {
+    for turn in 1..=2 {
+        append(
+            journal,
+            vec![
+                PendingEvent::TurnStarted { turn },
+                PendingEvent::ConversationTurnCommitted {
+                    agent_turn: turn,
+                    turn: text(Role::User, &format!("request {turn}")),
+                },
+                usage(turn),
+                PendingEvent::ConversationTurnCommitted {
+                    agent_turn: turn,
+                    turn: text(Role::Assistant, &format!("answer {turn}")),
+                },
+                usage(turn),
+                terminal(turn),
+            ],
+        );
+    }
 }

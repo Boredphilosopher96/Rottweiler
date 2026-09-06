@@ -117,45 +117,13 @@ fn incremental_context_matches_full_requests_across_source_and_configuration_cha
     let mut surgery = Vec::new();
     for step in 0..9 {
         let config = &configs[(step / 3).min(2)];
-        match step {
-            1 => {
-                pruned.insert(
-                    ContextBlockId {
-                        sequence: SequenceId(1),
-                        block_index: 0,
-                    }
-                    .key(),
-                    10,
-                );
-            }
-            2 => surgery.push(ContextSurgeryAction {
-                item_id: rw_types::context_source::conversation_item(SequenceId(2)),
-                pinned: true,
-                effective_after_agent_turn: 1,
-            }),
-            4 => surgery.push(ContextSurgeryAction {
-                item_id: rw_types::context_source::conversation_item(SequenceId(3)),
-                pinned: false,
-                effective_after_agent_turn: 1,
-            }),
-            5 => {
-                conversation.push(output(12));
-                sources.push(source(13));
-            }
-            7 => {
-                conversation = vec![text_turn(Role::Assistant, "compacted summary"), output(99)];
-                sources = vec![source(40), source(41)];
-                pruned.clear();
-                surgery.clear();
-            }
-            8 => {
-                conversation.remove(1);
-                sources.remove(1);
-                conversation.push(output(100));
-                sources.push(source(50));
-            }
-            _ => {}
-        }
+        change_source_selection(
+            step,
+            &mut conversation,
+            &mut sources,
+            &mut pruned,
+            &mut surgery,
+        );
         working = readmit(working, config, &conversation, &sources, &queued).expect("replanned");
         for repetition in 0..2 {
             let prior_normalizations = working.normalizations();
@@ -346,4 +314,52 @@ fn prefix_replacement_keeps_an_older_source_cache_entry() {
         assemble_full_session_context(&config, &conversation, &sources, &queued, &[], &pruned)
             .expect("oracle");
     assert_eq!(cached, full);
+}
+
+fn change_source_selection(
+    step: usize,
+    conversation: &mut Vec<rw_types::Turn>,
+    sources: &mut Vec<ConversationSource>,
+    pruned: &mut BTreeMap<String, u64>,
+    surgery: &mut Vec<ContextSurgeryAction>,
+) {
+    match step {
+        1 => {
+            pruned.insert(
+                ContextBlockId {
+                    sequence: SequenceId(1),
+                    block_index: 0,
+                }
+                .key(),
+                10,
+            );
+        }
+        2 => surgery.push(ContextSurgeryAction {
+            item_id: rw_types::context_source::conversation_item(SequenceId(2)),
+            pinned: true,
+            effective_after_agent_turn: 1,
+        }),
+        4 => surgery.push(ContextSurgeryAction {
+            item_id: rw_types::context_source::conversation_item(SequenceId(3)),
+            pinned: false,
+            effective_after_agent_turn: 1,
+        }),
+        5 => {
+            conversation.push(output(12));
+            sources.push(source(13));
+        }
+        7 => {
+            *conversation = vec![text_turn(Role::Assistant, "compacted summary"), output(99)];
+            *sources = vec![source(40), source(41)];
+            pruned.clear();
+            surgery.clear();
+        }
+        8 => {
+            conversation.remove(1);
+            sources.remove(1);
+            conversation.push(output(100));
+            sources.push(source(50));
+        }
+        _ => {}
+    }
 }
