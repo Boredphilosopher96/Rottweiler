@@ -84,13 +84,18 @@ fn exact_reads_keep_pinned_prefix_and_inspect_one_containing_segment() {
 }
 
 #[test]
+#[cfg(unix)]
 fn source_read_rejects_changed_bytes_in_its_containing_segment() {
     use std::os::unix::fs::FileExt as _;
     let root = tempfile::tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "changed").expect("journal");
     journal.append_batch([json!({"value":0})]).expect("append");
     let view = journal.read_view();
-    view.active.write_at(b"!", 0).expect("corrupt descriptor");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(view.directory.path.join("active.jsonl"))
+        .expect("source write descriptor");
+    file.write_at(b"!", 0).expect("corrupt descriptor");
     assert!(
         view.record_with_decode_limit::<Value>(SequenceId(0), MAX_JOURNAL_DECODE_BYTES)
             .is_err()

@@ -103,9 +103,9 @@ impl TokioCommandExecutor {
         scratch: Arc<CommandScratch>,
     ) -> Self {
         self.sandbox = Some(CommandSandbox {
+            scratch,
             policy,
             helper,
-            scratch,
         });
         self
     }
