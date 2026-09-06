@@ -67,12 +67,19 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
         "expected three real child spawns; stderr: {}\nevents: {events:#?}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        events
+    let children = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::SubagentFinished { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 3);
+    assert!(
+        children
             .iter()
-            .filter(|event| matches!(event, EngineEvent::SubagentFinished { .. }))
-            .count(),
-        3
+            .all(|child| child.status == rw_types::SubagentStatus::Completed),
+        "child execution failed before collation; events: {events:#?}"
     );
     assert!(
         events.iter().any(|event| matches!(
