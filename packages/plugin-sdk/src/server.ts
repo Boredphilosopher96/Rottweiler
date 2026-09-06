@@ -757,10 +757,9 @@ export class PluginServer {
     try {
       const handler = this.definition.handlers.shutdown
       if (handler !== undefined) {
-        await Promise.race([
-          Promise.resolve().then(() => handler(this.#lifetime.signal)).catch(() => this.#debug("shutdown handler failed")),
-          deadline,
-        ])
+        await Promise.resolve()
+          .then(() => handler(this.#lifetime.signal))
+          .catch(() => this.#debug("shutdown handler failed"))
       }
       await Promise.allSettled(this.#handlerTasks)
       await Promise.race([this.#writer.drain().catch(() => undefined), deadline])
