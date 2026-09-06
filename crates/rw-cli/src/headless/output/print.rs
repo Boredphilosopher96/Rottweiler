@@ -5,7 +5,7 @@ use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{EngineEvent, MessageDisposition, TurnStatus};
 use rw_types::{ApprovalBinding, ApprovalDecision};
 
-pub(super) async fn run_print(
+pub(in crate::headless) async fn run_print(
     actor: &rw_core::SessionHandle,
     session_id: &str,
     prompt: &str,
@@ -30,7 +30,7 @@ pub(super) async fn run_print(
     execution
 }
 
-pub(super) async fn print_dump(
+pub(in crate::headless) async fn print_dump(
     actor: &rw_core::SessionHandle,
     dump: &rw_types::PromptDump,
     perf_markers: bool,
