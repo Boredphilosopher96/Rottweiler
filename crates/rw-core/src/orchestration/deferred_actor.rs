@@ -160,8 +160,9 @@ impl DeferredActorSession {
 fn spawn_preparation(state: Arc<Mutex<State>>, recipe: Arc<Recipe>, done: watch::Sender<bool>) {
     tokio::spawn(async move {
         // The task owns preparation even when its initiating run/cancel/close caller drops.
+        // This async bridge cannot hold a finite I/O permit across nested admitted work.
         let builder = recipe.clone();
-        let result = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        let result = tokio::task::spawn_blocking(move || {
             tokio::runtime::Handle::current().block_on(builder.prepare())
         })
         .await
