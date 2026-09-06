@@ -115,7 +115,7 @@ pub(super) async fn current_sources(
 
 pub(super) async fn reserve_working(
     config: &SessionActorConfig,
-) -> Result<HistoryRead<()>, AgentLoopError> {
+) -> Result<Box<dyn crate::engine::recovery::HistoryWorkingAllowance>, AgentLoopError> {
     config
         .history
         .capture_history()

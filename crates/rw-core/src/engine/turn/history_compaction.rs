@@ -41,7 +41,8 @@ pub(in crate::engine) async fn compact(
     instructions: Option<String>,
     accounting: SessionAccountingFallback,
 ) -> Result<(HistoryRead<ConversationPage>, BudgetUsage), AgentLoopError> {
-    let working = history.reserve_working_set()?;
+    let mut working = history.reserve_working_set()?;
+    working.resize(crate::engine::recovery::MAX_HISTORY_RESULT_BYTES)?;
     persist_event(
         signals,
         PendingEvent::CompactionStarted {

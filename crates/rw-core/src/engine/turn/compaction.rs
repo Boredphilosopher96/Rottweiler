@@ -568,7 +568,8 @@ pub(in crate::engine) async fn compact_during_turn(
             false,
         ));
     }
-    let working = view.reserve_working_set()?;
+    let mut working = view.reserve_working_set()?;
+    working.resize(crate::engine::recovery::MAX_HISTORY_RESULT_BYTES)?;
     persist_event(
         signals,
         PendingEvent::CompactionStarted {
@@ -611,7 +612,7 @@ pub(in crate::engine) async fn compact_during_turn(
     .await;
     match transaction {
         Ok(result) => {
-            *retained = Some(working);
+            *retained = Some(crate::engine::recovery::HistoryRead::new((), working));
             Ok(result)
         }
         Err(error) => {

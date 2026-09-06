@@ -16,6 +16,16 @@ pub trait SessionHistory: Send + Sync {
     async fn capture_history(&self) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError>;
 }
 
+/// Resident transformation bytes owned independently of any transient source read.
+/// Growing must reject before allocation; the owner releases its credit on drop.
+pub trait HistoryWorkingAllowance: Send + Sync {
+    /// Resize the retained working credit. Shrinking requires the caller to have
+    /// released every allocation covered by the removed credit.
+    /// # Errors
+    /// Rejects an invalid size or exhausted application resident admission.
+    fn resize(&mut self, bytes: usize) -> Result<(), AgentLoopError>;
+}
+
 /// Canonical context, independent of raw audit replay and display transcript rows.
 /// Appends, receipts and rewinds cannot change a captured view's source identities.
 #[async_trait]
@@ -45,7 +55,7 @@ pub trait SessionHistoryView: Send + Sync {
     /// The owner must remain live through temporary buffers and delivered results.
     /// # Errors
     /// Rejects exhausted application working-set admission.
-    fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError>;
+    fn reserve_working_set(&self) -> Result<Box<dyn HistoryWorkingAllowance>, AgentLoopError>;
 
     /// Resolve live controls and interrupted input at this exact prefix.
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError>;

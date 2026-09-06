@@ -9,7 +9,7 @@ use crate::engine::{
     AgentLoopError,
     pending_event::PendingEvent,
     projection::ContextSurgeryAction,
-    recovery::{ConversationSource, HistoryRead},
+    recovery::{ConversationSource, HistoryWorkingAllowance},
     session::SessionActorConfig,
     task_ownership::ActorTasks,
 };
@@ -23,7 +23,7 @@ use std::{
 use tokio::sync::mpsc;
 
 pub(super) enum Reservation {
-    Fresh(HistoryRead<()>),
+    Fresh(Box<dyn HistoryWorkingAllowance>),
     Retained(Box<ContextWorkingSet>),
 }
 impl Reservation {

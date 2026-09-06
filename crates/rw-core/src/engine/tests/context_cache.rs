@@ -2,7 +2,7 @@
 use crate::engine::{
     builtin_hook_dispatcher,
     projection::ContextSurgeryAction,
-    recovery::{ConversationSource, HistoryRead, TurnSourceKind},
+    recovery::{ConversationSource, TurnSourceKind},
     session::SessionActorConfig,
     tests::fixtures::{
         models::ScriptedModel,
@@ -107,7 +107,7 @@ fn incremental_context_matches_full_requests_across_source_and_configuration_cha
     let mut sources = (1..=12).map(source).collect::<Vec<_>>();
     let queued = VecDeque::from(["queued input".into()]);
     let mut working = admit(
-        HistoryRead::new((), ()),
+        super::fixtures::history::working_allowance(()),
         &configs[0],
         &conversation,
         &sources,
@@ -184,7 +184,7 @@ fn measure_incremental_context_against_full_assembly() {
     let queued = VecDeque::new();
     let pruned = BTreeMap::new();
     let mut working = admit(
-        HistoryRead::new((), ()),
+        super::fixtures::history::working_allowance(()),
         &config,
         &conversation,
         &sources,
@@ -224,7 +224,7 @@ fn measure_incremental_context_against_full_assembly() {
             } else {
                 Some(
                     admit(
-                        HistoryRead::new((), ()),
+                        super::fixtures::history::working_allowance(()),
                         &config,
                         &conversation,
                         &sources,
@@ -273,7 +273,7 @@ fn prefix_replacement_keeps_an_older_source_cache_entry() {
     let queued = VecDeque::new();
     let pruned = BTreeMap::new();
     let mut working = admit(
-        HistoryRead::new((), ()),
+        super::fixtures::history::working_allowance(()),
         &config,
         &conversation,
         &sources,

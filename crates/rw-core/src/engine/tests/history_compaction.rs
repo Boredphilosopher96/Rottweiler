@@ -56,7 +56,9 @@ impl SessionHistoryView for SmallView {
     {
         self.0.conversation_fragment_source(ordinal).await
     }
-    fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn crate::engine::recovery::HistoryWorkingAllowance>, AgentLoopError> {
         self.0.reserve_working_set()
     }
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {

@@ -23,6 +23,22 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+pub(crate) struct TestWorkingAllowance(pub Box<dyn Send + Sync>);
+impl crate::engine::recovery::HistoryWorkingAllowance for TestWorkingAllowance {
+    fn resize(&mut self, bytes: usize) -> Result<(), AgentLoopError> {
+        let _owner = &self.0;
+        if bytes > crate::engine::recovery::MAX_HISTORY_RESULT_BYTES {
+            return Err(failure("test working allowance exceeded"));
+        }
+        Ok(())
+    }
+}
+pub(crate) fn working_allowance(
+    owner: impl Send + Sync + 'static,
+) -> Box<dyn crate::engine::recovery::HistoryWorkingAllowance> {
+    Box::new(TestWorkingAllowance(Box::new(owner)))
+}
+
 pub(crate) struct UnboundHistory;
 #[async_trait]
 impl SessionHistory for UnboundHistory {
@@ -288,8 +304,10 @@ impl SessionHistoryView for View {
             Arc::clone(&self.root),
         ))
     }
-    fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
-        Ok(HistoryRead::new((), Arc::clone(&self.root)))
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn crate::engine::recovery::HistoryWorkingAllowance>, AgentLoopError> {
+        Ok(working_allowance(Arc::clone(&self.root)))
     }
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
         Ok(HistoryRead::new(

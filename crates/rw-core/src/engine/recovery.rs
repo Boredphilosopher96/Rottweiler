@@ -9,7 +9,7 @@ pub use accounting::{
     AccountingReconciliationPage, MAX_ACCOUNTING_PAGE_BYTES, RecoveryAccountingPage,
 };
 mod capability;
-pub use capability::{HistoryRead, SessionHistory, SessionHistoryView};
+pub use capability::{HistoryRead, HistoryWorkingAllowance, SessionHistory, SessionHistoryView};
 mod context_selection;
 mod context_state;
 mod control;
