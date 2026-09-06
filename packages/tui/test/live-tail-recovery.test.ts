@@ -1,3 +1,4 @@
+import { ToolOutputReader } from "../src/state/output-reader"
 import { expect, test } from "bun:test"
 import { ClientCache } from "../src/history/cache"
 import type { HistoryCacheValue } from "../src/history/controller"
@@ -98,6 +99,6 @@ test("installed components suppress only their covered deltas and preserve expli
   expect(state.streamingTail?.citations).toHaveLength(1)
   expect(state.streamingTail?.displayBudget.text.omittedBytes).toBeGreaterThan(0)
   const buffer = ToolOutputBuffer.fromPreview("tool prefix", true).append({ stream: "stdout", chunk: "after omitted gap" })
-  expect(buffer.read().plain).toContain("tool prefix")
-  expect(buffer.read().plain).not.toContain("after omitted gap")
+  expect(new ToolOutputReader().read(buffer).plain).toContain("tool prefix")
+  expect(new ToolOutputReader().read(buffer).plain).not.toContain("after omitted gap")
 })

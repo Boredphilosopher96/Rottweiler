@@ -1,3 +1,4 @@
+import { ToolOutputReader } from "../state/output-reader"
 import { UiActionsRenderable } from "./ui-actions"
 import type { UiPresentation } from "../protocol"
 import type { KeyEvent } from "@opentui/core"
@@ -25,9 +26,11 @@ export class OutputViewerRenderable extends BoxRenderable {
   readonly hint: TextRenderable
   readonly actions: UiActionsRenderable
   #invocationId: string | null = null
+  readonly #liveOutput = new ToolOutputReader()
   #documentPage: DocumentSnapshot["page"] = null
 
   override destroy(): void {
+    this.#liveOutput.clear()
     this.#documentPage = null; this.#invocationId = null
     super.destroy()
   }
@@ -102,6 +105,7 @@ export class OutputViewerRenderable extends BoxRenderable {
 
   showDocument(snapshot: DocumentSnapshot): void {
     if (!snapshot.open) return
+    this.#liveOutput.clear()
     const changed = this.#documentPage !== snapshot.page
     this.#documentPage = snapshot.page
     this.#invocationId = null
@@ -123,6 +127,7 @@ export class OutputViewerRenderable extends BoxRenderable {
     this.surface.setSurface(null)
     this.setActions(null, false, null)
     this.body.visible = true
+    this.#liveOutput.clear()
     this.#invocationId = tool.invocationId
     this.update(tool)
     this.visible = true
@@ -135,10 +140,12 @@ export class OutputViewerRenderable extends BoxRenderable {
     if (this.#invocationId !== tool.invocationId) return
     const subject = presentTool(tool).subject.replace(/\s+/g, " ").trim()
     this.header.content = `${toolDisplayName(tool.name)} · ${subject}`
-    this.body.content = toolOutputContent(tool)
+    if (tool.status === "finished") this.#liveOutput.clear()
+    this.body.content = toolOutputContent(tool, tool.status === "finished" ? null : this.#liveOutput.read(tool.chunks))
   }
 
   closePresentation(): void {
+    this.#liveOutput.clear()
     this.#invocationId = null
     this.#documentPage = null
     this.scroller.blur()

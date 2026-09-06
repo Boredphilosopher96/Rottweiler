@@ -1,3 +1,4 @@
+import { ToolOutputReader } from "../../src/state/output-reader"
 import { prepareToolDisplay } from "../../src/state/tool-display"
 import { DiffRenderable, SyntaxStyle } from "@opentui/core"
 import {
@@ -329,7 +330,7 @@ describe("live-tools components", () => {
     expect(app.outputViewer.invocationId).toBe("full-output")
     expect(app.outputViewer.body.plainText).not.toContain("other invocation")
     expect(app.outputViewer.header.plainText).toBe("Read file · logs/full-output.log")
-    expect(app.outputViewer.body.plainText).toBe(toolOutputContent(tool))
+    expect(app.outputViewer.body.plainText).toBe(toolOutputContent(tool, new ToolOutputReader().read(tool.chunks)))
     expect(app.outputViewer.body.plainText).toContain("line-1")
     expect(app.outputViewer.body.plainText).toContain("line-12")
     expect(renderer.currentFocusedRenderable).toBe(app.outputViewer.scroller)
@@ -345,7 +346,7 @@ describe("live-tools components", () => {
     }
     app.setState(streaming)
     await setup.renderOnce()
-    expect(app.outputViewer.body.plainText).toBe(toolOutputContent(streamingTool))
+    expect(app.outputViewer.body.plainText).toBe(toolOutputContent(streamingTool, new ToolOutputReader().read(streamingTool.chunks)))
     expect(app.outputViewer.body.plainText).toContain("line-13")
 
     setup.mockInput.pressEscape()

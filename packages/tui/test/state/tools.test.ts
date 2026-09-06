@@ -1,3 +1,4 @@
+import { ToolOutputReader } from "../../src/state/output-reader"
 import { describe, expect, test } from "bun:test"
 import {
   createInitialState,
@@ -267,7 +268,7 @@ describe("state tools", () => {
     }
     const second = state.tools.second
     state = reduce(state, { type: "tool_output_delta", meta: meta("3"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", stream: "stdout", chunk: "first output" })
-    expect(state.tools.first?.chunks.read().plain).toBe("first output")
+    expect(new ToolOutputReader().read(state.tools.first!.chunks).plain).toBe("first output")
     state = reduce(state, { type: "tool_call_finished", presentation: null, meta: meta("4"), turn_id: "1", tool_call_id: "reused", invocation_id: "first", output: { type: "text", text: "first result" }, is_error: false, call_index: 0 })
     expect(Object.keys(state.tools)).toEqual(["first", "second"])
     expect(state.tools.reused).toBeUndefined()

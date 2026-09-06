@@ -44,16 +44,15 @@ interface LineWindow extends OutputLineWindow {
   readonly visibleLineCount: number
   readonly endedWithCR: boolean
 }
-export interface ToolOutputView {
-  readonly plain: string
+export interface ToolOutputPreview {
+  readonly hasOutput: boolean
   readonly plainWindow: OutputLineWindow
   readonly labeledWindow: OutputLineWindow
-  readonly labeled: string
   readonly tailLines: readonly string[]
   readonly lineCount: number
   readonly sourceTruncated: boolean
 }
-interface Materialization extends ToolOutputView {
+interface Materialization extends ToolOutputPreview {
   readonly node: ChunkNode | null
   readonly count: number
   readonly window: LineWindow
@@ -65,10 +64,10 @@ interface StreamCache {
   windowInputCodeUnits: number
 }
 const materializations = new WeakMap<object, StreamCache>()
-const truncatedMaterializations = new WeakMap<Materialization, ToolOutputView>()
+const truncatedMaterializations = new WeakMap<Materialization, ToolOutputPreview>()
 const EMPTY_WINDOW: LineWindow = { lines: [""], visibleLines: [], lineCount: 1, visibleLineCount: 0, endedWithCR: false }
 const EMPTY_MATERIALIZATION: Materialization = {
-  node: null, count: 0, plain: "", labeled: "", tailLines: [], lineCount: 0, sourceTruncated: false,
+  node: null, count: 0, hasOutput: false, tailLines: [], lineCount: 0, sourceTruncated: false,
   markerTail: "", window: EMPTY_WINDOW, plainWindow: EMPTY_WINDOW, labeledWindow: EMPTY_WINDOW,
 }
 
@@ -156,7 +155,7 @@ export class ToolOutputBuffer {
     )
   }
 
-  read(): ToolOutputView {
+  preview(): ToolOutputPreview {
     let cache = materializations.get(this.root)
     if (cache === undefined) {
       cache = { current: EMPTY_MATERIALIZATION, visitedNodes: 0, windowInputCodeUnits: 0 }
@@ -172,8 +171,8 @@ export class ToolOutputBuffer {
         cursor = cursor.previous
       }
       if (cursor !== result.node) result = EMPTY_MATERIALIZATION
-      let plain = result.plain
-      let labeled = result.labeled
+      let hasOutput = result.hasOutput
+      let count = result.count
       let plainWindow = result.plainWindow
       let labeledWindow = result.labeledWindow
       let window = result.window
@@ -186,14 +185,14 @@ export class ToolOutputBuffer {
         const markerCandidate = markerTail + value.chunk
         sourceTruncated ||= markerCandidate.includes(LIVE_OUTPUT_TRUNCATION_MARKER)
         markerTail = markerCandidate.slice(-(LIVE_OUTPUT_TRUNCATION_MARKER.length - 1))
-        const labeledChunk = `${labeled === "" ? "" : "\n"}${value.stream === "stderr" ? "Error output" : "Output"}\n${value.chunk.trimEnd()}`
+        const labeledChunk = `${count === 0 ? "" : "\n"}${value.stream === "stderr" ? "Error output" : "Output"}\n${value.chunk.trimEnd()}`
         plainWindow = appendRawWindow(plainWindow, value.chunk)
         labeledWindow = appendRawWindow(labeledWindow, labeledChunk)
         cache.windowInputCodeUnits += value.chunk.length * 2 + labeledChunk.length
-        plain += value.chunk
-        labeled += labeledChunk
+        hasOutput ||= value.chunk !== ""
+        count++
       }
-      result = { node: this.node, count: this.count, plain, labeled, plainWindow, labeledWindow, window, markerTail,
+      result = { node: this.node, count: this.count, hasOutput, plainWindow, labeledWindow, window, markerTail,
         tailLines: window.visibleLines, lineCount: window.visibleLineCount, sourceTruncated }
       // An old immutable snapshot must not roll the forward materialization cursor back.
       if (this.count >= cache.current.count) cache.current = result
@@ -201,15 +200,25 @@ export class ToolOutputBuffer {
     if (!this.truncated) return result
     const existing = truncatedMaterializations.get(result)
     if (existing !== undefined) return existing
-    const view: ToolOutputView = {
-      ...result, sourceTruncated: true,
+    const view: ToolOutputPreview = {
+      ...result, hasOutput: true, sourceTruncated: true,
       plainWindow: appendRawWindow(result.plainWindow, `\n${DISPLAY_TRUNCATION_MARKER}`),
       labeledWindow: appendRawWindow(result.labeledWindow, `\n${DISPLAY_TRUNCATION_MARKER}`),
-      plain: `${result.plain}\n${DISPLAY_TRUNCATION_MARKER}`,
-      labeled: `${result.labeled}\n${DISPLAY_TRUNCATION_MARKER}`,
     }
     truncatedMaterializations.set(result, view)
     return view
+  }
+
+  sameStream(other: ToolOutputBuffer): boolean { return this.root === other.root }
+
+  /** The explicit full-output reader walks only newly appended chunks; branches request a fresh prefix. */
+  appendedAfter(previous: ToolOutputBuffer | null): readonly ToolOutputChunk[] | null {
+    if (previous !== null && (previous.root !== this.root || previous.count > this.count)) return null
+    const pending: ToolOutputChunk[] = []
+    let cursor = this.node
+    const stop = previous?.node ?? null
+    while (cursor !== null && cursor !== stop) { pending.push(cursor.value); cursor = cursor.previous }
+    return cursor === stop ? pending.reverse() : null
   }
 
   get materializationWork(): { readonly visitedNodes: number; readonly retainedVersions: number; readonly windowInputCodeUnits: number } {

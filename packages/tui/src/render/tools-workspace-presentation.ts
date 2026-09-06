@@ -7,7 +7,7 @@ import type {
 import { presentTool } from "./tool-presentation"
 import { truncateToCells } from "./text"
 
-import { DISPLAY_TRUNCATION_MARKER, LIVE_OUTPUT_TRUNCATION_MARKER, type ToolOutputView } from "../state/display-buffer"
+import { DISPLAY_TRUNCATION_MARKER, LIVE_OUTPUT_TRUNCATION_MARKER, type ToolOutputPreview } from "../state/display-buffer"
 
 const OUTPUT_WINDOW_LINES = 8
 
@@ -144,7 +144,7 @@ export function projectToolActivity(
   const outcome = toolOutcome(tool, presentation.summary)
   const output = tool.status === "finished"
     ? outputWindow(presentation.details, "head", presentation.details.includes(LIVE_OUTPUT_TRUNCATION_MARKER) || tool.display?.truncated === true)
-    : liveOutputWindow(tool.chunks.read())
+    : liveOutputWindow(tool.chunks.preview())
   const fallbackSubject = argumentSubject(tool.args)
 
   return {
@@ -228,7 +228,7 @@ function isPermissionDenied(tool: ToolProjection): boolean {
   return tool.display?.permissionDenied === true
 }
 
-function liveOutputWindow(view: ToolOutputView): ActivityOutputPresentation {
+function liveOutputWindow(view: ToolOutputPreview): ActivityOutputPresentation {
   if (view.lineCount === 0) return view.sourceTruncated
     ? { kind: "text", text: DISPLAY_TRUNCATION_MARKER, retainedLineCount: 0, visibleLineCount: 1, hiddenRetainedLineCount: 0, window: "tail", sourceTruncated: true }
     : { kind: "none" }

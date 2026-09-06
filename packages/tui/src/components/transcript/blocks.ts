@@ -1,3 +1,4 @@
+import type { ToolOutputText } from "../../state/output-reader"
 import type { ClientDiagnostics } from "../../client-diagnostics"
 import { bindSelectableClick } from "../selectable-click"
 import type { HistoryAnchor } from "../../history/controller"
@@ -702,13 +703,14 @@ export class ToolBlockRenderable extends BoxRenderable {
 }
 
 /** Complete tool-card body content before compact transcript preview bounding. */
-export function toolOutputContent(tool: ToolProjection): string {
+export function toolOutputContent(tool: ToolProjection, live: ToolOutputText | null): string {
   let output: string
   if (tool.status === "finished") {
     output = presentTool(tool).details
     if (tool.display?.truncated) output += "\n… Open full output for the complete result."
   } else {
-    const view = tool.chunks.read()
+    if (live === null) throw new Error("live output requires an owned reader")
+    const view = live
     output = bashCommand(tool) !== null && tool.chunks.count > 0 ? view.labeled
       : view.plain === "" ? "" : `Live output\n${view.plain}`
   }
@@ -728,15 +730,15 @@ export function toolOutputContent(tool: ToolProjection): string {
 /** The mounted live card reads a bounded line window; opening all output materializes the body. */
 export function toolOutputPreview(tool: ToolProjection): { readonly content: string; readonly hiddenLines: number; readonly markerFirst: boolean } {
   const maximum = 8
-  if (tool.status !== "running") return boundedToolBody(toolOutputContent(tool), maximum, false)
-  const view = tool.chunks.read()
+  if (tool.status === "finished") return boundedToolBody(toolOutputContent(tool, null), maximum, false)
+  const view = tool.chunks.preview()
   const isBash = bashCommand(tool) !== null && tool.chunks.count > 0
   const output = isBash ? view.labeledWindow : view.plainWindow
-  const hasOutput = isBash || view.plain !== ""
+  const hasOutput = isBash || view.hasOutput
   const rationale = toolRationale(tool)
   const prefix = [rationale, !isBash && hasOutput ? "Live output" : ""].filter(Boolean)
   const lineCount = prefix.length + (hasOutput ? output.lineCount : 0) + 1
-  const lines = [...prefix, ...(hasOutput ? output.lines : []), "Running…"]
+  const lines = [...prefix, ...(hasOutput ? output.lines : []), tool.status === "awaiting_approval" ? "Awaiting approval…" : "Running…"]
   if (lineCount <= maximum) return { content: lines.join("\n"), hiddenLines: 0, markerFirst: false }
   const retained = lines.slice(-Math.max(1, maximum - 1))
   return { content: retained.join("\n"), hiddenLines: lineCount - retained.length, markerFirst: true }
