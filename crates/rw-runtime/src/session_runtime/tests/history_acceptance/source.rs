@@ -164,7 +164,7 @@ impl Seed {
             text: format!("result {logical}: {}", "output ".repeat(128)),
         };
         let turn_id = TurnId(self.turn.to_string());
-        let logical = rw_types::tool_result_admission::ToolResultAdmission::measure(&Turn {
+        let admission = rw_types::tool_result_admission::ToolResultAdmission::measure(&Turn {
             role: Role::Tool,
             blocks: vec![Block::ToolResult {
                 id: id.clone(),
@@ -190,7 +190,7 @@ impl Seed {
             EngineEvent::ConversationToolResultsCommitted {
                 meta,
                 agent_turn,
-                logical,
+                logical: admission,
                 results: vec![rw_types::conversation_input::ToolResultReference {
                     invocation_id: invocation,
                     finished_source,

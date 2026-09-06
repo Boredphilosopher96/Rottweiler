@@ -216,8 +216,12 @@ async fn prepare_process(
             .await
         }
         DiscoveredPluginTarget::TypeScript { .. } => {
-            let host = recipe
+            let helper = recipe
                 .helper
+                .capture_owned()
+                .await
+                .map_err(|message| error("configuration", &message))?;
+            let host = helper
                 .installation_path()
                 .parent()
                 .ok_or_else(|| {
