@@ -91,3 +91,61 @@ test("a saturated invocation set admits its next immutable revision without dupl
   expect(graph.retainedObjects).toBe(0)
   expect(owner.usage.bytes).toBe(0)
 })
+
+test("repeated rejected stream appends leave no allocation debt in the retained prefix", () => {
+  const owner = new ClientAllocationOwner({ ...CLIENT_ALLOCATION_LIMITS, live: 2_000_000 }, 2_000_000)
+  const graph = new ProjectionGraph(owner)
+  const buffer = EMPTY_TOOL_OUTPUT.append({ stream: "stdout", chunk: "original" })
+  const first = { buffer }
+  graph.replace([first], [])
+  const retained = owner.usage.bytes, objects = graph.retainedObjects
+  const blocker = owner.reserve("live", owner.maximumBytes - retained - 4096)
+  for (let index = 0; index < 100; index++) {
+    const rejected = { buffer: buffer.append({ stream: "stderr", chunk: "x".repeat(8192) }) }
+    expect(() => graph.replace([rejected], [first])).toThrow("admission")
+    expect(owner.usage.bytes).toBe(retained + blocker.bytes)
+    expect(graph.retainedObjects).toBe(objects)
+  }
+  blocker.release()
+  const accepted = { buffer: buffer.append({ stream: "stdout", chunk: "accepted" }) }
+  graph.replace([accepted], [first])
+  const freshOwner = new ClientAllocationOwner(), fresh = new ProjectionGraph(freshOwner)
+  fresh.replace([accepted], [])
+  expect(graph.bytes).toBe(fresh.bytes)
+  graph.dispose(); fresh.dispose()
+  expect(owner.usage.bytes).toBe(0)
+})
+
+test("divergent source branches release only their exclusive nodes", () => {
+  const owner = new ClientAllocationOwner(), graph = new ProjectionGraph(owner)
+  const prefix = EMPTY_TOOL_OUTPUT.append({ stream: "stdout", chunk: "shared" })
+  const a = { buffer: prefix.append({ stream: "stdout", chunk: "a".repeat(100) }) }
+  const b = { buffer: prefix.append({ stream: "stderr", chunk: "b".repeat(200) }) }
+  const c = { buffer: prefix.append({ stream: "stderr", chunk: "c".repeat(300) }) }
+  graph.replace([a, b, c], [])
+  const all = graph.bytes
+  graph.replace([], [b])
+  expect(graph.bytes).toBeLessThan(all)
+  graph.replace([], [a])
+  const freshOwner = new ClientAllocationOwner(), fresh = new ProjectionGraph(freshOwner)
+  fresh.replace([c], [])
+  expect(graph.bytes).toBe(fresh.bytes)
+  graph.replace([], [c])
+  expect(graph.bytes).toBe(0)
+  expect(graph.retainedObjects).toBe(0)
+  fresh.dispose(); graph.dispose()
+})
+
+test("staging refusal leaves the existing graph and shared allocation ledger unchanged", () => {
+  const owner = new ClientAllocationOwner({ ...CLIENT_ALLOCATION_LIMITS, live: 8192 }, 8192)
+  const graph = new ProjectionGraph(owner), first = { pending: "keep" }
+  graph.replace([first], [])
+  const bytes = graph.bytes, visited = graph.visitedObjects
+  const oversized = { values: Array.from({ length: 10_000 }, () => ({ field: "large" })) }
+  expect(() => graph.replace([oversized], [first])).toThrow("admission")
+  expect(graph.bytes).toBe(bytes)
+  expect(owner.usage.bytes).toBe(bytes)
+  expect(graph.visitedObjects - visited).toBeLessThan(10)
+  graph.replace([], [first])
+  expect(owner.usage.bytes).toBe(0)
+})

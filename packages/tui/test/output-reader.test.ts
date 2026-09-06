@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 import { OutputViewerRenderable } from "../src/components/output-viewer"
 import { ToolOutputReader } from "../src/state/output-reader"
@@ -66,4 +66,13 @@ test("mounted output viewer replaces live text with final content and clears nat
     expect(viewer.body.plainText).toContain("other")
     expect(viewer.body.plainText).not.toContain("live first")
   } finally { viewer.destroy(); setup.renderer.destroy() }
+})
+
+
+test("an expired weak preview cursor rebuilds the requested immutable prefix", () => {
+  const old = toolOutputBuffer([{ stream: "stdout", chunk: "old\n" }])
+  old.append({ stream: "stdout", chunk: "new\n" }).preview()
+  const expired = spyOn(WeakRef.prototype, "deref").mockReturnValue(undefined)
+  try { expect(old.preview().tailLines).toEqual(["old"]) }
+  finally { expired.mockRestore() }
 })

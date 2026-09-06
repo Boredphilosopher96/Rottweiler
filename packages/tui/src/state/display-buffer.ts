@@ -31,14 +31,15 @@ export interface ToolOutputChunk {
   readonly stream: ToolOutputStream
   readonly chunk: string
 }
-class ToolOutputNode {
-  constructor(readonly previous: ToolOutputNode | null, readonly value: ToolOutputChunk) {}
+export class ToolOutputNode {
+  readonly allocationBytes: number
+  readonly depth: number
+  constructor(readonly previous: ToolOutputNode | null, readonly value: ToolOutputChunk) {
+    this.depth = (previous?.depth ?? 0) + 1
+    this.allocationBytes = (previous?.allocationBytes ?? 0) + 176 + value.chunk.length * 2
+  }
 }
-export class ToolOutputCacheIdentity {
-  #allocatedBytes = 0
-  get allocationBytes(): number { return TOOL_OUTPUT_CACHE_ALLOCATION_BYTES + this.#allocatedBytes }
-  record(chunk: string): void { this.#allocatedBytes += 160 + chunk.length * 2 }
-}
+export class ToolOutputCacheIdentity {}
 export const TOOL_OUTPUT_CACHE_ALLOCATION_BYTES = MAX_TOOL_DISPLAY_BYTES * 10 + MAX_TOOL_DISPLAY_CHUNKS * 64 + MAX_WINDOW_LINES * 256
 export interface OutputLineWindow {
   readonly lines: readonly string[]
@@ -150,7 +151,6 @@ export class ToolOutputBuffer {
     const retained = Buffer.byteLength(chunk)
     const truncated = this.truncated || !allowed || retained < bytes
     const root = this.count === 0 && !this.truncated ? new ToolOutputCacheIdentity() : this.root
-    if (allowed) root.record(chunk)
     return new ToolOutputBuffer(
       this.count + (allowed ? 1 : 0),
       this.retainedBytes + retained,
@@ -168,6 +168,7 @@ export class ToolOutputBuffer {
       materializations.set(this.root, cache)
     }
     let result = cache.current
+    if (result.node !== null && result.node.deref() === undefined) result = EMPTY_MATERIALIZATION
     const resultNode = result.node?.deref() ?? null
     if (resultNode !== this.node) {
       const pending: ToolOutputChunk[] = []
@@ -216,6 +217,7 @@ export class ToolOutputBuffer {
     return view
   }
 
+  get allocationNode(): ToolOutputNode | null { return this.node }
   get allocationCache(): ToolOutputCacheIdentity | null { return this.count === 0 ? null : this.root }
 
   sameStream(other: ToolOutputBuffer): boolean { return this.root === other.root }
