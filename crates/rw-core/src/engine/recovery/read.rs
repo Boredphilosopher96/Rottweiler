@@ -24,6 +24,8 @@ pub struct HistoryMaterializationLimits {
     pub max_turns: usize,
     pub max_serialized_bytes: u64,
     pub max_decoded_bytes: u64,
+    /// Planning ceiling in local estimated tokens; byte admission remains independent.
+    pub max_estimated_tokens: u64,
 }
 impl Default for HistoryMaterializationLimits {
     fn default() -> Self {
@@ -31,6 +33,7 @@ impl Default for HistoryMaterializationLimits {
             max_turns: MAX_MATERIALIZED_HISTORY_TURNS,
             max_serialized_bytes: MAX_MATERIALIZED_HISTORY_BYTES,
             max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
+            max_estimated_tokens: u64::MAX,
         }
     }
 }
@@ -157,6 +160,7 @@ impl CanonicalHistory {
         if count > limits.max_turns as u64
             || bytes > limits.max_serialized_bytes
             || decoded_bytes > limits.max_decoded_bytes
+            || self.window_estimated_tokens(range.clone())? > limits.max_estimated_tokens
         {
             return Err(RecoveryError::Limit("provider history materialization"));
         }

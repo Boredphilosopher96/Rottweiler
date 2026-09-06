@@ -49,6 +49,7 @@ fn decoded_admission_cuts_source_pages_and_resumes_without_losing_turns() {
         .expect("source");
     let two = history.window_decoded_bytes(0..2).expect("decode charge");
     let limits = HistoryMaterializationLimits {
+        max_estimated_tokens: u64::MAX,
         max_turns: MAX_MATERIALIZED_HISTORY_TURNS,
         max_serialized_bytes: MAX_MATERIALIZED_HISTORY_BYTES,
         max_decoded_bytes: two,
@@ -69,6 +70,21 @@ fn decoded_admission_cuts_source_pages_and_resumes_without_losing_turns() {
         all.extend(page.turns);
     }
     assert_eq!(all, expected);
+    let tokens = history
+        .window_estimated_tokens(0..3)
+        .expect("three-turn token estimate");
+    let token_page = history
+        .conversation_page(
+            0..9,
+            HistoryMaterializationLimits {
+                max_estimated_tokens: tokens,
+                ..HistoryMaterializationLimits::default()
+            },
+        )
+        .expect("token-selected source window");
+    assert_eq!(token_page.range, 0..3);
+    assert!(token_page.has_more);
+
     assert!(matches!(
         history.materialize(0..9, limits),
         Err(RecoveryError::Limit(_))

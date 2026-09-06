@@ -78,7 +78,8 @@ impl CanonicalHistory {
             let candidate = low + (high - low).div_ceil(2);
             let selected = range.start..candidate;
             if self.window_bytes(selected.clone())? <= limits.max_serialized_bytes
-                && self.window_decoded_bytes(selected)? <= limits.max_decoded_bytes
+                && self.window_decoded_bytes(selected.clone())? <= limits.max_decoded_bytes
+                && self.window_estimated_tokens(selected)? <= limits.max_estimated_tokens
             {
                 low = candidate;
             } else {

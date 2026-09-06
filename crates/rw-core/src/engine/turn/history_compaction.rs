@@ -147,6 +147,11 @@ async fn summarize(
                     max_turns: 128,
                     max_serialized_bytes: PAGE_BYTES,
                     max_decoded_bytes: PAGE_HEAP,
+                    max_estimated_tokens: page_tokens(
+                        config,
+                        &summary.carry,
+                        instructions.as_deref(),
+                    )?,
                 },
             )
             .await?;
@@ -247,4 +252,38 @@ fn check_carry(turns: &Vec<Turn>, pins: &[ContextSurgeryAction]) -> Result<(), A
         ));
     }
     Ok(())
+}
+
+fn page_tokens(
+    config: &SessionActorConfig,
+    carry: &[Turn],
+    instructions: Option<&str>,
+) -> Result<u64, AgentLoopError> {
+    let compaction = config.model.compaction_config();
+    let alias = compaction
+        .model_alias
+        .as_deref()
+        .unwrap_or(&config.model_alias);
+    let metadata = config.model.context_metadata(alias);
+    let main = config.model.context_metadata(&config.model_alias);
+    // Both compaction route and its configured fallback must admit the request.
+    let window = match (metadata.max_context_tokens, main.max_context_tokens) {
+        (Some(left), Some(right)) => left.min(right),
+        (Some(value), None) | (None, Some(value)) => value,
+        (None, None) => 32_768,
+    };
+    let carry = carry.iter().fold(0u64, |total, turn| {
+        total.saturating_add(rw_context::LocalTokenEstimator::turn(turn))
+    });
+    let prompt = rw_context::LocalTokenEstimator::text(rw_context::DEFAULT_COMPACTION_PROMPT)
+        .saturating_add(instructions.map_or(0, rw_context::LocalTokenEstimator::text));
+    window
+        .checked_sub(
+            carry
+                .saturating_add(prompt)
+                .saturating_add(u64::from(config.max_output_tokens))
+                .saturating_add(1024),
+        )
+        .filter(|tokens| *tokens > 0)
+        .ok_or_else(|| invalid("retained summary and pins exhaust compaction context capacity"))
 }

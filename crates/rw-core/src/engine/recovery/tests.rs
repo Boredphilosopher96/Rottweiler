@@ -98,6 +98,7 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
             .materialize(
                 0..2,
                 HistoryMaterializationLimits {
+                    max_estimated_tokens: u64::MAX,
                     max_turns: 2,
                     max_serialized_bytes: bytes,
                     max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
@@ -110,6 +111,7 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
         history.materialize(
             0..2,
             HistoryMaterializationLimits {
+                max_estimated_tokens: u64::MAX,
                 max_turns: 2,
                 max_serialized_bytes: bytes - 1,
                 max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
@@ -121,6 +123,7 @@ fn exact_window_admission_and_snapshot_are_independent_of_later_appends() {
         history.materialize(
             0..2,
             HistoryMaterializationLimits {
+                max_estimated_tokens: u64::MAX,
                 max_turns: 1,
                 max_serialized_bytes: bytes,
                 max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
@@ -404,6 +407,7 @@ fn large_source_record_does_not_inflate_metadata_or_prevent_exact_materializatio
         history.materialize(
             0..1,
             HistoryMaterializationLimits {
+                max_estimated_tokens: u64::MAX,
                 max_turns: usize::MAX,
                 max_serialized_bytes: u64::MAX,
                 max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
