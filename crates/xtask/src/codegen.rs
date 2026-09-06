@@ -461,6 +461,8 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(FamilyControlsSnapshot);
     declaration!(rw_types::conversation_input::InputSelection);
     declaration!(rw_types::conversation_input::ContextSelection);
+    declaration!(rw_types::conversation_input::ToolResultReference);
+    declaration!(rw_types::tool_result_admission::ToolResultAdmission);
     declaration!(ChildControlsSnapshot);
     declaration!(ChildReadScopeResult);
     declaration!(ChildControlResponse);

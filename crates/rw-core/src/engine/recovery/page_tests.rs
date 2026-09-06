@@ -193,24 +193,19 @@ fn output_pruning_pages_follow_captured_revisions_and_rewind() {
         }],
         meta: rw_types::TurnMeta::default(),
     };
-    append(
-        &mut journal,
-        vec![
-            PendingEvent::TurnStarted { turn: 1 },
-            PendingEvent::ConversationTurnCommitted {
-                agent_turn: 1,
-                turn: tool.clone(),
+    let mut seeded = vec![PendingEvent::TurnStarted { turn: 1 }];
+    seeded.extend(crate::engine::tool_result_fixture::events(1, 1, &tool));
+    seeded.extend([
+        finish(1),
+        PendingEvent::ToolOutputPruned {
+            source: rw_types::ContextBlockId {
+                sequence: rw_types::SequenceId(3),
+                block_index: 0,
             },
-            finish(1),
-            PendingEvent::ToolOutputPruned {
-                source: rw_types::ContextBlockId {
-                    sequence: rw_types::SequenceId(1),
-                    block_index: 0,
-                },
-                reclaimed_tokens: 12,
-            },
-        ],
-    );
+            reclaimed_tokens: 12,
+        },
+    ]);
+    append(&mut journal, seeded);
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let captured = recovery
         .snapshot()
@@ -220,7 +215,7 @@ fn output_pruning_pages_follow_captured_revisions_and_rewind() {
     let pruned = captured
         .conversation_page(0..1, HistoryMaterializationLimits::default())
         .expect("page");
-    assert_eq!(pruned.pruned_tool_outputs.get("1:0"), Some(&12));
+    assert_eq!(pruned.pruned_tool_outputs.get("3:0"), Some(&12));
     assert_eq!(pruned.turns, vec![tool.clone()]);
     append(
         &mut journal,
@@ -246,7 +241,7 @@ fn output_pruning_pages_follow_captured_revisions_and_rewind() {
     assert_eq!(
         captured
             .pruned_output(rw_types::ContextBlockId {
-                sequence: rw_types::SequenceId(1),
+                sequence: rw_types::SequenceId(3),
                 block_index: 0
             })
             .expect("captured"),

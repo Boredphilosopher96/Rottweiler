@@ -237,7 +237,7 @@ pub(super) async fn run_actor(
     } = control;
     let interrupted_turn = recovered.interrupted_turn;
     let interrupted_compaction = recovered.interrupted_compaction;
-    let recovery_events = interrupted_turn_recovery_events(&recovered);
+    let recovery_events = interrupted_turn_recovery_events(&mut recovered);
     let accepted_messages = std::mem::take(&mut recovered.accepted_messages);
     let mut state = ActorState::recover(
         config.session_id.clone(),
@@ -298,6 +298,15 @@ pub(super) async fn run_actor(
             break 'startup;
         }
         if let Some(turn) = interrupted_turn {
+            let recovery_events = match recovery_events
+                .into_events(state.sequence.map_or(0, |sequence| sequence + 1))
+            {
+                Ok(events) => events,
+                Err(error) => {
+                    state.unsettled = Some(error.to_string());
+                    break 'startup;
+                }
+            };
             if emit_batch(&mut state, &events, &config.event_sink, recovery_events)
                 .await
                 .is_err()

@@ -50,7 +50,8 @@ impl TranscriptProjector {
         }
         if matches!(
             event,
-            EngineEvent::ConversationInputCommitted { .. }
+            EngineEvent::ConversationToolResultsCommitted { .. }
+                | EngineEvent::ConversationInputCommitted { .. }
                 | EngineEvent::ConversationContextCommitted { .. }
         ) && index
             .at_or_before_source(sequence)?

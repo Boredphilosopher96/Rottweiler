@@ -25,6 +25,10 @@ pub struct SessionActorRecovery {
     pub driver_client_id: Option<ClientId>,
     pub interrupted_tool_repairs: Vec<InterruptedToolRepair>,
     pub interrupted_tool_turn: Option<Turn>,
+    pub interrupted_completed_results: Vec<(
+        rw_types::ToolCallId,
+        rw_types::conversation_input::ToolResultReference,
+    )>,
     pub interrupted_assistant_turn: Option<Turn>,
     pub pending_questions: BTreeMap<String, RecoveredQuestion>,
     pub accounting: SessionAccountingState,
@@ -79,10 +83,19 @@ impl SessionActorRecovery {
             queued_message_positions.push(position);
             queued_messages.push(message.content);
         }
-        let (interrupted_tool_repairs, interrupted_tool_turn, interrupted_assistant_turn) =
-            interrupted.map_or((vec![], None, None), |repair| {
-                (repair.tools, repair.tool_turn, repair.assistant_turn)
-            });
+        let (
+            interrupted_tool_repairs,
+            interrupted_tool_turn,
+            interrupted_assistant_turn,
+            interrupted_completed_results,
+        ) = interrupted.map_or((vec![], None, None, vec![]), |repair| {
+            (
+                repair.tools,
+                repair.tool_turn,
+                repair.assistant_turn,
+                repair.completed_results,
+            )
+        });
         let (model_alias, provider, thinking) =
             controls.model.map_or((None, None, None), |model| {
                 (Some(model.model.0), model.provider, Some(model.thinking))
@@ -104,6 +117,7 @@ impl SessionActorRecovery {
             driver_client_id: head.control.driver,
             interrupted_tool_repairs,
             interrupted_tool_turn,
+            interrupted_completed_results,
             interrupted_assistant_turn,
             pending_questions: controls
                 .pending_questions

@@ -77,7 +77,7 @@ pub(in crate::engine) async fn start(
             signals: signals.clone(),
             cancellation: cancellation.clone(),
         };
-        let mut results = execute_tool_calls(
+        let results = execute_tool_calls(
             turn,
             &owned_tasks,
             calls,
@@ -89,8 +89,12 @@ pub(in crate::engine) async fn start(
             mode,
         )
         .await;
-        let result = results.pop().ok_or_else(|| {
-            AgentLoopError::EffectsUnsettled("host tool scheduler returned no completion".into())
+        let result = results.and_then(|mut results| {
+            results.pop().map(|result| result.execution).ok_or_else(|| {
+                AgentLoopError::EffectsUnsettled(
+                    "host tool scheduler returned no completion".into(),
+                )
+            })
         });
         // The same FIFO carries ToolCallStarted/output/Finished first. The actor
         // commits them before exposing this completion to the plugin callback.

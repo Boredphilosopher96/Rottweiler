@@ -5,7 +5,7 @@ use rw_types::{EngineEvent, Turn, conversation_input::InputSelection};
 use std::borrow::Cow;
 
 #[derive(Clone, Copy)]
-enum EventSource<'a> {
+pub(super) enum EventSource<'a> {
     Journal(&'a JournalReadView),
     Audit(&'a [EngineEvent]),
 }
@@ -46,16 +46,26 @@ fn materialize<'a>(
             let accepted = read_source(source, *accepted_source, meta)?;
             (meta, *agent_turn, resolve_input(event, &accepted)?)
         }
+        EngineEvent::ConversationToolResultsCommitted {
+            meta,
+            agent_turn,
+            results,
+            logical,
+        } => (
+            meta,
+            *agent_turn,
+            super::tool_results::resolve(source, meta, *agent_turn, results, logical)?,
+        ),
         EngineEvent::ConversationContextCommitted {
             meta,
             agent_turn,
             selection,
         } => (meta, *agent_turn, resolve_context(source, meta, selection)?),
         EngineEvent::ConversationTurnCommitted { turn, .. }
-            if turn.role == rw_types::Role::User =>
+            if matches!(turn.role, rw_types::Role::User | rw_types::Role::Tool) =>
         {
             return Err(RecoveryError::Invalid(
-                "user conversation requires an explicit input or context source",
+                "user/tool conversation requires an explicit source",
             ));
         }
         _ => return Ok(Cow::Borrowed(event)),
@@ -67,7 +77,7 @@ fn materialize<'a>(
     }))
 }
 
-fn read_source(
+pub(super) fn read_source(
     source: EventSource<'_>,
     selected: rw_types::SequenceId,
     owner: &rw_types::EventMeta,
@@ -166,11 +176,11 @@ fn resolve_context(
                 ));
             }
             let resolved = materialize(source, &body)?;
-            match resolved.as_ref() {
+            match resolved.into_owned() {
                 EngineEvent::ConversationTurnCommitted { turn, .. }
-                    if turn.role == rw_types::Role::User =>
+                    if matches!(turn.role, rw_types::Role::User | rw_types::Role::Tool) =>
                 {
-                    Ok(turn.clone())
+                    Ok(turn)
                 }
                 EngineEvent::UserShellStateChanged {
                     command,
@@ -180,11 +190,11 @@ fn resolve_context(
                     ..
                 } => Ok(crate::engine::projection::shell_context_turn(
                     command.as_deref().unwrap_or_default(),
-                    *status,
+                    status,
                     captured_output.as_deref(),
                 )),
                 _ => Err(RecoveryError::Invalid(
-                    "retained context must select user context",
+                    "retained context must select source-owned context",
                 )),
             }
         }

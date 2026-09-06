@@ -39,7 +39,7 @@ pub(super) fn validate(
             if ordinal >= head.conversation.turns
                 || selected.sequence != *selected_source
                 || selected.body_source != *body_source
-                || selected.role != Role::User
+                || !matches!(selected.role, Role::User | Role::Tool)
             {
                 return Err(RecoveryError::Invalid("retained context source identity"));
             }
@@ -53,9 +53,11 @@ pub(super) fn validate(
                 "continuation context requires an active compaction",
             ));
         }
-        EngineEvent::ConversationTurnCommitted { turn, .. } if turn.role == Role::User => {
+        EngineEvent::ConversationTurnCommitted { turn, .. }
+            if matches!(turn.role, Role::User | Role::Tool) =>
+        {
             return Err(RecoveryError::Invalid(
-                "user conversation requires an explicit input or context source",
+                "user/tool conversation requires an explicit source",
             ));
         }
         _ => {}

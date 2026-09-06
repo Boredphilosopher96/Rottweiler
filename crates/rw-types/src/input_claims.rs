@@ -26,6 +26,8 @@ pub struct InputClaimState {
     active: Option<u64>,
     #[serde(deserialize_with = "decode_pending")]
     pending: Vec<AcceptedSource>,
+    #[serde(deserialize_with = "decode_finished")]
+    finished: Vec<SequenceId>,
 }
 
 /// Borrows the exact event checked against the state's preceding watermark.
@@ -50,6 +52,7 @@ impl InputClaimState {
     /// Abandon pending interaction when selecting a completed rewind boundary.
     pub fn abandon_pending(&mut self) {
         self.pending.clear();
+        self.finished.clear();
         self.active = None;
     }
     /// Check one exact next event before transferring its input authority.
@@ -68,6 +71,7 @@ impl InputClaimState {
                 .as_ref()
                 .is_some_and(|session| session != &meta.session_id)
             || self.pending.len() > MAX_SESSION_QUEUE_ITEMS
+            || self.finished.len() > crate::tool_admission::MAX_PENDING_TOOL_INVOCATIONS
         {
             return Err("input claim checkpoint/source identity");
         }
@@ -81,6 +85,9 @@ impl InputClaimState {
         Ok(InputClaimChecked { event })
     }
     fn transition(&mut self, event: &EngineEvent) -> Result<(), &'static str> {
+        if self.tool_transition(event)? {
+            return Ok(());
+        }
         match event {
             EngineEvent::TurnStarted { turn_id, .. } => self.start(turn(turn_id)?)?,
             EngineEvent::UserMessageAccepted {
@@ -138,6 +145,44 @@ impl InputClaimState {
         }
         Ok(())
     }
+    fn tool_transition(&mut self, event: &EngineEvent) -> Result<bool, &'static str> {
+        match event {
+            EngineEvent::ToolCallFinished { meta, turn_id, .. } => {
+                if self.active != Some(turn(turn_id)?) {
+                    return Err("tool result completion requires its active turn");
+                }
+                if self.finished.len() >= crate::tool_admission::MAX_PENDING_TOOL_INVOCATIONS {
+                    return Err("unclaimed tool result source identities");
+                }
+                self.finished.push(meta.sequence_id);
+            }
+            EngineEvent::ConversationToolResultsCommitted {
+                agent_turn,
+                results,
+                ..
+            } => {
+                use crate::allocation::PrepareAllocation;
+                if results.prepared_bytes().is_none_or(|bytes| {
+                    bytes > crate::tool_result_admission::MAX_TOOL_RESULT_REFERENCE_BYTES
+                }) {
+                    return Err("tool result reference metadata admission");
+                }
+                if self.active != Some(*agent_turn)
+                    || results.is_empty()
+                    || results.len() != self.finished.len()
+                    || results
+                        .iter()
+                        .zip(&self.finished)
+                        .any(|(result, source)| result.finished_source != *source)
+                {
+                    return Err("tool result commit must consume its ordered active completions");
+                }
+                self.finished.clear();
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
     fn start(&mut self, turn: u64) -> Result<(), &'static str> {
         if self.pending.iter().any(|input| {
             input.retained && (self.active.is_some() || !input.ended || turn <= input.claimed_turn)
@@ -148,6 +193,9 @@ impl InputClaimState {
             input.claimed_turn = turn;
             input.retained = false;
             input.ended = false;
+        }
+        if !self.finished.is_empty() {
+            return Err("tool result sources require closure before another turn");
         }
         self.active = Some(turn);
         Ok(())
@@ -171,6 +219,7 @@ impl InputClaimState {
             input.ended = true;
         }
         if self.active == Some(turn) {
+            self.finished.clear();
             self.active = None;
         }
         Ok(())
@@ -199,12 +248,16 @@ impl InputClaimState {
         if session.len() > 128
             || self.next_sequence != next
             || self.pending.len() > MAX_SESSION_QUEUE_ITEMS
+            || self.finished.len() > crate::tool_admission::MAX_PENDING_TOOL_INVOCATIONS
             || (next == 0 && (self.session.is_some() || self.active.is_some()))
             || self
                 .pending
                 .windows(2)
                 .any(|pair| pair[0].sequence >= pair[1].sequence)
             || (next > 0 && self.session.as_ref().is_none_or(|id| id.0 != session))
+            || (!self.finished.is_empty() && self.active.is_none())
+            || self.finished.iter().any(|source| source.0 >= next)
+            || self.finished.windows(2).any(|pair| pair[0] >= pair[1])
             || self.pending.iter().any(|input| {
                 input.sequence.0 >= next
                     || input.agent_turn > input.claimed_turn
@@ -249,4 +302,33 @@ fn decode_pending<'de, D: serde::Deserializer<'de>>(
         }
     }
     decoder.deserialize_seq(Pending)
+}
+
+fn decode_finished<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Vec<SequenceId>, D::Error> {
+    struct Sources;
+    impl<'de> serde::de::Visitor<'de> for Sources {
+        type Value = Vec<SequenceId>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("bounded unclaimed completion identities")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut values = Vec::new();
+            while values.len() < crate::tool_admission::MAX_PENDING_TOOL_INVOCATIONS {
+                let Some(value) = sequence.next_element()? else {
+                    return Ok(values);
+                };
+                values.push(value);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom("unclaimed tool result identities"));
+            }
+            Ok(values)
+        }
+    }
+    decoder.deserialize_seq(Sources)
 }

@@ -307,7 +307,8 @@ async fn oversized_individual_block_is_summarized_with_complete_fragment_coverag
         for turn in request.turns {
             for block in turn.blocks {
                 if let rw_types::Block::Text { text } = block
-                    && text.starts_with("Canonical Tool tool_result block 0:0;")
+                    && text.starts_with("Canonical Tool tool_result block ")
+                    && text.contains(":0;")
                 {
                     assert!(text.len() <= crate::engine::recovery::MAX_SUMMARY_FRAGMENT_BYTES);
                     json.push_str(text.split_once('\n').expect("frame").1);

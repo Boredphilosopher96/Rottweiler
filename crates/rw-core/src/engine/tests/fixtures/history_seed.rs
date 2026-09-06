@@ -114,6 +114,10 @@ fn append_conversation(
     conversation: &[rw_types::Turn],
 ) -> Result<BTreeMap<u64, u64>, AgentLoopError> {
     let original_start = pending.len();
+    let has_tools = conversation.iter().any(|turn| turn.role == Role::Tool);
+    if has_tools {
+        pending.push(PendingEvent::TurnStarted { turn: 0 });
+    }
     let mut sources = BTreeMap::new();
     for (ordinal, turn) in conversation.iter().enumerate() {
         if turn.role == Role::User {
@@ -139,6 +143,13 @@ fn append_conversation(
                 accepted_source,
                 selection: rw_types::conversation_input::InputSelection::Accepted {},
             });
+        } else if turn.role == Role::Tool {
+            pending.extend(crate::engine::tool_result_fixture::events(
+                pending.len() as u64,
+                0,
+                turn,
+            ));
+            sources.insert((original_start + ordinal) as u64, pending.len() as u64 - 1);
         } else {
             sources.insert((original_start + ordinal) as u64, pending.len() as u64);
             pending.push(PendingEvent::ConversationTurnCommitted {
@@ -146,6 +157,14 @@ fn append_conversation(
                 turn: turn.clone(),
             });
         }
+    }
+    if has_tools {
+        pending.push(PendingEvent::TurnFinished {
+            turn: 0,
+            status: crate::engine::AgentTurnStatus::Completed,
+            usage: crate::engine::SessionUsage::default(),
+            cost: crate::engine::unavailable_cost(),
+        });
     }
     Ok(sources)
 }

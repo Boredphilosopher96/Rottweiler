@@ -419,7 +419,7 @@ fn checkpoint(session: &str, next: u64) -> Vec<u8> {
         "prefix": { "next_sequence": next, "digest": ([0; 32].as_slice()) },
         "claims": {
             "session": if next == 0 { None } else { Some(session) },
-            "next_sequence": next, "active": null, "pending": [],
+            "next_sequence": next, "active": null, "pending": [], "finished": [],
         },
     }))
     .expect("explicit claim checkpoint at synthetic store prefix")

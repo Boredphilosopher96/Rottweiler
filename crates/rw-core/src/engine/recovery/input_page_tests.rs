@@ -154,7 +154,7 @@ fn input_checkpoint_requires_bounded_complete_state() {
         .is_err()
     );
     let pending = serde_json::json!({"agent_turn":1,"claimed_turn":1,"sequence":0,"retained":false,"ended":false});
-    let oversized = serde_json::json!({"session":"canonical","next_sequence":1,"active":1,"pending":vec![pending; rw_types::session_state::MAX_SESSION_QUEUE_ITEMS + 1]});
+    let oversized = serde_json::json!({"session":"canonical","next_sequence":1,"active":1,"finished":[],"pending":vec![pending; rw_types::session_state::MAX_SESSION_QUEUE_ITEMS + 1]});
     assert!(serde_json::from_value::<InputClaimState>(oversized).is_err());
 }
 

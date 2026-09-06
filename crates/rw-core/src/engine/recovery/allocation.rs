@@ -55,6 +55,9 @@ impl RecoveryBootstrap {
         let repairs = self.interrupted.as_ref().map_or(Some(0), |repair| {
             sum([
                 heap(&repair.tool_turn),
+                vector(&repair.completed_results, |(id, result)| {
+                    sum([heap(id), heap(result)])
+                }),
                 heap(&repair.assistant_turn),
                 vector(&repair.tools, |tool| {
                     sum([

@@ -406,7 +406,8 @@ impl SessionProjector {
                 None
             };
             match &kind {
-                PendingEvent::ConversationInputCommitted { .. }
+                PendingEvent::ConversationToolResultsCommitted { .. }
+                | PendingEvent::ConversationInputCommitted { .. }
                 | PendingEvent::ConversationContextCommitted { .. } => {
                     return Err(SessionProjectionError::InvalidInput("unresolved input"));
                 }

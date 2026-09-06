@@ -14,6 +14,10 @@ pub struct InterruptedTurnRecovery {
     pub turn: u64,
     pub tools: Vec<InterruptedToolRepair>,
     pub tool_turn: Option<Turn>,
+    pub completed_results: Vec<(
+        rw_types::ToolCallId,
+        rw_types::conversation_input::ToolResultReference,
+    )>,
     pub assistant_turn: Option<Turn>,
 }
 
@@ -26,7 +30,23 @@ impl InterruptedTurnInputs {
     pub fn repair(self) -> Result<InterruptedTurnRecovery, RecoveryError> {
         let mut assistant = Vec::new();
         let mut completed = Vec::new();
+        let mut completed_results = Vec::new();
         for event in self.fragments {
+            if let rw_types::EngineEvent::ToolCallFinished {
+                meta,
+                tool_call_id,
+                invocation_id,
+                ..
+            } = &event
+            {
+                completed_results.push((
+                    tool_call_id.clone(),
+                    rw_types::conversation_input::ToolResultReference {
+                        invocation_id: invocation_id.clone(),
+                        finished_source: meta.sequence_id,
+                    },
+                ));
+            }
             let pending = crate::engine::projection::recovered_pending_event(&event)?
                 .ok_or(RecoveryError::Invalid("interrupted fragment kind"))?;
             match pending {
@@ -73,6 +93,7 @@ impl InterruptedTurnInputs {
             turn: self.turn,
             tools: repair.tools,
             tool_turn: repair.tool_turn,
+            completed_results,
             assistant_turn: (!assistant.is_empty()).then_some(Turn {
                 role: Role::Assistant,
                 blocks: assistant,

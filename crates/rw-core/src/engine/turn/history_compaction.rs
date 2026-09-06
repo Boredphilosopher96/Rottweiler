@@ -82,7 +82,13 @@ pub(in crate::engine) async fn compact(
                         .checked_sub(suffix_start)
                         .and_then(|index| suffix_sources.get(index))
                 });
-            committed.push(super::context_commits::commit(signals, turn, value, source).await?);
+            let pruned = summary
+                .pins
+                .iter()
+                .find(|pin| pin.ordinal == ordinal)
+                .map_or(&[][..], |pin| pin.pruned.as_slice());
+            committed
+                .push(super::context_commits::commit(signals, turn, value, source, pruned).await?);
         }
         publish_pins(signals, &committed, summary.pins).await?;
         let now = config.event_clock.unix_time_millis();
@@ -222,7 +228,16 @@ fn check_carry(turns: &Vec<Turn>, pins: &[CarryPin]) -> Result<(), AgentLoopErro
         || turns
             .prepared_bytes()
             .and_then(|bytes| {
-                bytes.checked_add(pins.len().checked_mul(std::mem::size_of::<CarryPin>())?)
+                pins.iter().try_fold(
+                    bytes.checked_add(pins.len().checked_mul(std::mem::size_of::<CarryPin>())?)?,
+                    |bytes, pin| {
+                        bytes.checked_add(
+                            pin.pruned
+                                .capacity()
+                                .checked_mul(std::mem::size_of::<(u32, u64)>())?,
+                        )
+                    },
+                )
             })
             .is_none_or(|bytes| bytes > CARRY_BYTES)
     {
@@ -330,6 +345,11 @@ impl Summary {
                     ordinal: self.carry.len(),
                     order: action.effective_after_agent_turn,
                     source: source.clone(),
+                    pruned: super::context_commits::retained_pruning(
+                        &value,
+                        source.sequence,
+                        &page.pruned_tool_outputs,
+                    ),
                 });
             }
             self.carry.push(value);
@@ -399,6 +419,7 @@ impl Summary {
                     ordinal,
                     order: turn,
                     source: previous.source.clone(),
+                    pruned: previous.pruned.clone(),
                 })
             })
             .collect::<Result<Vec<_>, AgentLoopError>>()?;
@@ -411,6 +432,7 @@ struct CarryPin {
     ordinal: usize,
     order: u64,
     source: crate::engine::recovery::ConversationSource,
+    pruned: Vec<(u32, u64)>,
 }
 
 pub(super) fn apply_pruning(

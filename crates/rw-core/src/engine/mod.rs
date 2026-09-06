@@ -646,3 +646,6 @@ pub use session::FamilyControlAuthority;
 pub(crate) use session::control_observation;
 
 pub(crate) use shutdown::settle_unstarted;
+
+#[cfg(test)]
+mod tool_result_fixture;

@@ -66,6 +66,7 @@ pub(super) fn is_session_projection_boundary(event: &EngineEvent) -> bool {
         event,
         EngineEvent::ConversationContextCommitted { .. }
             | EngineEvent::ConversationInputCommitted { .. }
+            | EngineEvent::ConversationToolResultsCommitted { .. }
             | EngineEvent::ConversationTurnCommitted { .. }
             | EngineEvent::SessionCreated { .. }
             | EngineEvent::UserMessageAccepted { .. }

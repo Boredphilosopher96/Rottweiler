@@ -248,9 +248,14 @@ fn projector_kill_boundaries_never_duplicate_committed_tool_calls_or_results() {
             is_error: false,
             index: 0,
         },
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::ConversationToolResultsCommitted {
             agent_turn: 1,
-            turn: tool,
+            results: vec![rw_types::conversation_input::ToolResultReference {
+                invocation_id: rw_types::ToolInvocationId("fixture-invocation".into()),
+                finished_source: rw_types::SequenceId(5),
+            }],
+            logical: rw_types::tool_result_admission::ToolResultAdmission::measure(&tool)
+                .expect("tool IR"),
         },
     ];
     let events = kinds
@@ -488,17 +493,28 @@ fn interrupted_reused_provider_id_finishes_only_its_active_invocation() {
                 is_error: false,
                 index: 0,
             });
-            events.push(PendingEvent::ConversationTurnCommitted {
+            let tool_turn = Turn {
+                role: Role::Tool,
+                blocks: vec![Block::ToolResult {
+                    id: ToolCallId("reused".into()),
+                    output,
+                    is_error: false,
+                }],
+                meta: TurnMeta::default(),
+            };
+            let PendingEvent::ToolCallFinished { invocation_id, .. } =
+                events.last().expect("completion")
+            else {
+                panic!("completion")
+            };
+            events.push(PendingEvent::ConversationToolResultsCommitted {
                 agent_turn: 1,
-                turn: Turn {
-                    role: Role::Tool,
-                    blocks: vec![Block::ToolResult {
-                        id: ToolCallId("reused".to_owned()),
-                        output,
-                        is_error: false,
-                    }],
-                    meta: TurnMeta::default(),
-                },
+                results: vec![rw_types::conversation_input::ToolResultReference {
+                    invocation_id: invocation_id.clone(),
+                    finished_source: rw_types::SequenceId(events.len() as u64 - 1),
+                }],
+                logical: rw_types::tool_result_admission::ToolResultAdmission::measure(&tool_turn)
+                    .expect("tool IR"),
             });
         }
     }

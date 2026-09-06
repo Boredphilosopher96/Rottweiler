@@ -38,6 +38,7 @@ pub mod session_read;
 pub mod session_state;
 pub mod todo;
 pub mod tool_admission;
+pub mod tool_result_admission;
 pub mod transcript;
 pub mod transcript_tail;
 pub mod release_contract {

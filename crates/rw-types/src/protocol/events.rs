@@ -402,6 +402,15 @@ pub enum EngineEvent {
         accepted_source: SequenceId,
         selection: crate::conversation_input::InputSelection,
     },
+    ConversationToolResultsCommitted {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        agent_turn: u64,
+        results: Vec<crate::conversation_input::ToolResultReference>,
+        logical: crate::tool_result_admission::ToolResultAdmission,
+    },
     ConversationTurnCommitted {
         meta: EventMeta,
         #[serde(with = "decimal_u64")]
@@ -834,6 +843,7 @@ impl EngineEvent {
             | Self::UiNotification { .. }
             | Self::ConversationContextCommitted { .. }
             | Self::ConversationInputCommitted { .. }
+            | Self::ConversationToolResultsCommitted { .. }
             | Self::ConversationTurnCommitted { .. }
             | Self::ConversationRewound { .. }
             | Self::TurnStarted { .. }
@@ -967,6 +977,7 @@ impl EngineEvent {
             | Self::UiNotification { meta, .. }
             | Self::ConversationContextCommitted { meta, .. }
             | Self::ConversationInputCommitted { meta, .. }
+            | Self::ConversationToolResultsCommitted { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
             | Self::TurnStarted { meta, .. }
@@ -1082,6 +1093,7 @@ impl EngineEvent {
             | Self::UiNotification { meta, .. }
             | Self::ConversationContextCommitted { meta, .. }
             | Self::ConversationInputCommitted { meta, .. }
+            | Self::ConversationToolResultsCommitted { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
             | Self::TurnStarted { meta, .. }

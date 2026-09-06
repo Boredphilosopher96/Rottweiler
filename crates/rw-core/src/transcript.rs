@@ -261,9 +261,10 @@ fn project_content(
     rows: &impl TranscriptRowLookup,
 ) -> Result<Option<ProjectedRow>, TranscriptProjectionError> {
     match event {
-        EngineEvent::ConversationInputCommitted { .. } => Err(TranscriptProjectionError::Invalid(
-            "unresolved accepted input",
-        )),
+        EngineEvent::ConversationToolResultsCommitted { .. }
+        | EngineEvent::ConversationInputCommitted { .. } => Err(
+            TranscriptProjectionError::Invalid("unresolved accepted input"),
+        ),
         EngineEvent::TurnFinished { .. } => project_turn_summary(event),
         EngineEvent::ConversationTurnCommitted { .. } => project_conversation(event),
         EngineEvent::ToolCallStarted { .. } => project_tool_start(event, rows),

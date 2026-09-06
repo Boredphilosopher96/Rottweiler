@@ -133,6 +133,11 @@ pub(super) struct PendingToolCall {
     pub(super) index: usize,
 }
 
+pub(super) struct CommittedToolExecution {
+    pub execution: ToolExecution,
+    pub source: rw_types::SequenceId,
+}
+
 pub(in crate::engine) struct ToolExecution {
     pub(super) presentation: Option<rw_tools::ToolPresentationPlan>,
     pub(super) unsettled: bool,

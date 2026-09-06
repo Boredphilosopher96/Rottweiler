@@ -79,12 +79,14 @@ fn commit(turn: u64) -> PendingEvent {
     }
 }
 fn repair(journal: &SegmentedJournal) -> Vec<PendingEvent> {
-    let recovered = SessionActorRecovery::from_bootstrap(HistoryRead::new(
+    let mut recovered = SessionActorRecovery::from_bootstrap(HistoryRead::new(
         bootstrap(journal).expect("bootstrap"),
         (),
     ))
     .expect("actor recovery");
-    interrupted_turn_recovery_events(&recovered)
+    interrupted_turn_recovery_events(&mut recovered)
+        .into_events(journal.read_view().prefix_identity().next_sequence)
+        .expect("repair batch")
 }
 
 #[test]

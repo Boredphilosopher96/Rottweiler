@@ -83,6 +83,11 @@ pub(super) enum PendingEvent {
         accepted_source: SequenceId,
         selection: rw_types::conversation_input::InputSelection,
     },
+    ConversationToolResultsCommitted {
+        agent_turn: u64,
+        results: Vec<rw_types::conversation_input::ToolResultReference>,
+        logical: rw_types::tool_result_admission::ToolResultAdmission,
+    },
     ConversationTurnCommitted {
         agent_turn: u64,
         turn: Turn,
@@ -324,6 +329,7 @@ impl PendingEvent {
             | Self::QuestionAnswered { turn, .. } => Some(*turn),
             Self::ConversationContextCommitted { agent_turn, .. }
             | Self::ConversationInputCommitted { agent_turn, .. }
+            | Self::ConversationToolResultsCommitted { agent_turn, .. }
             | Self::ConversationTurnCommitted { agent_turn, .. } => Some(*agent_turn),
             _ => None,
         }
@@ -384,6 +390,16 @@ impl PendingEvent {
                 meta,
                 agent_turn,
                 selection,
+            },
+            Self::ConversationToolResultsCommitted {
+                agent_turn,
+                results,
+                logical,
+            } => EngineEvent::ConversationToolResultsCommitted {
+                meta,
+                agent_turn,
+                results,
+                logical,
             },
             Self::ConversationInputCommitted {
                 agent_turn,

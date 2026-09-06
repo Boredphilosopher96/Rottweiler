@@ -12,7 +12,7 @@ pub enum InputSelection {
     Transformed { text: String },
 }
 
-/// Explicit sources for user-role context produced by the host.
+/// Explicit sources for context produced or retained by the host.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "type", rename_all = "snake_case")]
@@ -25,4 +25,12 @@ pub enum ContextSelection {
         body_source: crate::SequenceId,
     },
     Continuation {},
+}
+
+/// A provider result selects exactly one earlier authoritative completion body.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResultReference {
+    pub invocation_id: crate::ToolInvocationId,
+    pub finished_source: crate::SequenceId,
 }

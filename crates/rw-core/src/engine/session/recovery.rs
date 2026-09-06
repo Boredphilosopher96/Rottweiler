@@ -43,12 +43,19 @@ pub(in crate::engine) fn interrupted_tool_recovery_events(
     events
 }
 
+/// A repair batch binds newly generated completion references at its actual append prefix.
+pub(super) struct InterruptedRecoveryEvents {
+    turn: Option<u64>,
+    events: Vec<PendingEvent>,
+    tool_turn: Option<rw_types::Turn>,
+    completed: Vec<(
+        rw_types::ToolCallId,
+        rw_types::conversation_input::ToolResultReference,
+    )>,
+}
 pub(super) fn interrupted_turn_recovery_events(
-    recovered: &SessionActorRecovery,
-) -> Vec<PendingEvent> {
-    let Some(turn) = recovered.interrupted_turn else {
-        return Vec::new();
-    };
+    recovered: &mut SessionActorRecovery,
+) -> InterruptedRecoveryEvents {
     let mut events = recovered
         .interrupted_tool_repairs
         .iter()
@@ -56,31 +63,86 @@ pub(super) fn interrupted_turn_recovery_events(
         .collect::<Vec<_>>();
     events.extend(recovered.accepted_messages.iter().filter_map(|message| {
         let accepted = message.accepted.as_ref()?;
-        (accepted.claimed_turn == turn && !accepted.retained).then_some(
+        (Some(accepted.claimed_turn) == recovered.interrupted_turn && !accepted.retained).then_some(
             PendingEvent::UserMessageRetained {
                 accepted_source: accepted.sequence,
             },
         )
     }));
-    if let Some(assistant) = &recovered.interrupted_assistant_turn {
+    if let (Some(turn), Some(assistant)) = (
+        recovered.interrupted_turn,
+        recovered.interrupted_assistant_turn.take(),
+    ) {
         events.push(PendingEvent::ConversationTurnCommitted {
             agent_turn: turn,
-            turn: assistant.clone(),
+            turn: assistant,
         });
     }
-    if let Some(tool_turn) = &recovered.interrupted_tool_turn {
-        events.push(PendingEvent::ConversationTurnCommitted {
-            agent_turn: turn,
-            turn: tool_turn.clone(),
-        });
+    InterruptedRecoveryEvents {
+        turn: recovered.interrupted_turn,
+        events,
+        tool_turn: recovered.interrupted_tool_turn.take(),
+        completed: std::mem::take(&mut recovered.interrupted_completed_results),
     }
-    events.push(PendingEvent::TurnFinished {
-        turn,
-        status: AgentTurnStatus::Interrupted,
-        usage: SessionUsage::default(),
-        cost: unavailable_cost(),
-    });
-    events
+}
+impl InterruptedRecoveryEvents {
+    pub(super) fn into_events(mut self, first: u64) -> Result<Vec<PendingEvent>, AgentLoopError> {
+        use rw_types::conversation_input::ToolResultReference;
+        let Some(turn) = self.turn else {
+            return Ok(Vec::new());
+        };
+        for (index, event) in self.events.iter().enumerate() {
+            if let PendingEvent::ToolCallFinished {
+                id, invocation_id, ..
+            } = event
+            {
+                let source = first
+                    .checked_add(index as u64)
+                    .ok_or_else(|| invalid_repair("repair sequence overflow"))?;
+                self.completed.push((
+                    rw_types::ToolCallId(id.clone()),
+                    ToolResultReference {
+                        invocation_id: invocation_id.clone(),
+                        finished_source: rw_types::SequenceId(source),
+                    },
+                ));
+            }
+        }
+        if let Some(tool_turn) = self.tool_turn {
+            let logical = rw_types::tool_result_admission::ToolResultAdmission::measure(&tool_turn)
+                .map_err(|error| invalid_repair(&error.to_string()))?;
+            let mut results = Vec::with_capacity(tool_turn.blocks.len());
+            for block in tool_turn.blocks {
+                let rw_types::Block::ToolResult { id, .. } = block else {
+                    return Err(invalid_repair("repair result block"));
+                };
+                let index = self
+                    .completed
+                    .iter()
+                    .position(|(candidate, _)| *candidate == id)
+                    .ok_or_else(|| {
+                        invalid_repair("repair result has no authoritative completion")
+                    })?;
+                results.push(self.completed.remove(index).1);
+            }
+            self.events
+                .push(PendingEvent::ConversationToolResultsCommitted {
+                    agent_turn: turn,
+                    results,
+                    logical,
+                });
+        }
+        self.events.push(PendingEvent::TurnFinished {
+            turn,
+            status: AgentTurnStatus::Interrupted,
+            usage: SessionUsage::default(),
+            cost: unavailable_cost(),
+        });
+        Ok(self.events)
+    }
+}
+fn invalid_repair(message: &str) -> AgentLoopError {
+    AgentLoopError::Persistence(message.into())
 }
 
 /// Rebuilds all mutable actor state from the authoritative journal after an
@@ -116,7 +178,7 @@ pub(in crate::engine) async fn recover_actor_from_journal(
     control.commit_driver(recovered.driver_client_id.clone());
     let interrupted_compaction = recovered.interrupted_compaction;
     let interrupted_turn = recovered.interrupted_turn;
-    let recovery_events = interrupted_turn_recovery_events(&recovered);
+    let recovery_events = interrupted_turn_recovery_events(&mut recovered);
     let suspended_inputs = (suspended || !recovered.accepted_messages.is_empty())
         .then(|| std::mem::take(&mut recovered.accepted_messages));
     *state = ActorState::recover(
@@ -144,6 +206,8 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         .await?;
     }
     if let Some(turn) = interrupted_turn {
+        let recovery_events =
+            recovery_events.into_events(state.sequence.map_or(0, |sequence| sequence + 1))?;
         emit_batch(state, events, &config.event_sink, recovery_events).await?;
         state.accounting.record(&TurnAccounting {
             turn_id: wire_turn_id(turn),

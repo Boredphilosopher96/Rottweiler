@@ -6,7 +6,7 @@ use crate::engine::task_ownership;
 use crate::engine::turn::hooks::mark_unsettled;
 use crate::engine::turn::ordered_output::OrderedOutputCoordinator;
 use crate::engine::turn::provider_messages::emit_plan_submission;
-use crate::engine::turn::provider_messages::send_event;
+use crate::engine::turn::provider_messages::persist_event;
 use crate::engine::turn::redaction::redact_tool_output;
 use crate::engine::turn::signals::TurnSignal;
 use crate::engine::turn::subagent_events::OrderedSubagentCoordinator;
@@ -83,7 +83,8 @@ pub(super) async fn execute_tool_calls(
     approver: &dyn PermissionApprover,
     signals: &mpsc::UnboundedSender<TurnSignal>,
     mode: SessionMode,
-) -> Vec<ToolExecution> {
+) -> Result<Vec<super::tool_requests::CommittedToolExecution>, crate::engine::AgentLoopError> {
+    let mut failure = None;
     let super::tool_admission::AdmittedToolBatch { calls, mut budget } = calls;
     let mut prepared = Vec::with_capacity(calls.len());
     for (call, displayed) in calls {
@@ -219,7 +220,11 @@ pub(super) async fn execute_tool_calls(
                 "tool invocation effects remain unproven".to_owned(),
             );
             let execution_index = execution.call.index;
-            ordered.push(execution);
+            failure.get_or_insert_with(|| {
+                crate::engine::AgentLoopError::EffectsUnsettled(
+                    "tool invocation effects remain unproven".into(),
+                )
+            });
             next = next.saturating_add(1);
             coordinator.advance(next);
             subagents.advance_after_tool(execution_index);
@@ -242,7 +247,7 @@ pub(super) async fn execute_tool_calls(
             config.secret_redactor.as_ref(),
             &config.tools,
         );
-        send_event(
+        let committed = persist_event(
             signals,
             PendingEvent::ToolCallFinished {
                 presentation,
@@ -253,12 +258,25 @@ pub(super) async fn execute_tool_calls(
                 is_error: execution.is_error,
                 index: execution.call.index,
             },
-        );
+        )
+        .await;
         let execution_index = execution.call.index;
-        ordered.push(execution);
+        match committed {
+            Ok(meta) => ordered.push(super::tool_requests::CommittedToolExecution {
+                execution,
+                source: meta.sequence_id,
+            }),
+            Err(error) => {
+                cancellation.cancel();
+                failure.get_or_insert(error);
+            }
+        }
         next = next.saturating_add(1);
         coordinator.advance(next);
         subagents.advance_after_tool(execution_index);
     }
-    ordered
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(ordered),
+    }
 }

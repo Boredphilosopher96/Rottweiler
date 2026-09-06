@@ -24,7 +24,17 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
     let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
     let user = text(Role::User, "input");
     let answer = text(Role::Assistant, "already committed");
-    let output = text(Role::Tool, "already committed tool result");
+    let output = rw_types::Turn {
+        role: Role::Tool,
+        blocks: vec![rw_types::Block::ToolResult {
+            id: rw_types::ToolCallId("reused-provider-id".into()),
+            output: ToolOutput::Text {
+                text: "result".into(),
+            },
+            is_error: false,
+        }],
+        meta: rw_types::TurnMeta::default(),
+    };
     append_script(
         &mut journal,
         vec![
@@ -53,9 +63,14 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
                 is_error: false,
                 index: 0,
             }),
-            SourceEvent::event(PendingEvent::ConversationTurnCommitted {
+            SourceEvent::event(PendingEvent::ConversationToolResultsCommitted {
                 agent_turn: 1,
-                turn: output.clone(),
+                results: vec![rw_types::conversation_input::ToolResultReference {
+                    invocation_id: ToolInvocationId("first".into()),
+                    finished_source: rw_types::SequenceId(6),
+                }],
+                logical: rw_types::tool_result_admission::ToolResultAdmission::measure(&output)
+                    .expect("tool IR"),
             }),
             SourceEvent::event(start("second")),
         ],

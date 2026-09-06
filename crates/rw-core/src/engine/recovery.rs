@@ -32,6 +32,7 @@ mod projector;
 pub(crate) use projector::registry_fingerprint;
 mod input_page;
 mod read;
+pub(in crate::engine) mod tool_results;
 pub(crate) use input::materialize_indexed_event;
 pub use input_page::{ClaimedInputEvent, InputClaimCheckpoint, InputClaimPage};
 mod receipts;
@@ -138,3 +139,6 @@ mod test_source;
 mod fragment_input_tests;
 
 mod questions;
+
+#[cfg(test)]
+mod tool_result_tests;

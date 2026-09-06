@@ -106,6 +106,16 @@ pub(in crate::engine) fn recovered_pending_event(
             agent_turn: *agent_turn,
             selection: selection.clone(),
         },
+        EngineEvent::ConversationToolResultsCommitted {
+            agent_turn,
+            results,
+            logical,
+            ..
+        } => PendingEvent::ConversationToolResultsCommitted {
+            agent_turn: *agent_turn,
+            results: results.clone(),
+            logical: logical.clone(),
+        },
         EngineEvent::ConversationInputCommitted {
             agent_turn,
             accepted_source,

@@ -47,13 +47,28 @@ pub(in crate::engine) async fn emit_batch(
             let sequence = first_expected
                 .checked_add(offset)
                 .ok_or_else(|| AgentLoopError::Persistence("event sequence overflow".to_owned()))?;
-            Ok(kind.stamp(EventMeta {
+            let event = kind.stamp(EventMeta {
                 protocol_version: PROTOCOL_VERSION,
                 session_id: state.session_id.clone(),
                 sequence_id: SequenceId(sequence),
                 emitted_at: state.event_clock.emitted_at(),
                 caused_by: caused_by.clone(),
-            }))
+            });
+            if let EngineEvent::ConversationToolResultsCommitted {
+                meta,
+                agent_turn,
+                logical,
+                ..
+            } = &event
+            {
+                crate::engine::recovery::tool_results::validate_admission(
+                    meta,
+                    *agent_turn,
+                    logical,
+                )
+                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+            }
+            Ok(event)
         })
         .collect::<Result<Vec<_>, AgentLoopError>>()?;
     let persisted = durability::commit_session_events(Arc::clone(sink), requested).await?;

@@ -696,7 +696,7 @@ async fn publish_compaction(
 ) -> Result<(u64, u64, u64, bool), AgentLoopError> {
     let mut committed = Vec::with_capacity(execution.conversation.len());
     for (ordinal, compacted_turn) in execution.conversation.iter().enumerate() {
-        let source = if compacted_turn.role != Role::User {
+        let source = if !matches!(compacted_turn.role, Role::User | Role::Tool) {
             None
         } else if let Some((_, item)) = execution
             .remapped_pins
@@ -719,8 +719,16 @@ async fn publish_compaction(
                 })?;
             Some(page.sources[position].clone())
         };
+        let pruned = source.as_ref().map_or_else(Vec::new, |source| {
+            super::context_commits::retained_pruning(
+                compacted_turn,
+                source.sequence,
+                &page.pruned_tool_outputs,
+            )
+        });
         committed.push(
-            super::context_commits::commit(signals, turn, compacted_turn, source.as_ref()).await?,
+            super::context_commits::commit(signals, turn, compacted_turn, source.as_ref(), &pruned)
+                .await?,
         );
     }
     surgery.clear();

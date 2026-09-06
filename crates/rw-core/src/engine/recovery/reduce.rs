@@ -57,7 +57,8 @@ pub(super) fn reduce(
         return Ok(());
     };
     match kind {
-        PendingEvent::ConversationInputCommitted { .. }
+        PendingEvent::ConversationToolResultsCommitted { .. }
+        | PendingEvent::ConversationInputCommitted { .. }
         | PendingEvent::ConversationContextCommitted { .. } => {
             return Err(RecoveryError::Invalid("unresolved input commit"));
         }
@@ -416,14 +417,9 @@ pub(super) fn reduce(
             source,
             reclaimed_tokens,
         } => {
-            validate_source(rows, &head.conversation, source.sequence)?;
-            super::pruning::apply(
-                rows,
-                head.conversation.generation,
-                sequence,
-                source,
-                reclaimed_tokens,
-            )?;
+            let cut = head.compacting.as_ref().unwrap_or(&head.conversation);
+            validate_source(rows, cut, source.sequence)?;
+            super::pruning::apply(rows, cut.generation, sequence, source, reclaimed_tokens)?;
             head.context_cut = sequence.0;
         }
         PendingEvent::ContextUsage {

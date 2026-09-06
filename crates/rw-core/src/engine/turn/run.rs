@@ -1093,32 +1093,43 @@ pub(super) async fn run_turn(
             mode,
         )
         .await;
-        if executions.iter().any(|execution| execution.unsettled) {
+        let Ok(executions) = executions else {
             status = AgentTurnStatus::Failed;
             break;
-        }
+        };
         let interrupted = cancellation.is_cancelled();
         let mut tool_blocks = Vec::new();
         let mut doom_triggered = false;
-        for execution in executions {
+        let mut results = Vec::with_capacity(executions.len());
+        for committed in executions {
+            let execution = committed.execution;
+            doom_triggered |= !interrupted && doom.observe(&execution.call, &execution);
+            results.push(rw_types::conversation_input::ToolResultReference {
+                invocation_id: execution.call.invocation_id,
+                finished_source: committed.source,
+            });
             tool_blocks.push(Block::ToolResult {
-                id: ToolCallId(execution.call.id.clone()),
-                output: execution.output.clone(),
+                id: ToolCallId(execution.call.id),
+                output: execution.output,
                 is_error: execution.is_error,
             });
-            doom_triggered |= !interrupted && doom.observe(&execution.call, &execution);
         }
         let tool_turn = Turn {
             role: Role::Tool,
             blocks: tool_blocks,
             meta: TurnMeta::default(),
         };
-        conversation.push(tool_turn.clone());
+        let Ok(logical) = rw_types::tool_result_admission::ToolResultAdmission::measure(&tool_turn)
+        else {
+            status = AgentTurnStatus::Failed;
+            break;
+        };
         if persist_event(
             &signals,
-            PendingEvent::ConversationTurnCommitted {
+            PendingEvent::ConversationToolResultsCommitted {
                 agent_turn: turn,
-                turn: tool_turn,
+                results,
+                logical,
             },
         )
         .await
@@ -1127,6 +1138,7 @@ pub(super) async fn run_turn(
             status = AgentTurnStatus::Failed;
             break;
         }
+        conversation.push(tool_turn);
         if doom_triggered {
             send_event(
                 &signals,

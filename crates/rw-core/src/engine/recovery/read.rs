@@ -304,6 +304,14 @@ impl SourceReader<'_> {
                 .meta()
                 .ok_or(RecoveryError::Invalid("non-durable source"))?;
             if meta.sequence_id == sequence {
+                if matches!(
+                    event,
+                    EngineEvent::ConversationToolResultsCommitted { .. }
+                        | EngineEvent::ConversationInputCommitted { .. }
+                        | EngineEvent::ConversationContextCommitted { .. }
+                ) {
+                    self.events.clear();
+                }
                 return Ok(
                     match super::input::materialize_indexed_event(self.source, &event)? {
                         std::borrow::Cow::Borrowed(_) => event,

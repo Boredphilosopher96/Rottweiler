@@ -33,13 +33,16 @@ pub(super) async fn commit(
     turn: u64,
     value: &Turn,
     source: Option<&ConversationSource>,
+    pruned: &[(u32, u64)],
 ) -> Result<SequenceId, AgentLoopError> {
-    if value.role != Role::User {
+    if !matches!(value.role, Role::User | Role::Tool) {
         return persist_conversation_turn(signals, turn, value).await;
     }
     let selection = if let Some(source) = source {
-        if source.role != Role::User {
-            return Err(invalid("retained user role differs from its source"));
+        if source.role != value.role {
+            return Err(invalid(
+                "retained source-owned role differs from its source",
+            ));
         }
         ContextSelection::Retained {
             selected_source: source.sequence,
@@ -48,9 +51,9 @@ pub(super) async fn commit(
     } else if value == &rw_context::auto_continue_turn() {
         ContextSelection::Continuation {}
     } else {
-        return Err(invalid("retained user context has no source"));
+        return Err(invalid("retained source-owned context has no source"));
     };
-    persist_event(
+    let sequence = persist_event(
         signals,
         PendingEvent::ConversationContextCommitted {
             agent_turn: turn,
@@ -58,7 +61,42 @@ pub(super) async fn commit(
         },
     )
     .await
-    .map(|meta| meta.sequence_id)
+    .map(|meta| meta.sequence_id)?;
+    for &(block_index, reclaimed_tokens) in pruned {
+        persist_event(
+            signals,
+            PendingEvent::ToolOutputPruned {
+                source: rw_types::ContextBlockId {
+                    sequence,
+                    block_index,
+                },
+                reclaimed_tokens,
+            },
+        )
+        .await?;
+    }
+    Ok(sequence)
+}
+
+pub(super) fn retained_pruning(
+    value: &Turn,
+    source: SequenceId,
+    pruned: &std::collections::BTreeMap<String, u64>,
+) -> Vec<(u32, u64)> {
+    value
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            if !matches!(block, rw_types::Block::ToolResult { .. }) {
+                return None;
+            }
+            let index32 = u32::try_from(index).ok()?;
+            pruned
+                .get(&super::context::block_key(source, index))
+                .map(|tokens| (index32, *tokens))
+        })
+        .collect()
 }
 fn invalid(message: &str) -> AgentLoopError {
     AgentLoopError::Persistence(message.into())
