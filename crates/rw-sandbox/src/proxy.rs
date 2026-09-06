@@ -1,5 +1,4 @@
 use base64::Engine as _;
-use rustls::pki_types::ServerName;
 use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
 use std::collections::BTreeSet;
@@ -22,6 +21,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 use crate::{EgressDecision, EgressPolicy, SandboxError};
+
+mod tls;
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_PLAIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -1144,17 +1145,7 @@ fn connect_proxy_transport(proxy: &UpstreamProxy) -> io::Result<UpstreamConnecti
     if proxy.url.scheme() == "http" {
         return Ok(UpstreamConnection::Plain(socket));
     }
-    let roots = webpki_roots::TLS_SERVER_ROOTS
-        .iter()
-        .cloned()
-        .collect::<rustls::RootCertStore>();
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let server_name = ServerName::try_from(host.to_owned())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "proxy host is invalid"))?;
-    let connection = rustls::ClientConnection::new(Arc::new(config), server_name)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let connection = tls::connection(host)?;
     let mut stream = rustls::StreamOwned::new(connection, socket);
     stream
         .conn
