@@ -94,10 +94,15 @@ impl CanonicalHistory {
         let remaining = super::MAX_MATERIALIZED_HISTORY_DECODE_BYTES
             .checked_sub(controls.decoded_bytes)
             .ok_or(RecoveryError::Limit("bootstrap retained decoded bytes"))?;
-        let interrupted = self
-            .interrupted_inputs_with_allowance(remaining)?
-            .map(super::InterruptedTurnInputs::repair)
-            .transpose()?;
+        let interrupted = if self.prompt_cut {
+            // Inspection selects input before inference, never crash-repair output
+            // from the later active-turn index rows in this same transaction.
+            None
+        } else {
+            self.interrupted_inputs_with_allowance(remaining)?
+                .map(super::InterruptedTurnInputs::repair)
+                .transpose()?
+        };
         Ok(RecoveryBootstrap {
             head: self.head.clone(),
             controls,

@@ -11,6 +11,7 @@ pub(super) const ACTIVE_ASSISTANT: u8 = 6;
 pub(super) const ACTIVE_TOOL_LIFECYCLE: u8 = 7;
 pub(super) const ACTIVE_TOOL_RESULTS: u8 = 8;
 pub(super) const SOURCE_ORDINAL: u8 = 12;
+pub(super) const PROMPTS: u8 = 15;
 pub(super) const MAX_QUEUED: usize = rw_types::session_state::MAX_SESSION_QUEUE_ITEMS;
 pub(super) const MAX_QUESTIONS: usize = rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS;
 
@@ -198,6 +199,7 @@ pub(super) struct Boundary {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) enum RewindPhase {
     Boundaries,
+    Prompts,
     Context,
     Prunes,
 }

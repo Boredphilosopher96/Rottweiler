@@ -32,6 +32,16 @@ pub trait SessionHistoryView: Send + Sync {
         turn: u64,
     ) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError>;
 
+    /// Select one recorded prompt source cut without replaying the journal.
+    async fn prompt_at_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError>;
+
+    /// Prove that a reconstructed historical prompt matches its recorded request.
+    /// Called inside the retained blocking context worker.
+    fn verify_prompt(&self, turn: u64, dump: &rw_types::PromptDump) -> Result<(), AgentLoopError>;
+
     /// Read a bounded contiguous context interval. The implementation may cut the
     /// requested interval at admission, and must return its exact resume ordinal.
     async fn conversation_page(

@@ -37,6 +37,7 @@ impl CanonicalRecovery {
             } => {
                 let (namespace, scope, after) = match phase {
                     RewindPhase::Boundaries => (BOUNDARIES, 0, target),
+                    RewindPhase::Prompts => (super::state::PROMPTS, 0, target),
                     RewindPhase::Context => (
                         CONTEXT_ACTIONS,
                         head.conversation.generation,
@@ -69,7 +70,8 @@ impl CanonicalRecovery {
                         phase,
                     });
                 } else if let Some(next) = match phase {
-                    RewindPhase::Boundaries => Some(RewindPhase::Context),
+                    RewindPhase::Boundaries => Some(RewindPhase::Prompts),
+                    RewindPhase::Prompts => Some(RewindPhase::Context),
                     RewindPhase::Context => Some(RewindPhase::Prunes),
                     RewindPhase::Prunes => None,
                 } {

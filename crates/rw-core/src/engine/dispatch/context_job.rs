@@ -183,40 +183,44 @@ async fn historical_prompt(
     tasks: crate::engine::task_ownership::ActorTasks,
     turn: TurnId,
 ) -> ReadResult {
-    let view = config.event_sink.capture_read_view()?;
-    let requested = turn.clone();
-    let boundary = crate::engine::projection::find_journal_boundary(&view, &config.session_id,
-        |event| matches!(event, EngineEvent::ContextUsageUpdated { turn_id, .. } if turn_id == &requested), false
-    ).await?.ok_or_else(|| invalid("no assembled prompt was recorded for the requested turn"))?;
-    let historical = crate::engine::projection::project_journal_prefix(
-        view,
-        &config.session_id,
-        &config.modes,
-        Some(boundary),
-    )
-    .await?;
+    let turn_number = crate::engine::projection::parse_turn_id(&turn)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let view = config
+        .history
+        .capture_history()
+        .await?
+        .prompt_at_turn(turn_number)
+        .await?;
+    let bootstrap = view.bootstrap().await?;
+    let verification = Arc::clone(&view);
+    let current = bootstrap
+        .map_async(|bootstrap| async {
+            let queued = bootstrap
+                .controls
+                .queued_messages
+                .into_iter()
+                .map(|(_, message)| message.content)
+                .collect();
+            history_context::assemble_view(Arc::clone(&config), &tasks, view, queued, true).await
+        })
+        .await
+        .try_map(|result| result)?
+        .flatten();
     tasks
         .spawn_blocking(
             Arc::clone(&config),
             rw_tools::CancellationToken::default(),
             move || {
-                let assembled = crate::engine::turn::assemble_session_context(
-                    &config,
-                    &historical.conversation,
-                    &historical.queued_messages.into_iter().collect(),
-                    &historical.context_surgery,
-                    &historical.pruned_tool_outputs,
-                    true,
-                )?;
-                Ok(HistoryRead::new(
-                    Output::Prompt(prompt_dump(
-                        &assembled,
+                current.try_map(|current| {
+                    let dump = prompt_dump(
+                        &current.assembled,
                         &config.model_alias,
                         Some(turn),
-                        Some(boundary),
-                    )),
-                    (),
-                ))
+                        current.through,
+                    );
+                    verification.verify_prompt(turn_number, &dump)?;
+                    Ok(Output::Prompt(dump))
+                })
             },
         )?
         .await

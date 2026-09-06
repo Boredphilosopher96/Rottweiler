@@ -12,6 +12,7 @@ mod capability;
 pub use capability::{HistoryRead, SessionHistory, SessionHistoryView};
 mod context_state;
 mod control;
+mod prompts;
 mod pruning;
 pub use control::{
     MAX_CONTROL_SOURCE_BYTES, RecoveredMessage, RecoveredModelSelection, RecoveryBootstrap,
@@ -107,3 +108,6 @@ mod repair_tests;
 
 #[cfg(test)]
 mod input_tests;
+
+#[cfg(test)]
+mod prompt_tests;

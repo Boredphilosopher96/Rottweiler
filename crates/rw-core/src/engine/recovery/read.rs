@@ -8,7 +8,7 @@ use rw_store::session::{
     SessionEventPageLimits, journal::JournalReadView, recovery_index::RecoveryReadView,
 };
 use rw_types::{EngineEvent, SequenceId, Turn};
-use std::{collections::VecDeque, ops::Range};
+use std::{collections::VecDeque, ops::Range, sync::Arc};
 
 /// Hard maximum canonical JSON bytes retained by one provider/context materialization.
 pub const MAX_MATERIALIZED_HISTORY_BYTES: u64 = 32 * 1024 * 1024;
@@ -54,9 +54,10 @@ impl RecoverySnapshot {
     pub fn bind_source(self, source: &JournalReadView) -> Result<CanonicalHistory, RecoveryError> {
         let source = self.read.bind_source(source)?;
         Ok(CanonicalHistory {
-            read: self.read,
+            read: Arc::new(self.read),
             head: self.head,
             source,
+            prompt_cut: false,
         })
     }
 }
@@ -76,10 +77,12 @@ impl CanonicalRecovery {
 }
 
 /// Exact canonical history snapshot; all pages share one metadata transaction and raw prefix.
+#[derive(Clone)]
 pub struct CanonicalHistory {
-    pub(super) read: RecoveryReadView,
+    pub(super) read: Arc<RecoveryReadView>,
     pub(super) head: RecoveryHead,
     pub(super) source: JournalReadView,
+    pub(super) prompt_cut: bool,
 }
 impl CanonicalHistory {
     /// Bounded state describing the visible conversation and current controls.

@@ -18,8 +18,10 @@ use std::{
 struct CapturedHistory {
     history: Arc<Mutex<CanonicalHistory>>,
     lease: JournalReadLease,
+    _derived_admission: Option<crate::journal_service::JournalReadAdmission>,
     reads: Arc<super::super::reads::ReadOperations>,
     journal: Arc<crate::journal_service::JournalService>,
+    prompt_shapes: Arc<crate::session_runtime::prompt_shapes::PromptShapeJournal>,
     cut: ConversationCut,
     through: Option<SequenceId>,
 }
@@ -37,6 +39,7 @@ impl SessionHistory for DurableEventSink {
         let journal = Arc::clone(&self.journal_service);
         let publication = Arc::clone(&self.registration.publisher);
         let reads = Arc::clone(&self.reads);
+        let prompt_shapes = Arc::clone(&self.prompt_shapes);
         self.reads
             .run(Some(admission), move |admission| {
                 let mut lease = admission
@@ -50,8 +53,10 @@ impl SessionHistory for DurableEventSink {
                 Ok(Arc::new(CapturedHistory {
                     history: Arc::new(Mutex::new(history)),
                     lease,
+                    _derived_admission: None,
                     reads,
                     journal,
+                    prompt_shapes,
                     cut,
                     through,
                 }) as Arc<dyn SessionHistoryView>)
@@ -78,6 +83,64 @@ impl SessionHistoryView for CapturedHistory {
         turn: u64,
     ) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
         self.query(move |history| history.recovery_at_completed_turn(turn))
+            .await
+    }
+    fn verify_prompt(&self, turn: u64, dump: &rw_types::PromptDump) -> Result<(), AgentLoopError> {
+        let (profile, record) = self
+            .prompt_shapes
+            .shape_for_turn(turn)
+            .map_err(persistence)?
+            .ok_or_else(|| {
+                persistence("historical prompt is unavailable: required request shape is missing")
+            })?;
+        let tools = dump
+            .tools
+            .iter()
+            .map(|tool| rw_providers::ToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+            .collect::<Vec<_>>();
+        crate::session_runtime::prompt_shapes::validate_historical_prompt_shape(
+            dump, &tools, &profile, &record,
+        )
+        .map_err(persistence)
+    }
+    async fn prompt_at_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError> {
+        let admission = self.journal.admit_read().map_err(persistence)?;
+        let history = Arc::clone(&self.history);
+        let lease = self.lease.clone();
+        let reads = Arc::clone(&self.reads);
+        let prompt_shapes = Arc::clone(&self.prompt_shapes);
+        let journal = Arc::clone(&self.journal);
+        self.reads
+            .run(Some(admission), move |admission| {
+                let selected = history
+                    .lock()
+                    .map_err(|_| persistence("history reader poisoned"))?
+                    .prompt_at_turn(turn)
+                    .map_err(persistence)?;
+                let cut = selected.head().conversation;
+                let through = selected.head().next_sequence.checked_sub(1).map(SequenceId);
+                Ok(Arc::new(Self {
+                    history: Arc::new(Mutex::new(selected)),
+                    lease,
+                    reads,
+                    journal,
+                    prompt_shapes,
+                    cut,
+                    through,
+                    _derived_admission: Some(
+                        admission
+                            .take()
+                            .ok_or_else(|| persistence("prompt view already delivered"))?,
+                    ),
+                }) as Arc<dyn SessionHistoryView>)
+            })
             .await
     }
     async fn conversation_page(

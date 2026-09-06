@@ -268,6 +268,34 @@ impl SessionHistoryView for View {
             Arc::clone(&self.root),
         ))
     }
+    fn verify_prompt(
+        &self,
+        _turn: u64,
+        _dump: &rw_types::PromptDump,
+    ) -> Result<(), AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "fixture has no recorded provider request".into(),
+        ))
+    }
+    async fn prompt_at_turn(
+        &self,
+        turn: u64,
+    ) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError> {
+        let history = self
+            .history
+            .lock()
+            .map_err(failure)?
+            .prompt_at_turn(turn)
+            .map_err(failure)?;
+        let cut = history.head().conversation;
+        let through = history.head().next_sequence.checked_sub(1).map(SequenceId);
+        Ok(Arc::new(Self {
+            history: Mutex::new(history),
+            cut,
+            through,
+            root: Arc::clone(&self.root),
+        }))
+    }
     async fn conversation_page(
         &self,
         range: Range<u64>,

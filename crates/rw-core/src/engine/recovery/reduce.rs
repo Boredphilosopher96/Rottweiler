@@ -127,6 +127,7 @@ pub(super) fn reduce(
             return Ok(());
         }
         PendingEvent::TurnStarted { turn } => {
+            rows.delete(key(super::state::PROMPTS, 0, turn));
             head.control.active = Some(ActiveTurn {
                 announced_citations: rw_types::citation_admission::CitationAdmission::default(),
                 committed_citations: rw_types::citation_admission::CitationAdmission::default(),
@@ -417,6 +418,7 @@ pub(super) fn reduce(
             head.context_cut = sequence.0;
         }
         PendingEvent::ContextUsage {
+            turn,
             estimated_input_tokens,
             provider_input_tokens,
             ..
@@ -431,6 +433,17 @@ pub(super) fn reduce(
                 },
             );
             head.budget = budget.snapshot();
+            if rows
+                .get::<RecoveryHead>(key(super::state::PROMPTS, 0, turn))?
+                .is_none()
+            {
+                let mut prompt = head.clone();
+                prompt.next_sequence = sequence
+                    .0
+                    .checked_add(1)
+                    .ok_or(RecoveryError::Invalid("prompt sequence overflow"))?;
+                rows.put(key(super::state::PROMPTS, 0, turn), &prompt)?;
+            }
         }
         PendingEvent::CitationDelta { turn, uri, title } => {
             let active = head
