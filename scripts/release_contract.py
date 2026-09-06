@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -396,12 +397,10 @@ def validate_build(
         except OSError as error:
             raise ValueError(f"release {member_id} is unavailable: {path}: {error}") from error
         if (
-            path.is_symlink()
-            or not path.is_file()
-            or metadata.st_nlink != 1
+            not stat.S_ISREG(metadata.st_mode)
             or metadata.st_size == 0
         ):
-            raise ValueError(f"release {member_id} must be a single-link regular file: {path}")
+            raise ValueError(f"release {member_id} must be a nonempty regular file: {path}")
         sizes[member_id] = metadata.st_size
         extraction_limit = _member_by_id(platform, member_id).max_bytes
         if metadata.st_size > extraction_limit:
@@ -773,6 +772,32 @@ def render_installer(
     return rendered
 
 
+def _copy_build_artifact(source: Path, destination: Path, max_bytes: int) -> None:
+    # Cargo publishes its executable using a hard link into deps/. Staging owns
+    # a distinct inode and copies a bounded, stable descriptor before publication.
+    def identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (metadata.st_dev, metadata.st_ino, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as incoming:
+        before = os.fstat(incoming.fileno())
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= max_bytes:
+            raise ValueError(f"invalid build artifact: {source}")
+        with destination.open("xb") as outgoing:
+            remaining = before.st_size
+            while remaining:
+                chunk = incoming.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError(f"build artifact shortened during staging: {source}")
+                outgoing.write(chunk)
+                remaining -= len(chunk)
+            if incoming.read(1) or identity(os.fstat(incoming.fileno())) != identity(before):
+                raise ValueError(f"build artifact changed during staging: {source}")
+        if identity(source.lstat()) != identity(before):
+            raise ValueError(f"build artifact replaced during staging: {source}")
+
+
 def stage_release(
     contract: ReleaseContract,
     output: Path,
@@ -816,7 +841,7 @@ def stage_release(
             continue
         else:
             source = sources[member.id]
-            shutil.copyfile(source, destination)
+            _copy_build_artifact(source, destination, member.max_bytes)
         destination.chmod(member.mode)
     member = _member_by_id(platform, "wasm_host_identity")
     with (output / _member_by_id(platform, "wasm_host").path).open("rb") as helper:

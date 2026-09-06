@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -221,6 +222,9 @@ class ReleaseContractTests(unittest.TestCase):
                 source = root / member_id
                 source.write_bytes(member_id.encode("ascii"))
                 sources[member_id] = source
+            # Cargo's public executable is hard-linked to its deps artifact.
+            cargo_peer = root / "cargo-deps-engine"
+            os.link(sources["engine"], cargo_peer)
             stage = root / contract.archive_root(VERSION, platform_id)
             self.module.stage_release(
                 contract,
@@ -235,6 +239,13 @@ class ReleaseContractTests(unittest.TestCase):
                 sources["opentui_native"],
             )
             platform_contract = contract.platform(platform_id)
+            engine_path = next(member.path for member in platform_contract.archive_members
+                               if member.id == "engine")
+            staged_engine = stage / engine_path
+            self.assertEqual(staged_engine.stat().st_nlink, 1)
+            self.assertNotEqual(staged_engine.stat().st_ino, cargo_peer.stat().st_ino)
+            cargo_peer.write_bytes(b"another-build")
+            self.assertEqual(staged_engine.read_bytes(), b"engine")
             observed = {
                 path.relative_to(stage).as_posix()
                 for path in stage.rglob("*")
