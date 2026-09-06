@@ -248,9 +248,9 @@ fn durable_generated_title_overrides_prompt_fallback_in_the_session_index() {
     );
 }
 
-#[test]
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
-fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
+async fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
     let fixture = tempdir().expect("fixture");
     let storage = fixture.path().join("storage");
     let workspace = fixture.path().join("workspace");
@@ -428,9 +428,16 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         .join("journal")
         .join("active.jsonl");
     let parent_bytes = std::fs::read(&parent_path).expect("parent bytes");
+    let journal = JournalService::new(&storage).expect("journal reads");
+    let order = journal
+        .routing_projection_order(&parent.0)
+        .expect("routing order")
+        .acquire()
+        .await
+        .expect("routing publication permit");
     let fork_modes = rw_ext::ModeRegistry::builtins().expect("built-in modes");
     fork_hosted_session_storage(
-        &JournalService::new(&storage).expect("journal reads"),
+        &journal,
         &storage,
         &workspace,
         &parent.0,
@@ -441,6 +448,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         driver.clone(),
         None,
         &fork_modes,
+        &order,
     )
     .expect("fork");
     assert_eq!(
@@ -472,13 +480,8 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
     assert_eq!(child_metadata.initial_context_workspace_root_count, 1);
     assert_eq!(child_metadata.fork_at_turn, Some(2));
     assert_eq!(
-        load_session_workspace_roots(
-            &JournalService::new(&storage).expect("journal reads"),
-            &storage,
-            &workspace,
-            &parent.0
-        )
-        .expect("current parent roots"),
+        load_session_workspace_roots(&journal, &storage, &workspace, &parent.0, &order,)
+            .expect("current parent roots"),
         vec![workspace.clone(), added.clone(), added_later]
     );
     let child_stores = open_checkpoint_stores(
@@ -526,7 +529,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         .expect("custom mode event");
     drop(parent_log);
     let error = fork_hosted_session_storage(
-        &JournalService::new(&storage).expect("journal reads"),
+        &journal,
         &storage,
         &workspace,
         &parent.0,
@@ -537,6 +540,7 @@ fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         driver,
         None,
         &fork_modes,
+        &order,
     )
     .expect_err("removed custom mode must reject fork");
     assert!(

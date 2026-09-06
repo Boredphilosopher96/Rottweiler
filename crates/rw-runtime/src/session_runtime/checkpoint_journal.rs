@@ -245,10 +245,11 @@ pub(crate) fn load_session_workspace_roots(
     storage_root: &Path,
     workspace: &Path,
     session_id: &str,
+    order: &crate::journal_service::ProjectionPermit,
 ) -> Result<Vec<PathBuf>> {
     let root = checkpoint_root(storage_root, workspace, session_id);
     let generation =
-        crate::mode_recovery::current_workspace_generation(journal_service, session_id)?;
+        crate::mode_recovery::current_workspace_generation(journal_service, session_id, order)?;
     if generation == 0 {
         return Ok(vec![workspace.to_path_buf()]);
     }

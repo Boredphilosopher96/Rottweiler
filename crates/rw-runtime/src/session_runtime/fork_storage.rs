@@ -42,6 +42,7 @@ pub(crate) fn fork_hosted_session_storage(
     driver_client_id: ClientId,
     fork_operation_id: Option<&str>,
     mode_registry: &rw_ext::ModeRegistry,
+    order: &crate::journal_service::ProjectionPermit,
 ) -> Result<()> {
     validate_session_id(parent_session_id)?;
     validate_session_id(child_session_id)?;
@@ -52,6 +53,7 @@ pub(crate) fn fork_hosted_session_storage(
         through_turn,
         through_sequence,
         include_idle_tail,
+        order,
     )?;
     let through_sequence = route.through;
     let selected = route

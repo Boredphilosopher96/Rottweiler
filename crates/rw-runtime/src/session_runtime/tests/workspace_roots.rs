@@ -200,8 +200,8 @@ fn aborted_workspace_root_generation_is_retry_clean() {
     abort_checkpoint_root_generation(&checkpoint, 1).expect("cleanup retry");
 }
 
-#[test]
-fn host_root_load_ignores_pre_event_committed_marker_after_crash() {
+#[tokio::test]
+async fn host_root_load_ignores_pre_event_committed_marker_after_crash() {
     let root = tempdir().expect("root");
     let storage = root.path().join("state");
     let primary = root.path().join("primary");
@@ -228,13 +228,15 @@ fn host_root_load_ignores_pre_event_committed_marker_after_crash() {
         "fixture must represent the crash after marker persistence and before the event"
     );
 
-    let visible = load_session_workspace_roots(
-        &JournalService::new(&storage).expect("journal reads"),
-        &storage,
-        &primary,
-        session_id,
-    )
-    .expect("host workspace query");
+    let journal = JournalService::new(&storage).expect("journal reads");
+    let order = journal
+        .routing_projection_order(session_id)
+        .expect("routing order")
+        .acquire()
+        .await
+        .expect("routing publication permit");
+    let visible = load_session_workspace_roots(&journal, &storage, &primary, session_id, &order)
+        .expect("host workspace query");
     assert_eq!(visible, vec![primary]);
     assert!(!visible.contains(&added));
 }
