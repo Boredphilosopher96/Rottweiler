@@ -25,7 +25,7 @@ fn generation(name: &'static str) -> NativeModelGeneration {
     let model: Arc<dyn ModelDriver> = Arc::new(Model(name));
     NativeModelGeneration {
         provider: Arc::clone(&model),
-        children: Arc::new(move |_, _| Arc::new(Model(name))),
+        children: Arc::new(move |_, _, _| Arc::new(Model(name))),
         model,
         catalog: None,
         redactor: FixtureRedactor::default(),
@@ -53,7 +53,7 @@ async fn child_configuration_retains_its_generation_through_shutdown_and_drop() 
         "first",
     )
     .expect("child");
-    assert!(child.provider.has_model_alias("first"));
+    assert!((child.compose)(Vec::new()).has_model_alias("first"));
     assert!(owner.begin_replacement().is_err());
     let resource = Arc::clone(&child.resources);
     child.resources.shutdown().await.expect("child shutdown");
@@ -110,7 +110,7 @@ fn replacement_closes_admission_and_publishes_model_source_together() {
         "first",
     )
     .expect("new child");
-    assert!(child.provider.has_model_alias("second"));
+    assert!((child.compose)(Vec::new()).has_model_alias("second"));
 }
 
 #[test]
@@ -162,9 +162,13 @@ async fn live_child_model_selection_is_private_to_each_session() {
     let provider: Arc<dyn rw_providers::Provider> = Arc::new(
         super::super::script_provider::ScriptProvider::new("local".into(), Vec::new(), 0),
     );
-    let compose = recipe.child_composer(vec![("local/".into(), provider)]);
-    let first = compose(root.path(), "first");
-    let second = compose(root.path(), "second");
+    let compose = recipe.child_composer();
+    let first = compose(
+        root.path(),
+        "first",
+        vec![("local/".into(), provider.clone())],
+    );
+    let second = compose(root.path(), "second", vec![("local/".into(), provider)]);
     first
         .prepare_model("first")
         .await

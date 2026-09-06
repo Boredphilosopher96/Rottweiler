@@ -2,6 +2,7 @@ pub use crate::storage_root::initialize_private_storage_root;
 mod accounting_projection;
 mod checkpoint_journal;
 mod checkpoints;
+mod child_plugins;
 mod code_intelligence;
 mod command_execution;
 mod credential_resolution;

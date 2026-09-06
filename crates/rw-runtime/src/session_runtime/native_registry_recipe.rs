@@ -16,6 +16,8 @@ use std::{
 /// A session binding is installed exactly once after cyclic registries exist.
 pub(crate) enum RootNativeBinding {
     Standalone,
+    /// Child workspace authority is captured until the child is closed/rebound.
+    CapturedChild,
     Session(OnceLock<Weak<RuntimeSessionExtensionController>>),
 }
 impl RootNativeBinding {

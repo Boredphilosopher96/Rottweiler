@@ -600,13 +600,7 @@ pub(crate) async fn compose_hosted_actor(
         instruction_roots: Arc::clone(&instruction_workspace_roots),
         active_sources: Arc::clone(&active_nested_instruction_sources),
     };
-    let children = recipe.child_composer(
-        plugin_runtime
-            .providers
-            .iter()
-            .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider)))
-            .collect(),
-    );
+    let children = recipe.child_composer();
     let model_generations = NativeModelGenerations::new(
         NativeModelGeneration {
             model: Arc::clone(&model),
@@ -659,6 +653,7 @@ pub(crate) async fn compose_hosted_actor(
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        child_plugins: native_extensions.child_configuration(),
         native: super::native_registry_recipe::RootNativeBinding::session(),
         index_pool: Arc::clone(&options.index_pool),
         journal_service: Arc::clone(&options.journal_service),

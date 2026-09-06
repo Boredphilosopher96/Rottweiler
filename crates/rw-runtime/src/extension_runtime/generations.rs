@@ -20,6 +20,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+#[derive(Clone)]
 pub(crate) struct PluginGenerationConfig {
     pub(crate) private_root: PathBuf,
     pub(crate) helper: PathBuf,
@@ -38,6 +39,12 @@ struct PluginBatch {
     pending: Vec<String>,
 }
 impl PluginGenerationConfig {
+    pub(crate) fn child_session(&self) -> Self {
+        Self {
+            session_ui: Arc::new(ui::UiSessionBudget::default()),
+            ..self.clone()
+        }
+    }
     fn discover(
         &self,
         configured: &[DiscoveredPlugin],
@@ -155,6 +162,9 @@ impl PluginGenerationOwner {
             models: RwLock::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
         }))
+    }
+    pub(crate) fn child_configuration(&self) -> Arc<PluginGenerationConfig> {
+        Arc::new(self.configuration.child_session())
     }
     pub(crate) fn current(&self) -> Arc<PluginSessionRuntime> {
         self.current

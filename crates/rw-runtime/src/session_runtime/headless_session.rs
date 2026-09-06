@@ -806,13 +806,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         instruction_roots: Arc::clone(&instruction_workspace_roots),
         active_sources: Arc::clone(&active_nested_instruction_sources),
     };
-    let children = recipe.child_composer(
-        plugin_runtime
-            .providers
-            .iter()
-            .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider)))
-            .collect(),
-    );
+    let children = recipe.child_composer();
     let model_generations = NativeModelGenerations::new(
         NativeModelGeneration {
             model: Arc::clone(&model),
@@ -860,6 +854,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .await?;
     wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        child_plugins: native_extensions.child_configuration(),
         native: if inspection {
             super::native_registry_recipe::RootNativeBinding::Standalone
         } else {

@@ -96,6 +96,7 @@ pub(super) fn canonical_workspace_roots(
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct RuntimeWorkspaceRootController {
+    pub(super) child_plugins: Arc<crate::extension_runtime::generations::PluginGenerationConfig>,
     pub(crate) native: super::native_registry_recipe::RootNativeBinding,
     pub(super) index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub(super) journal_service: Arc<JournalService>,
@@ -185,7 +186,7 @@ impl RuntimeWorkspaceRootController {
                 },
             )?;
         let child_project_trusted = trusted_roots.first().copied().unwrap_or(false);
-        let built = build_tools(BuildToolsInput {
+        let mut built = build_tools(BuildToolsInput {
             index_pool: Arc::clone(&self.index_pool),
             workspace_roots: &roots,
             trusted_lsp_roots: &trusted_roots,
@@ -204,6 +205,13 @@ impl RuntimeWorkspaceRootController {
             background_manager: Some(Arc::clone(&self.background_manager)),
         })
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let plugins = super::child_plugins::ChildPlugins::compose(
+            &self.child_plugins,
+            &self.native_configs(&roots)?,
+            &roots,
+        )?;
+        let child_resources = plugins.resources(model.resources.clone());
+        plugins.tools(&mut built.registry)?;
         let toolchain_runtime = Arc::new(ToolchainRuntime::new_with_read_only(
             Arc::clone(&built.command_executor),
             Arc::clone(&built.read_only_hook_executor),
@@ -234,8 +242,11 @@ impl RuntimeWorkspaceRootController {
             Arc::clone(&active_sources),
         )
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
-        let commands = compose_runtime_commands(&catalog, &roots, storage_root, &built.registry)
-            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        plugins.hooks(&mut hooks)?;
+        let mut commands =
+            compose_runtime_commands(&catalog, &roots, storage_root, &built.registry)
+                .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        plugins.commands(&mut commands)?;
         let mode_registry = compose_mode_registry(&catalog)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let child_checkpoint_root = checkpoint_root(storage_root, workspace_root, &session_id.0);
@@ -277,10 +288,13 @@ impl RuntimeWorkspaceRootController {
             .map(Arc::new)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let ChildNativeModel {
-            provider,
+            compose,
             redactor,
-            resources,
+            resources: _parent_lease,
         } = model;
+        let provider = compose(plugins.runtime.providers.clone());
+        let delivery = plugins.delivery(event_sink.clone(), &redactor)?;
+        let resources = child_resources;
         let recorded: Arc<dyn rw_core::ModelDriver> =
             Arc::new(super::prompt_model::PromptRecordingModel {
                 inner: provider,
@@ -299,7 +313,8 @@ impl RuntimeWorkspaceRootController {
                 memory_redactor: redactor,
             });
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
-            native: super::native_registry_recipe::RootNativeBinding::Standalone,
+            native: super::native_registry_recipe::RootNativeBinding::CapturedChild,
+            child_plugins: self.child_plugins.clone(),
             index_pool: Arc::clone(&self.index_pool),
             journal_service: Arc::clone(&self.journal_service),
             transcripts: Arc::clone(&self.transcripts),
@@ -331,7 +346,7 @@ impl RuntimeWorkspaceRootController {
             root_authorization: WorkspaceRootAuthorization::Hosted(roots.clone()),
         });
         Ok(SessionActorConfig {
-            ui: Arc::new(rw_core::ui::EmptyUiRegistry),
+            ui: plugins.runtime.ui.clone(),
             ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
                 reader: Arc::clone(&self.transcripts),
                 session: session_id.clone(),
@@ -354,7 +369,7 @@ impl RuntimeWorkspaceRootController {
             commands: Arc::new(commands),
             modes: mode_registry,
             history: event_sink.clone(),
-            event_sink,
+            event_sink: delivery,
             event_clock: Arc::new(SystemEventClock),
             provider_admission,
             secret_redactor,
@@ -632,6 +647,14 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
         &self,
         request: rw_core::WorkspaceRootRequest<'_>,
     ) -> std::result::Result<rw_core::WorkspaceRuntimeGeneration, AgentLoopError> {
+        if matches!(
+            self.native,
+            super::native_registry_recipe::RootNativeBinding::CapturedChild
+        ) {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "child workspace roots are fixed by their captured invocation authority".into(),
+            ));
+        }
         let rw_core::WorkspaceRootRequest {
             requested,
             roots: current_roots,
@@ -656,7 +679,8 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
             AgentLoopError::InvalidConfiguration("workspace generation exhausted".into())
         })?;
         let native_owner = match &self.native {
-            super::native_registry_recipe::RootNativeBinding::Standalone => None,
+            super::native_registry_recipe::RootNativeBinding::Standalone
+            | super::native_registry_recipe::RootNativeBinding::CapturedChild => None,
             super::native_registry_recipe::RootNativeBinding::Session(binding) => Some(
                 binding
                     .get()

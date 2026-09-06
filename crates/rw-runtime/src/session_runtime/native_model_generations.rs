@@ -21,8 +21,12 @@ pub(super) use recipe::{NativeModelRecipe, NativeProviderRecipe};
 pub(crate) type NativeModelComposer =
     dyn Fn(NativeModelInput) -> Result<NativeModelGeneration, AgentLoopError> + Send + Sync;
 
-pub(crate) type NativeChildComposer =
-    dyn Fn(&std::path::Path, &str) -> Arc<dyn ModelDriver> + Send + Sync;
+pub(crate) type NativeChildComposer = dyn Fn(&std::path::Path, &str, Vec<(String, Arc<dyn Provider>)>) -> Arc<dyn ModelDriver>
+    + Send
+    + Sync;
+
+pub(crate) type BoundChildComposer =
+    dyn Fn(Vec<(String, Arc<dyn Provider>)>) -> Arc<dyn ModelDriver> + Send + Sync;
 
 pub(crate) struct NativeModelInput {
     pub providers: Vec<(String, Arc<dyn Provider>)>,

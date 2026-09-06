@@ -1,12 +1,12 @@
 //! A child holds its captured provider generation until its actor drops it.
 use super::{NativeModelGenerations, busy};
 use async_trait::async_trait;
-use rw_core::{AgentLoopError, ModelDriver, SessionResources};
+use rw_core::{AgentLoopError, SessionResources};
 use rw_providers::FixtureRedactor;
 use std::sync::{Arc, Weak};
 
 pub(in crate::session_runtime) struct ChildNativeModel {
-    pub provider: Arc<dyn ModelDriver>,
+    pub compose: Arc<super::BoundChildComposer>,
     pub redactor: FixtureRedactor,
     pub resources: Arc<dyn SessionResources>,
 }
@@ -44,9 +44,11 @@ impl NativeModelGenerations {
         let redactor = state.current.redactor.clone();
         drop(state);
         let resources = Arc::new(ChildLease(owner));
-        let provider = compose(workspace, alias);
+        let workspace = workspace.to_path_buf();
+        let alias = alias.to_owned();
+        let compose = Arc::new(move |providers| compose(&workspace, &alias, providers));
         Ok(ChildNativeModel {
-            provider,
+            compose,
             redactor,
             resources,
         })

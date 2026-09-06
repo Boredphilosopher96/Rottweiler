@@ -408,3 +408,10 @@ clears remain available at capacity. Admission happens before journal append.
 Rich text and larger content belong in UI panels. The session-state snapshot
 returns each retained status with its canonical source sequence so clients can
 recover it without replaying the session transcript.
+
+A child actor captures its own native plugin endpoints, state namespace, UI registry,
+commands, hooks and event delivery. Provider configuration is inherited as an inert
+recipe; the child supplies its own endpoints when constructing its lazy model.
+Its workspace roots remain fixed until close and rebind. Parent generation replacement
+requires all captured child leases retired. A dropped child construction or close
+caller cannot release that lease before the child's native cleanup owner settles.

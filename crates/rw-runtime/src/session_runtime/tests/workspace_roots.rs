@@ -277,6 +277,17 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     let journal_service = JournalService::new(&private).expect("journal reads");
     let controller = RuntimeWorkspaceRootController {
         native: super::super::native_registry_recipe::RootNativeBinding::Standalone,
+        child_plugins: Arc::new(
+            crate::extension_runtime::generations::PluginGenerationConfig {
+                private_root: private.clone(),
+                helper: crate::plugin_process::helper_executable().expect("test helper"),
+                redactor: Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
+                    FixtureRedactor::default(),
+                )),
+                budget: Arc::new(crate::extension_runtime::PluginRuntimeBudget::default()),
+                session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
+            },
+        ),
         transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         journal_service,
@@ -343,8 +354,10 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             &primary,
             "fast",
             super::super::native_model_generations::ChildNativeModel {
-                provider: Arc::new(CapturingModel {
-                    request: Arc::new(Mutex::new(None)),
+                compose: Arc::new(|_| {
+                    Arc::new(CapturingModel {
+                        request: Arc::new(Mutex::new(None)),
+                    })
                 }),
                 redactor: rw_providers::FixtureRedactor::default(),
                 resources: Arc::new(rw_core::NoopSessionResources),
@@ -372,8 +385,10 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             &added,
             "fast",
             super::super::native_model_generations::ChildNativeModel {
-                provider: Arc::new(CapturingModel {
-                    request: Arc::new(Mutex::new(None)),
+                compose: Arc::new(|_| {
+                    Arc::new(CapturingModel {
+                        request: Arc::new(Mutex::new(None)),
+                    })
                 }),
                 redactor: rw_providers::FixtureRedactor::default(),
                 resources: Arc::new(rw_core::NoopSessionResources),
@@ -442,8 +457,10 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             &added,
             "fast",
             super::super::native_model_generations::ChildNativeModel {
-                provider: Arc::new(CapturingModel {
-                    request: Arc::new(Mutex::new(None)),
+                compose: Arc::new(|_| {
+                    Arc::new(CapturingModel {
+                        request: Arc::new(Mutex::new(None)),
+                    })
                 }),
                 redactor: rw_providers::FixtureRedactor::default(),
                 resources: Arc::new(rw_core::NoopSessionResources),
@@ -648,6 +665,17 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
     let journal_service = JournalService::new(&private).expect("journal reads");
     let pending = RuntimeWorkspaceRootController {
         native: super::super::native_registry_recipe::RootNativeBinding::Standalone,
+        child_plugins: Arc::new(
+            crate::extension_runtime::generations::PluginGenerationConfig {
+                private_root: private.clone(),
+                helper: crate::plugin_process::helper_executable().expect("test helper"),
+                redactor: Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
+                    FixtureRedactor::default(),
+                )),
+                budget: Arc::new(crate::extension_runtime::PluginRuntimeBudget::default()),
+                session_ui: Arc::new(crate::extension_runtime::ui::UiSessionBudget::default()),
+            },
+        ),
         transcripts: crate::transcript_service::TranscriptReader::new(Arc::clone(&journal_service)),
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         journal_service,
