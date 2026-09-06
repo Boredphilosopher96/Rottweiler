@@ -252,6 +252,14 @@ jobs:
           --output "$RUNNER_TEMP/native-candidates.noindex"
           --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
           --github-output "$GITHUB_OUTPUT"
+      - name: Preserve failed Linux engine and diagnostic link map
+        if: failure() && steps.candidate.outcome == 'failure'
+        continue-on-error: true
+        run: >-
+          python3 scripts/diagnose-native-size.py
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
+          --failed-gate ci-results/build.json
+          --output ci-results/native-size
       - name: Upload verified native candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
