@@ -4,7 +4,7 @@ use super::*;
 use crate::journal_service::JournalRegistration;
 use rw_store::session::SessionEventLog;
 use rw_types::{
-    Block, EngineEvent, EventMeta, PROTOCOL_VERSION, Role, Turn, TurnMeta,
+    EngineEvent, EventMeta, PROTOCOL_VERSION,
     transcript::{
         TranscriptAnchor, TranscriptGeneration, TranscriptInvalidation, TranscriptItemId,
         TranscriptOrdinal, TranscriptPage, TranscriptPosition,
@@ -23,19 +23,13 @@ impl Fixture {
         let journals = JournalService::new(root.path()).expect("read owner");
         let mut journal = SessionEventLog::open(root.path(), "semantic").expect("journal");
         journal
-            .append_batch(
-                (0..count).map(|sequence| EngineEvent::ConversationTurnCommitted {
-                    meta: meta(sequence),
-                    agent_turn: sequence,
-                    turn: Turn {
-                        role: Role::User,
-                        blocks: vec![Block::Text {
-                            text: format!("{sequence}:{text}"),
-                        }],
-                        meta: TurnMeta::default(),
-                    },
-                }),
-            )
+            .append_batch((0..count).flat_map(|ordinal| {
+                crate::session_runtime::test_history::input_events(
+                    meta(2 * ordinal),
+                    ordinal,
+                    format!("{ordinal}:{text}"),
+                )
+            }))
             .expect("events");
         let registration = journals
             .register("semantic", journal.read_view())
@@ -139,14 +133,21 @@ fn catch_up_is_bounded_and_first_middle_latest_are_indexed_current_views() {
         fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024),
         TranscriptReadResult::CatchingUp {
             through: Some(SequenceId(255)),
-            target: Some(SequenceId(299))
+            target: Some(SequenceId(599))
+        }
+    ));
+    assert!(matches!(
+        fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024),
+        TranscriptReadResult::CatchingUp {
+            through: Some(SequenceId(511)),
+            target: Some(SequenceId(599))
         }
     ));
     let latest = ready(fixture.read(TranscriptPosition::Latest {}, None, 64 * 1024));
     assert_eq!(latest.first_ordinal, TranscriptOrdinal(290));
     assert_eq!(
         latest.items.last().expect("tail").id,
-        TranscriptItemId(SequenceId(299))
+        TranscriptItemId(SequenceId(599))
     );
     let middle = ready(fixture.read(
         TranscriptPosition::AtOrdinal {
@@ -160,7 +161,7 @@ fn catch_up_is_bounded_and_first_middle_latest_are_indexed_current_views() {
     assert_eq!(middle.invalidation, TranscriptInvalidation::None {});
     assert_eq!(middle.view, latest.view);
     let first = ready(fixture.read(TranscriptPosition::First {}, Some(latest.view), 64 * 1024));
-    assert_eq!(first.items[0].id, TranscriptItemId(SequenceId(0)));
+    assert_eq!(first.items[0].id, TranscriptItemId(SequenceId(1)));
 }
 
 #[tokio::test]
@@ -181,7 +182,7 @@ async fn offline_reader_uses_the_same_projection_without_a_session_actor() {
         .await
         .expect("bounded header");
     assert!(bootstrap.created.is_none());
-    assert_eq!(bootstrap.through_sequence, Some(SequenceId(299)));
+    assert_eq!(bootstrap.through_sequence, Some(SequenceId(599)));
     let request = TranscriptRead {
         known_view: None,
         position: TranscriptPosition::Latest {},
@@ -199,6 +200,20 @@ async fn offline_reader_uses_the_same_projection_without_a_session_actor() {
             .expect("catchup"),
         TranscriptReadResult::CatchingUp { .. }
     ));
+    assert!(matches!(
+        reader
+            .page(
+                session.clone(),
+                rw_types::session_read::SessionReadScope::Session {},
+                request.clone()
+            )
+            .await
+            .expect("second bounded page"),
+        TranscriptReadResult::CatchingUp {
+            through: Some(SequenceId(511)),
+            target: Some(SequenceId(599))
+        }
+    ));
     let page = ready(
         reader
             .page(
@@ -212,7 +227,7 @@ async fn offline_reader_uses_the_same_projection_without_a_session_actor() {
     assert_eq!(page.first_ordinal, TranscriptOrdinal(292));
     assert_eq!(
         page.items.last().expect("last").id,
-        TranscriptItemId(SequenceId(299))
+        TranscriptItemId(SequenceId(599))
     );
 }
 
@@ -223,18 +238,18 @@ fn byte_limited_latest_keeps_the_last_item_and_before_excludes_its_anchor() {
     assert!(latest.items.len() < 10);
     assert_eq!(
         latest.items.last().expect("last").id,
-        TranscriptItemId(SequenceId(11))
+        TranscriptItemId(SequenceId(23))
     );
     assert!(serde_json::to_vec(&latest).expect("wire page").len() <= 8192);
     let before = ready(fixture.read(
         TranscriptPosition::Before {
-            item: TranscriptItemId(SequenceId(1)),
+            item: TranscriptItemId(SequenceId(3)),
         },
         Some(latest.view),
         8192,
     ));
     assert_eq!(before.items.len(), 1);
-    assert_eq!(before.items[0].id, TranscriptItemId(SequenceId(0)));
+    assert_eq!(before.items[0].id, TranscriptItemId(SequenceId(1)));
 }
 
 #[test]
@@ -244,7 +259,7 @@ fn rewind_changes_ordering_and_recovers_a_removed_stable_anchor() {
     fixture
         .journal
         .append(&EngineEvent::ConversationRewound {
-            meta: meta(10),
+            meta: meta(20),
             to_agent_turn: 3,
             operation_id: "rewind".into(),
             unrestorable_paths: vec![],
@@ -267,7 +282,7 @@ fn rewind_changes_ordering_and_recovers_a_removed_stable_anchor() {
     );
     let page = ready(fixture.read(
         TranscriptPosition::Around {
-            item: TranscriptItemId(SequenceId(8)),
+            item: TranscriptItemId(SequenceId(17)),
         },
         Some(old.view),
         64 * 1024,
@@ -275,8 +290,8 @@ fn rewind_changes_ordering_and_recovers_a_removed_stable_anchor() {
     assert!(matches!(
         page.anchor,
         TranscriptAnchor::Replaced {
-            requested: TranscriptItemId(SequenceId(8)),
-            replacement: Some(TranscriptItemId(SequenceId(3)))
+            requested: TranscriptItemId(SequenceId(17)),
+            replacement: Some(TranscriptItemId(SequenceId(7)))
         }
     ));
     assert_eq!(page.invalidation, TranscriptInvalidation::All {});
@@ -319,7 +334,7 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
     fixture
         .journal
         .append(&EngineEvent::ToolCallStarted {
-            meta: meta(1),
+            meta: meta(2),
             turn_id: rw_types::TurnId("1".into()),
             tool_call_id: rw_types::ToolCallId("provider-id".into()),
             invocation_id: rw_types::ToolInvocationId("host-invocation".into()),
@@ -337,7 +352,7 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
         .journal
         .append(&EngineEvent::ToolCallFinished {
             presentation: None,
-            meta: meta(2),
+            meta: meta(3),
             turn_id: rw_types::TurnId("1".into()),
             tool_call_id: rw_types::ToolCallId("provider-id".into()),
             invocation_id: rw_types::ToolInvocationId("host-invocation".into()),
@@ -360,11 +375,11 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
     assert_eq!(after.view.generation, before.view.generation);
     assert_eq!(after.items.len(), before.items.len());
     assert_eq!(after.items[1].id, before.items[1].id);
-    assert_eq!(after.items[1].revision, SequenceId(2));
+    assert_eq!(after.items[1].revision, SequenceId(3));
     assert_eq!(
         after.invalidation,
         TranscriptInvalidation::Items {
-            items: vec![TranscriptItemId(SequenceId(1))]
+            items: vec![TranscriptItemId(SequenceId(2))]
         }
     );
 }
@@ -416,7 +431,7 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
     let request = rw_types::transcript::TranscriptContentRead {
         view: page.view,
         source: rw_types::transcript::TranscriptContentSource {
-            sequence: SequenceId(0),
+            sequence: SequenceId(1),
             selector: rw_types::transcript::TranscriptContentSelector::ConversationBlock {
                 index: 0,
             },
@@ -477,7 +492,7 @@ fn complete_content_chunks_reuse_one_canonical_document_and_validate_view_bounda
             .is_err()
     );
     bad = request;
-    bad.source.sequence = SequenceId(1);
+    bad.source.sequence = SequenceId(0);
     assert!(
         fixture
             .service
@@ -673,14 +688,14 @@ async fn active_children_query_is_mode_free_bounded_and_source_qualified() {
     fixture
         .journal
         .append(EngineEvent::TurnStarted {
-            meta: meta(80),
+            meta: meta(160),
             turn_id: rw_types::TurnId("80".into()),
         })
         .expect("active parent turn");
     fixture
         .journal
         .append(EngineEvent::SubagentSpawned {
-            meta: meta(81),
+            meta: meta(161),
             subagent_id: rw_types::SubagentId("agent".into()),
             child_session_id: SessionId("child".into()),
             task: "€".repeat(1024),
@@ -700,10 +715,23 @@ async fn active_children_query_is_mode_free_bounded_and_source_qualified() {
         first.value(),
         rw_types::session_children::SessionChildrenResult::CatchingUp {
             through: Some(SequenceId(63)),
-            target: Some(SequenceId(81))
+            target: Some(SequenceId(161))
         }
     ));
     drop(first);
+    let second = fixture
+        .service
+        .children(SessionId("semantic".into()), scope.clone())
+        .await
+        .expect("second bounded batch");
+    assert!(matches!(
+        second.value(),
+        rw_types::session_children::SessionChildrenResult::CatchingUp {
+            through: Some(SequenceId(127)),
+            target: Some(SequenceId(161))
+        }
+    ));
+    drop(second);
     let ready = fixture
         .service
         .children(SessionId("semantic".into()), scope.clone())
@@ -713,9 +741,9 @@ async fn active_children_query_is_mode_free_bounded_and_source_qualified() {
     else {
         panic!("snapshot")
     };
-    assert_eq!(snapshot.through, Some(SequenceId(81)));
+    assert_eq!(snapshot.through, Some(SequenceId(161)));
     assert_eq!(snapshot.children.len(), 1);
-    assert_eq!(snapshot.children[0].spawned, SequenceId(81));
+    assert_eq!(snapshot.children[0].spawned, SequenceId(161));
     assert_eq!(snapshot.children[0].child_session_id.0, "child");
     assert!(snapshot.children[0].task_truncated);
     assert!(
@@ -727,7 +755,7 @@ async fn active_children_query_is_mode_free_bounded_and_source_qualified() {
         ancestry: vec![rw_types::session_read::SessionReadAncestor {
             session_id: SessionId("child".into()),
             subagent_id: rw_types::SubagentId("agent".into()),
-            source_sequence: SequenceId(79),
+            source_sequence: SequenceId(159),
         }],
     };
     assert!(

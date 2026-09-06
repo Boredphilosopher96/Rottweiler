@@ -13,18 +13,8 @@ fn meta(sequence: u64) -> EventMeta {
         caused_by: None,
     }
 }
-fn user(sequence: u64, turn: u64, content: &str) -> EngineEvent {
-    EngineEvent::ConversationTurnCommitted {
-        meta: meta(sequence),
-        agent_turn: turn,
-        turn: rw_types::Turn {
-            role: Role::User,
-            blocks: vec![Block::Text {
-                text: content.into(),
-            }],
-            meta: rw_types::TurnMeta::default(),
-        },
-    }
+fn user(sequence: u64, turn: u64, content: &str) -> [EngineEvent; 2] {
+    crate::session_runtime::test_history::input_events(meta(sequence), turn, content.into())
 }
 fn start(sequence: u64, invocation: &str) -> EngineEvent {
     EngineEvent::ToolCallStarted {
@@ -56,11 +46,13 @@ fn pages_resume_from_exact_source_without_duplicate_documents() {
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     for batch in 0..3 {
         journal
-            .append_batch(
-                (batch * 100..(batch + 1) * 100).map(|sequence| {
-                    user(sequence, sequence + 1, &format!("message unique{sequence}"))
-                }),
-            )
+            .append_batch((batch * 100..(batch + 1) * 100).flat_map(|sequence| {
+                user(
+                    2 * sequence,
+                    sequence + 1,
+                    &format!("message unique{sequence}"),
+                )
+            }))
             .expect("append");
     }
     synchronize(root.path(), "search", &journal.read_view()).expect("paged catchup");
@@ -84,7 +76,7 @@ fn pages_resume_from_exact_source_without_duplicate_documents() {
     drop(journal);
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("reopen");
     journal
-        .append_batch([user(300, 301, "freshneedle")])
+        .append_batch(user(600, 301, "freshneedle"))
         .expect("append after restart");
     synchronize(root.path(), "search", &journal.read_view()).expect("incremental resumed source");
     assert_eq!(
@@ -100,42 +92,43 @@ fn pages_resume_from_exact_source_without_duplicate_documents() {
 fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
     let root = tempfile::tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
-    journal
-        .append_batch([
-            user(0, 1, &format!("{} deepneedle", "title ".repeat(30))),
-            EngineEvent::TextDelta {
-                meta: meta(1),
-                turn_id: TurnId("1".into()),
-                text: "inter".into(),
+    let mut events = user(0, 1, &format!("{} deepneedle", "title ".repeat(30))).to_vec();
+    events.extend([
+        EngineEvent::TextDelta {
+            meta: meta(2),
+            turn_id: TurnId("1".into()),
+            text: "inter".into(),
+        },
+        EngineEvent::TextDelta {
+            meta: meta(3),
+            turn_id: TurnId("1".into()),
+            text: "operability".into(),
+        },
+        EngineEvent::ConversationTurnCommitted {
+            meta: meta(4),
+            agent_turn: 1,
+            turn: rw_types::Turn {
+                role: Role::Assistant,
+                blocks: vec![Block::Text {
+                    text: "interoperability".into(),
+                }],
+                meta: rw_types::TurnMeta::default(),
             },
-            EngineEvent::TextDelta {
-                meta: meta(2),
-                turn_id: TurnId("1".into()),
-                text: "operability".into(),
+        },
+    ]);
+    events.extend(user(5, 2, "discardedmessage"));
+    events.extend([
+        start(7, "first"),
+        finish(
+            8,
+            "first",
+            ToolOutput::Structured {
+                value: serde_json::json!({"status":"discardedresult", "count":42}),
             },
-            EngineEvent::ConversationTurnCommitted {
-                meta: meta(3),
-                agent_turn: 1,
-                turn: rw_types::Turn {
-                    role: Role::Assistant,
-                    blocks: vec![Block::Text {
-                        text: "interoperability".into(),
-                    }],
-                    meta: rw_types::TurnMeta::default(),
-                },
-            },
-            user(4, 2, "discardedmessage"),
-            start(5, "first"),
-            finish(
-                6,
-                "first",
-                ToolOutput::Structured {
-                    value: serde_json::json!({"status":"discardedresult", "count":42}),
-                },
-            ),
-            start(7, "pending"),
-        ])
-        .expect("append");
+        ),
+        start(9, "pending"),
+    ]);
+    journal.append_batch(events).expect("append");
     synchronize(root.path(), "search", &journal.read_view()).expect("search source");
     let index = SessionIndex::open(root.path()).expect("index");
     assert_eq!(
@@ -145,38 +138,39 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
             .len(),
         1
     );
-    journal
-        .append_batch([
-            EngineEvent::ConversationRewound {
-                meta: meta(8),
-                to_agent_turn: 1,
-                operation_id: "rewind".into(),
-                unrestorable_paths: vec![],
+    let mut events = vec![EngineEvent::ConversationRewound {
+        meta: meta(10),
+        to_agent_turn: 1,
+        operation_id: "rewind".into(),
+        unrestorable_paths: vec![],
+    }];
+    events.extend(user(11, 2, "replacementmessage"));
+    events.extend([
+        start(13, "replacement"),
+        finish(
+            14,
+            "pending",
+            ToolOutput::Text {
+                text: "latepoison".into(),
             },
-            user(9, 2, "replacementmessage"),
-            start(10, "replacement"),
-            finish(
-                11,
-                "pending",
-                ToolOutput::Text {
-                    text: "latepoison".into(),
-                },
-            ),
-            finish(
-                12,
-                "replacement",
-                ToolOutput::Mixed {
-                    parts: vec![
-                        ToolOutputPart::Text {
-                            text: "validresult".into(),
-                        },
-                        ToolOutputPart::Structured {
-                            value: serde_json::json!([true, "nestedvalue"]),
-                        },
-                    ],
-                },
-            ),
-        ])
+        ),
+        finish(
+            15,
+            "replacement",
+            ToolOutput::Mixed {
+                parts: vec![
+                    ToolOutputPart::Text {
+                        text: "validresult".into(),
+                    },
+                    ToolOutputPart::Structured {
+                        value: serde_json::json!([true, "nestedvalue"]),
+                    },
+                ],
+            },
+        ),
+    ]);
+    journal
+        .append_batch(events)
         .expect("rewind and replacement");
     synchronize(root.path(), "search", &journal.read_view()).expect("rewind source");
     for absent in ["discardedmessage", "discardedresult", "latepoison"] {
@@ -196,7 +190,7 @@ fn failed_page_keeps_cursor_and_documents_atomic_then_resumes() {
     let root = tempfile::tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     journal
-        .append_batch([user(0, 1, "retainedneedle")])
+        .append_batch(user(0, 1, "retainedneedle"))
         .expect("first");
     synchronize(root.path(), "search", &journal.read_view()).expect("initial");
     let index = SessionIndex::open(root.path()).expect("index");
@@ -233,7 +227,7 @@ fn failed_page_keeps_cursor_and_documents_atomic_then_resumes() {
             .is_empty()
     );
     journal
-        .append_batch([user(1, 2, "completedneedle")])
+        .append_batch(user(2, 2, "completedneedle"))
         .expect("next");
     synchronize(root.path(), "search", &journal.read_view()).expect("resume");
     assert_eq!(

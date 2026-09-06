@@ -4,7 +4,9 @@ use super::durable_session::DurableEventSink;
 use crate::journal_service::JournalService;
 use rw_core::{AgentLoopError, SessionActorRecovery, SessionEventSink, recovery::SessionHistory};
 use rw_store::session::SessionEventLog;
-use rw_types::{ClientId, EngineEvent, EventMeta, SequenceId, SessionId, Turn};
+use rw_types::{
+    Block, ClientId, EngineEvent, EventMeta, Role, SequenceId, SessionId, Turn, TurnMeta,
+};
 use std::{path::Path, sync::Arc};
 
 pub(crate) struct ActorHistory {
@@ -43,12 +45,27 @@ pub(crate) async fn open(
         .map_err(failure)?;
     }
     for turn in conversation {
-        log.append(EngineEvent::ConversationTurnCommitted {
-            meta: meta(log.next_sequence()),
-            agent_turn: 1,
-            turn,
-        })
-        .map_err(failure)?;
+        if turn.role == Role::User {
+            let [Block::Text { text }] = turn.blocks.as_slice() else {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "input fixture requires one text body".into(),
+                ));
+            };
+            if turn.meta != TurnMeta::default() {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "input fixture metadata must be empty".into(),
+                ));
+            }
+            log.append_batch(input_events(meta(log.next_sequence()), 1, text.clone()))
+                .map_err(failure)?;
+        } else {
+            log.append(EngineEvent::ConversationTurnCommitted {
+                meta: meta(log.next_sequence()),
+                agent_turn: 1,
+                turn,
+            })
+            .map_err(failure)?;
+        }
     }
     let sink = DurableEventSink::new(
         log,
@@ -70,4 +87,27 @@ pub(crate) async fn open(
         sink,
         recovered,
     })
+}
+
+/// Seed actual accepted input and its exact immutable commit reference.
+#[allow(clippy::expect_used)]
+pub(crate) fn input_events(meta: EventMeta, agent_turn: u64, content: String) -> [EngineEvent; 2] {
+    let mut committed = meta.clone();
+    committed.sequence_id =
+        SequenceId(meta.sequence_id.0.checked_add(1).expect("fixture sequence"));
+    let accepted_source = meta.sequence_id;
+    [
+        EngineEvent::UserMessageAccepted {
+            meta,
+            agent_turn,
+            content,
+            attachments: vec![],
+        },
+        EngineEvent::ConversationInputCommitted {
+            meta: committed,
+            agent_turn,
+            accepted_source,
+            selection: rw_types::conversation_input::InputSelection::Accepted {},
+        },
+    ]
 }

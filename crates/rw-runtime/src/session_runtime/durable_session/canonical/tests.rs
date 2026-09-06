@@ -218,19 +218,20 @@ fn completed_events(turns: std::ops::RangeInclusive<u64>, first_sequence: u64) -
                 meta: meta(start),
                 turn_id: rw_types::TurnId(turn.to_string()),
             },
-            EngineEvent::ConversationTurnCommitted {
+            EngineEvent::UserMessageAccepted {
                 meta: meta(start + 1),
                 agent_turn: turn,
-                turn: rw_types::Turn {
-                    role: rw_types::Role::User,
-                    blocks: vec![rw_types::Block::Text {
-                        text: "user".into(),
-                    }],
-                    meta: rw_types::TurnMeta::default(),
-                },
+                content: "user".into(),
+                attachments: vec![],
+            },
+            EngineEvent::ConversationInputCommitted {
+                meta: meta(start + 2),
+                agent_turn: turn,
+                accepted_source: SequenceId(start + 1),
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
             },
             EngineEvent::TurnFinished {
-                meta: meta(start + 2),
+                meta: meta(start + 3),
                 turn_id: rw_types::TurnId(turn.to_string()),
                 status: rw_types::TurnStatus::Completed,
                 usage: rw_core::SessionUsage::default().into(),
@@ -253,7 +254,7 @@ async fn completed_turn_query_uses_effective_source_after_rewind_and_reopen() {
     assert_eq!(
         current.completed_turn(2).await.expect("second"),
         Some(rw_core::CompletedTurn {
-            sequence_id: SequenceId(5),
+            sequence_id: SequenceId(7),
             completed_turns: 2,
         })
     );
@@ -263,7 +264,7 @@ async fn completed_turn_query_uses_effective_source_after_rewind_and_reopen() {
             meta: EventMeta {
                 protocol_version: rw_core::SESSION_EVENT_VERSION,
                 session_id: SessionId("state".into()),
-                sequence_id: SequenceId(6),
+                sequence_id: SequenceId(8),
                 emitted_at: "2026-09-05T00:00:00Z".into(),
                 caused_by: None,
             },
@@ -278,11 +279,11 @@ async fn completed_turn_query_uses_effective_source_after_rewind_and_reopen() {
     assert_eq!(
         current.completed_turn(1).await.expect("first"),
         Some(rw_core::CompletedTurn {
-            sequence_id: SequenceId(2),
+            sequence_id: SequenceId(3),
             completed_turns: 1,
         })
     );
-    commit_session_events(Arc::clone(&current), completed_events(2..=2, 7))
+    commit_session_events(Arc::clone(&current), completed_events(2..=2, 9))
         .await
         .expect("replacement");
     current.settle_effects().await.expect("settle");
@@ -294,7 +295,7 @@ async fn completed_turn_query_uses_effective_source_after_rewind_and_reopen() {
             .await
             .expect("replacement source"),
         Some(rw_core::CompletedTurn {
-            sequence_id: SequenceId(9),
+            sequence_id: SequenceId(12),
             completed_turns: 2,
         })
     );
@@ -305,35 +306,33 @@ async fn captured_semantic_history_preserves_pages_and_charges_its_read_lifetime
     use rw_core::recovery::{HistoryMaterializationLimits, SessionHistory};
     let root = tempfile::tempdir().expect("root");
     let current = sink(root.path());
-    let conversation = |sequence, text: &str| EngineEvent::ConversationTurnCommitted {
-        meta: EventMeta {
-            protocol_version: rw_core::SESSION_EVENT_VERSION,
-            session_id: SessionId("state".into()),
-            sequence_id: SequenceId(sequence),
-            emitted_at: "2026-09-05T00:00:00.000Z".into(),
-            caused_by: None,
-        },
-        agent_turn: 1,
-        turn: rw_types::Turn {
-            role: rw_types::Role::User,
-            blocks: vec![rw_types::Block::Text { text: text.into() }],
-            meta: rw_types::TurnMeta::default(),
-        },
+    let conversation = |sequence, text: &str| {
+        crate::session_runtime::test_history::input_events(
+            EventMeta {
+                protocol_version: rw_core::SESSION_EVENT_VERSION,
+                session_id: SessionId("state".into()),
+                sequence_id: SequenceId(sequence),
+                emitted_at: "2026-09-05T00:00:00.000Z".into(),
+                caused_by: None,
+            },
+            1,
+            text.into(),
+        )
     };
-    commit_session_events(Arc::clone(&current), vec![conversation(0, "first")])
+    commit_session_events(Arc::clone(&current), conversation(0, "first").to_vec())
         .await
         .expect("commit");
     let captured = current.capture_history().await.expect("history");
-    commit_session_events(Arc::clone(&current), vec![conversation(1, "second")])
+    commit_session_events(Arc::clone(&current), conversation(2, "second").to_vec())
         .await
         .expect("append after capture");
-    assert_eq!(captured.through(), Some(SequenceId(0)));
+    assert_eq!(captured.through(), Some(SequenceId(1)));
     assert_eq!(captured.conversation().turns, 1);
     let page = captured
         .conversation_page(0..1, HistoryMaterializationLimits::default())
         .await
         .expect("captured page");
-    assert_eq!(page.sources[0].sequence, SequenceId(0));
+    assert_eq!(page.sources[0].sequence, SequenceId(1));
     assert!(!page.has_more);
     assert!(
         captured
@@ -373,8 +372,8 @@ async fn captured_semantic_history_preserves_pages_and_charges_its_read_lifetime
         .await
         .expect("released view readmission");
     drop(views);
-    assert_eq!(pages[0].sources[0].sequence, SequenceId(0));
-    assert_eq!(bootstraps[0].head.next_sequence, 1);
+    assert_eq!(pages[0].sources[0].sequence, SequenceId(1));
+    assert_eq!(bootstraps[0].head.next_sequence, 2);
     drop((pages, bootstraps));
     current.settle_effects().await.expect("read jobs settled");
 }
