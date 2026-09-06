@@ -171,10 +171,25 @@ async fn failed_or_panicked_model_cleanup_has_no_terminal_and_retains_owner_afte
             .await
             .expect("turn admitted");
         model.entered.notified().await;
+        let mut closing_events = handle.subscribe_live().expect("closing event stream");
         let proof = tokio::time::timeout(Duration::from_secs(1), handle.close())
             .await
             .expect("failed proof is bounded");
         assert!(matches!(proof, Err(AgentLoopError::EffectsUnsettled(_))));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match closing_events.recv().await {
+                    Ok(event) => assert!(!matches!(
+                        event.as_ref(),
+                        rw_types::EngineEvent::TurnFinished { .. }
+                    )),
+                    Err(AgentLoopError::Closed) => break,
+                    Err(error) => panic!("unexpected close delivery: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("quarantined effects cannot keep the live stream open");
         assert!(
             sink.events
                 .lock()
