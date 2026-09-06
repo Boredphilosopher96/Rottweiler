@@ -47,6 +47,12 @@ pub(in crate::engine) struct StartTurnRuntime<'a> {
     pub(in crate::engine) active_turn: &'a Arc<AtomicU64>,
 }
 
+pub(super) struct AcceptedUserMessage {
+    pub(super) source: rw_types::SequenceId,
+    pub(super) original_content: String,
+    pub(super) message: PreparedUserMessage,
+}
+
 pub(super) struct PreparedTurnStart {
     pub(super) config: Arc<SessionActorConfig>,
     pub(super) messages: Vec<PreparedUserMessage>,
@@ -144,6 +150,7 @@ pub(super) fn prepare_turn_start(
 pub(super) fn prepare_turn_opening(
     turn: u64,
     messages: &[PreparedUserMessage],
+    first_accepted: rw_types::SequenceId,
     synchronous: bool,
     conversation: &mut Vec<Turn>,
 ) -> Vec<PendingEvent> {
@@ -164,11 +171,12 @@ pub(super) fn prepare_turn_opening(
             }),
     );
     if synchronous {
-        for message in messages {
+        for (index, message) in messages.iter().enumerate() {
             let user_turn = message.turn(message.content.clone());
-            events.push(PendingEvent::ConversationTurnCommitted {
+            events.push(PendingEvent::ConversationInputCommitted {
                 agent_turn: turn,
-                turn: user_turn.clone(),
+                accepted_source: rw_types::SequenceId(first_accepted.0 + index as u64),
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
             });
             conversation.push(user_turn);
         }
@@ -219,10 +227,17 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         .len()
         == 0
         && tool_calls.is_empty();
+    let first_accepted = state
+        .sequence
+        .map_or(Some(1), |sequence| sequence.checked_add(2))
+        .filter(|first| first.checked_add(messages.len() as u64).is_some())
+        .map(rw_types::SequenceId)
+        .ok_or_else(|| AgentLoopError::Persistence("input source sequence overflow".into()))?;
     let mut opening_conversation = Vec::new();
     let opening_events = prepare_turn_opening(
         turn,
         &messages,
+        first_accepted,
         prepare_users_synchronously,
         &mut opening_conversation,
     );
@@ -244,6 +259,14 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         Vec::new()
     } else {
         messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| AcceptedUserMessage {
+                source: rw_types::SequenceId(first_accepted.0 + index as u64),
+                original_content: message.content.clone(),
+                message,
+            })
+            .collect()
     };
     let protocol_asker: Arc<dyn QuestionAsker> = Arc::new(ActorQuestionAsker::new(
         runtime.signals.clone(),

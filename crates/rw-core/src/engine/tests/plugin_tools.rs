@@ -123,9 +123,11 @@ async fn command_host_tool_uses_canonical_turn_without_provider_ir_and_retires_o
         let terminal = events.iter().position(|event|matches!(&event.wire,EngineEvent::TurnFinished {turn_id,..} if turn_id==&outcome.turn_id)).expect("terminal");
         assert!(started < finished && finished < terminal);
         assert!(
-            !events
-                .iter()
-                .any(|event| matches!(&event.wire, EngineEvent::ConversationTurnCommitted { .. })),
+            !events.iter().any(|event| matches!(
+                &event.wire,
+                EngineEvent::ConversationTurnCommitted { .. }
+                    | EngineEvent::ConversationInputCommitted { .. }
+            )),
             "host calls do not invent model messages"
         );
     }

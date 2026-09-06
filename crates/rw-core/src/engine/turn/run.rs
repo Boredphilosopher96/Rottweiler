@@ -1,6 +1,6 @@
 use super::provider_context::{ProviderContext, Reservation, Selection};
+use super::start::AcceptedUserMessage;
 use crate::engine::AgentTurnStatus;
-use crate::engine::PreparedUserMessage;
 use crate::engine::SessionUsage;
 use crate::engine::TEXT_DELTA_COALESCE_WINDOW;
 use crate::engine::commands::CommandToolCall;
@@ -70,7 +70,7 @@ use tokio::sync::mpsc;
 pub(super) async fn run_turn(
     turn: u64,
     tasks: task_ownership::ActorTasks,
-    mut messages: Vec<PreparedUserMessage>,
+    mut messages: Vec<AcceptedUserMessage>,
     command_tool_calls: Vec<CommandToolCall>,
     mut conversation: Vec<Turn>,
     config: Arc<SessionActorConfig>,
@@ -116,7 +116,12 @@ pub(super) async fn run_turn(
             budgeter,
         };
     }
-    for message in messages {
+    for AcceptedUserMessage {
+        source,
+        original_content,
+        message,
+    } in messages
+    {
         let Ok(hook) = dispatch_hook(
             &config.hooks,
             HookInput::UserPromptSubmit(HookPromptInput {
@@ -164,13 +169,21 @@ pub(super) async fn run_turn(
             unreachable!("dispatcher preserves hook phase")
         };
         let content = config.secret_redactor.redact(&input.content);
+        let selection = if content == original_content {
+            rw_types::conversation_input::InputSelection::Accepted {}
+        } else {
+            rw_types::conversation_input::InputSelection::Transformed {
+                text: content.clone(),
+            }
+        };
         let user_turn = message.turn(content);
-        conversation.push(user_turn.clone());
+        conversation.push(user_turn);
         if persist_event(
             &signals,
-            PendingEvent::ConversationTurnCommitted {
+            PendingEvent::ConversationInputCommitted {
                 agent_turn: turn,
-                turn: user_turn,
+                accepted_source: source,
+                selection,
             },
         )
         .await

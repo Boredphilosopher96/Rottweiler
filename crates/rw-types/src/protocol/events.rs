@@ -369,6 +369,15 @@ pub enum EngineEvent {
         title: String,
         message: String,
     },
+    ConversationInputCommitted {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        agent_turn: u64,
+        accepted_source: SequenceId,
+        selection: crate::conversation_input::InputSelection,
+    },
     ConversationTurnCommitted {
         meta: EventMeta,
         #[serde(with = "decimal_u64")]
@@ -792,6 +801,7 @@ impl EngineEvent {
             | Self::PluginStatusChanged { .. }
             | Self::ExtensionStateCommitted { .. }
             | Self::UiNotification { .. }
+            | Self::ConversationInputCommitted { .. }
             | Self::ConversationTurnCommitted { .. }
             | Self::ConversationRewound { .. }
             | Self::TurnStarted { .. }
@@ -916,6 +926,7 @@ impl EngineEvent {
             | Self::ExtensionStateCommitted { meta, .. }
             | Self::TodoStateCommitted { meta, .. }
             | Self::UiNotification { meta, .. }
+            | Self::ConversationInputCommitted { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
             | Self::TurnStarted { meta, .. }
@@ -1022,6 +1033,7 @@ impl EngineEvent {
             | Self::ExtensionStateCommitted { meta, .. }
             | Self::TodoStateCommitted { meta, .. }
             | Self::UiNotification { meta, .. }
+            | Self::ConversationInputCommitted { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
             | Self::TurnStarted { meta, .. }

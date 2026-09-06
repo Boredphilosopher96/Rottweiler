@@ -28,6 +28,7 @@ pub(super) fn reduce(
     event: &EngineEvent,
     modes: &ModeRegistry,
     rows: &mut BatchRows,
+    source: &rw_store::session::journal::JournalReadView,
 ) -> Result<(), RecoveryError> {
     let meta = event
         .meta()
@@ -44,11 +45,32 @@ pub(super) fn reduce(
     }
     head.session_id = Some(meta.session_id.clone());
     let sequence = meta.sequence_id;
-    let Some(kind) = recovered_pending_event(event)? else {
+    if let EngineEvent::ConversationInputCommitted {
+        agent_turn,
+        accepted_source,
+        ..
+    } = event
+    {
+        if !head
+            .control
+            .accepted
+            .iter()
+            .any(|input| input.agent_turn == *agent_turn && input.sequence == *accepted_source)
+        {
+            return Err(RecoveryError::Invalid(
+                "input is not pending in the effective turn",
+            ));
+        }
+    }
+    let materialized = super::input::materialize_input_event(source, event)?;
+    let Some(kind) = recovered_pending_event(&materialized)? else {
         head.next_sequence += 1;
         return Ok(());
     };
     match kind {
+        PendingEvent::ConversationInputCommitted { .. } => {
+            return Err(RecoveryError::Invalid("unresolved input commit"));
+        }
         PendingEvent::BudgetStatus { .. } => head.latest_budget = Some(sequence),
         PendingEvent::TodoStateCommitted { snapshot } => {
             snapshot
@@ -91,11 +113,15 @@ pub(super) fn reduce(
             )?;
             if head.compacting.is_none() {
                 if turn.role == Role::User
-                    && let Some(index) = head
-                        .control
-                        .accepted
-                        .iter()
-                        .position(|accepted| accepted.agent_turn == agent_turn)
+                    && let Some(index) = head.control.accepted.iter().position(|accepted| {
+                        accepted.agent_turn == agent_turn
+                            && match event {
+                                EngineEvent::ConversationInputCommitted {
+                                    accepted_source, ..
+                                } => accepted.sequence == *accepted_source,
+                                _ => true,
+                            }
+                    })
                 {
                     head.control.accepted.remove(index);
                 }

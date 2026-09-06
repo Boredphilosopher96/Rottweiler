@@ -13,7 +13,7 @@ use rw_types::{EngineEvent, SequenceId};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
-pub(super) const VERSION: u32 = 20;
+pub(super) const VERSION: u32 = 21;
 const EVENTS_PER_BATCH: usize = 64;
 
 /// One cancellable, durable canonical projection step.
@@ -146,7 +146,7 @@ impl CanonicalRecovery {
             }
             let mut next = head.clone();
             rows.begin_event();
-            super::reduce::reduce(&mut next, &envelope.event, modes, &mut rows)?;
+            super::reduce::reduce(&mut next, &envelope.event, modes, &mut rows, source)?;
             let checkpoint = encode(&next, MAX_RECOVERY_HEAD_BYTES)?;
             if !rows.fits(checkpoint.len()) {
                 rows.rollback_event();

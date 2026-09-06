@@ -15,6 +15,7 @@ pub mod billing;
 pub mod citation_admission;
 pub mod config;
 pub mod context_source;
+pub mod conversation_input;
 pub use context_source::ContextBlockId;
 mod error;
 pub mod extension_contract;

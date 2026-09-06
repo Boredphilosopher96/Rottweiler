@@ -157,6 +157,12 @@ pub(super) fn read(
             .next()
             .ok_or_else(|| HostError::Protocol("content source does not exist".into()))?
             .event;
+        let event = match rw_core::recovery::materialize_input_event(&pinned, &event)
+            .map_err(page::storage)?
+        {
+            std::borrow::Cow::Borrowed(_) => event,
+            std::borrow::Cow::Owned(resolved) => resolved,
+        };
         let document = TranscriptDocument::from_event(event, &request.source, MAX_DOCUMENT_BYTES)
             .map_err(page::storage)?;
         cache

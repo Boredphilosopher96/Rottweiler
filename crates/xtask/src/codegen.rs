@@ -459,6 +459,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(ChildControlSummary);
     declaration!(FamilyControlRow);
     declaration!(FamilyControlsSnapshot);
+    declaration!(rw_types::conversation_input::InputSelection);
     declaration!(ChildControlsSnapshot);
     declaration!(ChildControlResponse);
 

@@ -307,6 +307,10 @@ async fn interrupt_cancels_a_hung_session_hook_without_waiting_for_its_deadline(
             .lock()
             .expect("event sink lock")
             .iter()
-            .any(|event| matches!(event.kind, PendingEvent::ConversationTurnCommitted { .. }))
+            .any(|event| matches!(
+                event.kind,
+                PendingEvent::ConversationTurnCommitted { .. }
+                    | PendingEvent::ConversationInputCommitted { .. }
+            ))
     );
 }

@@ -287,7 +287,12 @@ impl SourceReader<'_> {
                 .meta()
                 .ok_or(RecoveryError::Invalid("non-durable source"))?;
             if meta.sequence_id == sequence {
-                return Ok(event);
+                return Ok(
+                    match super::input::materialize_input_event(self.source, &event)? {
+                        std::borrow::Cow::Borrowed(_) => event,
+                        std::borrow::Cow::Owned(resolved) => resolved,
+                    },
+                );
             }
             if meta.sequence_id > sequence {
                 break;

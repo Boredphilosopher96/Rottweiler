@@ -64,7 +64,8 @@ pub(super) fn collect_abandoned_empty_sessions(storage_root: &Path) -> Result<()
 pub(super) fn is_session_projection_boundary(event: &EngineEvent) -> bool {
     matches!(
         event,
-        EngineEvent::ConversationTurnCommitted { .. }
+        EngineEvent::ConversationInputCommitted { .. }
+            | EngineEvent::ConversationTurnCommitted { .. }
             | EngineEvent::SessionCreated { .. }
             | EngineEvent::UserMessageAccepted { .. }
             | EngineEvent::TurnFinished { .. }

@@ -22,6 +22,7 @@ use rw_types::PlanArtifact;
 use rw_types::PlanDecision;
 use rw_types::Question;
 use rw_types::QuestionId;
+use rw_types::SequenceId;
 use rw_types::SessionId;
 use rw_types::ShellId;
 use rw_types::StoredAttachment;
@@ -69,6 +70,11 @@ pub(super) enum PendingEvent {
         title: String,
         usage: Option<SessionUsage>,
         cost: Option<Cost>,
+    },
+    ConversationInputCommitted {
+        agent_turn: u64,
+        accepted_source: SequenceId,
+        selection: rw_types::conversation_input::InputSelection,
     },
     ConversationTurnCommitted {
         agent_turn: u64,
@@ -309,7 +315,8 @@ impl PendingEvent {
             | Self::BudgetStatus { turn, .. }
             | Self::QuestionAsked { turn, .. }
             | Self::QuestionAnswered { turn, .. } => Some(*turn),
-            Self::ConversationTurnCommitted { agent_turn, .. } => Some(*agent_turn),
+            Self::ConversationInputCommitted { agent_turn, .. }
+            | Self::ConversationTurnCommitted { agent_turn, .. } => Some(*agent_turn),
             _ => None,
         }
     }
@@ -357,6 +364,16 @@ impl PendingEvent {
                 title,
                 usage: usage.map(Into::into),
                 cost,
+            },
+            Self::ConversationInputCommitted {
+                agent_turn,
+                accepted_source,
+                selection,
+            } => EngineEvent::ConversationInputCommitted {
+                meta,
+                agent_turn,
+                accepted_source,
+                selection,
             },
             Self::ConversationTurnCommitted { agent_turn, turn } => {
                 EngineEvent::ConversationTurnCommitted {

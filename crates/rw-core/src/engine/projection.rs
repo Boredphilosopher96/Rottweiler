@@ -96,6 +96,8 @@ struct ActiveToolStart {
 pub enum SessionProjectionError {
     #[error("invalid durable attachment: {0}")]
     InvalidAttachment(String),
+    #[error("invalid accepted input selector: {0}")]
+    InvalidInput(&'static str),
     #[error("invalid plan: {0}")]
     InvalidPlan(&'static str),
     #[error("invalid durable question payload: {0}")]
@@ -212,7 +214,7 @@ pub struct SessionProjector {
     title: Option<String>,
     conversation_agent_turns: Vec<u64>,
     queued: VecDeque<(u64, String)>,
-    uncommitted_users: BTreeMap<u64, Vec<PreparedUserMessage>>,
+    uncommitted_users: BTreeMap<u64, Vec<(SequenceId, PreparedUserMessage)>>,
     completed_turns: u64,
     active_turn: Option<u64>,
     turn_ends: BTreeMap<u64, usize>,
@@ -396,7 +398,47 @@ impl SessionProjector {
             let Some(kind) = recovered_pending_event(event)? else {
                 break 'event;
             };
+            let input_source = if let PendingEvent::ConversationInputCommitted {
+                accepted_source,
+                ..
+            } = &kind
+            {
+                Some(*accepted_source)
+            } else {
+                None
+            };
+            let kind = match kind {
+                PendingEvent::ConversationInputCommitted {
+                    agent_turn,
+                    accepted_source,
+                    selection,
+                } => {
+                    let (_, message) = uncommitted_users
+                        .get(&agent_turn)
+                        .and_then(|pending| {
+                            pending
+                                .iter()
+                                .find(|(source, _)| *source == accepted_source)
+                        })
+                        .ok_or(SessionProjectionError::InvalidInput(
+                            "input is not pending in this turn",
+                        ))?;
+                    let content =
+                        crate::engine::recovery::input::selected_text(&message.content, &selection)
+                            .map_err(|_| {
+                                SessionProjectionError::InvalidInput("redundant transformed text")
+                            })?;
+                    PendingEvent::ConversationTurnCommitted {
+                        agent_turn,
+                        turn: message.turn(content.to_owned()),
+                    }
+                }
+                event => event,
+            };
             match &kind {
+                PendingEvent::ConversationInputCommitted { .. } => {
+                    return Err(SessionProjectionError::InvalidInput("unresolved input"));
+                }
                 PendingEvent::ProviderCallAccounted { .. } => {}
                 PendingEvent::TurnStarted { turn } => {
                     active_tool_starts.clear();
@@ -431,7 +473,10 @@ impl SessionProjector {
                     {
                         queued.remove(position);
                     }
-                    uncommitted_users.entry(*turn).or_default().push(message);
+                    uncommitted_users
+                        .entry(*turn)
+                        .or_default()
+                        .push((meta.sequence_id, message));
                 }
                 PendingEvent::SessionTitleUpdated {
                     title: updated,
@@ -460,9 +505,11 @@ impl SessionProjector {
                     }
                     if turn.role == Role::User
                         && let Some(pending) = uncommitted_users.get_mut(agent_turn)
-                        && !pending.is_empty()
+                        && let Some(index) = pending.iter().position(|(source, _)| {
+                            input_source.is_none_or(|expected| expected == *source)
+                        })
                     {
-                        pending.remove(0);
+                        pending.remove(index);
                     }
                     conversation.push(turn.clone());
                     conversation_agent_turns.push(*agent_turn);
@@ -986,7 +1033,7 @@ impl SessionProjector {
             rewind_archives: _,
         } = self;
         for messages in uncommitted_users.into_values() {
-            for message in messages {
+            for (_, message) in messages {
                 conversation.push(message.turn(message.content.clone()));
             }
         }

@@ -1,6 +1,6 @@
+use super::start::AcceptedUserMessage;
 use crate::PermissionApprover;
 use crate::engine::MAX_COMMAND_TOOL_FRAME_BYTES;
-use crate::engine::PreparedUserMessage;
 use crate::engine::commands::CommandToolCall;
 use crate::engine::commands::CommandToolOutputKind;
 use crate::engine::session::SessionActorConfig;
@@ -29,7 +29,7 @@ pub(super) struct CommandToolRuntime<'a> {
 
 pub(super) async fn apply_command_tool_calls(
     turn: u64,
-    messages: &mut [PreparedUserMessage],
+    messages: &mut [AcceptedUserMessage],
     calls: Vec<CommandToolCall>,
     runtime: CommandToolRuntime<'_>,
 ) -> Result<(), String> {
@@ -45,7 +45,7 @@ pub(super) async fn apply_command_tool_calls(
     for call in &calls {
         let occurrences = messages
             .iter()
-            .map(|message| message.content.matches(&call.placeholder).count())
+            .map(|message| message.message.content.matches(&call.placeholder).count())
             .sum::<usize>();
         if call.placeholder.is_empty()
             || occurrences != 1
@@ -91,11 +91,14 @@ pub(super) async fn apply_command_tool_calls(
         }
         let Some(message) = messages
             .iter_mut()
-            .find(|message| message.content.contains(&call.placeholder))
+            .find(|message| message.message.content.contains(&call.placeholder))
         else {
             return Err("command tool placeholder disappeared before expansion".to_owned());
         };
-        message.content = message.content.replacen(&call.placeholder, &framed, 1);
+        message.message.content = message
+            .message
+            .content
+            .replacen(&call.placeholder, &framed, 1);
     }
     Ok(())
 }

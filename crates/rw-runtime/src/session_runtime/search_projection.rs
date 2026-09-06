@@ -74,7 +74,9 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
         index
             .apply_page(expected, &projection, |writer| {
                 for envelope in &page.events {
-                    documents(writer, &envelope.event)?;
+                    let event = rw_core::recovery::materialize_input_event(source, &envelope.event)
+                        .map_err(|_| SessionStoreError::CorruptEvent("accepted search input"))?;
+                    documents(writer, &event)?;
                 }
                 Ok(())
             })
@@ -133,14 +135,9 @@ fn documents(
     };
     let mut part = 0;
     match event {
-        EngineEvent::UserMessageAccepted {
-            content,
-            agent_turn,
-            ..
-        } => writer.text(*agent_turn, meta.sequence_id, part, content),
         EngineEvent::ConversationTurnCommitted {
             agent_turn, turn, ..
-        } if turn.role == Role::Assistant => {
+        } if matches!(turn.role, Role::User | Role::Assistant) => {
             for block in &turn.blocks {
                 if let Block::Text { text } = block {
                     text_field(writer, *agent_turn, meta.sequence_id, &mut part, text)?;

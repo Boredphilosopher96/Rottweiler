@@ -25,9 +25,11 @@ pub use fragments::{
     MAX_SUMMARY_FRAGMENT_BYTES,
 };
 mod extension;
+pub(in crate::engine) mod input;
 mod maintenance;
 mod projector;
 mod read;
+pub use input::materialize_input_event;
 mod receipts;
 mod reduce;
 mod repair;
@@ -116,3 +118,6 @@ mod input_tests;
 
 #[cfg(test)]
 mod prompt_tests;
+
+#[cfg(test)]
+mod input_commit_tests;

@@ -226,14 +226,11 @@ async fn successful_single_delta_batches_delta_commit_and_finish() {
     ));
     assert!(matches!(
         &persisted[3].kind,
-        PendingEvent::ConversationTurnCommitted {
+        PendingEvent::ConversationInputCommitted {
             agent_turn: 1,
-            turn: Turn {
-                role: Role::User,
-                blocks,
-                ..
-            },
-        } if matches!(blocks.as_slice(), [Block::Text { text }] if text == "run")
+            accepted_source,
+            selection: rw_types::conversation_input::InputSelection::Accepted {},
+        } if *accepted_source == persisted[2].sequence
     ));
     let terminal = &persisted[persisted.len() - 3..];
     assert!(matches!(
@@ -309,20 +306,14 @@ async fn no_hook_multi_message_opening_batch_preserves_accept_and_commit_order()
                 if content == expected
         ));
     }
-    for (event, expected) in persisted[3..5]
-        .iter()
-        .zip(["first queued", "second queued"])
-    {
+    for (event, expected) in persisted[3..5].iter().zip(&persisted[1..3]) {
         assert!(matches!(
             &event.kind,
-            PendingEvent::ConversationTurnCommitted {
+            PendingEvent::ConversationInputCommitted {
                 agent_turn: 1,
-                turn: Turn {
-                    role: Role::User,
-                    blocks,
-                    ..
-                },
-            } if matches!(blocks.as_slice(), [Block::Text { text }] if text == expected)
+                accepted_source,
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
+            } if *accepted_source == expected.sequence
         ));
     }
     drop(persisted_guard);
@@ -387,10 +378,11 @@ async fn registered_user_prompt_hook_keeps_rewrite_on_the_separate_commit_path()
     ));
     assert!(matches!(
         &persisted[3].kind,
-        PendingEvent::ConversationTurnCommitted {
-            turn: Turn { blocks, .. },
+        PendingEvent::ConversationInputCommitted {
+            accepted_source,
+            selection: rw_types::conversation_input::InputSelection::Transformed { text },
             ..
-        } if matches!(blocks.as_slice(), [Block::Text { text }] if text == "rewritten by hook")
+        } if *accepted_source == persisted[2].sequence && text == "rewritten by hook"
     ));
     drop(persisted_guard);
     let requests = model.requests.lock().expect("request lock");

@@ -14,11 +14,16 @@ fn meta(sequence: u64) -> EventMeta {
     }
 }
 fn user(sequence: u64, turn: u64, content: &str) -> EngineEvent {
-    EngineEvent::UserMessageAccepted {
+    EngineEvent::ConversationTurnCommitted {
         meta: meta(sequence),
         agent_turn: turn,
-        content: content.into(),
-        attachments: vec![],
+        turn: rw_types::Turn {
+            role: Role::User,
+            blocks: vec![Block::Text {
+                text: content.into(),
+            }],
+            meta: rw_types::TurnMeta::default(),
+        },
     }
 }
 fn start(sequence: u64, invocation: &str) -> EngineEvent {
@@ -236,6 +241,42 @@ fn failed_page_keeps_cursor_and_documents_atomic_then_resumes() {
             .search("retainedneedle completedneedle", 10)
             .expect("completed")
             .len(),
+        1
+    );
+}
+
+#[test]
+fn referenced_input_searches_selected_text() {
+    let root = tempfile::tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
+    journal
+        .append_batch([
+            EngineEvent::UserMessageAccepted {
+                meta: meta(0),
+                agent_turn: 1,
+                content: "unselectedneedle".into(),
+                attachments: vec![],
+            },
+            EngineEvent::ConversationInputCommitted {
+                meta: meta(1),
+                agent_turn: 1,
+                accepted_source: SequenceId(0),
+                selection: rw_types::conversation_input::InputSelection::Transformed {
+                    text: "selectedneedle".into(),
+                },
+            },
+        ])
+        .expect("input");
+    synchronize(root.path(), "search", &journal.read_view()).expect("projection");
+    let index = SessionIndex::open(root.path()).expect("index");
+    assert!(
+        index
+            .search("unselectedneedle", 10)
+            .expect("unselected")
+            .is_empty()
+    );
+    assert_eq!(
+        index.search("selectedneedle", 10).expect("selected").len(),
         1
     );
 }
