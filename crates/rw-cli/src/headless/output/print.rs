@@ -102,24 +102,8 @@ async fn consume(
     printer: &mut Terminal,
 ) -> Result<Option<TurnStatus>> {
     let mut events = actor.subscribe().map_err(display_agent_error)?;
-    // Complete the initial durable replay before dispatch. Otherwise a fast
-    // command result can enter the replay ahead of its connection-scoped ACK.
-    events
-        .prime()
-        .await
-        .map_err(|error| miette!("session event stream failed: {error}"))?;
     let dispatch_started = std::time::Instant::now();
-    let actor_task = actor.clone();
-    let prompt_task = prompt.to_owned();
-    let dispatch = tokio::spawn(async move { actor_task.send_message(prompt_task).await });
-    let first_event = events
-        .recv()
-        .await
-        .map_err(|error| miette!("session event stream failed: {error}"))?;
-    let disposition = dispatch
-        .await
-        .map_err(|error| miette!("message dispatch worker failed: {error}"))?
-        .map_err(display_agent_error)?;
+    let (disposition, first_event) = startup(actor, &mut events, prompt).await?;
     let mut completion = Completion::new(disposition, prompt);
     let mut aggregate = PrintOutput::new(session_id, format);
     let mut first_event = Some(first_event);
@@ -167,6 +151,38 @@ async fn consume(
         write(actor, printer, message, false).await?;
     }
     Ok(status)
+}
+
+async fn startup(
+    actor: &rw_core::SessionHandle,
+    events: &mut rw_core::SessionSubscription,
+    prompt: &str,
+) -> Result<(MessageDisposition, rw_core::SessionEventDelivery)> {
+    // Validate the captured source before admitting the command. The subscription
+    // owns any entered read even when this client stops waiting for it.
+    tokio::select! {
+        result = events.prime() => result.map_err(display_agent_error)?,
+        signal = tokio::signal::ctrl_c() => {
+            signal.into_diagnostic()?;
+            return Err(miette!("print startup interrupted"));
+        }
+    }
+    tokio::select! {
+        result = async {
+            // Poll both without spawning a detached dispatcher. Once admitted,
+            // request and effects belong to the actor, independently of these
+            // response waiters; the enclosing session always settles on exit.
+            tokio::try_join!(
+                async { actor.send_message(prompt.to_owned()).await.map_err(display_agent_error) },
+                async { events.recv().await.map_err(display_agent_error) },
+            )
+        } => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.into_diagnostic()?;
+            actor.interrupt().await.map_err(display_agent_error)?;
+            Err(miette!("print startup interrupted"))
+        }
+    }
 }
 
 struct Completion {
