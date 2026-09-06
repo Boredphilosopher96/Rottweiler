@@ -106,7 +106,11 @@ impl Drop for BlockingProcess {
             if Instant::now() >= deadline {
                 // Unwinding cannot report proof that does not exist. Preserve
                 // the actual child and group authority with its capacity.
-                std::mem::forget(state);
+                tracing::error!(
+                    pid = state.child.id(),
+                    "process settlement unavailable; retaining physical owner"
+                );
+                Box::leak(Box::new(state));
                 return;
             }
             thread::sleep(Duration::from_millis(10));
