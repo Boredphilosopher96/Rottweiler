@@ -213,7 +213,8 @@ impl CommandExecutor for TokioCommandExecutor {
                 child,
                 watchdog: None,
                 output: None,
-                _proxy: egress_proxy,
+                proxy: egress_proxy,
+                proxy_cleanup: None,
                 _lease: self.execution_lease.clone(),
             }),
             cleanup: Arc::clone(&self.native_cleanup),
@@ -316,6 +317,16 @@ struct NativeJob {
     completion: tokio::sync::watch::Receiver<NativeProof>,
 }
 
+impl Drop for NativeJob {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.get_mut().take() {
+            // A failed or cancelled cleanup retains the actual child, authority,
+            // output workers, and capacity until this process exits.
+            std::mem::forget(state);
+        }
+    }
+}
+
 struct NativeProofOwner {
     completed: bool,
     proof: tokio::sync::watch::Sender<NativeProof>,
@@ -374,7 +385,7 @@ impl NativeCleanup {
             proof,
             admission: Arc::clone(&self.admission),
         };
-        tokio::spawn(async move {
+        let retirement = async move {
             let mut owner = owner;
             let mut state = job.state.lock().await;
             let result = match state.as_mut() {
@@ -396,7 +407,10 @@ impl NativeCleanup {
             ));
             owner.completed = true;
             let _ = respond.send(result);
-        });
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(retirement);
+        }
         result
     }
 
@@ -440,7 +454,8 @@ pub(super) struct NativeCommandState {
     child_id: Option<u32>,
     watchdog: Option<ParentDeathWatchdog>,
     output: Option<CommandOutputTasks>,
-    _proxy: Option<SupervisedEgressProxy>,
+    proxy: Option<SupervisedEgressProxy>,
+    proxy_cleanup: Option<tokio::task::JoinHandle<()>>,
     _lease: Option<Arc<ExecutionLease>>,
 }
 
@@ -458,7 +473,17 @@ impl NativeCommandState {
         };
         watchdog_result
             .and(output_result)
-            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
+            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))?;
+        if let Some(proxy) = self.proxy.take() {
+            self.proxy_cleanup = Some(tokio::task::spawn_blocking(move || drop(proxy)));
+        }
+        if let Some(cleanup) = self.proxy_cleanup.as_mut() {
+            cleanup.await.map_err(|error| {
+                ToolError::EffectsUnsettled(format!("command proxy cleanup failed: {error}"))
+            })?;
+            self.proxy_cleanup = None;
+        }
+        Ok(())
     }
 }
 
