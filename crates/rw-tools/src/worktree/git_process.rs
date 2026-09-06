@@ -30,7 +30,8 @@ pub(super) async fn run(
     rw_resources::run_blocking(ResourceClass::Blocking, move || {
         cancellation.check()?;
         abandoned.check()?;
-        let mut process = BlockingProcess::spawn(&mut command).map_err(command_error)?;
+        let mut process =
+            BlockingProcess::spawn(&mut command).map_err(|error| command_error(&error))?;
         let result = communicate(&mut process, &input, &cancellation, &abandoned);
         // Every result, including pipe failures and cancellation, crosses the
         // same physical settlement barrier before the effect caller resumes.
@@ -41,7 +42,7 @@ pub(super) async fn run(
     .map_err(|error| ToolError::Command(format!("Git worker failed: {error}")))?
 }
 
-fn command_error(error: io::Error) -> ToolError {
+fn command_error(error: &io::Error) -> ToolError {
     ToolError::Command(format!("Git execution failed: {error}"))
 }
 
@@ -57,20 +58,20 @@ fn communicate(
     cancellation: &CancellationToken,
     abandoned: &CancellationToken,
 ) -> Result<GitOutput, ToolError> {
-    let child = process.child_mut().map_err(command_error)?;
+    let child = process.child_mut().map_err(|error| command_error(&error))?;
     let mut stdin = child.stdin.take();
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| command_error(io::Error::other("missing stdout")))?;
+        .ok_or_else(|| command_error(&io::Error::other("missing stdout")))?;
     let mut stderr = child
         .stderr
         .take()
-        .ok_or_else(|| command_error(io::Error::other("missing stderr")))?;
-    nonblocking(&stdout).map_err(command_error)?;
-    nonblocking(&stderr).map_err(command_error)?;
+        .ok_or_else(|| command_error(&io::Error::other("missing stderr")))?;
+    nonblocking(&stdout).map_err(|error| command_error(&error))?;
+    nonblocking(&stderr).map_err(|error| command_error(&error))?;
     if let Some(pipe) = stdin.as_ref() {
-        nonblocking(pipe).map_err(command_error)?;
+        nonblocking(pipe).map_err(|error| command_error(&error))?;
     }
     let mut written = 0;
     let mut output = Output::new(MAX_GIT_OUTPUT_BYTES);
@@ -79,14 +80,18 @@ fn communicate(
     loop {
         cancellation.check()?;
         abandoned.check()?;
-        let mut progress = output.read(&mut stdout).map_err(command_error)?;
-        progress |= diagnostic.read(&mut stderr).map_err(command_error)?;
+        let mut progress = output
+            .read(&mut stdout)
+            .map_err(|error| command_error(&error))?;
+        progress |= diagnostic
+            .read(&mut stderr)
+            .map_err(|error| command_error(&error))?;
         if written == input.len() {
             stdin.take();
         }
         if let Some(pipe) = stdin.as_mut() {
             match pipe.write(&input[written..input.len().min(written + 16 * 1024)]) {
-                Ok(0) => return Err(command_error(io::ErrorKind::WriteZero.into())),
+                Ok(0) => return Err(command_error(&io::ErrorKind::WriteZero.into())),
                 Ok(count) => {
                     written += count;
                     progress = true;
@@ -96,15 +101,15 @@ fn communicate(
                         error.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) => {}
-                Err(error) => return Err(command_error(error)),
+                Err(error) => return Err(command_error(&error)),
             }
         }
         if exited.is_none()
             && let Some(status) = process
                 .child_mut()
-                .map_err(command_error)?
+                .map_err(|error| command_error(&error))?
                 .try_wait()
-                .map_err(command_error)?
+                .map_err(|error| command_error(&error))?
         {
             process.settle();
             exited = Some((status, Instant::now()));
@@ -127,7 +132,7 @@ fn communicate(
                 });
             }
             if at.elapsed() >= Duration::from_secs(2) {
-                return Err(command_error(io::Error::other(
+                return Err(command_error(&io::Error::other(
                     "Git output pipes did not close",
                 )));
             }
@@ -143,6 +148,44 @@ struct Output {
     limit: usize,
     truncated: bool,
     eof: bool,
+}
+
+impl Output {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            truncated: false,
+            eof: false,
+        }
+    }
+    fn read(&mut self, pipe: &mut impl Read) -> io::Result<bool> {
+        if self.eof {
+            return Ok(false);
+        }
+        let mut buffer = [0; 16 * 1024];
+        match pipe.read(&mut buffer) {
+            Ok(0) => {
+                self.eof = true;
+                Ok(true)
+            }
+            Ok(count) => {
+                let retained = self.limit.saturating_sub(self.bytes.len()).min(count);
+                self.bytes.extend_from_slice(&buffer[..retained]);
+                self.truncated |= retained < count;
+                Ok(true)
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -220,42 +263,5 @@ mod tests {
             rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG),
             Err(rustix::io::Errno::CHILD)
         ));
-    }
-}
-impl Output {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            limit,
-            truncated: false,
-            eof: false,
-        }
-    }
-    fn read(&mut self, pipe: &mut impl Read) -> io::Result<bool> {
-        if self.eof {
-            return Ok(false);
-        }
-        let mut buffer = [0; 16 * 1024];
-        match pipe.read(&mut buffer) {
-            Ok(0) => {
-                self.eof = true;
-                Ok(true)
-            }
-            Ok(count) => {
-                let retained = self.limit.saturating_sub(self.bytes.len()).min(count);
-                self.bytes.extend_from_slice(&buffer[..retained]);
-                self.truncated |= retained < count;
-                Ok(true)
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) =>
-            {
-                Ok(false)
-            }
-            Err(error) => Err(error),
-        }
     }
 }
