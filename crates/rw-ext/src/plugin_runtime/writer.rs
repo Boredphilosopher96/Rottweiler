@@ -43,6 +43,11 @@ struct PreparedFrame {
 }
 
 impl PreparedFrame {
+    fn from_reply(reply: super::push_reply::OwnedPushFrame) -> Result<Self, ()> {
+        let mut prepared = Self::new(reply.frame)?;
+        prepared.retained = Some(reply.retained);
+        Ok(prepared)
+    }
     fn new(frame: RpcFrame) -> Result<Self, ()> {
         frame.validate().map_err(|_| ())?;
         let mut size = JsonWriter::count(MAX_FRAME_BYTES);
@@ -110,10 +115,10 @@ impl RpcWriter {
         &self,
         reply: super::push_reply::OwnedPushFrame,
     ) -> Result<(), ()> {
+        // Capture the whole owner: disjoint closure captures must not replace
+        // OwnedPushFrame's value-before-credit drop order before CPU admission.
         let prepared = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
-            let mut prepared = PreparedFrame::new(reply.frame)?;
-            prepared.retained = Some(reply.retained);
-            Ok::<_, ()>(prepared)
+            PreparedFrame::from_reply(reply)
         })
         .await
         .map_err(|_| ())??;
