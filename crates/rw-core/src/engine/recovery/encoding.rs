@@ -55,7 +55,7 @@ impl Write for Counter {
 
 /// The fold and source reader decode the same canonical event. Persist the
 /// normalized retained allocation of that turn, independently of decoder scratch.
-/// SourceReader rechecks the prepared allocation before transferring the turn.
+/// `SourceReader` rechecks the prepared allocation before transferring the turn.
 pub(super) fn turn_decode_bytes(turn: &rw_types::Turn) -> Result<u64, RecoveryError> {
     use rw_types::allocation::PrepareAllocation;
     turn.prepared_bytes()

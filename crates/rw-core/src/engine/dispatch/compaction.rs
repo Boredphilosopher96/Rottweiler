@@ -62,83 +62,16 @@ pub(super) async fn start_manual_compaction(
     let tasks = state.tasks.clone();
     if let Err(error) = tasks.spawn(Arc::clone(&config), cancellation.clone(), async move {
         let mut summary = fallback;
-        let result = async {
-            let page = history
-                .conversation_page(
-                    0..history.conversation().turns,
-                    crate::engine::recovery::HistoryMaterializationLimits::default(),
-                )
-                .await?;
-            if page.has_more {
-                drop(page);
-                let (compacted, _) = crate::engine::turn::history_compaction::compact(
-                    history,
-                    Vec::new(),
-                    &config,
-                    &cancellation,
-                    &signals,
-                    summary_turn,
-                    CompactionReason::Manual,
-                    instructions,
-                    local_session_accounting,
-                )
-                .await?;
-                summary = crate::engine::session::ConversationSummary::from_turns(&compacted.turns);
-                return Ok(());
-            }
-            let owned = page
-                .map_async(|page| async {
-                    let mut conversation = page.turns;
-                    let mut context_surgery = page.context_actions.into_iter().flatten().collect();
-                    let result = async {
-                        let pre_budget = evaluate_budget(
-                            summary_turn,
-                            config.event_clock.as_ref(),
-                            &config.event_sink,
-                            &config.model.budget_config(),
-                            local_session_accounting,
-                            BudgetUsage::default(),
-                        )
-                        .await?;
-                        for event in pre_budget.events {
-                            persist_event(&signals, event).await?;
-                        }
-                        if pre_budget.hard_stop {
-                            return Err(AgentLoopError::InvalidConfiguration(
-                                "budget hard cap prevents compaction model call".to_owned(),
-                            ));
-                        }
-                        compact_during_turn(
-                            summary_turn,
-                            &mut conversation,
-                            &mut context_surgery,
-                            CompactionReason::Manual,
-                            &config,
-                            &cancellation,
-                            &signals,
-                            local_session_accounting,
-                            0,
-                            0,
-                            0,
-                            instructions,
-                        )
-                        .await
-                        .map(|_| ())
-                    }
-                    .await;
-                    (
-                        crate::engine::session::ConversationSummary::from_turns(&conversation),
-                        result,
-                    )
-                })
-                .await;
-            let mut completed = Ok(());
-            drop(owned.map(|(value, result)| {
-                summary = value;
-                completed = result;
-            }));
-            completed
-        }
+        let result = compact_history(
+            history,
+            &config,
+            &cancellation,
+            &signals,
+            summary_turn,
+            local_session_accounting,
+            instructions,
+            &mut summary,
+        )
         .await;
         if let Err(error) = &result {
             let _ = persist_event(
@@ -160,4 +93,92 @@ pub(super) async fn start_manual_compaction(
         state.unsettled = Some(error.to_string());
         state.tasks.cancel();
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compact_history(
+    history: Arc<dyn crate::engine::recovery::SessionHistoryView>,
+    config: &SessionActorConfig,
+    cancellation: &CancellationToken,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    summary_turn: u64,
+    local_session_accounting: crate::engine::turn::accounting::SessionAccountingFallback,
+    instructions: Option<String>,
+    summary: &mut crate::engine::session::ConversationSummary,
+) -> Result<(), AgentLoopError> {
+    let page = history
+        .conversation_page(
+            0..history.conversation().turns,
+            crate::engine::recovery::HistoryMaterializationLimits::default(),
+        )
+        .await?;
+    if page.has_more {
+        drop(page);
+        let (compacted, _) = crate::engine::turn::history_compaction::compact(
+            history,
+            Vec::new(),
+            config,
+            cancellation,
+            signals,
+            summary_turn,
+            CompactionReason::Manual,
+            instructions,
+            local_session_accounting,
+        )
+        .await?;
+        *summary = crate::engine::session::ConversationSummary::from_turns(&compacted.turns);
+        return Ok(());
+    }
+    let owned = page
+        .map_async(|page| async {
+            let mut conversation = page.turns;
+            let mut context_surgery = page.context_actions.into_iter().flatten().collect();
+            let result = async {
+                let pre_budget = evaluate_budget(
+                    summary_turn,
+                    config.event_clock.as_ref(),
+                    &config.event_sink,
+                    &config.model.budget_config(),
+                    local_session_accounting,
+                    BudgetUsage::default(),
+                )
+                .await?;
+                for event in pre_budget.events {
+                    persist_event(signals, event).await?;
+                }
+                if pre_budget.hard_stop {
+                    return Err(AgentLoopError::InvalidConfiguration(
+                        "budget hard cap prevents compaction model call".to_owned(),
+                    ));
+                }
+                compact_during_turn(
+                    summary_turn,
+                    &mut conversation,
+                    &mut context_surgery,
+                    CompactionReason::Manual,
+                    config,
+                    cancellation,
+                    signals,
+                    local_session_accounting,
+                    0,
+                    0,
+                    0,
+                    instructions,
+                )
+                .await
+                .map(|_| ())
+            }
+            .await;
+            (
+                crate::engine::session::ConversationSummary::from_turns(&conversation),
+                result,
+            )
+        })
+        .await;
+    let mut completed = Ok(());
+    drop(owned.map(|(value, result)| {
+        *summary = value;
+        completed = result;
+    }));
+    completed
 }

@@ -170,10 +170,10 @@ impl FixedSessionExtensionController {
     pub(in crate::engine::tests) fn rebase(
         &self,
         current: SessionExtensionSnapshot,
-    ) -> Result<(SessionExtensionSnapshot, bool), AgentLoopError> {
+    ) -> (SessionExtensionSnapshot, bool) {
         let mut stored = self.base.lock().expect("extension base");
         if stored.is_none() {
-            return Ok((current, false));
+            return (current, false);
         }
         *stored = Some(current.clone());
         let mut commands = current.commands.as_ref().clone();
@@ -186,7 +186,7 @@ impl FixedSessionExtensionController {
                 EchoCommand,
             )
             .expect("development marker command");
-        Ok((
+        (
             SessionExtensionSnapshot {
                 publication: crate::RuntimePublication::Active,
                 model: current.model,
@@ -199,7 +199,7 @@ impl FixedSessionExtensionController {
                 commands: Arc::new(commands),
             },
             false,
-        ))
+        )
     }
 }
 
@@ -246,7 +246,7 @@ impl WorkspaceRootController for FixedWorkspaceRootController {
                 tools: generation.tools.clone(),
                 hooks: generation.hooks.clone(),
                 commands: generation.commands.clone(),
-            })?;
+            });
             generation.tools = snapshot.tools;
             generation.hooks = snapshot.hooks;
             generation.commands = snapshot.commands;

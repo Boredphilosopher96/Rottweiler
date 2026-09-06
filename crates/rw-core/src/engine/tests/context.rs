@@ -128,26 +128,7 @@ async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
         builtin_hook_dispatcher().expect("hooks"),
     );
     actor_config.initial_session_context = vec![text_turn(Role::System, "protected policy")];
-    actor_config.recovered.conversation = vec![Turn {
-        role: Role::Tool,
-        blocks: vec![
-            Block::ToolResult {
-                id: ToolCallId("call-inspect".to_owned()),
-                output: ToolOutput::Structured {
-                    value: json!({"answer": 42}),
-                },
-                is_error: false,
-            },
-            Block::ToolResult {
-                id: ToolCallId("call-second".to_owned()),
-                output: ToolOutput::Text {
-                    text: "second result".to_owned(),
-                },
-                is_error: false,
-            },
-        ],
-        meta: TurnMeta::default(),
-    }];
+    actor_config.recovered.conversation = vec![inventory_tool_turn()];
     actor_config.recovered.context_surgery = vec![ContextSurgeryAction {
         item_id: ContextItemId("conversation:0".to_owned()),
         pinned: true,
@@ -439,4 +420,27 @@ async fn running_turn_rejects_context_surgery_without_losing_durable_state() {
     assert!(!snapshot.items[0].state.pinned);
     assert!(handle.interrupt().await.expect("interrupt"));
     collect_turn(&mut subscription).await;
+}
+
+fn inventory_tool_turn() -> Turn {
+    Turn {
+        role: Role::Tool,
+        blocks: vec![
+            Block::ToolResult {
+                id: ToolCallId("call-inspect".to_owned()),
+                output: ToolOutput::Structured {
+                    value: json!({"answer": 42}),
+                },
+                is_error: false,
+            },
+            Block::ToolResult {
+                id: ToolCallId("call-second".to_owned()),
+                output: ToolOutput::Text {
+                    text: "second result".to_owned(),
+                },
+                is_error: false,
+            },
+        ],
+        meta: TurnMeta::default(),
+    }
 }

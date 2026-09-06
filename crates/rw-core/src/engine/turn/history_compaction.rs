@@ -201,56 +201,7 @@ async fn summarize(
             true,
         )
         .await?;
-        persist_event(
-            signals,
-            PendingEvent::CompactionAttemptFinished {
-                summary_turn: turn,
-                usage: execution.usage,
-                cost: execution.cost.clone(),
-            },
-        )
-        .await?;
-        let units = cost_units(&execution.cost);
-        summary.cost_micros = summary
-            .cost_micros
-            .saturating_add(units.cost_micros_usd)
-            .saturating_add(execution.failed_attempt_cost_micros);
-        summary.credit_micros = summary
-            .credit_micros
-            .saturating_add(units.ai_credit_micros)
-            .saturating_add(execution.failed_attempt_credit_micros);
-        summary.tokens = summary
-            .tokens
-            .saturating_add(units.subscription_tokens)
-            .saturating_add(execution.failed_attempt_tokens);
-        let now = config.event_clock.unix_time_millis();
-        let ledger = config
-            .event_sink
-            .budget_totals(crate::engine::event_clock::BudgetLedgerQuery {
-                now_unix_ms: now,
-                utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
-                trailing_minute_start_unix_ms: now.saturating_sub(60_000),
-            })
-            .await?;
-        if ledger.authoritative {
-            summary.cost_micros = 0;
-            summary.credit_micros = 0;
-            summary.tokens = 0;
-        }
-        if execution.hard_stop {
-            return Err(invalid("budget cap prevents complete history compaction"));
-        }
-        summary.carry = execution.conversation;
-        summary.pins = execution
-            .remapped_pins
-            .into_iter()
-            .map(|item_id| ContextSurgeryAction {
-                item_id,
-                pinned: true,
-                effective_after_agent_turn: turn,
-            })
-            .collect();
-        check_carry(&summary.carry, &summary.pins)?;
+        summary.accept(execution, config, signals, turn).await?;
         drop(source);
     }
     Ok(summary)
@@ -301,4 +252,66 @@ fn page_tokens(
         )
         .filter(|tokens| *tokens > 0)
         .ok_or_else(|| invalid("retained summary and pins exhaust compaction context capacity"))
+}
+
+impl Summary {
+    async fn accept(
+        &mut self,
+        execution: super::compaction::CompactionExecution,
+        config: &SessionActorConfig,
+        signals: &mpsc::UnboundedSender<TurnSignal>,
+        turn: u64,
+    ) -> Result<(), AgentLoopError> {
+        persist_event(
+            signals,
+            PendingEvent::CompactionAttemptFinished {
+                summary_turn: turn,
+                usage: execution.usage,
+                cost: execution.cost.clone(),
+            },
+        )
+        .await?;
+        let units = cost_units(&execution.cost);
+        self.cost_micros = self
+            .cost_micros
+            .saturating_add(units.cost_micros_usd)
+            .saturating_add(execution.failed_attempt_cost_micros);
+        self.credit_micros = self
+            .credit_micros
+            .saturating_add(units.ai_credit_micros)
+            .saturating_add(execution.failed_attempt_credit_micros);
+        self.tokens = self
+            .tokens
+            .saturating_add(units.subscription_tokens)
+            .saturating_add(execution.failed_attempt_tokens);
+        let now = config.event_clock.unix_time_millis();
+        let ledger = config
+            .event_sink
+            .budget_totals(crate::engine::event_clock::BudgetLedgerQuery {
+                now_unix_ms: now,
+                utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
+                trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+            })
+            .await?;
+        if ledger.authoritative {
+            self.cost_micros = 0;
+            self.credit_micros = 0;
+            self.tokens = 0;
+        }
+        if execution.hard_stop {
+            return Err(invalid("budget cap prevents complete history compaction"));
+        }
+        self.carry = execution.conversation;
+        self.pins = execution
+            .remapped_pins
+            .into_iter()
+            .map(|item_id| ContextSurgeryAction {
+                item_id,
+                pinned: true,
+                effective_after_agent_turn: turn,
+            })
+            .collect();
+        check_carry(&self.carry, &self.pins)?;
+        Ok(())
+    }
 }

@@ -375,10 +375,10 @@ pub(super) fn reduce(
                 sequence,
                 from: head.conversation,
                 after: None,
-                to: ConversationCut {
+                to: Box::new(ConversationCut {
                     generation: sequence.0.saturating_add(1),
                     ..ConversationCut::default()
-                },
+                }),
             });
             return Ok(());
         }

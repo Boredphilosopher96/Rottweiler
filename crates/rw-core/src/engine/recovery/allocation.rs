@@ -98,6 +98,10 @@ fn head_heap(head: &RecoveryHead) -> Option<usize> {
     let control = &head.control;
     sum([
         heap(&head.session_id),
+        Some(match &head.maintenance {
+            Some(super::state::Maintenance::Clear { .. }) => size_of::<super::ConversationCut>(),
+            _ => 0,
+        }),
         heap(&head.plugin_statuses),
         head.accounting.retained_heap_bytes(),
         heap(&control.driver),

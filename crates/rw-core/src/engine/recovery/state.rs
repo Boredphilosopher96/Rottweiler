@@ -214,7 +214,8 @@ pub(super) enum Maintenance {
         sequence: SequenceId,
         from: ConversationCut,
         after: Option<u64>,
-        to: ConversationCut,
+        // Keep the destination under construction out of every idle/rewind head.
+        to: Box<ConversationCut>,
     },
 }
 

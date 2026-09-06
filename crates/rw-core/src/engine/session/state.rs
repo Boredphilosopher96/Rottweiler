@@ -391,6 +391,7 @@ impl ActorState {
         self.has_assistant_text = summary.has_assistant_text;
         self.approved_plan_item = summary.approved_plan_item;
     }
+    /// Consume a committed body into scalar metadata, releasing its allocation here.
     pub(in crate::engine) fn append_conversation(&mut self, turn: Turn) {
         if let Some(model) = turn.meta.model.as_ref().filter(|model| model.contains('/')) {
             self.resolved_model = Some(model.clone());
@@ -417,6 +418,7 @@ impl ActorState {
             )));
         }
         self.conversation_turns = self.conversation_turns.saturating_add(1);
+        drop(turn);
     }
     pub(in crate::engine) fn clear_conversation_except_system(&mut self) {
         self.conversation_turns = self.system_turns;

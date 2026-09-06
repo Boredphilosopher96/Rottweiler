@@ -141,7 +141,7 @@ impl CanonicalRecovery {
                     || !page.has_more
                     || from.turns == 0
                 {
-                    head.conversation = to;
+                    head.conversation = *to;
                     if let Some(active) = &mut head.control.active {
                         active.replace_conversation(sequence);
                     }

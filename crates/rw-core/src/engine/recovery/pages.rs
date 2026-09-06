@@ -107,10 +107,10 @@ impl CanonicalHistory {
         let mut pruned_tool_outputs = std::collections::BTreeMap::new();
         for turn in &turns {
             for block in &turn.blocks {
-                if let rw_types::Block::ToolResult { id, .. } = block {
-                    if let Some(tokens) = self.pruned_output(&id.0)? {
-                        pruned_tool_outputs.insert(id.0.clone(), tokens);
-                    }
+                if let rw_types::Block::ToolResult { id, .. } = block
+                    && let Some(tokens) = self.pruned_output(&id.0)?
+                {
+                    pruned_tool_outputs.insert(id.0.clone(), tokens);
                 }
             }
         }

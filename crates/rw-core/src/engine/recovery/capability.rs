@@ -25,6 +25,8 @@ pub trait SessionHistoryView: Send + Sync {
 
     /// Reserve the application-wide working allowance before context transformation.
     /// The owner must remain live through temporary buffers and delivered results.
+    /// # Errors
+    /// Rejects exhausted application working-set admission.
     fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError>;
 
     /// Resolve live controls and interrupted input at this exact prefix.
@@ -44,6 +46,8 @@ pub trait SessionHistoryView: Send + Sync {
 
     /// Prove that a reconstructed historical prompt matches its recorded request.
     /// Called inside the retained blocking context worker.
+    /// # Errors
+    /// Rejects missing recorded request shapes or mismatched reconstructed requests.
     fn verify_prompt(&self, turn: u64, dump: &rw_types::PromptDump) -> Result<(), AgentLoopError>;
 
     /// Read a bounded contiguous context interval. The implementation may cut the
