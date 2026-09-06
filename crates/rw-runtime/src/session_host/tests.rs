@@ -1,5 +1,5 @@
-use rw_core::EngineEvent;
 #![allow(clippy::expect_used)]
+use rw_core::EngineEvent;
 use rw_store::session::SessionEventLog;
 
 #[cfg(unix)]

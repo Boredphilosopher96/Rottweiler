@@ -44,14 +44,14 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rw_core::{
     AttachmentData, CachedModelCatalog, CommandDescriptor, CompletedForkOperation, Config,
-    CreateSessionRequest, ForkOperationKey, ForkOperationState, ForkSessionRequest,
-    HostError, HostQueryService, HostedSession, ModelAlias, ModelCatalogError,
-    ModelCatalogSnapshot, ModelCatalogSource, PermissionDecision, PreparedForkOperation,
-    ProviderAuthAttempt, ProviderAuthChallenge, ProviderAuthCompletion, ProviderLogin,
-    ProviderLoginCancellation, ProviderModelCatalogSource, SessionDescriptor, SessionFactory,
-    SessionId, TranscriptFormat, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceStatus, begin_provider_login, builtin_command_registry,
-    merge_model_catalog_provider, retain_model_catalog_provider,
+    CreateSessionRequest, ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError,
+    HostQueryService, HostedSession, ModelAlias, ModelCatalogError, ModelCatalogSnapshot,
+    ModelCatalogSource, PermissionDecision, PreparedForkOperation, ProviderAuthAttempt,
+    ProviderAuthChallenge, ProviderAuthCompletion, ProviderLogin, ProviderLoginCancellation,
+    ProviderModelCatalogSource, SessionDescriptor, SessionFactory, SessionId, TranscriptFormat,
+    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceStatus, begin_provider_login, builtin_command_registry, merge_model_catalog_provider,
+    retain_model_catalog_provider,
 };
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
