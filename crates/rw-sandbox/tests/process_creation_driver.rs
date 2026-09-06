@@ -54,8 +54,15 @@ fn main() {
         let args = [
             OsString::from("--probe-child"),
             OsString::from(if proxy_mode { "proxy" } else { "deny" }),
-            OsString::from(rustix::process::getuid().as_raw().to_string()),
         ];
+        #[cfg(target_os = "linux")]
+        let args = {
+            let mut args = args.to_vec();
+            args.push(OsString::from(
+                rustix::process::getuid().as_raw().to_string(),
+            ));
+            args
+        };
         let plan =
             shell_launch_plan(&policy, &common::helper(), &executable, &args).expect("launch plan");
         #[cfg(target_os = "linux")]
