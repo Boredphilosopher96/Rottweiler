@@ -3,8 +3,6 @@ use crate::cli_args::OutputFormat;
 use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
-use rustyline::DefaultEditor;
-use rustyline::error::ReadlineError;
 use rw_core::EngineEvent;
 use rw_core::MessageDisposition;
 use rw_core::QuestionId;
@@ -18,10 +16,9 @@ use std::collections::VecDeque;
 use std::io;
 use std::io::Write;
 use std::path::Path;
-use std::path::PathBuf;
-use tokio::sync::mpsc;
 
 mod aggregate;
+mod printer;
 mod repl_encoding;
 use aggregate::PrintOutput;
 pub(super) const MAX_REPL_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -247,54 +244,6 @@ pub(super) enum InputLine {
     Error(String),
 }
 
-pub(super) fn spawn_readline(
-    history: PathBuf,
-) -> Result<(
-    mpsc::UnboundedReceiver<InputLine>,
-    Box<dyn rustyline::ExternalPrinter + Send>,
-)> {
-    let (send, receive) = mpsc::unbounded_channel();
-    let mut editor = DefaultEditor::new().into_diagnostic()?;
-    let printer = editor.create_external_printer().into_diagnostic()?;
-    let _ = editor.load_history(&history);
-    std::thread::spawn(move || {
-        loop {
-            match editor.readline("rw> ") {
-                Ok(line) => {
-                    if !line.trim().is_empty() {
-                        let _ = editor.add_history_entry(line.as_str());
-                        if let Some(parent) = history.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = editor.save_history(&history);
-                    }
-                    if send.send(InputLine::Line(line)).is_err() {
-                        break;
-                    }
-                }
-                Err(ReadlineError::Interrupted) => {
-                    if send.send(InputLine::Interrupt).is_err() {
-                        break;
-                    }
-                }
-                Err(ReadlineError::Eof) => {
-                    let _ = send.send(InputLine::Eof);
-                    break;
-                }
-                Err(error) => {
-                    let _ = send.send(InputLine::Error(error.to_string()));
-                    break;
-                }
-            }
-        }
-        if let Some(parent) = history.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = editor.save_history(&history);
-    });
-    Ok((receive, Box::new(printer)))
-}
-
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_repl(
     actor: &rw_core::SessionHandle,
@@ -302,7 +251,7 @@ pub(super) async fn run_repl(
     format: OutputFormat,
 ) -> Result<Option<TurnStatus>> {
     let mut events = actor.subscribe().map_err(display_agent_error)?;
-    let (mut input, mut printer) = spawn_readline(storage_root.join("history.txt"))?;
+    let (mut input, mut printer) = printer::spawn_readline(storage_root.join("history.txt"))?;
     let mut interactions = VecDeque::new();
     let mut last_status = None;
     loop {
@@ -338,7 +287,7 @@ pub(super) async fn run_repl(
                                         .map_err(display_agent_error)?;
                                 }
                             }
-                            display_next_interaction(interactions.front(), printer.as_mut())?;
+                            display_next_interaction(interactions.front(), &mut printer).await?;
                             continue;
                         }
                         if line.trim() == "/exit" {
@@ -388,7 +337,7 @@ pub(super) async fn run_repl(
                         }),
                     });
                     if announce {
-                        display_next_interaction(interactions.front(), printer.as_mut())?;
+                        display_next_interaction(interactions.front(), &mut printer).await?;
                     }
                 }
                 if let EngineEvent::QuestionAsked {
@@ -408,7 +357,7 @@ pub(super) async fn run_repl(
                             .collect(),
                     });
                     if announce {
-                        display_next_interaction(interactions.front(), printer.as_mut())?;
+                        display_next_interaction(interactions.front(), &mut printer).await?;
                     }
                 }
                 if let EngineEvent::PlanSubmitted { .. } = &event {
@@ -417,10 +366,10 @@ pub(super) async fn run_repl(
                 if let EngineEvent::TurnFinished { status, .. } = &event {
                     last_status = Some(status.clone());
                     interactions.retain(|interaction| matches!(interaction, PendingInteraction::Plan));
-                    display_next_interaction(interactions.front(), printer.as_mut())?;
+                    display_next_interaction(interactions.front(), &mut printer).await?;
                 }
                 if let Some(message) = repl_event_message(event, format)? {
-                    printer.print(message).into_diagnostic()?;
+                    printer.print(message).await?;
                 }
             }
         }
@@ -444,9 +393,9 @@ pub(super) enum PendingInteraction {
     },
 }
 
-pub(super) fn display_next_interaction(
+pub(super) async fn display_next_interaction(
     interaction: Option<&PendingInteraction>,
-    printer: &mut dyn rustyline::ExternalPrinter,
+    printer: &mut printer::OwnedPrinter,
 ) -> Result<()> {
     let message = match interaction {
         Some(PendingInteraction::Plan) => {
@@ -468,7 +417,7 @@ pub(super) fn display_next_interaction(
         }) => format!("allow {capabilities:?} ({rationale})? [y] once / [a] session / [p] project / [n] deny\n"),
         None => return Ok(()),
     };
-    printer.print(message).into_diagnostic()
+    printer.print(message).await
 }
 
 pub(super) fn repl_event_message(
