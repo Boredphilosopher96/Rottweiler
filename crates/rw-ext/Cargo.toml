@@ -11,6 +11,7 @@ default = []
 wasm-runtime = ["dep:wasmtime"]
 
 [dependencies]
+rw-resources.workspace = true
 rw-operation-contract.workspace = true
 async-trait = "0.1.89"
 base64.workspace = true

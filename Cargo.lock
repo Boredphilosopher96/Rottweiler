@@ -2797,6 +2797,7 @@ dependencies = [
  "rw-mcp",
  "rw-plugin-protocol",
  "rw-providers",
+ "rw-resources",
  "rw-store",
  "rw-tools",
  "rw-types",
@@ -2829,6 +2830,7 @@ dependencies = [
  "rw-operation-contract",
  "rw-plugin-protocol",
  "rw-providers",
+ "rw-resources",
  "rw-tools",
  "rw-types",
  "semver",
@@ -2937,6 +2939,7 @@ dependencies = [
  "getrandom 0.4.3",
  "regex",
  "reqwest",
+ "rw-resources",
  "rw-types",
  "schemars",
  "serde",
@@ -2948,6 +2951,15 @@ dependencies = [
  "tracing",
  "ts-rs",
  "url",
+]
+
+[[package]]
+name = "rw-resources"
+version = "0.1.4"
+dependencies = [
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2975,6 +2987,7 @@ dependencies = [
  "rw-mcp",
  "rw-plugin-protocol",
  "rw-providers",
+ "rw-resources",
  "rw-store",
  "rw-tools",
  "rw-types",
@@ -3000,6 +3013,7 @@ dependencies = [
  "rustix",
  "rustls",
  "rw-macos-bootstrap",
+ "rw-resources",
  "rw-types",
  "seccompiler",
  "serde",
@@ -3022,6 +3036,7 @@ dependencies = [
  "redb",
  "rusqlite",
  "rustix",
+ "rw-resources",
  "rw-types",
  "serde",
  "serde_json",
@@ -3050,6 +3065,7 @@ dependencies = [
  "rustix",
  "rw-intel",
  "rw-operation-contract",
+ "rw-resources",
  "rw-sandbox",
  "rw-types",
  "schemars",

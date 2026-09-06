@@ -22,6 +22,7 @@ path = "tests/process_creation_driver.rs"
 harness = false
 
 [dependencies]
+rw-resources.workspace = true
 base64.workspace = true
 blake3.workspace = true
 sha2.workspace = true

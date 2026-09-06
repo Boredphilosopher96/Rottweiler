@@ -17,6 +17,7 @@ path = "tests/embedded_session.rs"
 harness = false
 
 [dependencies]
+rw-resources.workspace = true
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 base64.workspace = true

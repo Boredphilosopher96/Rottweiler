@@ -87,7 +87,17 @@ Closing a local session waits for actor effects, finalizes durable projections a
 session-local state, then settles services. Dropping a client or a cleanup waiter
 requests that same independently owned shutdown; it cannot cancel cleanup.
 
-Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` is a dependency leaf. `rw-types` consumes the operation contract and the allocation derive macro. `rw-plugin-protocol` consumes the operation and shared-type contracts. `rw-sandbox` owns policy and calls the dependency-free macOS bootstrap crate for Mach authority clearing. `xtask` consumes the type, provider, plugin, operation, and storage owners to generate schemas and SDK projections; product crates never depend on it. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
+Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-operation-contract` and `rw-resources` are dependency leaves. `rw-resources` owns process-wide physical execution admission, with no dependency on sessions, tools, or presentation. `rw-types` consumes the operation contract and the allocation derive macro. `rw-plugin-protocol` consumes the operation and shared-type contracts. `rw-sandbox` owns policy and calls the dependency-free macOS bootstrap crate for Mach authority clearing. `xtask` consumes the type, provider, plugin, operation, and storage owners to generate schemas and SDK projections; product crates never depend on it. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
+
+Physical execution has independent process-wide pools: 64 supervised process
+groups, 64 network operations, 16 blocking workers, and at most four CPU workers
+(capped by available parallelism). Each class admits at most 64 waiting requests.
+The actual worker or process owner retains its lease through settlement; cached
+results retain allocation credit separately. Cancellation removes a waiter, not
+an already running effect. Nested work transfers ownership or uses a different
+class instead of reacquiring its own exhausted pool. A process-group credit
+counts one supervised group, not arbitrary descendants within it. These limits
+complement per-session queues and permission policy; they do not grant authority.
 
 Each piece of contract data and each feature catalog has one hand-maintained
 owner. Other crates, clients, scripts, tests, and docs either consume that owner

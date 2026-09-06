@@ -12,6 +12,7 @@ members = [
     "crates/rw-plugin-protocol",
     "crates/rw-providers",
     "crates/rw-runtime",
+    "crates/rw-resources",
     "crates/rw-sandbox",
     "crates/rw-store",
     "crates/rw-tools",
@@ -60,6 +61,7 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
+rw-resources = { path = "crates/rw-resources" }
 redb = "=4.2.0"
 memchr = "2.8.3"
 rw-operation-contract = { path = "crates/rw-operation-contract" }

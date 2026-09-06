@@ -11,19 +11,21 @@ import tomllib
 
 ALLOWED = {
     "rw-operation-contract": set(),
+    "rw-resources": set(),
     "rw-memory-derive": set(),
     "rw-macos-bootstrap": set(),
     "rw-plugin-protocol": {"rw-operation-contract", "rw-types"},
     "rw-types": {"rw-operation-contract", "rw-memory-derive"},
-    "rw-store": {"rw-types"},
-    "rw-providers": {"rw-types"},
+    "rw-store": {"rw-resources", "rw-types"},
+    "rw-providers": {"rw-resources", "rw-types"},
     "rw-context": {"rw-providers", "rw-types"},
-    "rw-sandbox": {"rw-types", "rw-macos-bootstrap"},
+    "rw-sandbox": {"rw-resources", "rw-types", "rw-macos-bootstrap"},
     "rw-intel": {"rw-types"},
-    "rw-tools": {"rw-operation-contract", "rw-intel", "rw-sandbox", "rw-types"},
+    "rw-tools": {"rw-resources", "rw-operation-contract", "rw-intel", "rw-sandbox", "rw-types"},
     "rw-mcp": {"rw-tools", "rw-types"},
-    "rw-ext": {"rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-tools", "rw-types"},
+    "rw-ext": {"rw-resources", "rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-tools", "rw-types"},
     "rw-core": {
+        "rw-resources",
         "rw-context",
         "rw-ext",
         "rw-mcp",
@@ -36,6 +38,7 @@ ALLOWED = {
     # Owns concrete provider/tool/storage/extension assembly while keeping the
     # engine in rw-core independent from executable frontends.
     "rw-runtime": {
+        "rw-resources",
         "rw-core",
         "rw-ext",
         "rw-mcp",
