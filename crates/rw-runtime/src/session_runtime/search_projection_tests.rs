@@ -265,6 +265,14 @@ fn referenced_input_searches_selected_text() {
                     text: "selectedneedle".into(),
                 },
             },
+            // Search includes the session title. Give it an independent title
+            // so this assertion specifically verifies committed body selection.
+            EngineEvent::SessionTitleUpdated {
+                meta: meta(2),
+                title: "Search session".into(),
+                usage: None,
+                cost: None,
+            },
         ])
         .expect("input");
     synchronize(root.path(), "search", &journal.read_view()).expect("projection");

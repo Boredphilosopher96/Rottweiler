@@ -324,27 +324,26 @@ fn simultaneous_resume_rejects_the_second_writer_before_startup_mutation() {
         ]],
     );
     let unique_prompt = "FIRST_RESUME_WRITER_OWNS_SESSION";
-    let mut first = base_command(&run.workspace, &run.home)
-        .args([
-            "-p",
-            unique_prompt,
-            "--resume",
-            &session_id,
-            "--permission-mode",
-            "yolo",
-            "--replay-dir",
-            fixtures.to_str().expect("fixture path"),
-            "--record-replay-script",
-            delayed_script.to_str().expect("script path"),
-            "--record-script-delay-ms",
-            "30000",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("first resume writer");
+    let mut first = TestProcess::spawn(
+        base_command(&run.workspace, &run.home)
+            .args([
+                "-p",
+                unique_prompt,
+                "--resume",
+                &session_id,
+                "--permission-mode",
+                "yolo",
+                "--replay-dir",
+                fixtures.to_str().expect("fixture path"),
+                "--record-replay-script",
+                delayed_script.to_str().expect("script path"),
+                "--record-script-delay-ms",
+                "30000",
+            ])
+            .stdout(Stdio::null()),
+    );
     let log_path = event_log(&run.home).expect("event log");
-    wait_until(Duration::from_secs(5), || {
+    first.wait_ready(|| {
         fs::read_to_string(&log_path)
             .ok()
             .is_some_and(|log| log.contains(unique_prompt))
@@ -391,12 +390,12 @@ fn simultaneous_resume_rejects_the_second_writer_before_startup_mutation() {
 
     assert!(
         Command::new("kill")
-            .args(["-9", &first.id().to_string()])
+            .args(["-9", &first.child.id().to_string()])
             .status()
             .expect("kill first writer")
             .success()
     );
-    assert!(!first.wait().expect("first writer wait").success());
+    assert!(!first.child.wait().expect("first writer wait").success());
 }
 
 #[test]
@@ -429,22 +428,21 @@ fn sigkill_mid_bash_waits_for_watchdog_then_recovers_opaque_checkpoint() {
     );
     let run = TestRun::new(&root, "opaque-kill");
     run.write_agents();
-    let mut child = base_command(&run.workspace, &run.home)
-        .args([
-            "-p",
-            "run the opaque command",
-            "--permission-mode",
-            "yolo",
-            "--replay-dir",
-            fixtures.to_str().expect("fixture path"),
-            "--record-replay-script",
-            script.to_str().expect("script path"),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("opaque bash child");
-    wait_until(Duration::from_secs(5), || {
+    let mut child = TestProcess::spawn(
+        base_command(&run.workspace, &run.home)
+            .args([
+                "-p",
+                "run the opaque command",
+                "--permission-mode",
+                "yolo",
+                "--replay-dir",
+                fixtures.to_str().expect("fixture path"),
+                "--record-replay-script",
+                script.to_str().expect("script path"),
+            ])
+            .stdout(Stdio::null()),
+    );
+    child.wait_ready(|| {
         run.workspace.join("mutated.txt").is_file()
             && read_pid(&run.workspace.join("child.pid")).is_some()
     });
@@ -452,12 +450,12 @@ fn sigkill_mid_bash_waits_for_watchdog_then_recovers_opaque_checkpoint() {
     let shell_pid = read_pid(&run.workspace.join("child.pid")).expect("shell pid");
     assert!(
         Command::new("kill")
-            .args(["-9", &child.id().to_string()])
+            .args(["-9", &child.child.id().to_string()])
             .status()
             .expect("kill CLI")
             .success()
     );
-    assert!(!child.wait().expect("killed CLI wait").success());
+    assert!(!child.child.wait().expect("killed CLI wait").success());
 
     let session_id = only_session_id(&run.home);
     let resume_script = root.path().join("opaque-resume.json");
@@ -558,36 +556,33 @@ fn sigint_mid_bash_closes_the_log_and_kills_the_process_group() {
     );
     let run = TestRun::new(&root, "interrupt-workspace");
     run.write_agents();
-    let mut child = base_command(&run.workspace, &run.home)
-        .args([
-            "-p",
-            "run a long command",
-            "--permission-mode",
-            "yolo",
-            "--replay-dir",
-            fixtures.to_str().expect("fixture path"),
-            "--record-replay-script",
-            script.to_str().expect("script path"),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("bash child");
-    wait_until(Duration::from_secs(5), || {
-        read_pid(&run.workspace.join("child.pid")).is_some()
-    });
+    let mut child = TestProcess::spawn(
+        base_command(&run.workspace, &run.home)
+            .args([
+                "-p",
+                "run a long command",
+                "--permission-mode",
+                "yolo",
+                "--replay-dir",
+                fixtures.to_str().expect("fixture path"),
+                "--record-replay-script",
+                script.to_str().expect("script path"),
+            ])
+            .stdout(Stdio::null()),
+    );
+    child.wait_ready(|| read_pid(&run.workspace.join("child.pid")).is_some());
     #[cfg(not(target_os = "linux"))]
     let shell_pid = read_pid(&run.workspace.join("child.pid"))
         .expect("numeric child pid")
         .to_string();
     assert!(
         Command::new("kill")
-            .args(["-INT", &child.id().to_string()])
+            .args(["-INT", &child.child.id().to_string()])
             .status()
             .expect("send SIGINT")
             .success()
     );
-    let status = child.wait().expect("interrupted child");
+    let status = child.child.wait().expect("interrupted child");
     assert!(!status.success());
     #[cfg(not(target_os = "linux"))]
     wait_until(Duration::from_secs(5), || {

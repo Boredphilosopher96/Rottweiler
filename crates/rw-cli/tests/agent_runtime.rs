@@ -409,3 +409,7 @@ fn session_ids_by_workspace(home: &Path) -> std::collections::BTreeMap<PathBuf, 
 mod execution;
 #[path = "agent_runtime/sessions.rs"]
 mod sessions;
+
+#[path = "agent_runtime/process.rs"]
+mod process;
+use process::TestProcess;

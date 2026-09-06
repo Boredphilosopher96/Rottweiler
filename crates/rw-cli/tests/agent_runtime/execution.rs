@@ -74,10 +74,13 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
             .count(),
         3
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        EngineEvent::TextDelta { text, .. } if text.contains("collated all three explorers")
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            EngineEvent::TextDelta { text, .. } if text.contains("collated all three explorers")
+        )),
+        "parent did not collate the completed children; events: {events:#?}"
+    );
     assert!(git_output(&run.workspace, &["diff", "--binary", "HEAD", "--"]).is_empty());
     let status = git_output(&run.workspace, &["status", "--porcelain=v1"]);
     assert!(status.is_empty(), "parent status was not clean: {status:?}");
