@@ -105,6 +105,19 @@ async fn driver_ui_action_uses_bound_arguments_and_observer_never_resolves() {
             .expect("deny"),
         CommandOutcome::Rejected { .. }
     ));
+    let mut stale = request.clone();
+    stale.owner.generation = UiGenerationId::from_bytes([2; 16]);
+    assert!(matches!(
+        handle
+            .dispatch(ClientCommand::InvokeUiAction {
+                meta: protocol_meta("driver", "stale-generation"),
+                session_id: session.clone(),
+                request: stale,
+            })
+            .await
+            .expect("stale acknowledgement"),
+        CommandOutcome::Rejected { .. }
+    ));
     assert_eq!(resolved.load(Ordering::SeqCst), 0);
     assert_eq!(
         handle

@@ -6,11 +6,11 @@ use crate::engine::{
 use crate::ui::BoundUiCommand;
 use rw_types::extension_ui::{UiActionRequest, UiActionTarget};
 
-pub(super) async fn resolve(
+pub(super) fn validate_admission(
     state: &ActorState,
     config: &SessionActorConfig,
     request: &UiActionRequest,
-) -> Result<BoundUiCommand, AgentLoopError> {
+) -> Result<(), AgentLoopError> {
     request
         .validate()
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
@@ -33,6 +33,15 @@ pub(super) async fn resolve(
             "UI action generation is unavailable".into(),
         ));
     }
+    Ok(())
+}
+
+pub(super) async fn resolve(
+    state: &ActorState,
+    config: &SessionActorConfig,
+    request: &UiActionRequest,
+) -> Result<BoundUiCommand, AgentLoopError> {
+    validate_admission(state, config, request)?;
     let source = match &request.target {
         UiActionTarget::Tool { invocation_id } => {
             let through = config.event_sink.last_sequence().await?;

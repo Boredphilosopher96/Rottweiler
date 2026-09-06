@@ -191,7 +191,7 @@ pub(super) async fn dispatch_protocol(
     }
 
     if let ClientCommand::InvokeUiAction { request, .. } = &command
-        && let Err(error) = request.validate()
+        && let Err(error) = super::ui_actions::validate_admission(state, config, request)
     {
         let outcome = protocol_rejection("invalid_ui_action", error.to_string());
         send_ack(state, events, &meta, session, outcome.clone());
