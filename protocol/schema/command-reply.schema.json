@@ -235,6 +235,64 @@
             "target": {
               "$ref": "#/$defs/ChildControlTarget"
             },
+            "result": {
+              "$ref": "#/$defs/ChildReadScopeResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "child_read_scope_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "target": {
+              "$ref": "#/$defs/ChildControlTarget"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/SessionStateSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "child_state_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "target": {
+              "$ref": "#/$defs/ChildControlTarget"
+            },
             "snapshot": {
               "$ref": "#/$defs/ChildControlsSnapshot"
             },
@@ -1665,6 +1723,31 @@
             "plugin_id",
             "title",
             "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "agent_turn": {
+              "type": "string"
+            },
+            "selection": {
+              "$ref": "#/$defs/ContextSelection"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_context_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "agent_turn",
+            "selection"
           ]
         },
         {
@@ -4050,6 +4133,133 @@
         "approvals",
         "pending_plan",
         "available"
+      ]
+    },
+    "ChildReadScopeResult": {
+      "description": "Bounded canonical ancestry resolution does not block live control reads.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "$ref": "#/$defs/SessionReadScope"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "scope"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "session_id",
+            "through",
+            "target"
+          ]
+        }
+      ]
+    },
+    "SessionReadScope": {
+      "description": "Direct session authority or an explicit path from an independently authorized root.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "root_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "ancestry": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionReadAncestor"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "type": {
+              "type": "string",
+              "const": "descendant"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "root_session_id",
+            "ancestry"
+          ]
+        }
+      ]
+    },
+    "SessionReadAncestor": {
+      "description": "A hop is bound to its parent's canonical spawn source, never just a child name.",
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source_sequence": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id",
+        "source_sequence"
       ]
     },
     "ChildControlsSnapshot": {
@@ -8317,6 +8527,62 @@
       "required": [
         "session_id",
         "sequence"
+      ]
+    },
+    "ContextSelection": {
+      "description": "Explicit sources for user-role context produced by the host.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "type": {
+              "type": "string",
+              "const": "plan_review"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "selected_source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "body_source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "type": {
+              "type": "string",
+              "const": "retained"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selected_source",
+            "body_source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "continuation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
       ]
     },
     "InputSelection": {
