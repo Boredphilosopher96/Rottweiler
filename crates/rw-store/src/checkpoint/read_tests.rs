@@ -61,7 +61,7 @@ fn source_byte_allowance_is_shared_across_manifests_before_decode() -> TestResul
     let fixture = Fixture::new()?;
     fixture.manifest(1, &["a"])?;
     fixture.manifest(2, &["b"])?;
-    let admitted = fs::metadata(fixture.store.manifest_path("session", 2))?.len() as usize;
+    let admitted = usize::try_from(fs::metadata(fixture.store.manifest_path("session", 2))?.len())?;
     fs::write(fixture.store.manifest_path("session", 1), b"invalid JSON")?;
     let mut operation = CheckpointOperation::default().read_limits(100, 1024 * 1024, admitted);
     assert!(matches!(
