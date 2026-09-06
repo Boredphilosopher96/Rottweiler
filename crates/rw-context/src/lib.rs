@@ -21,7 +21,8 @@ pub use budget::{
 pub use cache::{CacheObservation, CacheRuleProfile, CacheSimulation, CacheSimulator};
 pub use compaction::{
     AUTO_CONTINUE_TEXT, CompactionError, CompactionInput, CompactionPlan, CompactionReason,
-    Compactor, ConversationPin, DEFAULT_COMPACTION_PROMPT, PreCompactHook, auto_continue_turn, summary_turn,
+    Compactor, ConversationPin, DEFAULT_COMPACTION_PROMPT, PreCompactHook, auto_continue_turn,
+    summary_turn,
 };
 pub use estimate::{LocalTokenEstimator, canonicalize_json};
 pub use prune::{
