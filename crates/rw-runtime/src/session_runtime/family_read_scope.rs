@@ -87,6 +87,7 @@ fn storage(error: impl std::fmt::Display) -> HostError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::resolve;
     use crate::journal_service::JournalService;

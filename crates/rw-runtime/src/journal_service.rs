@@ -193,9 +193,12 @@ impl JournalService {
         source: JournalReadLease,
         session: &str,
     ) -> Result<JournalReadLease> {
-        let JournalReadLease { view, _permit } = source;
+        let JournalReadLease {
+            view,
+            _permit: credit,
+        } = source;
         drop(view);
-        let permit = Arc::try_unwrap(_permit)
+        let permit = Arc::try_unwrap(credit)
             .map_err(|_| miette!("serial source query retained a previous read view"))?;
         self.capture_admitted(session, permit)
     }
