@@ -59,11 +59,11 @@ pub(super) fn tool_result_output(result: ToolResult) -> ToolOutput {
             text: result.content,
         };
     }
+    let mut fields = serde_json::Map::new();
+    fields.insert("data".into(), result.data);
+    fields.insert("truncated".into(), Value::Bool(result.truncated));
     let structured = ToolOutputPart::Structured {
-        value: json!({
-            "data": result.data,
-            "truncated": result.truncated,
-        }),
+        value: Value::Object(fields),
     };
     if result.content.is_empty() {
         ToolOutput::Mixed {
@@ -451,6 +451,7 @@ pub(super) async fn apply_post_tool_hook(
     result_budget: &super::tool_result_budget::ToolResultBudget,
 ) -> ToolExecution {
     redact_tool_output(&mut execution.output, secret_redactor);
+    result_budget.admit_execution(&mut execution);
     let displayed_arguments = redacted_json(
         execution.call.arguments.clone().unwrap_or(Value::Null),
         secret_redactor,
