@@ -9,6 +9,7 @@ for (const recursive of [false, true]) {
     const app = createRottweilerApp(setup.renderer, { sessionReader: emptySessionReader })
     setup.renderer.root.add(app)
     await setup.renderOnce()
+    expect(app.historyCache.insert("idle-surface", { kind: "ui_catalog", catalog: { entries: [] } })).toBe(true)
     app.composer.restoreDraft("handoff draft", [])
     if (recursive) app.destroyRecursively()
     else app.destroy()

@@ -42,6 +42,7 @@ export class ClientCache<Value> {
   #bytes = 0
   #entries = 0
   #pinned = 0
+  #disposed = false
 
   constructor(limits: CacheLimits = { bytes: CLIENT_HISTORY_BYTES, entries: 2048 }, readonly allocations = new ClientAllocationOwner()) {
     if (!Number.isSafeInteger(limits.bytes) || limits.bytes <= 0
@@ -64,6 +65,7 @@ export class ClientCache<Value> {
 
   /** Charge once on admission; readers and frames never remeasure a value. */
   insert(key: string, value: Value): boolean {
+    if (this.#disposed) return false
     const bytes = retainedJsonBytes(value, this.#limits.bytes) + 96 + key.length * 2
     if (bytes > this.#limits.bytes) return false
     const previous = this.#resident.get(key)
@@ -92,6 +94,7 @@ export class ClientCache<Value> {
   }
 
   reserve(maximumBytes: number): CacheReservation<Value> | null {
+    if (this.#disposed) return null
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || maximumBytes > this.#limits.bytes) return null
     let bytes = this.#limits.bytes - this.#bytes
     let entries = this.#limits.entries - this.#entries
@@ -114,6 +117,7 @@ export class ClientCache<Value> {
     let active = true
     const admit = (required: number) => {
       if (!active) throw new Error("cache reservation is released")
+      if (this.#disposed) throw new Error("client cache is retired")
       if (!Number.isSafeInteger(required) || required < 0 || required > this.#limits.bytes) throw new Error("read exceeds the client cache allowance")
       if (required <= maximumBytes) return
       let available = this.#limits.bytes - this.#bytes
@@ -143,6 +147,7 @@ export class ClientCache<Value> {
       },
       commit: (key, value) => {
         if (!active) throw new Error("cache reservation is released")
+      if (this.#disposed) throw new Error("client cache is retired")
         const actual = retainedJsonBytes(value, maximumBytes) + 96 + key.length * 2
         if (actual > maximumBytes) throw new Error("decoded value exceeds reserved cache allocation")
         this.remove(key)
@@ -180,6 +185,9 @@ export class ClientCache<Value> {
     entry.resident = false
     if (entry.readers === 0) this.#release(entry)
   }
+
+  /** Close publication; existing readers and decoders stay charged until they settle. */
+  dispose(): void { this.#disposed = true; this.clear() }
 
   clear(): void {
     for (const key of this.#resident.keys()) this.remove(key)

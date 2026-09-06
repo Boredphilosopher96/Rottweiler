@@ -741,3 +741,12 @@ export class ProviderUiController {
     }
   }
 }
+
+export function modelSupportsVision(state: RottweilerState): boolean {
+  const selected = state.models.find((model) => model.current && model.available !== false)
+    ?? state.models.find(
+      (model) => model.available !== false &&
+        (model.id === state.model || model.aliases.includes(state.model ?? "")),
+    )
+  return selected?.vision === true
+}

@@ -24,7 +24,7 @@ import {
 import { McpUiController } from "./app/mcp"
 import type { RottweilerAppOptions } from "./app/options"
 import { PermissionUiController } from "./app/permissions"
-import { ProviderUiController } from "./app/provider"
+import { ProviderUiController, modelSupportsVision } from "./app/provider"
 import { SettingsUiController } from "./app/settings"
 import { ThemeUiController } from "./app/themes"
 import { DocumentController } from "./history/document"
@@ -293,7 +293,7 @@ export class RottweilerApp extends BoxRenderable {
       discardPendingRestore: () => { this.#clientRestore.discard() },
       projectRejection: outcome => this.#projectRejection(outcome),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
-      modelSupportsVision: state => this.#modelSupportsVision(state),
+      modelSupportsVision: state => modelSupportsVision(state),
       closeOutputViewer: () => this.#closeOutputViewer(), closeReview: () => this.#closeReview(),
       closePicker: () => this.closePicker(), openSessionPicker: () => this.openSessionPicker(),
       openSubagentPicker: () => this.openSubagentPicker(), openReview: () => this.openReview(),
@@ -945,15 +945,6 @@ export class RottweilerApp extends BoxRenderable {
   restoreRecycleState(state: AppClientState): void { this.#clientRestore.restoreRecycleState(state) }
   applyPendingRecycleScroll(): void { this.#clientRestore.applyPendingRecycleScroll() }
 
-  #modelSupportsVision(state: RottweilerState): boolean {
-    const selected = state.models.find((model) => model.current && model.available !== false)
-      ?? state.models.find(
-        (model) => model.available !== false &&
-          (model.id === state.model || model.aliases.includes(state.model ?? "")),
-      )
-    return selected?.vision === true
-  }
-
   #bindStateToComponents(state: RottweilerState): void {
     const previousConnectionPhase = this.#state.connection.phase
     const previousFocusOwner = this.#input.visibleFocusOwner()
@@ -967,7 +958,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#children.syncFamily()
     const presented = this.#children.presentedState()
-    this.composer.setImagePasteAvailable(this.#modelSupportsVision(presented))
+    this.composer.setImagePasteAvailable(modelSupportsVision(presented))
     const viewingSubagent = this.#children.activeId !== null
     const childDescriptor = this.#children.activeId === null
       ? undefined
@@ -1297,6 +1288,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#settings.pickerClosed()
     this.#document?.close()
     this.#history?.dispose()
+    this.historyCache.dispose()
     this.#state = createInitialState()
     this.#presentation.destroy()
     this.#submission.reset()

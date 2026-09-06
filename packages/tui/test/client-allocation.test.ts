@@ -106,3 +106,22 @@ test("urgent credit cannot move into full ordinary capacity and refused transfer
   urgent.release()
   expect(owner.usage.bytes).toBe(0)
 })
+
+test("cache retirement drops idle documents and rejects late publication while retaining unsettled readers", () => {
+  const owner = new ClientAllocationOwner(), cache = new ClientCache<unknown>(undefined, owner)
+  expect(cache.insert("idle-document", { text: "resident body" })).toBe(true)
+  expect(cache.insert("mounted", { text: "visible body" })).toBe(true)
+  const pinned = cache.lease("mounted")!
+  const reading = cache.reserve(4096)!
+  cache.dispose()
+  expect(cache.usage.residentEntries).toBe(0)
+  expect(owner.usage.bytes).toBeGreaterThan(4096)
+  expect(cache.insert("new", {})).toBe(false)
+  expect(cache.reserve(1024)).toBeNull()
+  expect(() => reading.admit(8192)).toThrow("retired")
+  expect(() => reading.commit("late-document", {})).toThrow("retired")
+  pinned.release()
+  expect(owner.usage.bytes).toBe(4096)
+  reading.release()
+  expect(owner.usage.bytes).toBe(0)
+})
