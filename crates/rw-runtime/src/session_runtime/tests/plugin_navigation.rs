@@ -21,7 +21,7 @@ pub(super) async fn verify_deferred_navigation(handle: &rw_core::SessionHandle) 
                 result = &mut caller => panic!("SDK command returned before navigation admission: {result:?}"),
                 event = events.recv() => event.expect("command events"),
             };
-            match event {
+            match event.as_ref() {
                 EngineEvent::SessionNavigationRequested { .. } => {
                     panic!("navigation before callback settlement")
                 }

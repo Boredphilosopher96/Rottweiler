@@ -130,18 +130,18 @@ async fn exercise() -> Result<()> {
     let mut text = String::new();
     let mut answered = false;
     loop {
-        match events.recv().await? {
+        match events.recv().await?.as_ref() {
             EngineEvent::QuestionAsked { question_id, .. } => {
                 // The embedder, not composition, chooses the answer.
                 answered = true;
                 session
                     .handle()
-                    .answer_question(question_id, "second".to_owned())
+                    .answer_question(question_id.clone(), "second".to_owned())
                     .await?;
             }
-            EngineEvent::TextDelta { text: delta, .. } => text.push_str(&delta),
+            EngineEvent::TextDelta { text: delta, .. } => text.push_str(delta),
             EngineEvent::TurnFinished { status, .. } => {
-                assert_eq!(status, TurnStatus::Completed);
+                assert_eq!(*status, TurnStatus::Completed);
                 break;
             }
             _ => {}
@@ -165,7 +165,7 @@ async fn exercise() -> Result<()> {
     let mut interrupted = false;
     let mut accepted = false;
     loop {
-        match events.recv().await? {
+        match events.recv().await?.as_ref() {
             EngineEvent::UserMessageAccepted { content, .. } if content == "ask again" => {
                 accepted = true;
             }
@@ -174,7 +174,7 @@ async fn exercise() -> Result<()> {
                 interrupted = true;
             }
             EngineEvent::TurnFinished { status, .. } if interrupted => {
-                assert_eq!(status, TurnStatus::Interrupted);
+                assert_eq!(*status, TurnStatus::Interrupted);
                 break;
             }
             _ => {}
