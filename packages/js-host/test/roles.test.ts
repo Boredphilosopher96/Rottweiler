@@ -4,6 +4,8 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { JS_HOST_ROLES } from "../generated/release-contract"
 
+import { SOURCE_HOST_ABI, SOURCE_BUNDLE_FORMAT } from "../../plugin-host/src/protocol"
+
 const entry = resolve(import.meta.dir, "../src/index.ts")
 
 async function invoke(args: readonly string[]) {
@@ -27,7 +29,7 @@ plugin({name:"reject-terminal",setup(build){build.onResolve({filter:/opentui|tre
 
 test("source-plugin loads no terminal dependency and writes only its protocol response", async () => {
   expect(await invoke([JS_HOST_ROLES.source_plugin, "version"])).toEqual({
-    status: 0, stdout: '{"abi":1,"format":"bun-esm-v1"}\n', stderr: "",
+    status: 0, stdout: `${JSON.stringify({ abi: SOURCE_HOST_ABI, format: SOURCE_BUNDLE_FORMAT })}\n`, stderr: "",
   })
 })
 

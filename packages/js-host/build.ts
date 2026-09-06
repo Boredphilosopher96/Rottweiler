@@ -17,6 +17,8 @@ import type { BunPlugin } from "bun"
 
 import { JS_HOST_EXECUTABLE_NAME, JS_HOST_ROLES, releasePlatformForNodeTarget } from "./generated/release-contract.ts"
 
+import { SOURCE_HOST_ABI, SOURCE_BUNDLE_FORMAT } from "../plugin-host/src/protocol"
+
 const tuiDirectory = join(import.meta.dir, "../tui")
 
 const MAX_EMBEDDED_TREE_SITTER_ASSET_BYTES = 8 * 1024 * 1024
@@ -251,7 +253,7 @@ signDarwinArtifact(outputNativePath, "OpenTUI native library")
 enforceJavaScriptBundleSize(outputExecutable, outputNativePath)
 
 // Prove the compiled release executable contains its parser runtime. Only the
-// native renderer remains adjacent, preserving the signed six-entry archive.
+// native renderer remains adjacent, as defined by the release archive contract.
 const smokeDirectory = mkdtempSync(join(tmpdir(), "rottweiler-embedded-parser-smoke-"))
 try {
   const smokeExecutable = join(smokeDirectory, JS_HOST_EXECUTABLE_NAME)
@@ -267,7 +269,7 @@ try {
     env: { ...process.env, ROTTWEILER_HOME: smokeHome, ROTTWEILER_TREE_SITTER_SMOKE_REPORT: smokeReport },
   })
   if (sourceSmoke.error !== undefined || sourceSmoke.status !== 0 || sourceSmoke.stderr !== ""
-    || sourceSmoke.stdout !== '{"abi":1,"format":"bun-esm-v1"}\n'
+    || sourceSmoke.stdout !== `${JSON.stringify({ abi: SOURCE_HOST_ABI, format: SOURCE_BUNDLE_FORMAT })}\n`
     || readdirSync(smokeDirectory).join("\n") !== JS_HOST_EXECUTABLE_NAME) {
     throw new Error(`compiled source-plugin role initialized unexpected resources: ${sourceSmoke.stderr}`)
   }
