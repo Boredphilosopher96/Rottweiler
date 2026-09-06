@@ -612,7 +612,7 @@ pub(super) async fn dispatch_protocol(
                 {
                     Ok(known) => known,
                     Err(error) => {
-                        let outcome = protocol_rejection("context_unavailable", &error.to_string());
+                        let outcome = protocol_rejection("context_unavailable", error.to_string());
                         send_ack(state, events, &meta, session, outcome.clone());
                         let _ = respond.send(outcome);
                         return false;

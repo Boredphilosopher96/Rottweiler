@@ -23,10 +23,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub(crate) struct TestWorkingAllowance(pub Box<dyn Send + Sync>);
+pub(crate) struct TestWorkingAllowance {
+    _owner: Box<dyn Send + Sync>,
+}
 impl crate::engine::recovery::HistoryWorkingAllowance for TestWorkingAllowance {
     fn resize(&mut self, bytes: usize) -> Result<(), AgentLoopError> {
-        let _owner = &self.0;
         if bytes > crate::engine::recovery::MAX_HISTORY_RESULT_BYTES {
             return Err(failure("test working allowance exceeded"));
         }
@@ -36,7 +37,9 @@ impl crate::engine::recovery::HistoryWorkingAllowance for TestWorkingAllowance {
 pub(crate) fn working_allowance(
     owner: impl Send + Sync + 'static,
 ) -> Box<dyn crate::engine::recovery::HistoryWorkingAllowance> {
-    Box::new(TestWorkingAllowance(Box::new(owner)))
+    Box::new(TestWorkingAllowance {
+        _owner: Box::new(owner),
+    })
 }
 
 pub(crate) struct UnboundHistory;

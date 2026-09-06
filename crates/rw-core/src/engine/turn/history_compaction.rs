@@ -84,19 +84,7 @@ pub(in crate::engine) async fn compact(
                 });
             committed.push(super::context_commits::commit(signals, turn, value, source).await?);
         }
-        for pin in summary.pins {
-            let sequence = committed
-                .get(pin.ordinal)
-                .ok_or_else(|| invalid("compaction pin position"))?;
-            persist_event(
-                signals,
-                PendingEvent::ContextItemPinned {
-                    item_id: rw_types::context_source::conversation_item(*sequence),
-                    effective_after_agent_turn: pin.order,
-                },
-            )
-            .await?;
-        }
+        publish_pins(signals, &committed, summary.pins).await?;
         let now = config.event_clock.unix_time_millis();
         config
             .event_sink
@@ -450,4 +438,25 @@ pub(super) fn requires_streaming(
     Ok(cut.serialized_bytes > PAGE_BYTES
         || cut.decoded_bytes > PAGE_HEAP
         || cut.estimated_tokens > page_tokens(config, &[], instructions)?)
+}
+
+async fn publish_pins(
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    committed: &[rw_types::SequenceId],
+    pins: Vec<CarryPin>,
+) -> Result<(), AgentLoopError> {
+    for pin in pins {
+        let sequence = committed
+            .get(pin.ordinal)
+            .ok_or_else(|| invalid("compaction pin position"))?;
+        persist_event(
+            signals,
+            PendingEvent::ContextItemPinned {
+                item_id: rw_types::context_source::conversation_item(*sequence),
+                effective_after_agent_turn: pin.order,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }

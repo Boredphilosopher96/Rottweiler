@@ -318,31 +318,7 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
         text_turn(Role::User, "durable prior context"),
     ];
     let question_id = QuestionId("model-switch-recovered".to_owned());
-    let mut events = vec![
-        wire_event(
-            0,
-            PendingEvent::ConversationTurnCommitted {
-                agent_turn: 1,
-                turn: original[0].clone(),
-            },
-        ),
-        wire_event(
-            1,
-            PendingEvent::UserMessageAccepted {
-                turn: 1,
-                content: "durable prior context".into(),
-                attachments: vec![],
-            },
-        ),
-        wire_event(
-            2,
-            PendingEvent::ConversationInputCommitted {
-                agent_turn: 1,
-                accepted_source: rw_types::SequenceId(1),
-                selection: rw_types::conversation_input::InputSelection::Accepted {},
-            },
-        ),
-    ];
+    let mut events = prior_model_context(&original[0]);
     events.push(wire_event(
         3,
         PendingEvent::QuestionAsked {
@@ -420,4 +396,32 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
             .turns,
         original
     );
+}
+
+fn prior_model_context(system: &rw_types::Turn) -> Vec<EngineEvent> {
+    vec![
+        wire_event(
+            0,
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: system.clone(),
+            },
+        ),
+        wire_event(
+            1,
+            PendingEvent::UserMessageAccepted {
+                turn: 1,
+                content: "durable prior context".into(),
+                attachments: vec![],
+            },
+        ),
+        wire_event(
+            2,
+            PendingEvent::ConversationInputCommitted {
+                agent_turn: 1,
+                accepted_source: rw_types::SequenceId(1),
+                selection: rw_types::conversation_input::InputSelection::Accepted {},
+            },
+        ),
+    ]
 }
