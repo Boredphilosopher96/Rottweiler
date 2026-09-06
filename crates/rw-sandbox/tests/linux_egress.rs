@@ -133,6 +133,47 @@ fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
         return;
     }
 
+    verify_connected_pair_contract();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("Tokio runtime");
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (client, server) = tokio::net::UnixStream::pair().expect("Unix pair");
+            client.writable().await.expect("client writable");
+            assert_eq!(
+                nix::unistd::write(&client, b"initialize").expect("client write"),
+                10
+            );
+            server.readable().await.expect("server readable");
+            let mut request = [0_u8; 10];
+            assert_eq!(
+                nix::unistd::read(&server, &mut request).expect("server read"),
+                request.len()
+            );
+            assert_eq!(&request, b"initialize");
+            server.writable().await.expect("server writable");
+            assert_eq!(
+                nix::unistd::write(&server, b"ready").expect("server write"),
+                5
+            );
+            client.readable().await.expect("client readable");
+            let mut response = [0_u8; 5];
+            assert_eq!(
+                nix::unistd::read(&client, &mut response).expect("client read"),
+                response.len()
+            );
+            assert_eq!(&response, b"ready");
+        })
+        .await
+        .expect("Tokio Unix-pair handshake timed out");
+    });
+}
+
+fn verify_connected_pair_contract() {
     for flags in [
         nix::sys::socket::SockFlag::empty(),
         nix::sys::socket::SockFlag::SOCK_CLOEXEC,
@@ -205,43 +246,6 @@ fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
             .expect("nested Rust fork/exec handshake")
             .success()
     );
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Tokio runtime");
-    runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let (client, server) = tokio::net::UnixStream::pair().expect("Unix pair");
-            client.writable().await.expect("client writable");
-            assert_eq!(
-                nix::unistd::write(&client, b"initialize").expect("client write"),
-                10
-            );
-            server.readable().await.expect("server readable");
-            let mut request = [0_u8; 10];
-            assert_eq!(
-                nix::unistd::read(&server, &mut request).expect("server read"),
-                request.len()
-            );
-            assert_eq!(&request, b"initialize");
-            server.writable().await.expect("server writable");
-            assert_eq!(
-                nix::unistd::write(&server, b"ready").expect("server write"),
-                5
-            );
-            client.readable().await.expect("client readable");
-            let mut response = [0_u8; 5];
-            assert_eq!(
-                nix::unistd::read(&client, &mut response).expect("client read"),
-                response.len()
-            );
-            assert_eq!(&response, b"ready");
-        })
-        .await
-        .expect("Tokio Unix-pair handshake timed out");
-    });
 }
 
 #[test]
