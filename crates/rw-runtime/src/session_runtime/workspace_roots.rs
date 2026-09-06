@@ -251,9 +251,9 @@ impl RuntimeWorkspaceRootController {
         )
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let mode_registry = Arc::new(mode_registry);
-        event_sink
-            .bind_canonical(Arc::clone(&mode_registry))
-            .await?;
+        // Child lifecycle metadata is authoritative; subagent journals have no
+        // inherited fork prefix and do not use parent SessionMetadata files.
+        event_sink.configure_canonical(Arc::clone(&mode_registry), None)?;
         let recovered = rw_core::SessionActorRecovery::from_bootstrap(
             event_sink.capture_history().await?.bootstrap().await?,
         )?;

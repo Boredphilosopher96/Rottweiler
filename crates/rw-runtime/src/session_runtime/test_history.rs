@@ -62,7 +62,7 @@ pub(crate) async fn open(
         rw_ext::ModeRegistry::builtins()
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
     );
-    sink.bind_canonical(modes).await?;
+    sink.configure_canonical(modes, None)?;
     let recovered =
         SessionActorRecovery::from_bootstrap(sink.capture_history().await?.bootstrap().await?)?;
     Ok(ActorHistory {
