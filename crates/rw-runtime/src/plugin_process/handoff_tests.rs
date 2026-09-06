@@ -29,6 +29,7 @@ async fn incomplete_stdio_is_rejected_only_after_actual_child_cleanup() {
             &config,
             running_helper(),
             process_fixture_lease(),
+            fixture_launch_bytes(),
         ),
     )
     .await
@@ -59,6 +60,7 @@ async fn lost_wait_result_is_typed_as_unsettled_launch() {
             &config,
             running_helper(),
             process_fixture_lease(),
+            fixture_launch_bytes(),
         ),
     )
     .await
@@ -90,6 +92,7 @@ async fn successful_process_settlement_stops_proxy_while_process_owner_stays_ali
         &config,
         running_helper(),
         process_fixture_lease(),
+        fixture_launch_bytes(),
     )
     .await
     .expect("handoff");
@@ -137,6 +140,7 @@ async fn dropping_bare_launched_process_settles_actual_child_and_proxy() {
         &config,
         running_helper(),
         process_fixture_lease(),
+        fixture_launch_bytes(),
     )
     .await
     .expect("handoff");
@@ -178,7 +182,11 @@ async fn dropped_launch_waiter_retires_the_child_returned_by_its_blocking_worker
         command.as_std_mut().process_group(0);
         let child = command.spawn().expect("physical child");
         let _ = spawned.send(child.id().expect("child pid"));
-        Ok((child, None))
+        Ok(SpawnedPlugin {
+            child,
+            proxy: None,
+            bytes: fixture_launch_bytes(),
+        })
     }));
     entered.await.expect("worker owns launch");
     waiting.abort();

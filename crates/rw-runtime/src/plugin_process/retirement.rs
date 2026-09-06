@@ -18,6 +18,7 @@ pub(super) fn retire_dropped(process: &mut PluginChild) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     let owner = PluginChild {
+        bytes: Arc::clone(&process.bytes),
         settlement: tokio::sync::Mutex::new(()),
         admission: Mutex::new(Some(admission)),
         helper: process.helper.clone(),

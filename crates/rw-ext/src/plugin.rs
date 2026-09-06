@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -165,7 +164,7 @@ pub struct ExecutableIdentity {
     pub device: u64,
     pub inode: u64,
     pub length: u64,
-    pub content_blake3: String,
+    pub content_sha256: String,
 }
 
 /// Stable identity for the narrowly readable plugin package directory.
@@ -323,6 +322,9 @@ impl PluginProcessConfig {
         let mut identities = Vec::with_capacity(canonical.len());
         for path in canonical {
             let identity = executable_identity(&path)?;
+            if path == self.executable && identity != self.executable_identity {
+                return Err(PluginProcessConfigError::InvalidAttestedFile);
+            }
             if let Some(root) = &self.code_root
                 && identity.canonical_path != self.executable
                 && !identity.canonical_path.starts_with(&root.canonical_path)
@@ -336,6 +338,24 @@ impl PluginProcessConfig {
                 return Err(PluginProcessConfigError::AttestationLimit);
             }
             identities.push(identity);
+        }
+        // Bind explicit file arguments to the exact captured path while approval
+        // is being constructed. Launch never resolves those mutable paths again.
+        for argument in &mut self.argv {
+            let path = Path::new(argument);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                self.cwd.join(path)
+            };
+            if let Ok(canonical) = path.canonicalize()
+                && identities
+                    .iter()
+                    .any(|identity| identity.canonical_path == canonical)
+                && canonical != self.executable
+            {
+                *argument = canonical.into_os_string();
+            }
         }
         self.attested_files = identities;
         Ok(self)
@@ -440,6 +460,14 @@ impl PluginProcessConfig {
                 });
             }
         }
+        self.validate_code_root_identity()
+    }
+
+    /// Revalidates the code directory while the launch owner pins file bytes.
+    ///
+    /// # Errors
+    /// Rejects replacement of the approved directory identity.
+    pub fn validate_code_root_identity(&self) -> Result<(), PluginProcessError> {
         if let Some(expected) = &self.code_root {
             let current = directory_identity(&expected.canonical_path).map_err(|error| {
                 PluginProcessError {
@@ -487,52 +515,35 @@ fn directory_identity(path: &Path) -> Result<CodeRootIdentity, PluginProcessConf
 }
 
 fn executable_identity(path: &Path) -> Result<ExecutableIdentity, PluginProcessConfigError> {
-    const MAX_IDENTITY_FILE_BYTES: u64 = 256 * 1024 * 1024;
-    let metadata =
-        std::fs::metadata(path).map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
-    if !metadata.is_file() || metadata.len() > MAX_IDENTITY_FILE_BYTES {
+    if std::fs::metadata(path)
+        .map_err(|_| PluginProcessConfigError::InvalidExecutable)?
+        .len()
+        > 256 * 1024 * 1024
+    {
         return Err(PluginProcessConfigError::AttestationLimit);
     }
-    let file =
-        std::fs::File::open(path).map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
-    let mut file = file.take(metadata.len().saturating_add(1));
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 16 * 1024];
-    let mut read_bytes = 0_u64;
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
-        if count == 0 {
-            break;
+    let identity = rw_tools::ExecutableArtifactIdentity::capture(path, 256 * 1024 * 1024)
+        .map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
+    Ok(ExecutableIdentity {
+        canonical_path: identity.executable,
+        device: identity.device,
+        inode: identity.inode,
+        length: identity.bytes,
+        content_sha256: identity.sha256,
+    })
+}
+
+impl ExecutableIdentity {
+    /// Exact file identity supplied to the shared approved-byte owner.
+    #[must_use]
+    pub fn artifact_identity(&self) -> rw_tools::ExecutableArtifactIdentity {
+        rw_tools::ExecutableArtifactIdentity {
+            executable: self.canonical_path.clone(),
+            device: self.device,
+            inode: self.inode,
+            bytes: self.length,
+            sha256: self.content_sha256.clone(),
         }
-        hasher.update(&buffer[..count]);
-        read_bytes = read_bytes.saturating_add(count as u64);
-    }
-    if read_bytes != metadata.len() {
-        return Err(PluginProcessConfigError::InvalidExecutable);
-    }
-    let content_blake3 = hasher.finalize().to_hex().to_string();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(ExecutableIdentity {
-            canonical_path: path.to_path_buf(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            length: metadata.len(),
-            content_blake3,
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(ExecutableIdentity {
-            canonical_path: path.to_path_buf(),
-            device: 0,
-            inode: 0,
-            length: metadata.len(),
-            content_blake3,
-        })
     }
 }
 

@@ -152,7 +152,7 @@ impl McpApprovalStore {
                 "attested_files":config.attested_files.iter().map(|identity| serde_json::json!({
                     "path":identity.path,
                     "bytes":identity.length,
-                    "content_blake3":identity.content_blake3,
+                    "content_sha256":identity.content_sha256,
                 })).collect::<Vec<_>>(),
             }),
             crate::extension_config::DiscoveredMcpTransport::Http {

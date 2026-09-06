@@ -16,9 +16,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt as _;
-
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_SERVERS: usize = 128;
 const MAX_PLUGINS: usize = 128;
@@ -75,7 +72,7 @@ pub struct DiscoveredMcpServer {
 pub struct ContentAttestation {
     pub path: PathBuf,
     pub length: u64,
-    pub content_blake3: String,
+    pub content_sha256: String,
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -88,39 +85,16 @@ impl ContentAttestation {
             return Err(miette!("attested command input cannot be a symlink"));
         }
         let path = fs::canonicalize(path).into_diagnostic()?;
-        let metadata = fs::metadata(&path).into_diagnostic()?;
-        if !metadata.is_file() {
-            return Err(miette!("attested command input must be a regular file"));
-        }
-        if metadata.len() > max_bytes {
-            return Err(miette!(
-                "attested command input exceeds its remaining byte budget"
-            ));
-        }
-        let file = fs::File::open(&path).into_diagnostic()?;
-        let mut file = file.take(metadata.len().saturating_add(1));
-        let mut hasher = blake3::Hasher::new();
-        let mut buffer = [0_u8; 16 * 1024];
-        let mut read_bytes = 0_u64;
-        loop {
-            let count = file.read(&mut buffer).into_diagnostic()?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-            read_bytes = read_bytes.saturating_add(count as u64);
-        }
-        if read_bytes != metadata.len() {
-            return Err(miette!("attested command input changed while hashing"));
-        }
+        let identity =
+            rw_tools::ExecutableArtifactIdentity::capture(&path, max_bytes).into_diagnostic()?;
         Ok(Self {
             path,
-            length: metadata.len(),
-            content_blake3: hasher.finalize().to_hex().to_string(),
+            length: identity.bytes,
+            content_sha256: identity.sha256,
             #[cfg(unix)]
-            device: metadata.dev(),
+            device: identity.device,
             #[cfg(unix)]
-            inode: metadata.ino(),
+            inode: identity.inode,
         })
     }
 

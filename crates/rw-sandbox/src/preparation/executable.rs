@@ -1,11 +1,9 @@
 //! Approved compiler bytes become an immutable executable before entering the view.
 
 use crate::SandboxError;
-use rustix::fs::{MemfdFlags, Mode, SealFlags};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
-    io::Read as _,
     os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     path::{Path, PathBuf},
 };
@@ -20,7 +18,7 @@ pub struct PreparationExecutable {
     device: u64,
     inode: u64,
     length: u64,
-    content_blake3: String,
+    content_sha256: String,
 }
 impl PreparationExecutable {
     /// Creates a compiler identity from the host's approved process configuration.
@@ -32,14 +30,14 @@ impl PreparationExecutable {
         device: u64,
         inode: u64,
         length: u64,
-        content_blake3: String,
+        content_sha256: String,
     ) -> Result<Self, SandboxError> {
         let identity = Self {
             path,
             device,
             inode,
             length,
-            content_blake3,
+            content_sha256,
         };
         identity.validate()?;
         Ok(identity)
@@ -58,13 +56,13 @@ impl PreparationExecutable {
         {
             return Err(SandboxError::UntrustedHelper);
         }
-        let content_blake3 = digest(&file, metadata.len(), &mut std::io::sink())?;
+        let captured = crate::ExecutableArtifactIdentity::capture(&path, MAX_EXECUTABLE_BYTES)?;
         Self::from_identity(
             path,
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            content_blake3,
+            captured.device,
+            captured.inode,
+            captured.bytes,
+            captured.sha256,
         )
     }
     pub(crate) fn path(&self) -> &Path {
@@ -77,8 +75,13 @@ impl PreparationExecutable {
                 .path
                 .components()
                 .any(|part| matches!(part, std::path::Component::ParentDir))
+            || self.length == 0
             || self.length > MAX_EXECUTABLE_BYTES
-            || blake3::Hash::from_hex(&self.content_blake3).is_err()
+            || self.content_sha256.len() != 64
+            || !self
+                .content_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {
             return Err(SandboxError::MalformedHelper);
         }
@@ -95,23 +98,14 @@ impl PreparationExecutable {
         {
             return Err(SandboxError::UntrustedHelper);
         }
-        let mut snapshot = File::from(
-            rustix::fs::memfd_create(
-                "rottweiler-source-host",
-                MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-            )
-            .map_err(super::invalid)?,
-        );
-        if digest(&file, self.length, &mut snapshot)? != self.content_blake3 {
-            return Err(SandboxError::UntrustedHelper);
-        }
-        rustix::fs::fchmod(&snapshot, Mode::RUSR | Mode::XUSR).map_err(super::invalid)?;
-        rustix::fs::fcntl_add_seals(
-            &snapshot,
-            SealFlags::WRITE | SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL,
-        )
-        .map_err(super::invalid)?;
-        Ok(snapshot)
+        crate::ApprovedExecutable::from_artifact(&crate::ExecutableArtifactIdentity {
+            executable: self.path.clone(),
+            device: self.device,
+            inode: self.inode,
+            bytes: self.length,
+            sha256: self.content_sha256.clone(),
+        })?
+        .sealed_file()
     }
 }
 fn open(path: &Path) -> Result<File, SandboxError> {
@@ -120,27 +114,4 @@ fn open(path: &Path) -> Result<File, SandboxError> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .map_err(super::invalid)
-}
-fn digest(
-    file: &File,
-    length: u64,
-    output: &mut impl std::io::Write,
-) -> Result<String, SandboxError> {
-    let mut bounded = file.take(length + 1);
-    let mut hasher = blake3::Hasher::new();
-    let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = bounded.read(&mut buffer).map_err(super::invalid)?;
-        if read == 0 {
-            break;
-        }
-        bytes += u64::try_from(read).map_err(super::invalid)?;
-        hasher.update(&buffer[..read]);
-        output.write_all(&buffer[..read]).map_err(super::invalid)?;
-    }
-    if bytes != length {
-        return Err(SandboxError::UntrustedHelper);
-    }
-    Ok(hasher.finalize().to_hex().to_string())
 }

@@ -163,7 +163,7 @@ impl SourcePreparations {
                 identity.device,
                 identity.inode,
                 identity.length,
-                identity.content_blake3.clone(),
+                identity.content_sha256.clone(),
             )
             .map_err(|error| miette!(error.to_string()))?;
             let filesystem = rw_tools::PreparationFilesystem::new(

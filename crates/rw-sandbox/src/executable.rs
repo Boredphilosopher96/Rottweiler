@@ -1,13 +1,13 @@
 //! Host-approved executable bytes, retained independently of mutable installation paths.
 use crate::SandboxError;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
-    io::{Read as _, Seek as _, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+mod identity;
 
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -134,16 +134,8 @@ impl ApprovedExecutable {
     // kernel-proven running images stream their actual descriptor size.
     fn snapshot(
         approved: &ExecutableArtifactIdentity,
-        mut source: &File,
+        source: &File,
     ) -> Result<Self, SandboxError> {
-        source.rewind().map_err(invalid)?;
-        let before = source.metadata().map_err(invalid)?;
-        if !before.is_file()
-            || before.len() != approved.bytes
-            || identity(&before)? != (approved.device, approved.inode)
-        {
-            return Err(SandboxError::UntrustedHelper);
-        }
         #[cfg(target_os = "linux")]
         let mut executable = File::from(
             rustix::fs::memfd_create(
@@ -163,34 +155,7 @@ impl ApprovedExecutable {
             .read(true)
             .open(&launch_path)
             .map_err(invalid)?;
-        let mut hasher = Sha256::new();
-        let mut remaining = source.take(
-            approved
-                .bytes
-                .checked_add(1)
-                .ok_or(SandboxError::UntrustedHelper)?,
-        );
-        let mut copied = 0_u64;
-        let mut buffer = [0_u8; 16 * 1024];
-        loop {
-            let count = remaining.read(&mut buffer).map_err(invalid)?;
-            if count == 0 {
-                break;
-            }
-            copied += u64::try_from(count).map_err(invalid)?;
-            if copied > approved.bytes {
-                return Err(SandboxError::UntrustedHelper);
-            }
-            hasher.update(&buffer[..count]);
-            executable.write_all(&buffer[..count]).map_err(invalid)?;
-        }
-        let digest = hex_digest(&hasher.finalize());
-        if copied != approved.bytes
-            || digest != approved.sha256
-            || source.metadata().map_err(invalid)?.len() != approved.bytes
-        {
-            return Err(SandboxError::UntrustedHelper);
-        }
+        identity::verify_copy(approved, source, &mut executable)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -256,6 +221,11 @@ impl ApprovedExecutable {
             _pin: pin,
         })
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn sealed_file(&self) -> Result<File, SandboxError> {
+        self.0.executable.try_clone().map_err(invalid)
+    }
+
     fn same_artifact(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
             || self

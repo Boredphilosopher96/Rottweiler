@@ -1,6 +1,8 @@
 //! Production OS-sandboxed launcher for approved RPC plugins.
 
+mod launch_bytes;
 mod proxy_settlement;
+use launch_bytes::LaunchBytes;
 mod retirement;
 
 use std::{
@@ -30,6 +32,8 @@ const PLUGIN_HANDOFF_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(all(test, unix))]
 mod handoff_tests;
+#[cfg(all(test, unix))]
+mod pinned_tests;
 
 /// A launcher that refuses ambient networking and executes only through the
 /// native Rottweiler sandbox helper. The approved manifest remains the sole
@@ -91,9 +95,7 @@ async fn handoff_in_worker(
     config: PluginProcessConfig,
     helper: rw_tools::SandboxHelper,
     admission: rw_resources::ResourceLease,
-    spawn: impl FnOnce() -> Result<(Child, Option<SupervisedEgressProxy>), PluginLaunchError>
-    + Send
-    + 'static,
+    spawn: impl FnOnce() -> Result<SpawnedPlugin, PluginLaunchError> + Send + 'static,
 ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
     let runtime = tokio::runtime::Handle::current();
     // The physical worker owns admission, helper bytes and the complete
@@ -104,13 +106,14 @@ async fn handoff_in_worker(
         tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn", phase = "admitted",
             admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
         let started = std::time::Instant::now();
-        let result = spawn();
+        let SpawnedPlugin { child, proxy, bytes } = spawn()?;
+        // Establish the complete physical owner synchronously before any
+        // callback, tracing subscriber or async handoff can fail or be dropped.
+        let handoff = attach_supervisor(child, proxy, &config, helper, admission, bytes);
         tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn",
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            succeeded = result.is_ok(), "plugin activation stage finished");
-        let (child, proxy) = result?;
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
         let started = std::time::Instant::now();
-        let result = runtime.block_on(attach_supervisor(child, proxy, &config, helper, admission));
+        let result = runtime.block_on(handoff);
         tracing::debug!(target: "rw_performance", stage = "plugin.handoff",
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = result.is_ok());
         result
@@ -159,7 +162,9 @@ fn approved_write_roots(
             "plugin launch domains differ from the approved config identity",
         ));
     }
-    config.validate_executable_identity()?;
+    config.validate_code_root_identity()?;
+    // Exact executable/content validation is performed while copying into the
+    // immutable launch owner, without a redundant full-file hash pass.
     // Manifest effects are delegated by the host, never ambient worker grants.
     let roots = vec![scratch.to_path_buf()];
     Ok(roots)
@@ -170,22 +175,31 @@ fn spawn_sandboxed_plugin(
     profile: &PluginSandboxProfile,
     scratch: &Path,
     helper: &rw_tools::SandboxHelper,
-) -> Result<(Child, Option<SupervisedEgressProxy>), PluginProcessError> {
+) -> Result<SpawnedPlugin, PluginProcessError> {
     let roots = approved_write_roots(config, profile, scratch)?;
-    let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, &roots)?;
-    let args = config.argv().to_vec();
+    let bytes = Arc::new(LaunchBytes::capture(config, profile)?);
+    spawn_pinned_plugin(config, profile, scratch, helper, bytes, &roots)
+}
+
+fn spawn_pinned_plugin(
+    config: &PluginProcessConfig,
+    profile: &PluginSandboxProfile,
+    scratch: &Path,
+    helper: &rw_tools::SandboxHelper,
+    bytes: Arc<LaunchBytes>,
+    roots: &[PathBuf],
+) -> Result<SpawnedPlugin, PluginProcessError> {
+    let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, roots, &bytes)?;
     #[allow(unused_mut)]
-    let mut plan = shell_launch_plan(&policy, helper, config.executable(), &args)
+    let mut plan = shell_launch_plan(&policy, helper, bytes.program(config), bytes.args(config))
         .map_err(|sandbox| error(&sandbox.to_string()))?;
     if !plan.warnings.is_empty() {
         return Err(error("plugin sandbox produced a degradation warning"));
     }
-    // Close the approval-to-exec replacement window at the final boundary.
-    config.validate_executable_identity()?;
     let mut command = tokio::process::Command::new(&plan.program);
     command
         .args(&plan.args)
-        .current_dir(config.cwd())
+        .current_dir(bytes.cwd(config))
         .env_clear()
         .env("HOME", scratch)
         .env("TMPDIR", scratch)
@@ -209,7 +223,11 @@ fn spawn_sandboxed_plugin(
     let child = command.spawn().map_err(|error| process_error(&error))?;
     #[cfg(target_os = "linux")]
     drop(plan.take_helper_pin());
-    Ok((child, proxy))
+    Ok(SpawnedPlugin {
+        child,
+        proxy,
+        bytes,
+    })
 }
 
 fn plugin_sandbox_policy(
@@ -217,6 +235,7 @@ fn plugin_sandbox_policy(
     profile: &PluginSandboxProfile,
     scratch: &Path,
     roots: &[PathBuf],
+    bytes: &LaunchBytes,
 ) -> Result<(SandboxPolicy, Option<SupervisedEgressProxy>), PluginProcessError> {
     #[cfg(target_os = "linux")]
     if let rw_ext::PluginSandboxMode::Preparation { filesystem } = &profile.mode {
@@ -232,7 +251,7 @@ fn plugin_sandbox_policy(
             .map(|policy| (policy.without_process_creation(), None))
             .map_err(|sandbox| error(&sandbox.to_string()));
     }
-    let read_roots = intrinsic_plugin_read_roots(config, scratch)?;
+    let read_roots = intrinsic_plugin_read_roots(bytes, scratch)?;
     let policy = SandboxPolicy::new(roots, NetworkPolicy::Deny)
         .and_then(|policy| policy.with_read_roots(read_roots))
         .map_err(|sandbox| error(&sandbox.to_string()))?
@@ -250,19 +269,21 @@ fn plugin_sandbox_policy(
     Ok((policy, None))
 }
 
-async fn attach_supervisor(
+fn attach_supervisor(
     mut child: Child,
     proxy: Option<SupervisedEgressProxy>,
     config: &PluginProcessConfig,
     helper: rw_tools::SandboxHelper,
     admission: rw_resources::ResourceLease,
-) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+    bytes: Arc<LaunchBytes>,
+) -> impl std::future::Future<Output = Result<LaunchedPluginProcess, PluginLaunchError>> {
     let process_group = child.id();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let denials = proxy.as_ref().map(SupervisedEgressProxy::denials);
     let process = Arc::new(PluginChild {
+        bytes,
         helper,
         admission: Mutex::new(Some(admission)),
         settlement: tokio::sync::Mutex::new(()),
@@ -271,67 +292,70 @@ async fn attach_supervisor(
         violation: Arc::new(Mutex::new(None)),
         proxy: proxy_settlement::PluginProxy::new(proxy),
     });
+    let executable_identity = config.executable_identity().clone();
     let mut handoff = PendingPluginHandoff {
         process: Arc::clone(&process),
         settled: false,
     };
-    let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
-        // A failed handoff still owns the process and every descendant.
-        let _ = process.kill_tree();
-        let proof =
-            tokio::time::timeout(PLUGIN_HANDOFF_PROOF_TIMEOUT, process.settle_effects()).await;
-        match proof {
-            Ok(Ok(())) => {
-                handoff.settled = true;
-                return Err(PluginLaunchError::Rejected(error(
-                    "plugin stdio is unavailable",
-                )));
-            }
-            Ok(Err(error)) => {
-                return Err(PluginLaunchError::EffectsUnsettled {
-                    message: error.to_string(),
-                });
-            }
-            Err(_) => {
-                return Err(PluginLaunchError::EffectsUnsettled {
-                    message: "plugin launch cleanup proof deadline expired".to_owned(),
-                });
-            }
-        }
-    };
-    if let Some(denials) = denials {
-        let weak = Arc::downgrade(&process);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                let Some(process) = weak.upgrade() else {
-                    return;
-                };
-                if denials.count() == 0 {
-                    continue;
+    async move {
+        let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
+            // A failed handoff still owns the process and every descendant.
+            let _ = process.kill_tree();
+            let proof =
+                tokio::time::timeout(PLUGIN_HANDOFF_PROOF_TIMEOUT, process.settle_effects()).await;
+            match proof {
+                Ok(Ok(())) => {
+                    handoff.settled = true;
+                    return Err(PluginLaunchError::Rejected(error(
+                        "plugin stdio is unavailable",
+                    )));
                 }
-                if let Ok(mut violation) = process.violation.lock() {
-                    *violation = Some(
+                Ok(Err(error)) => {
+                    return Err(PluginLaunchError::EffectsUnsettled {
+                        message: error.to_string(),
+                    });
+                }
+                Err(_) => {
+                    return Err(PluginLaunchError::EffectsUnsettled {
+                        message: "plugin launch cleanup proof deadline expired".to_owned(),
+                    });
+                }
+            }
+        };
+        if let Some(denials) = denials {
+            let weak = Arc::downgrade(&process);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let Some(process) = weak.upgrade() else {
+                        return;
+                    };
+                    if denials.count() == 0 {
+                        continue;
+                    }
+                    if let Ok(mut violation) = process.violation.lock() {
+                        *violation = Some(
                         "plugin attempted network egress outside its approved manifest/domain allowlist"
                             .to_owned(),
                     );
+                    }
+                    tracing::error!("plugin killed after network capability/domain violation");
+                    let _ = process.kill_tree();
+                    return;
                 }
-                tracing::error!("plugin killed after network capability/domain violation");
-                let _ = process.kill_tree();
-                return;
-            }
-        });
+            });
+        }
+        let process: Arc<dyn SupervisedPluginProcess> = process;
+        let launched = LaunchedPluginProcess {
+            stdin: Box::pin(stdin),
+            stdout: Box::pin(BufReader::new(stdout)),
+            stderr: Box::pin(BufReader::new(stderr.take(MAX_PLUGIN_STDERR_BYTES))),
+            process,
+            executable_identity,
+        };
+        handoff.settled = true;
+        Ok(launched)
     }
-    let process: Arc<dyn SupervisedPluginProcess> = process;
-    let launched = LaunchedPluginProcess {
-        stdin: Box::pin(stdin),
-        stdout: Box::pin(BufReader::new(stdout)),
-        stderr: Box::pin(BufReader::new(stderr.take(MAX_PLUGIN_STDERR_BYTES))),
-        process,
-        executable_identity: config.executable_identity().clone(),
-    };
-    handoff.settled = true;
-    Ok(launched)
 }
 
 struct PendingPluginHandoff {
@@ -347,7 +371,14 @@ impl Drop for PendingPluginHandoff {
     }
 }
 
+struct SpawnedPlugin {
+    child: Child,
+    proxy: Option<SupervisedEgressProxy>,
+    bytes: Arc<LaunchBytes>,
+}
+
 struct PluginChild {
+    bytes: Arc<LaunchBytes>,
     settlement: tokio::sync::Mutex<()>,
     admission: Mutex<Option<rw_resources::ResourceLease>>,
     helper: rw_tools::SandboxHelper,
@@ -487,20 +518,11 @@ impl PluginChild {
 }
 
 fn intrinsic_plugin_read_roots(
-    config: &PluginProcessConfig,
+    bytes: &LaunchBytes,
     scratch: &Path,
 ) -> Result<Vec<PathBuf>, PluginProcessError> {
     let mut roots = vec![scratch.to_path_buf()];
-    roots.push(config.executable().to_path_buf());
-    if let Some(code_root) = config.code_root() {
-        roots.push(code_root.canonical_path.clone());
-    }
-    roots.extend(
-        config
-            .attested_files()
-            .iter()
-            .map(|identity| identity.canonical_path.clone()),
-    );
+    roots.extend(bytes.read_roots());
     for candidate in [
         "/System",
         "/Library/Apple",
@@ -914,6 +936,7 @@ mod tests {
                 )
                 .expect("helper"),
                 process_fixture_lease(),
+                fixture_launch_bytes(),
             ),
         )
         .await
@@ -951,4 +974,15 @@ pub(crate) fn helper_executable() -> std::io::Result<rw_tools::SandboxHelper> {
 fn process_fixture_lease() -> rw_resources::ResourceLease {
     rw_resources::try_acquire(rw_resources::ResourceClass::Process)
         .unwrap_or_else(|failure| panic!("fixture process admission: {failure}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+fn fixture_launch_bytes() -> Arc<LaunchBytes> {
+    Arc::new(LaunchBytes::Harness {
+        _helper: rw_tools::SandboxHelper::from_running(
+            &std::env::current_exe().expect("test executable"),
+        )
+        .expect("kernel-owned fixture helper"),
+    })
 }
