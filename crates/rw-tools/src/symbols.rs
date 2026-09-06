@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod acceptance;
 mod presentation;
 use presentation::SYMBOLS_PRESENTATION;
 
