@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used)]
 //! Exercise the actual native sandbox, including the Linux proxy worker bootstrap.
+#[cfg(unix)]
+mod common;
 use rw_sandbox::{
     EgressPolicy, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
     maybe_run_helper, probe, shell_launch_plan,
@@ -42,13 +44,8 @@ fn main() {
             .without_process_creation();
         let executable = std::env::current_exe().expect("executable");
         let args = [OsString::from("--probe-child")];
-        let plan = shell_launch_plan(
-            &policy,
-            &rw_sandbox::SandboxHelper::from_running(&executable).expect("running helper"),
-            &executable,
-            &args,
-        )
-        .expect("launch plan");
+        let plan =
+            shell_launch_plan(&policy, &common::helper(), &executable, &args).expect("launch plan");
         #[cfg(target_os = "linux")]
         assert!(
             !plan

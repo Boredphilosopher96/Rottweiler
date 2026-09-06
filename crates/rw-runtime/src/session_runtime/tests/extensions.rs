@@ -1,23 +1,29 @@
 #![cfg(test)]
 use super::Arc;
+#[cfg(target_os = "macos")]
 use super::BTreeMap;
 use super::BashSandboxMode;
 use super::BashTool;
 use super::Block;
+#[cfg(target_os = "macos")]
 use super::CancellationToken;
 use super::CommandFixtureMode;
+#[cfg(target_os = "macos")]
 use super::CommandRequest;
 use super::CommandSafetyClassifier;
 use super::ExecutionLease;
 use super::ExtensionCatalog;
 use super::ExtensionDiscoveryConfig;
 use super::FixtureCodeIntelligence;
+#[cfg(target_os = "macos")]
 use super::FixtureRedactor;
 use super::FixtureToolchainExecutor;
+#[cfg(target_os = "macos")]
 use super::HookCommandCapture;
 use super::HookDispatcher;
 use super::HookEvent;
 use super::PluginManifest;
+#[cfg(target_os = "macos")]
 use super::READ_ONLY_HOOK_COMMAND_FIXTURE_NAMESPACE;
 use super::ReadTool;
 use super::SessionCommandAction;
@@ -28,6 +34,7 @@ use super::ToolchainConfig;
 use super::ToolchainRuntime;
 use super::WasmHookLimits;
 use super::WasmProcessHook;
+#[cfg(target_os = "macos")]
 use super::build_command_executor;
 use super::build_read_only_hook_executor;
 use super::builtin_hook_dispatcher;

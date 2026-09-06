@@ -199,6 +199,7 @@ impl ProtocolChildLauncher for SandboxedProtocolLauncher {
             stdin,
             stdout,
             handle: Box::new(TokioProtocolHandle {
+                _helper: self.helper_executable.clone(),
                 child,
                 process_group,
                 _proxy: proxy,
@@ -405,6 +406,7 @@ fn has_symlink_provenance(path: &Path) -> bool {
 }
 
 struct TokioProtocolHandle {
+    _helper: rw_sandbox::SandboxHelper,
     child: Child,
     process_group: Option<u32>,
     _proxy: Option<SupervisedEgressProxy>,

@@ -152,6 +152,7 @@ impl SandboxedLspSpawner {
 }
 
 struct TokioLspHandle {
+    _helper: rw_sandbox::SandboxHelper,
     child: Child,
     process_group: Option<u32>,
 }
@@ -227,6 +228,7 @@ impl LspProcessSpawner for SandboxedLspSpawner {
         let stdout = child.stdout.take().ok_or(LspError::Unavailable)?;
         Ok(SpawnedLspProcess {
             handle: Box::new(TokioLspHandle {
+                _helper: self.helper_executable.clone(),
                 child,
                 process_group,
             }),
