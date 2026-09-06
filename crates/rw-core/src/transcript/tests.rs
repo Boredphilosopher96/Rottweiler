@@ -507,17 +507,21 @@ fn mixed_rewind_events() -> Vec<EngineEvent> {
         });
     }
     events.push(finish(53, 0, "authoritative complete output"));
-    events.push(
-        crate::engine::PendingEvent::TurnFinished {
-            turn: 1,
-            status: crate::engine::AgentTurnStatus::Completed,
-            usage: crate::engine::SessionUsage::default(),
-            cost: rw_types::Cost::Unavailable {
-                reason: "fixture".into(),
-            },
-        }
-        .stamp(meta(54)),
-    );
+    events.push(EngineEvent::TurnFinished {
+        meta: meta(54),
+        turn_id: TurnId("1".into()),
+        status: rw_types::TurnStatus::Completed,
+        usage: rw_types::Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+        },
+        cost: rw_types::Cost::Unavailable {
+            reason: "fixture".into(),
+        },
+    });
     events.push(EngineEvent::TurnStarted {
         meta: meta(55),
         turn_id: TurnId("2".into()),
