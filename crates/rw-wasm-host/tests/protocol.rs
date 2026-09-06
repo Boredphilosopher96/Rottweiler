@@ -369,3 +369,16 @@ async fn approved_helper_survives_installation_replacement_before_worker_start()
     assert!(launch.path().exists(), "authority survives generation drop");
     pool.shutdown().await.expect("actual helper settled");
 }
+
+/// Produces component input before native mixed-package acceptance starts.
+#[test]
+#[ignore = "explicit fixture preparation; set ROTTWEILER_MIXED_WASM_COMPONENT"]
+fn prepare_mixed_policy_component() {
+    let output =
+        std::env::var_os("ROTTWEILER_MIXED_WASM_COMPONENT").expect("explicit component output");
+    std::fs::write(
+        output,
+        component(r#"{"decision":"block","message":"MIXED_WASM_POLICY"}"#),
+    )
+    .expect("component fixture output");
+}
