@@ -1,3 +1,4 @@
+import { retainedChildReader } from "../fixtures/family"
 import { expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
@@ -9,11 +10,8 @@ test("opening an idle child loads exact tasks and leaving retires a pending chil
   const commands: ClientCommand[] = []
   const reads: { session: string; signal: AbortSignal; resolve(result: TodoReadResult): void }[] = []
   const app = createRottweilerApp(setup.renderer, {
-    sessionId: "parent", sessionReader: { ...emptySessionReader,
-      children: async target => {
-        expect(target).toEqual({ sessionId: "parent", scope: { type: "session" } })
-        return { type: "ready", snapshot: { through: "1", children: [{ subagent_id: "worker", child_session_id: "child", spawned: "1", spawned_turn: "1", task_preview: "Inspect internals", task_truncated: false }] } }
-      },
+    sessionId: "parent", familyControls: retainedChildReader("parent", "worker", "child", "1"), sessionReader: { ...emptySessionReader,
+      children: emptySessionReader.children,
       todos: ({ sessionId: session }, signal) => new Promise(resolve => reads.push({ session, signal, resolve })),
     },
     onCommand: command => { commands.push(command); return { type: "accepted" } },

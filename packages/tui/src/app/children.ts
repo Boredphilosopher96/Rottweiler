@@ -1,7 +1,10 @@
+import { ChildDisplayController } from "../child-display"
+import { readSessionState } from "../state/recovery"
+import { installLiveTail } from "../state/tail-recovery"
 import { FamilyControlsController } from "../family-controls"
-import type { FamilyControlsReader } from "../family-controls-reader"
+import { sameChildTarget, type FamilyControlsReader } from "../family-controls-reader"
 import { resolveFamilyHistory } from "../family-history"
-import type { ChildControlResponse, ChildControlTarget, FamilyControlRow } from "../../../../protocol/types"
+import { MAX_ACTIVE_CHILDREN, type ChildControlResponse, type ChildControlTarget, type FamilyControlRow } from "../../../../protocol/types"
 import { readControls, resolvedApproval } from "../state/controls"
 import { childPassiveInteractionState } from "../subagent-state"
 import type { TranscriptRenderable } from "../components"
@@ -64,7 +67,6 @@ type SubagentAction =
   | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
-const MAX_VISIBLE_SUBAGENTS = 256
 
 export class ChildUiController {
   readonly #host: ChildUiHost
@@ -86,6 +88,12 @@ export class ChildUiController {
   #sourceRequest: AbortController | null = null
   #sourceOwner: { target: SessionReadTarget; release(): void } | null = null
   #sourceError: string | null = null
+  #wasConnected = false
+  #needsSource = false
+  readonly #display: ChildDisplayController | null
+  #displaySource: SessionReadTarget | null = null
+  #displayTarget: ChildControlTarget | null = null
+  #displayError: string | null = null
   readonly #todos: TodoController
   constructor(host: ChildUiHost) {
     this.draftStore = new ComposerDraftStore(undefined, undefined, host.history.controller.cache.allocations)
@@ -101,6 +109,27 @@ export class ChildUiController {
         } : readControls(state, snapshot)
       },
     })
+    this.#display = host.familyControls === undefined ? null : new ChildDisplayController({
+      cache: host.history.controller.cache,
+      readState: (root, target, signal, allocation) => host.familyControls!.state(root, target, signal, allocation),
+      readTail: (target, read, signal, allocation) => host.sessionReader.tail(target, read, signal, allocation),
+      apply: (snapshot, pages) => {
+        const current = this.#activeChildState
+        if (current === null || this.#familyChild === null) return
+        let next = readSessionState(current, this.#familyChild.session_id, snapshot)
+        if (pages !== null) {
+          next = installLiveTail(next, pages)
+          next = { ...next, tools: { ...next.tools, ...Object.fromEntries(Object.entries(current.tools).filter(([, tool]) => tool.status === "awaiting_approval")) } }
+        }
+        this.#activeChildState = next
+        if (pages !== null) {
+          host.history.invalidate(this.#familyChild.session_id)
+          this.#todos.open(this.readTarget, snapshot.through)
+        }
+        host.refresh()
+      },
+      failed: message => { if (message !== this.#displayError) { this.#displayError = message; host.refresh() } },
+    })
     this.#todos = new TodoController({
       allocations: host.history.controller.cache.allocations,
       reader: host.sessionReader,
@@ -114,7 +143,13 @@ export class ChildUiController {
   }
   syncFamily(): void {
     if (this.#resetting) return
-    this.#family?.connect(this.#host.state.connection.phase === "connected" && !this.#host.state.replay.active ? this.#host.sessionId : null)
+    const connected = this.#host.state.connection.phase === "connected" && !this.#host.state.replay.active
+    if (!connected && this.#wasConnected) {
+      this.#sourceRequest?.abort(); this.#sourceRequest = null
+      this.#needsSource = this.#activeSubagentId !== null
+    }
+    this.#wasConnected = connected
+    this.#family?.connect(connected ? this.#host.sessionId : null)
     if (this.#activeSubagentId !== null && this.#familyChild === null && this.#historicalChild === null) {
       const row = this.#family?.rows.find(value => value.target.ancestry.at(-1)?.subagent_id === this.#activeSubagentId)
       if (row !== undefined) {
@@ -123,6 +158,22 @@ export class ChildUiController {
         this.#familyChild = this.#family?.target ?? null
       }
     }
+    if (connected && this.#needsSource && this.#familyChild !== null
+      && this.#family?.rows.some(row => sameChildTarget(row.target, this.#familyChild!) && row.controls.available)) {
+      this.#needsSource = false; this.#loadSource(this.#familyChild)
+    }
+    this.#syncDisplay()
+  }
+  #syncDisplay(): void {
+    const target = this.#familyChild, source = this.#activeReadTarget
+    const available = target !== null && this.#family?.rows.some(row => sameChildTarget(row.target, target) && row.controls.available)
+    if (this.#host.state.connection.phase !== "connected" || this.#sourceRequest !== null || this.#needsSource || !available || target === null || source === null) {
+      this.#display?.close(); this.#displaySource = null; this.#displayTarget = null
+      return
+    }
+    if (this.#displaySource === source && this.#displayTarget === target) return
+    this.#display?.open(this.#host.sessionId, target, source)
+    this.#displaySource = source; this.#displayTarget = target
   }
   get controlsPending(): boolean { return this.#family?.pendingResponses === true }
   get sourceReady(): boolean { return this.#activeSubagentId === null || this.#activeReadTarget !== null }
@@ -162,13 +213,26 @@ export class ChildUiController {
     this.#activeChildState = { ...createInitialState(), connection: { ...createInitialState().connection, phase: "connected" } }
     this.restoreComposerDraft(this.#activeSubagentId)
     this.#host.refresh(); this.#host.focus(); prior?.release()
+    this.#loadSource(row.target)
+  }
+  #loadSource(target: ChildControlTarget): void {
+    this.#sourceRequest?.abort()
     const request = new AbortController(); this.#sourceRequest = request
-    void resolveFamilyHistory(this.#host.sessionReader, this.#host.history.controller.cache.allocations, this.#host.sessionId, row.target, request.signal).then(source => {
+    this.#sourceError = null
+    void this.#resolveHistory(target, request.signal).then(source => {
       if (request.signal.aborted) { source.release(); return }
+      this.#sourceRequest = null
+      const previous = this.#sourceOwner
       this.#sourceOwner = source; this.#activeReadTarget = source.target
       this.#todos.open(source.target)
-      this.#host.refresh()
+      try { this.#host.refresh() } finally { previous?.release() }
     }).catch(error => { if (!request.signal.aborted) { this.#sourceError = safeErrorMessage(error); this.#host.refresh() } })
+      .finally(() => { if (this.#sourceRequest === request) this.#sourceRequest = null })
+  }
+
+  #resolveHistory(target: ChildControlTarget, signal: AbortSignal) {
+    if (this.#host.familyControls === undefined) return Promise.reject(new Error("Live child history authority is unavailable."))
+    return resolveFamilyHistory(this.#host.familyControls, this.#host.history.controller.cache.allocations, this.#host.sessionId, target, signal)
   }
   retryTodos(): void { this.#todos.retry() }
   refreshTodos(): void {
@@ -192,6 +256,8 @@ export class ChildUiController {
   }
   reset(): void {
     this.#resetting = true
+    this.#wasConnected = false; this.#needsSource = false
+    this.#display?.close(); this.#displaySource = null; this.#displayTarget = null; this.#displayError = null
     this.#familyChild = null; this.#family?.close()
      this.#sourceRequest?.abort(); this.#sourceRequest = null
     this.#sourceOwner?.release(); this.#sourceOwner = null; this.#sourceError = null
@@ -205,7 +271,7 @@ export class ChildUiController {
   pickerClosed(): void { this.#subagentActionId = null }
   acceptCatalog(values: readonly SubagentDescriptor[]): void {
     this.#subagentListError = null
-    this.#subagentDescriptors = values.slice(0, MAX_VISIBLE_SUBAGENTS).map(sanitizeSubagentDescriptor)
+    this.#subagentDescriptors = values.slice(0, MAX_ACTIVE_CHILDREN).map(sanitizeSubagentDescriptor)
       .filter((descriptor): descriptor is SubagentDescriptor => descriptor !== null)
     if (this.#familyChild === null && this.#activeSubagentId !== null && this.subagentDescriptor(this.#activeSubagentId) === undefined && this.#historicalChild === null) this.leaveSubagent()
     else this.#host.refresh()
@@ -319,14 +385,7 @@ export class ChildUiController {
     this.#subagentErrorBaseline = this.#host.state.errors.at(-1)
     this.#activeChildState = initialSubagentState(this.#host.state, descriptor)
     this.#activeReadTarget = null
-    this.#sourceRequest?.abort()
-    const request = new AbortController(); this.#sourceRequest = request
-    void resolveFamilyHistory(this.#host.sessionReader, this.#host.history.controller.cache.allocations, this.#host.sessionId,
-      { session_id: descriptor.child_session_id, ancestry: [{ subagent_id: subagentId, session_id: descriptor.child_session_id }] }, request.signal).then(source => {
-      if (request.signal.aborted) { source.release(); return }
-      this.#sourceOwner?.release(); this.#sourceOwner = source; this.#activeReadTarget = source.target
-      this.#todos.open(source.target); this.#host.refresh()
-    }).catch(error => { if (!request.signal.aborted) { this.#sourceError = safeErrorMessage(error); this.#host.refresh() } })
+    this.#loadSource({ session_id: descriptor.child_session_id, ancestry: [{ subagent_id: subagentId, session_id: descriptor.child_session_id }] })
     this.#host.refresh()
     this.#host.focus()
   }
@@ -335,8 +394,10 @@ export class ChildUiController {
     if (this.#activeSubagentId === null) return
     if (!this.saveComposerDraft()) return
     this.#family?.select(null); this.#familyChild = null
+    this.#display?.close(); this.#displaySource = null; this.#displayTarget = null; this.#displayError = null
     this.#sourceRequest?.abort(); this.#sourceRequest = null
     const source = this.#sourceOwner; this.#sourceOwner = null
+    this.#needsSource = false
     this.#todos.reset()
     this.#activeSubagentId = null
     this.#activeReadTarget = null
@@ -368,6 +429,10 @@ export class ChildUiController {
 
   acceptProgress(event: Extract<EngineEvent, { type: "subagent_progress" }>): boolean {
     if (event.parent_session_id !== this.#host.sessionId) return false
+    if (this.#familyChild?.session_id === event.child_session_id) {
+      this.#host.history.invalidate(event.child_session_id)
+      return true
+    }
     const descriptor = this.subagentDescriptor(event.subagent_id)
     if (descriptor === undefined || descriptor.child_session_id !== event.child_session_id) return false
     const source = childProgressSource(event)
@@ -453,7 +518,7 @@ export class ChildUiController {
     }
     if (this.#familyChild !== null) {
       this.#host.banner.visible = true
-      this.#host.banner.content = `Child ${this.#familyChild.session_id} · ${this.familyControlReady ? "controls ready" : "refreshing controls"}${this.#family?.error ? ` · ${this.#family.error}` : ""} · Esc parent`
+      this.#host.banner.content = `Child ${this.#familyChild.session_id} · ${this.familyControlReady ? "controls ready" : "refreshing controls"}${this.#family?.error ? ` · ${this.#family.error}` : ""}${this.#displayError ? ` · ${this.#displayError}` : ""} · Esc parent`
       return
     }
     if (this.#historicalChild !== null) {

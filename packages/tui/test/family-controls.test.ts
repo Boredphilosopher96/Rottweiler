@@ -4,7 +4,6 @@ import { ClientAllocationOwner } from "../src/client-allocation"
 import { FamilyControlsController } from "../src/family-controls"
 import type { FamilyControlsReader } from "../src/family-controls-reader"
 import { resolveFamilyHistory } from "../src/family-history"
-import { emptySessionReader } from "./fixtures/history"
 
 const target: ChildControlTarget = { session_id: "child", ancestry: [{ subagent_id: "agent", session_id: "child" }] }
 const controls: SessionControlsSnapshot = { through: "4", controls: { questions: [], approvals: [], pending_plan: null } }
@@ -17,7 +16,7 @@ function cancelled(signal: AbortSignal): Promise<never> {
 test("reconnect discovers unopened child controls without progress and restarts revision namespace", async () => {
   const owner = new ClientAllocationOwner(), after: (string | null)[] = []
   let revision = "9"
-  const reader: FamilyControlsReader = {
+  const reader: Pick<FamilyControlsReader, "watch" | "child"> = {
     async watch(_root, cursor, signal, allocation) {
       after.push(cursor); allocation.admit(4096)
       if (cursor === null) return family(revision)
@@ -42,7 +41,7 @@ test("reconnect discovers unopened child controls without progress and restarts 
 
 test("selected snapshot and action target remain owned across cancellation, replacement and teardown", async () => {
   const owner = new ClientAllocationOwner(), received = Promise.withResolvers<void>(), finish = Promise.withResolvers<ChildControlsSnapshot>()
-  const reader: FamilyControlsReader = {
+  const reader: Pick<FamilyControlsReader, "watch" | "child"> = {
     async watch(_root, after, signal) { return after === null ? family("2") : cancelled(signal) },
     async child(_root, _target, _signal, allocation) { allocation.admit(8192); received.resolve(); return finish.promise },
   }
@@ -84,16 +83,16 @@ test("new discovery revision invalidates action admission until the selected sna
   controller.close(); await controller.settled(); expect(owner.usage.bytes).toBe(0)
 })
 
-test("selected history resolves exact canonical spawn authority at every live ancestry hop", async () => {
-  const owner = new ClientAllocationOwner(), paths: unknown[] = []
+test("selected history resolves terminal bindings through exact live target authority", async () => {
+  const owner = new ClientAllocationOwner(), calls: unknown[] = []
   const nested = { session_id: "grandchild", ancestry: [...target.ancestry, { subagent_id: "nested", session_id: "grandchild" }] }
-  const reader = { ...emptySessionReader, async children(scope: Parameters<typeof emptySessionReader.children>[0]) {
-    paths.push(scope)
-    const child = scope.sessionId === "root" ? ["agent", "child", "10"] : ["nested", "grandchild", "20"]
-    return { type: "ready" as const, snapshot: { through: "30", children: [{ subagent_id: child[0]!, child_session_id: child[1]!, spawned: child[2]!, spawned_turn: "1", task_preview: "task", task_truncated: false }] } }
+  const reader: Pick<FamilyControlsReader, "scope"> = { async scope(root, selected, _signal, allocation) {
+    calls.push({ root, selected }); allocation.admit(8192)
+    return { type: "ready", scope: { type: "descendant", root_session_id: root,
+      ancestry: [{ subagent_id: "agent", session_id: "child", source_sequence: "10" }, { subagent_id: "nested", session_id: "grandchild", source_sequence: "20" }] } }
   } }
   const source = await resolveFamilyHistory(reader, owner, "root", nested, new AbortController().signal)
-  expect(paths).toEqual([{ sessionId: "root", scope: { type: "session" } }, { sessionId: "child", scope: { type: "descendant", root_session_id: "root", ancestry: [{ subagent_id: "agent", session_id: "child", source_sequence: "10" }] } }])
+  expect(calls).toEqual([{ root: "root", selected: nested }])
   expect(source.target.scope).toMatchObject({ ancestry: [{ subagent_id: "agent", source_sequence: "10" }, { subagent_id: "nested", source_sequence: "20" }] })
   expect(owner.usage.bytes).toBeGreaterThan(0)
   source.release(); expect(owner.usage.bytes).toBe(0)
@@ -114,4 +113,20 @@ test("repeated rebinds retain only the latest watch while the cancelled HTTP own
   expect(roots).toEqual(["first", "root-99"])
   controller.close(); await controller.settled()
   expect(owner.usage.bytes).toBe(0)
+})
+
+test("scope resolution refuses a different ancestry and retains canceled decode credit until settlement", async () => {
+  const owner = new ClientAllocationOwner(), signal = new AbortController()
+  const pending = Promise.withResolvers<import("../../../protocol/types").ChildReadScopeResult>()
+  const work = resolveFamilyHistory({ async scope(_root, _target, _signal, allocation) { allocation.admit(8192); return pending.promise } }, owner, "root", target, signal.signal)
+  signal.abort()
+  expect(owner.usage.bytes).toBeGreaterThan(8192)
+  pending.resolve({ type: "ready", scope: { type: "descendant", root_session_id: "root", ancestry: [{ subagent_id: "agent", session_id: "child", source_sequence: "10" }] } })
+  await expect(work).rejects.toThrow()
+  expect(owner.usage.bytes).toBe(0)
+  for (const root of ["foreign", "root"]) {
+    await expect(resolveFamilyHistory({ async scope() { return { type: "ready", scope: { type: "descendant", root_session_id: root,
+      ancestry: [{ subagent_id: "different", session_id: "child", source_sequence: "10" }] } } } }, owner, "root", target, new AbortController().signal)).rejects.toThrow("live ancestry")
+    expect(owner.usage.bytes).toBe(0)
+  }
 })

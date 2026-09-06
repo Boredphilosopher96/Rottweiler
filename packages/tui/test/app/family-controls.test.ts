@@ -26,6 +26,8 @@ for (const kind of ["question", "approval"] as const) {
     const emitted: ClientCommand[] = [], cursors: (string | null)[] = []
     let revision = "7", resolved = false, snapshotReads = 0
     const reader: FamilyControlsReader = {
+      async state() { throw new Error("display scope has not resolved") },
+      scope: (_root, _target, signal) => untilAbort(signal),
       async watch(_root, after, signal, allocation) {
         cursors.push(after); allocation.admit(4096)
         if (after !== null) return untilAbort(signal)
@@ -92,6 +94,8 @@ test("leaving a child preserves its unsettled response owner and defers renderer
   const setup = await createTestRenderer({ width: 100, height: 30, useThread: false })
   const dispatched = Promise.withResolvers<void>(), settle = Promise.withResolvers<void>()
   const reader: FamilyControlsReader = {
+      async state() { throw new Error("display scope has not resolved") },
+      scope: (_root, _target, signal) => untilAbort(signal),
     async watch(_root, after, signal) {
       if (after !== null) return untilAbort(signal)
       return { revision: "7", children: [{ target, controls: { revision: "7", through: "12", questions: 0, approvals: 1, pending_plan: false, available: true } }] }

@@ -927,7 +927,7 @@ export class TuiEngineRuntime {
   }
 
   async #readSession(
-    command: Extract<ClientCommand, { type: "read_family_controls" | "read_child_controls" | "read_session_children" | "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
+    command: Extract<ClientCommand, { type: "read_family_controls" | "read_child_controls" | "read_child_state" | "resolve_child_read_scope" | "read_session_children" | "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
     signal: AbortSignal,
     allocation: ReplyAllocation,
   ): Promise<Extract<CommandReply, { type: "read" }>> {

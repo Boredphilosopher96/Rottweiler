@@ -1,3 +1,4 @@
+import { retainedChildReader } from "./fixtures/family"
 import type { RottweilerApp } from "../src/app"
 import { expect, test } from "bun:test"
 import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
@@ -18,12 +19,9 @@ async function childHarness(activity: "running" | "idle", sourceReader?: import(
   const commands: ClientCommand[] = []
   const sessions: string[] = []
   const app = createRottweilerApp(harness.renderer, {
-    sessionId: "parent", treeSitterClient: new MockTreeSitterClient(),
+    sessionId: "parent", familyControls: retainedChildReader("parent", "child", "child-session", "1"), treeSitterClient: new MockTreeSitterClient(),
     sessionReader: {
-      children: async target => {
-        expect(target).toEqual({ sessionId: "parent", scope: { type: "session" } })
-        return { type: "ready", snapshot: { through: "1", children: [{ subagent_id: "child", child_session_id: "child-session", spawned: "1", spawned_turn: "1", task_preview: "Inspect child history", task_truncated: false }] } }
-      },
+      children: emptySessionReader.children,
       tail: emptySessionReader.tail,
       uiCatalog: async () => ({ entries: [] }),
   uiPanels: async () => ({ panels: [] }),

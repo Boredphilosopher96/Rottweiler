@@ -10,7 +10,7 @@ function releaseSelection(value: Selection): void { if (--value.references === 0
 
 interface FamilyControlsOptions {
   readonly allocations: ClientAllocationOwner
-  readonly reader: FamilyControlsReader
+  readonly reader: Pick<FamilyControlsReader, "watch" | "child">
   changed(): void
   apply(snapshot: SessionControlsSnapshot | null): void
 }

@@ -63,6 +63,14 @@ export class ChildDisplayController {
       finally { release(selected) }
     }
   }
+  #notify(message: string | null): void {
+    try { this.options.failed(message) }
+    catch {
+      // A renderer already refusing replacement cannot safely receive another error render.
+      // The application stores the error before refreshing; stop this worker until the view reopens.
+      this.close()
+    }
+  }
   async #poll(selected: Selection): Promise<void> {
     let through: string | null | undefined, compaction: string | null = null
     while (!selected.abort.signal.aborted) {
@@ -89,10 +97,10 @@ export class ChildDisplayController {
         if (tail !== null || revision !== compaction) this.options.apply(snapshot, tail?.pages ?? null)
         through = snapshot.through; compaction = revision
         if (this.#selection !== selected) return
-        this.options.failed(null)
+        this.#notify(null)
       } catch (error) {
         if (selected.abort.signal.aborted) return
-        this.options.failed(error instanceof Error ? error.message.slice(0, 512) : "Child display could not be recovered.")
+        this.#notify(error instanceof Error ? error.message.slice(0, 512) : "Child display could not be recovered.")
       } finally { tail?.release() }
       await delay(REFRESH_MILLIS, undefined, { signal: selected.abort.signal }).catch(() => {})
     }

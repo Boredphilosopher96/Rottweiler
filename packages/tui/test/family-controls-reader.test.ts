@@ -29,3 +29,27 @@ test("source-referenced input commits advance the cursor without duplicating acc
   expect(committed.streamingTail).toBe(accepted.streamingTail)
   expect("transcript" in committed).toBe(false)
 })
+
+test("child scalar and scope replies retain full root and ancestry correlation", async () => {
+  const reader = familyControlsReader(async command => {
+    const common = { meta: ack, session_id: "root", target: { ...target, ancestry: [{ subagent_id: "foreign", session_id: "child" }] } }
+    if (command.type === "resolve_child_read_scope") return { type: "read", outcome: { type: "accepted" }, events: [{ ...common, type: "child_read_scope_ready", result: { type: "ready", scope: { type: "session" } } }] }
+    return { type: "read", outcome: { type: "accepted" }, events: [{ ...common, type: "child_state_ready", snapshot: {
+      through: "1", driver_client_id: null, title: null, model_alias: "main", provider: null, thinking: "off", mode_id: "execute",
+      active_turn: null, completed_turns: "0", shell: null, compaction: null, plugin_statuses: [], queued_messages: [], budget: null,
+    } }] }
+  }, meta)
+  await expect(reader.state("root", target, signal, allocation)).rejects.toThrow("target-bound")
+  await expect(reader.scope("root", target, signal, allocation)).rejects.toThrow("target-bound")
+})
+
+test("source-referenced context commits advance the durable cursor without creating a display body", () => {
+  const initial = createInitialState()
+  const state = reduceRottweilerState(initial, engineEvent({ type: "conversation_context_committed",
+    meta: { protocol_version: PROTOCOL_VERSION, session_id: "root", sequence_id: "5", emitted_at: ack.emitted_at }, agent_turn: "1",
+    selection: { type: "continuation" },
+  }))
+  expect(state.lastSequence).toBe("5")
+  expect(state.hasActivity).toBe(true)
+  expect(state.streamingTail).toBeNull()
+})

@@ -104,3 +104,18 @@ test("compaction preview revisions refresh independently without rereading an un
   expect(tails).toBe(4)
   expect(cache.allocations.usage.bytes).toBe(0)
 })
+
+test("a refused display and error render settle the collector without retrying into a failing renderer", async () => {
+  const cache = new ClientCache<HistoryCacheValue>(), failure = Promise.withResolvers<void>()
+  let applied = 0, reported = 0
+  const controller = new ChildDisplayController({ cache,
+    async readState() { return metadata() },
+    async readTail(_target, request) { return { type: "ready", page: page(request.part) } },
+    apply() { applied++; throw new Error("projection admission refused") },
+    failed(message) { expect(message).toBe("projection admission refused"); reported++; failure.resolve(); throw new Error("error renderer refused") },
+  })
+  controller.open("root", target, source)
+  await failure.promise; await controller.settled()
+  expect(applied).toBe(1); expect(reported).toBe(1)
+  expect(cache.allocations.usage.bytes).toBe(0)
+})

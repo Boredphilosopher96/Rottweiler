@@ -191,6 +191,8 @@ function applyKnownEvent(
       return activeSessionId !== null && event.session_id !== activeSessionId ? state : readSessionState(state, event.session_id, event.snapshot)
     case "family_controls_ready":
     case "child_controls_ready":
+    case "child_state_ready":
+    case "child_read_scope_ready":
       return state
     case "session_controls_ready":
       return activeSessionId !== null && event.session_id !== activeSessionId ? state : readControls(state, event.snapshot)
@@ -606,6 +608,7 @@ function applyKnownEvent(
       if (activeSessionId !== null && event.session_id !== activeSessionId) return state
       return { ...state, todos: readTodos(state.todos, event.result) }
     case "conversation_input_committed":
+    case "conversation_context_committed":
       return { ...state, hasActivity: true }
     case "conversation_turn_committed": {
       const clearsTail =

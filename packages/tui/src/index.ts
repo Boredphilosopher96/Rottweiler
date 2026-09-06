@@ -237,6 +237,16 @@ async function main(): Promise<void> {
       if (transcriptPainted && value.length > 0) composerAcceptedInput = true
     },
     familyControls: {
+      async state(root, target, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.state(root, target, signal, allocation)
+      },
+      async scope(root, target, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.scope(root, target, signal, allocation)
+      },
       async watch(root, after, signal, allocation) {
         const { runtime } = await runtimeBootstrap
         if (runtime === null) throw new Error("engine runtime is unavailable")
