@@ -16,10 +16,10 @@ fn meta(sequence: u64) -> EventMeta {
 fn user(sequence: u64, turn: u64, content: &str) -> [EngineEvent; 2] {
     crate::session_runtime::test_history::input_events(meta(sequence), turn, content.into())
 }
-fn start(sequence: u64, invocation: &str) -> EngineEvent {
+fn start(sequence: u64, turn: u64, invocation: &str) -> EngineEvent {
     EngineEvent::ToolCallStarted {
         meta: meta(sequence),
-        turn_id: TurnId("2".into()),
+        turn_id: TurnId(turn.to_string()),
         tool_call_id: ToolCallId("provider-call".into()),
         invocation_id: ToolInvocationId(invocation.into()),
         name: "read".into(),
@@ -27,10 +27,10 @@ fn start(sequence: u64, invocation: &str) -> EngineEvent {
         call_index: 0,
     }
 }
-fn finish(sequence: u64, invocation: &str, output: ToolOutput) -> EngineEvent {
+fn finish(sequence: u64, turn: u64, invocation: &str, output: ToolOutput) -> EngineEvent {
     EngineEvent::ToolCallFinished {
         meta: meta(sequence),
-        turn_id: TurnId("2".into()),
+        turn_id: TurnId(turn.to_string()),
         tool_call_id: ToolCallId("provider-call".into()),
         invocation_id: ToolInvocationId(invocation.into()),
         output,
@@ -116,17 +116,22 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
             },
         },
     ]);
-    events.extend(user(5, 2, "discardedmessage"));
+    events.push(EngineEvent::TurnStarted {
+        meta: meta(5),
+        turn_id: TurnId("2".into()),
+    });
+    events.extend(user(6, 2, "discardedmessage"));
     events.extend([
-        start(7, "first"),
+        start(8, 2, "first"),
         finish(
-            8,
+            9,
+            2,
             "first",
             ToolOutput::Structured {
                 value: serde_json::json!({"status":"discardedresult", "count":42}),
             },
         ),
-        start(9, "pending"),
+        start(10, 2, "pending"),
     ]);
     journal.append_batch(events).expect("append");
     synchronize(root.path(), "search", &journal.read_view()).expect("search source");
@@ -139,23 +144,21 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
         1
     );
     let mut events = vec![EngineEvent::ConversationRewound {
-        meta: meta(10),
+        meta: meta(11),
         to_agent_turn: 1,
         operation_id: "rewind".into(),
         unrestorable_paths: vec![],
     }];
-    events.extend(user(11, 2, "replacementmessage"));
+    events.push(EngineEvent::TurnStarted {
+        meta: meta(12),
+        turn_id: TurnId("3".into()),
+    });
+    events.extend(user(13, 3, "replacementmessage"));
     events.extend([
-        start(13, "replacement"),
+        start(15, 3, "replacement"),
         finish(
-            14,
-            "pending",
-            ToolOutput::Text {
-                text: "latepoison".into(),
-            },
-        ),
-        finish(
-            15,
+            16,
+            3,
             "replacement",
             ToolOutput::Mixed {
                 parts: vec![
@@ -182,6 +185,28 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
             .expect("retained source")
             .len(),
         1
+    );
+    let published = index.projection("search").expect("published source");
+    journal
+        .append(finish(
+            17,
+            2,
+            "pending",
+            ToolOutput::Text {
+                text: "latepoison".into(),
+            },
+        ))
+        .expect("invalid source fixture");
+    assert!(synchronize(root.path(), "search", &journal.read_view()).is_err());
+    assert_eq!(
+        index.projection("search").expect("unchanged index"),
+        published
+    );
+    assert!(
+        index
+            .search("latepoison", 10)
+            .expect("rejected body")
+            .is_empty()
     );
 }
 
