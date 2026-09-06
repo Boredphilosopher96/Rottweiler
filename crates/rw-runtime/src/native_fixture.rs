@@ -35,7 +35,7 @@ fn load_helper() -> std::io::Result<rw_tools::SandboxHelper> {
             "sandbox helper receipt exceeds 4096 bytes",
         ));
     }
-    let identity: rw_tools::HelperArtifactIdentity =
+    let identity: rw_tools::ExecutableArtifactIdentity =
         serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
     rw_tools::SandboxHelper::from_artifact(&identity)
         .map_err(|error| std::io::Error::other(format!("sandbox helper receipt rejected: {error}")))

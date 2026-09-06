@@ -183,41 +183,36 @@ pub(super) fn sanitized_wasm_notice_text(value: &str, limit: usize) -> String {
 ///
 /// # Errors
 /// Returns an error when no safe executable candidate can be located.
-pub fn locate_wasm_host_executable() -> Result<PathBuf> {
-    if let Some(override_path) = std::env::var_os("ROTTWEILER_WASM_HOST_BIN") {
-        return require_private_helper(PathBuf::from(override_path));
-    }
-    let current = std::env::current_exe().into_diagnostic()?;
-    let installed = std::fs::canonicalize(current).into_diagnostic()?;
-    if let Some(sibling) = installed
-        .parent()
-        .map(|parent| parent.join("rottweiler-wasm-host"))
-        && sibling.is_file()
-    {
-        return require_private_helper(sibling);
-    }
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| workspace.join("target"), PathBuf::from);
-    require_private_helper(target.join("debug/rottweiler-wasm-host"))
-}
-
-pub(super) fn require_private_helper(path: PathBuf) -> Result<PathBuf> {
-    let metadata = std::fs::symlink_metadata(&path).into_diagnostic()?;
-    #[cfg(unix)]
-    let executable = {
-        use std::os::unix::fs::PermissionsExt as _;
-        metadata.permissions().mode() & 0o111 != 0
+pub fn locate_wasm_host_executable() -> Result<rw_tools::ApprovedExecutable> {
+    let receipt = if let Some(path) = std::env::var_os("ROTTWEILER_WASM_HOST_RECEIPT") {
+        PathBuf::from(path)
+    } else {
+        let current = std::env::current_exe().into_diagnostic()?;
+        let installed = current.canonicalize().into_diagnostic()?;
+        installed
+            .parent()
+            .ok_or_else(|| miette!("WASM bundle directory is missing"))?
+            .join("rottweiler-wasm-host.identity.json")
     };
-    #[cfg(not(unix))]
-    let executable = true;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || !executable {
+    let receipt = receipt.canonicalize().into_diagnostic()?;
+    let directory = receipt
+        .parent()
+        .ok_or_else(|| miette!("WASM receipt directory is missing"))?;
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&receipt)
+        .into_diagnostic()?
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .into_diagnostic()?;
+    if bytes.len() > 4096 {
         return Err(miette!(
-            "private WASM helper is not a regular executable at {}",
-            path.display()
+            "WASM helper identity receipt exceeds its byte limit"
         ));
     }
-    Ok(path)
+    let identity: rw_tools::ExecutableDigest = serde_json::from_slice(&bytes).into_diagnostic()?;
+    rw_tools::ApprovedExecutable::from_installed(&directory.join("rottweiler-wasm-host"), &identity)
+        .into_diagnostic()
 }
 
 pub(super) fn compose_runtime_hooks(

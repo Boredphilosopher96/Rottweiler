@@ -1,5 +1,5 @@
 #![allow(clippy::expect_used)]
-use super::{HelperArtifactIdentity, SandboxHelper};
+use crate::{ExecutableArtifactIdentity, SandboxHelper};
 use sha2::{Digest as _, Sha256};
 use std::{
     fs,
@@ -7,7 +7,7 @@ use std::{
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
 };
 
-fn fixture() -> (tempfile::TempDir, HelperArtifactIdentity) {
+fn fixture() -> (tempfile::TempDir, ExecutableArtifactIdentity) {
     let directory = tempfile::tempdir().expect("artifact directory");
     let executable = directory.path().join("approved-helper");
     let bytes = b"approved internal bootstrap bytes";
@@ -17,12 +17,12 @@ fn fixture() -> (tempfile::TempDir, HelperArtifactIdentity) {
     let metadata = executable.metadata().expect("identity");
     (
         directory,
-        HelperArtifactIdentity {
+        ExecutableArtifactIdentity {
             executable,
             device: metadata.dev(),
             inode: metadata.ino(),
             bytes: metadata.len(),
-            sha256: super::hex_digest(&Sha256::digest(bytes)),
+            sha256: crate::executable::hex_digest(&Sha256::digest(bytes)),
         },
     )
 }
@@ -49,23 +49,23 @@ fn approved_bytes_survive_same_inode_mutation_and_path_replacement() {
 fn receipts_reject_unapproved_identity_bytes_and_digest() {
     let (_directory, approved) = fixture();
     for altered in [
-        HelperArtifactIdentity {
+        ExecutableArtifactIdentity {
             device: approved.device.wrapping_add(1),
             ..approved.clone()
         },
-        HelperArtifactIdentity {
+        ExecutableArtifactIdentity {
             inode: approved.inode.wrapping_add(1),
             ..approved.clone()
         },
-        HelperArtifactIdentity {
+        ExecutableArtifactIdentity {
             bytes: approved.bytes + 1,
             ..approved.clone()
         },
-        HelperArtifactIdentity {
+        ExecutableArtifactIdentity {
             sha256: "0".repeat(64),
             ..approved.clone()
         },
-        HelperArtifactIdentity {
+        ExecutableArtifactIdentity {
             sha256: approved.sha256.to_uppercase(),
             ..approved.clone()
         },

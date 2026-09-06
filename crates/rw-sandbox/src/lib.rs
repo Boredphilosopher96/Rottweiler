@@ -4,8 +4,12 @@
 //! policy into an argv-only launch plan consumed by `rw-tools`, and exposes the
 //! Linux helper entry point used immediately before `exec(2)`.
 
+mod executable;
+pub use executable::{
+    ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest, ExecutableLaunch,
+};
 mod helper;
-pub use helper::{HelperArtifactIdentity, SandboxHelper};
+pub use helper::SandboxHelper;
 
 #[cfg(target_os = "macos")]
 mod macos;

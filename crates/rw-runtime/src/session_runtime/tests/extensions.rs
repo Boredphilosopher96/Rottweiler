@@ -328,9 +328,20 @@ fn root_recomposition_reuses_the_validated_wasm_generation() {
             }"#,
     )
     .expect("manifest");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
+        .expect("executable fixture");
+    let approved = rw_tools::ApprovedExecutable::from_installed(
+        &helper.canonicalize().expect("path"),
+        &rw_tools::ExecutableDigest {
+            bytes: 40,
+            sha256: "79b086bc9698e1dd8158ad2262eada56bb7536a6d01e7822c1c2c1174d39aff6".to_owned(),
+        },
+    )
+    .expect("fixture approval");
     let host = WasmProcessHook::new(
         rw_ext::WasmWorkerPool::new(),
-        helper.clone(),
+        approved,
         manifest,
         vec![0],
         WasmHookLimits::default(),

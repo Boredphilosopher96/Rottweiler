@@ -2834,6 +2834,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3082,8 +3083,11 @@ version = "0.1.4"
 dependencies = [
  "rw-ext",
  "rw-plugin-protocol",
+ "rw-tools",
  "rw-types",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "tokio",
  "wat",
 ]

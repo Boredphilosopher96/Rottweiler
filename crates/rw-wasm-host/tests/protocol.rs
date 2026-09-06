@@ -7,6 +7,30 @@ use rw_plugin_protocol::{
     HookFailurePolicy, PROTOCOL_VERSION, PluginCapabilities, PluginHookCapability, PluginManifest,
 };
 
+fn approve_helper(path: &std::path::Path) -> rw_tools::ApprovedExecutable {
+    use sha2::{Digest as _, Sha256};
+    let path = path.canonicalize().expect("fixture executable");
+    let bytes = std::fs::read(&path).expect("fixture bytes");
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .flat_map(|byte| {
+            let digits = b"0123456789abcdef";
+            [
+                char::from(digits[usize::from(byte >> 4)]),
+                char::from(digits[usize::from(byte & 15)]),
+            ]
+        })
+        .collect();
+    rw_tools::ApprovedExecutable::from_installed(
+        &path,
+        &rw_tools::ExecutableDigest {
+            bytes: bytes.len() as u64,
+            sha256: digest,
+        },
+    )
+    .expect("approved fixture executable")
+}
+
 fn manifest() -> PluginManifest {
     PluginManifest {
         name: "helper-test".to_owned(),
@@ -69,7 +93,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
     let pool = WasmWorkerPool::new();
     let hook = WasmProcessHook::new(
         pool.clone(),
-        Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")).to_owned(),
+        approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host"))),
         manifest(),
         component(r#"{"decision":"transform","change":{"hook":"pre_tool","name":"read","arguments":{"safe":true}}}"#),
         WasmHookLimits::default(),
@@ -104,7 +128,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
 #[tokio::test]
 async fn helper_rejects_malformed_components_and_recovers() {
     let pool = WasmWorkerPool::new();
-    let helper = Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")).to_owned();
+    let helper = approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")));
     let invalid = WasmProcessHook::new(
         pool.clone(),
         helper.clone(),
@@ -130,7 +154,7 @@ async fn helper_rejects_malformed_components_and_recovers() {
 #[tokio::test]
 async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
     let pool = WasmWorkerPool::with_worker_limit(2).expect("capacity");
-    let helper = Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")).to_owned();
+    let helper = approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")));
     let bytes = component(r#"{"decision":"continue"}"#);
     let first = WasmProcessHook::new(
         pool.clone(),
@@ -175,7 +199,7 @@ async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
 #[tokio::test]
 async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
     let pool = WasmWorkerPool::with_worker_limit(1).expect("capacity");
-    let helper = Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")).to_owned();
+    let helper = approve_helper(Path::new(env!("CARGO_BIN_EXE_rottweiler-wasm-host")));
     let hook = WasmProcessHook::new(
         pool.clone(),
         helper,
@@ -210,9 +234,19 @@ async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
 #[ignore = "native worker-capacity measurement; run alone with a release helper"]
 async fn worker_capacity_measurement() {
     use std::{sync::Arc, time::Instant};
-    let helper = std::env::var_os("ROTTWEILER_WASM_BENCH_HELPER")
+    let helper = std::env::var_os("ROTTWEILER_WASM_BENCH_RECEIPT")
         .map(std::path::PathBuf::from)
-        .expect("set ROTTWEILER_WASM_BENCH_HELPER to the release helper");
+        .expect("set ROTTWEILER_WASM_BENCH_RECEIPT to the release helper receipt");
+    let receipt: rw_tools::ExecutableDigest =
+        serde_json::from_slice(&std::fs::read(&helper).expect("receipt")).expect("typed receipt");
+    let helper = rw_tools::ApprovedExecutable::from_installed(
+        &helper
+            .parent()
+            .expect("bundle")
+            .join("rottweiler-wasm-host"),
+        &receipt,
+    )
+    .expect("approved release helper");
     for workers in [1, 2] {
         let pool = WasmWorkerPool::with_worker_limit(workers).expect("capacity");
         let hook = WasmProcessHook::new(
@@ -272,24 +306,52 @@ async fn worker_capacity_measurement() {
             concurrent_us.push(started.elapsed().as_micros());
         }
         let process_snapshot = std::process::Command::new("ps")
-            .args(["-axo", "ppid=,rss=,comm="])
+            .args(["-axo", "pid=,rss="])
             .output()
             .expect("RSS sample");
-        let own_pid = std::process::id().to_string();
+        let worker_pids = pool.idle_process_ids();
+        assert_eq!(worker_pids.len(), workers);
         let rss_kib: u64 = String::from_utf8_lossy(&process_snapshot.stdout)
             .lines()
             .filter_map(|line| {
                 let mut parts = line.split_whitespace();
-                let parent = parts.next()?;
+                let pid = parts.next()?.parse::<u32>().ok()?;
                 let rss = parts.next()?.parse::<u64>().ok()?;
-                let command = parts.collect::<Vec<_>>().join(" ");
-                (parent == own_pid && command.ends_with("rottweiler-wasm-host")).then_some(rss)
+                worker_pids.contains(&pid).then_some(rss)
             })
             .sum();
         println!(
             "{}",
-            serde_json::json!({"workers":workers,"helper":helper,"cold_us":cold_us,"warm_us":warm_us,"concurrent_16_us":concurrent_us,"warm_workers_rss_kib":rss_kib,"process_starts":pool.stats().process_starts,"component_loads":pool.stats().component_loads,"cache_hits":pool.stats().cache_hits})
+            serde_json::json!({"workers":workers,"helper":helper.installation_path(),"cold_us":cold_us,"warm_us":warm_us,"concurrent_16_us":concurrent_us,"warm_workers_rss_kib":rss_kib,"process_starts":pool.stats().process_starts,"component_loads":pool.stats().component_loads,"cache_hits":pool.stats().cache_hits})
         );
         assert!(pool.shutdown().await.is_ok());
     }
+}
+
+#[tokio::test]
+async fn approved_helper_survives_installation_replacement_before_worker_start() {
+    let directory = tempfile::tempdir().expect("bundle");
+    let installation = directory.path().join("rottweiler-wasm-host");
+    std::fs::copy(env!("CARGO_BIN_EXE_rottweiler-wasm-host"), &installation)
+        .expect("install helper");
+    let helper = approve_helper(&installation);
+    let launch = helper.launch().expect("launch authority");
+    std::fs::remove_file(&installation).expect("remove installation");
+    std::fs::write(&installation, b"not the approved helper").expect("replace installation");
+    let pool = WasmWorkerPool::new();
+    let hook = WasmProcessHook::new(
+        pool.clone(),
+        helper,
+        manifest(),
+        component(r#"{"decision":"continue"}"#),
+        WasmHookLimits::default(),
+    )
+    .expect("proxy");
+    hook.validate()
+        .await
+        .expect("original exact executable bytes");
+    assert_eq!(pool.stats().process_starts, 1);
+    drop(hook);
+    assert!(launch.path().exists(), "authority survives generation drop");
+    pool.shutdown().await.expect("actual helper settled");
 }

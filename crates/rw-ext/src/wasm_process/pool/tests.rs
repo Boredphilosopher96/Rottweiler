@@ -2,7 +2,31 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt as _;
 
-fn generation(helper: PathBuf) -> Arc<Generation> {
+fn approve_helper(path: &std::path::Path) -> rw_tools::ApprovedExecutable {
+    use sha2::{Digest as _, Sha256};
+    let path = path.canonicalize().expect("fixture executable");
+    let bytes = std::fs::read(&path).expect("fixture bytes");
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .flat_map(|byte| {
+            let digits = b"0123456789abcdef";
+            [
+                char::from(digits[usize::from(byte >> 4)]),
+                char::from(digits[usize::from(byte & 15)]),
+            ]
+        })
+        .collect();
+    rw_tools::ApprovedExecutable::from_installed(
+        &path,
+        &rw_tools::ExecutableDigest {
+            bytes: bytes.len() as u64,
+            sha256: digest,
+        },
+    )
+    .expect("approved fixture executable")
+}
+
+fn generation(helper: rw_tools::ApprovedExecutable) -> Arc<Generation> {
     Arc::new(Generation {
         helper,
         manifest: PluginManifest {
@@ -26,7 +50,7 @@ async fn saturation_is_bounded_before_starting_or_copying_components() {
         .acquire()
         .await
         .expect("hold worker admission");
-    let generation = generation(PathBuf::from("unused-helper"));
+    let generation = generation(approve_helper(std::path::Path::new("/bin/sh")));
     let mut tasks = Vec::new();
     for _ in 0..MAX_ADMITTED {
         let pool = pool.clone();
@@ -74,7 +98,7 @@ async fn dropped_caller_reaps_worker_before_settlement_and_releases_its_slot() {
     .expect("helper");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("executable");
     let pool = WasmWorkerPool::capacity(1);
-    let generation = generation(path);
+    let generation = generation(approve_helper(&path));
     let call = {
         let pool = pool.clone();
         let generation = generation.clone();
@@ -140,14 +164,14 @@ async fn admitted_owner(pool: &Arc<WasmWorkerPool>, generation: &Arc<Generation>
             .await
             .expect("execution"),
     );
-    owner.worker = Some(Worker::start(std::path::Path::new("/bin/sh")).expect("child"));
+    owner.worker = Some(Worker::start(&generation.helper).expect("child"));
     owner
 }
 
 #[tokio::test]
 async fn failed_reap_returns_error_and_never_releases_failed_capacity() {
     let pool = WasmWorkerPool::capacity(1);
-    let generation = generation(PathBuf::from("/bin/sh"));
+    let generation = generation(approve_helper(std::path::Path::new("/bin/sh")));
     let mut owner = admitted_owner(&pool, &generation).await;
     // Consume the actual OS wait result outside Tokio, creating a real ECHILD
     // failure without leaving a live child behind the test.
@@ -194,7 +218,7 @@ async fn failed_reap_returns_error_and_never_releases_failed_capacity() {
 #[tokio::test]
 async fn aborted_owner_reports_failed_proof_and_shutdown_reaps_quarantined_child() {
     let pool = WasmWorkerPool::capacity(1);
-    let generation = generation(PathBuf::from("/bin/sh"));
+    let generation = generation(approve_helper(std::path::Path::new("/bin/sh")));
     let owner = admitted_owner(&pool, &generation).await;
     let pid = owner
         .worker
@@ -241,7 +265,7 @@ async fn aborted_owner_reports_failed_proof_and_shutdown_reaps_quarantined_child
 #[tokio::test]
 async fn retirement_deadline_keeps_native_ownership_and_capacity_charged() {
     let pool = WasmWorkerPool::capacity(1);
-    let generation = generation(PathBuf::from("/bin/sh"));
+    let generation = generation(approve_helper(std::path::Path::new("/bin/sh")));
     let mut owner = admitted_owner(&pool, &generation).await;
     // A controlled wait proves timer behavior without relying on an OS process
     // entering an uninterruptible state. The owner retains a real child.

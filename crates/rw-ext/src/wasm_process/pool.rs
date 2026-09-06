@@ -1,11 +1,11 @@
 //! Application-owned helper reuse. Callers own cancellation; jobs own cleanup.
 use super::{
     Arc, AsyncReadExt, AsyncWriteExt, Duration, MAX_WASM_HOST_HEADER_BYTES,
-    MAX_WASM_HOST_RESPONSE_BYTES, PathBuf, PluginManifest, Stdio, WasmHookHostError,
-    WasmHookLimits, WasmHostRequest, WasmHostResponse, helper_deadline_error, io_error,
+    MAX_WASM_HOST_RESPONSE_BYTES, PluginManifest, Stdio, WasmHookHostError, WasmHookLimits,
+    WasmHostRequest, WasmHostResponse, helper_deadline_error, io_error,
 };
 use futures_util::FutureExt as _;
-use rw_tools::CancellationToken;
+use rw_tools::{ApprovedExecutable, CancellationToken, ExecutableLaunch};
 use std::sync::{
     Mutex,
     atomic::{AtomicU64, Ordering},
@@ -20,7 +20,7 @@ const DEFAULT_WORKERS: usize = 2;
 const WORKER_RETIREMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct Generation {
-    pub helper: PathBuf,
+    pub helper: ApprovedExecutable,
     pub manifest: PluginManifest,
     pub component: Arc<[u8]>,
     pub limits: WasmHookLimits,
@@ -111,6 +111,17 @@ impl WasmWorkerPool {
             component_loads: self.loads.load(Ordering::Relaxed),
             cache_hits: self.hits.load(Ordering::Relaxed),
         }
+    }
+
+    /// Returns actual idle worker identities for local process diagnostics.
+    #[must_use]
+    pub fn idle_process_ids(&self) -> Vec<u32> {
+        self.idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|worker| worker.child.id())
+            .collect()
     }
 
     /// Closes admission and waits for all admitted jobs and helpers to settle.
@@ -269,7 +280,7 @@ impl WasmWorkerPool {
             if owner
                 .worker
                 .as_ref()
-                .is_some_and(|worker| worker.helper != generation.helper)
+                .is_some_and(|worker| !worker.executable.matches(&generation.helper))
             {
                 owner.retire_worker().await?;
                 self.starts.fetch_add(1, Ordering::Relaxed);
@@ -359,13 +370,18 @@ impl Drop for CancelOnDrop {
 }
 
 struct Worker {
-    helper: PathBuf,
+    executable: ExecutableLaunch,
     child: tokio::process::Child,
     digest: Option<blake3::Hash>,
 }
 impl Worker {
-    fn start(helper: &std::path::Path) -> Result<Self, WasmHookHostError> {
-        let child = tokio::process::Command::new(helper)
+    fn start(helper: &ApprovedExecutable) -> Result<Self, WasmHookHostError> {
+        let executable = helper
+            .launch()
+            .map_err(|error| WasmHookHostError::Execution {
+                message: error.to_string(),
+            })?;
+        let child = tokio::process::Command::new(executable.path())
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -374,13 +390,13 @@ impl Worker {
             .spawn()
             .map_err(|error| io_error(&error))?;
         Ok(Self {
-            helper: helper.to_owned(),
+            executable,
             child,
             digest: None,
         })
     }
     fn matches(&self, generation: &Generation) -> bool {
-        self.helper == generation.helper && self.digest == Some(generation.digest)
+        self.executable.matches(&generation.helper) && self.digest == Some(generation.digest)
     }
     async fn exchange(
         &mut self,

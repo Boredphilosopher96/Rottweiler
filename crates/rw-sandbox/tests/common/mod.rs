@@ -1,6 +1,6 @@
 //! The Cargo test binary is an explicitly approved fixture artifact.
 #![allow(clippy::expect_used)]
-use rw_sandbox::{HelperArtifactIdentity, SandboxHelper};
+use rw_sandbox::{ExecutableArtifactIdentity, SandboxHelper};
 use sha2::{Digest as _, Sha256};
 use std::{fs::File, io::Read as _, os::unix::fs::MetadataExt as _, path::Path};
 
@@ -19,7 +19,7 @@ pub fn helper() -> SandboxHelper {
         }
         digest.update(&buffer[..count]);
     }
-    SandboxHelper::from_artifact(&HelperArtifactIdentity {
+    SandboxHelper::from_artifact(&ExecutableArtifactIdentity {
         executable,
         device: metadata.dev(),
         inode: metadata.ino(),

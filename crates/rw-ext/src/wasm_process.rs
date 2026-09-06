@@ -2,7 +2,7 @@
 mod pool;
 pub use pool::{WasmWorkerPool, WasmWorkerStats};
 
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use rw_plugin_protocol::PluginManifest;
@@ -56,7 +56,7 @@ impl WasmProcessHook {
     /// Returns an error for invalid manifests, capabilities, or component size.
     pub fn new(
         pool: Arc<WasmWorkerPool>,
-        helper: PathBuf,
+        helper: rw_tools::ApprovedExecutable,
         manifest: PluginManifest,
         component: Vec<u8>,
         limits: WasmHookLimits,

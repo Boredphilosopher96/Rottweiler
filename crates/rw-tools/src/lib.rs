@@ -98,4 +98,7 @@ pub use worktree::{
     WorktreeLeaseRecord, WorktreeLimits, validate_diff_artifact,
 };
 
-pub use rw_sandbox::{HelperArtifactIdentity, SandboxHelper};
+pub use rw_sandbox::{
+    ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest, ExecutableLaunch,
+    SandboxHelper,
+};
