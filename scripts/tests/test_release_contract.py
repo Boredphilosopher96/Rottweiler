@@ -111,7 +111,7 @@ class ReleaseContractTests(unittest.TestCase):
                              {"installer", "engine", "js_host", "wasm_host", "wasm_host_identity", "opentui_native"})
             host = next(member for member in platform.archive_members if member.id == "js_host")
             self.assertEqual(host.path, "bin/rottweiler-js-host")
-            self.assertEqual(host.max_bytes, 104_857_600)
+            self.assertEqual(host.max_bytes, 150_000_000)
             expected = 100_000_000 if platform.system == "Darwin" else 150_000_000
             self.assertEqual(platform.product_budgets.js_bundle_less_than_bytes, expected)
 
@@ -149,6 +149,28 @@ class ReleaseContractTests(unittest.TestCase):
             path.write_text(json.dumps(member), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "engine product budget exceeds"):
                 self.module.load_contract(path)
+
+            member = copy.deepcopy(document)
+            host = next(value for value in member["archive"]["members"] if value["id"] == "js_host")
+            host["max_bytes"] = 104_857_600
+            path.write_text(json.dumps(member), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "JavaScript bundle product budget exceeds its host"):
+                self.module.load_contract(path)
+
+    def test_large_linux_host_obeys_combined_platform_budget(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("engine", "wasm", "js", "native")]
+            for path, size in zip(paths, (1, 1, 115_480_704, 5_500_000), strict=True):
+                with path.open("wb") as output:
+                    output.truncate(size)
+            self.module.validate_build(contract, "linux-x86_64", *paths)
+            with self.assertRaisesRegex(ValueError, "product budget is <100000000"):
+                self.module.validate_build(contract, "darwin-arm64", *paths)
+            with paths[2].open("wb") as output:
+                output.truncate(144_500_000)
+            with self.assertRaisesRegex(ValueError, "product budget is <150000000"):
+                self.module.validate_build(contract, "linux-x86_64", *paths)
 
     def test_generated_rust_is_deterministic_and_current(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

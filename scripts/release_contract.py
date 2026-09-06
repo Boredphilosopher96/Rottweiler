@@ -334,13 +334,13 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
                 f"platforms.{platform.id}.product_budgets.wasm_host_less_than_bytes",
                 "WASM host product budget exceeds its member extraction limit",
             )
-        js_extraction_bytes = (
-            member_by_id["js_host"].max_bytes + member_by_id["opentui_native"].max_bytes
-        )
-        if budgets.js_bundle_less_than_bytes > js_extraction_bytes:
+        # The executable may own almost the entire combined JS/native budget.
+        # Adding two extraction ceilings hides an executable ceiling that
+        # prevents an otherwise valid platform bundle from being published.
+        if budgets.js_bundle_less_than_bytes > member_by_id["js_host"].max_bytes:
             _fail(
                 f"platforms.{platform.id}.product_budgets.js_bundle_less_than_bytes",
-                "JavaScript bundle product budget exceeds its member extraction limits",
+                "JavaScript bundle product budget exceeds its host extraction limit",
             )
         maximum_allowed_product_bytes = (
             member_by_id["installer"].max_bytes

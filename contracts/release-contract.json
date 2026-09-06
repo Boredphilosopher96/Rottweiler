@@ -20,7 +20,7 @@
         "id": "js_host",
         "path": "bin/rottweiler-js-host",
         "mode": "0755",
-        "max_bytes": 104857600
+        "max_bytes": 150000000
       },
       {
         "id": "wasm_host",

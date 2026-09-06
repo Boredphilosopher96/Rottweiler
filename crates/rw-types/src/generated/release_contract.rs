@@ -54,7 +54,7 @@ const DARWIN_ARM64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         id: "js_host",
         path: "bin/rottweiler-js-host",
         mode: 0o755,
-        max_bytes: 104_857_600,
+        max_bytes: 150_000_000,
     },
     ReleaseArchiveMember {
         id: "wasm_host",
@@ -93,7 +93,7 @@ const DARWIN_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         id: "js_host",
         path: "bin/rottweiler-js-host",
         mode: 0o755,
-        max_bytes: 104_857_600,
+        max_bytes: 150_000_000,
     },
     ReleaseArchiveMember {
         id: "wasm_host",
@@ -132,7 +132,7 @@ const LINUX_AARCH64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         id: "js_host",
         path: "bin/rottweiler-js-host",
         mode: 0o755,
-        max_bytes: 104_857_600,
+        max_bytes: 150_000_000,
     },
     ReleaseArchiveMember {
         id: "wasm_host",
@@ -171,7 +171,7 @@ const LINUX_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         id: "js_host",
         path: "bin/rottweiler-js-host",
         mode: 0o755,
-        max_bytes: 104_857_600,
+        max_bytes: 150_000_000,
     },
     ReleaseArchiveMember {
         id: "wasm_host",
