@@ -68,6 +68,13 @@ impl CheckpointStore {
     ///
     /// Returns an error for an unsafe path, unreadable file, unsupported file
     /// kind, or durable blob/manifest write failure.
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "checkpoint.capture",
+        skip_all,
+        fields(session_id, turn)
+    )]
     pub fn checkpoint_known(
         &self,
         session_id: &str,
@@ -151,6 +158,13 @@ impl CheckpointStore {
     ///
     /// Returns an error for an existing pending mutation, unsafe workspace
     /// entries, or a durable baseline/manifest write failure.
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "checkpoint.begin_opaque",
+        skip_all,
+        fields(session_id, turn)
+    )]
     pub fn begin_opaque_mutation(
         &self,
         session_id: &str,
@@ -214,6 +228,7 @@ impl CheckpointStore {
     ///
     /// Returns an error for a missing/corrupt marker, unsafe path, unavailable
     /// required preimage, or durable manifest failure.
+    #[tracing::instrument(target = "rw_performance", level = "trace", name = "checkpoint.finish_opaque", skip_all, fields(session_id = mutation.session_id.as_str(), turn = mutation.turn))]
     pub fn finish_opaque_mutation(
         &self,
         mutation: &OpaqueMutation,

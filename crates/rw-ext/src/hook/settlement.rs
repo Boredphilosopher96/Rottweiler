@@ -33,6 +33,12 @@ impl HookRuntime {
     pub(super) fn close_admission(&self) {
         self.admission.close();
     }
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "hook.admission_wait",
+        skip_all
+    )]
     pub(super) async fn admit(
         self: &Arc<Self>,
         handler: Arc<dyn HookHandler>,
@@ -56,6 +62,12 @@ impl HookRuntime {
         })
     }
 
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "hook.settlement",
+        skip_all
+    )]
     pub(super) async fn settle(&self, deadline: Instant) -> Result<(), HookError> {
         let permit = tokio::time::timeout_at(deadline, self.admission.acquire())
             .await

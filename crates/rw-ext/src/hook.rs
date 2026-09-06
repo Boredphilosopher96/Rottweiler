@@ -332,6 +332,7 @@ struct RegisteredHook {
     runtime: Arc<HookRuntime>,
 }
 
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "hook.invoke", skip_all, fields(hook_id = registered.registration.id(), event = ?input.event()))]
 async fn invoke_registered_hook(
     registered: &RegisteredHook,
     input: &HookInput,
@@ -568,6 +569,7 @@ impl HookDispatcher {
         self.dispatch_selected(input, None).await
     }
 
+    #[tracing::instrument(target = "rw_performance", level = "trace", name = "hook.phase", skip_all, fields(event = ?input.event()))]
     async fn dispatch_selected(
         &self,
         input: HookInput,
