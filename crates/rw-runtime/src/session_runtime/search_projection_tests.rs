@@ -186,6 +186,14 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
             .len(),
         1
     );
+    reject_stale_completion(root.path(), &mut journal, &index);
+}
+
+fn reject_stale_completion(
+    root: &std::path::Path,
+    journal: &mut SegmentedJournal,
+    index: &SessionIndex,
+) {
     let published = index.projection("search").expect("published source");
     journal
         .append_batch([finish(
@@ -197,7 +205,7 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
             },
         )])
         .expect("invalid source fixture");
-    assert!(synchronize(root.path(), "search", &journal.read_view()).is_err());
+    assert!(synchronize(root, "search", &journal.read_view()).is_err());
     assert_eq!(
         index.projection("search").expect("unchanged index"),
         published
