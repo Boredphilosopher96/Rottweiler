@@ -42,6 +42,17 @@ pub enum SessionStoreError {
     /// Paged scans require positive, independently bounded limits.
     #[error("session event page limits must all be greater than zero")]
     InvalidEventPageLimits,
+    /// Exact record decoding requires a positive allowance within the journal ceiling.
+    #[error("session event decode allowance is outside the journal limit")]
+    InvalidEventDecodeLimit,
+    /// The caller cannot retain the requested record within its remaining allowance.
+    #[error(
+        "session event requires {required_bytes} decoded bytes but the allowance is {max_bytes}"
+    )]
+    EventDecodeLimitTooSmall {
+        required_bytes: usize,
+        max_bytes: usize,
+    },
     /// The descriptor snapshot exceeded the caller's total scan budget.
     #[error("session event log exceeds the {max_bytes}-byte page scan limit")]
     EventScanBytesExceeded { max_bytes: u64 },

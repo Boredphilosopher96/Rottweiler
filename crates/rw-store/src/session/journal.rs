@@ -5,8 +5,10 @@ pub(super) mod decode;
 pub use append::{JournalAppendPlan, PreparedJournalAppend};
 mod catalog;
 mod proof;
+mod record;
 use catalog::SegmentCatalog;
 pub use proof::{JournalAdvance, JournalPageProof, VerifiedJournalPage};
+pub use record::JournalRecord;
 
 use super::{
     EVENT_SCHEMA_VERSION, EventEnvelope, SessionEventPage, SessionEventPageLimits,
