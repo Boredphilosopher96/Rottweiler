@@ -196,6 +196,7 @@ async fn sample(root: &Path, expected: &Expected, phase: &str, ordinal: usize, w
     drop(factory);
     owner
         .journal_service
+        .commits
         .shutdown()
         .await
         .expect("source jobs settled");
