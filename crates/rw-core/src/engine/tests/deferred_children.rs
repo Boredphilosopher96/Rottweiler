@@ -119,8 +119,8 @@ async fn resumed_followups_observe_only_their_own_turn() {
 async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
     let (started, entered) = tokio::sync::oneshot::channel();
     let started = std::sync::Mutex::new(Some(started));
-    let (release, wait) = std::sync::mpsc::channel();
-    let wait = std::sync::Mutex::new(wait);
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let wait = std::sync::Mutex::new(Some(wait));
     let factory =
         ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(move |_, root, _| {
             started
@@ -130,14 +130,22 @@ async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
                 .expect("single preparation")
                 .send(())
                 .expect("notify");
-            wait.lock().expect("release lock").recv().expect("release");
-            Box::pin(super::fixtures::history::bind(config(
+            let wait = wait
+                .lock()
+                .expect("release lock")
+                .take()
+                .expect("one preparation");
+            let config = config(
                 root,
                 Arc::new(ScriptedModel::default()),
                 Arc::new(ToolRegistry::new()),
                 PermissionDecision::Allow,
                 builtin_hook_dispatcher().expect("hooks"),
-            )))
+            );
+            Box::pin(async move {
+                wait.await.expect("release");
+                super::fixtures::history::bind(config).await
+            })
         });
     let root = tempfile::tempdir().expect("root");
     let child = rebind(&factory, root.path()).await;
