@@ -3,6 +3,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use std::{fs, path::Path, time::Duration};
 
 pub const MAX_PROFILE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum retained allocation of a directly decoded request profile.
+pub const MAX_PROFILE_DECODE_BYTES: usize = 16 * 1024 * 1024;
 const APPLICATION_ID: u32 = 0x5257_5053;
 const PROFILES: &str = "CREATE TABLE profiles (id BLOB PRIMARY KEY NOT NULL CHECK(length(id)=32), body BLOB NOT NULL CHECK(length(body)<=4194304)) STRICT";
 const REQUESTS: &str = "CREATE TABLE requests (source BLOB PRIMARY KEY NOT NULL CHECK(length(source)=8), turn BLOB NOT NULL CHECK(length(turn)=8), profile BLOB NOT NULL REFERENCES profiles(id), fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32)) STRICT";

@@ -87,6 +87,9 @@ fn planned_bytes(
         .and_then(|bytes| bytes.checked_add(transformed.checked_mul(3)?))
         .and_then(|bytes| bytes.checked_add(metadata.checked_mul(4)?))
         .and_then(|bytes| bytes.checked_add(scratch))
+        // Request recording and historical verification overlap the assembled request.
+        .and_then(|bytes| bytes.checked_add(rw_store::prompt_shapes::MAX_PROFILE_BYTES))
+        .and_then(|bytes| bytes.checked_add(rw_store::prompt_shapes::MAX_PROFILE_DECODE_BYTES))
         .ok_or_else(|| invalid("context working allocation overflow"))
 }
 fn output_plan(

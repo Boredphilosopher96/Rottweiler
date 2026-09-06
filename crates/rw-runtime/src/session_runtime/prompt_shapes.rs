@@ -265,7 +265,7 @@ fn admit_profile(bytes: &[u8]) -> Result<()> {
     if shape
         .direct_value_decode_bytes()
         .and_then(|bytes| bytes.checked_add(shape.nodes.checked_mul(slot)?.checked_mul(2)?))
-        .is_none_or(|size| size > 16 * 1024 * 1024)
+        .is_none_or(|size| size > rw_store::prompt_shapes::MAX_PROFILE_DECODE_BYTES)
     {
         return Err(miette!("prompt shape exceeds decoded allocation admission"));
     }
