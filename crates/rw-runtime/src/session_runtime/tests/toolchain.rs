@@ -213,12 +213,20 @@ async fn toolchain_test_runs_only_after_successful_turns_and_blocks_on_failure()
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
+    let root = tempdir().expect("workspace");
+    std::fs::write(
+        root.path().join("rust-toolchain.toml"),
+        include_str!("../../../../../rust-toolchain.toml"),
+    )
+    .expect("workspace toolchain declaration");
     let rustfmt_available = std::process::Command::new("rustfmt")
         .arg("--version")
+        .current_dir(root.path())
         .output()
         .is_ok_and(|output| output.status.success());
     let clippy_available = std::process::Command::new("cargo")
         .args(["clippy", "--version"])
+        .current_dir(root.path())
         .output()
         .is_ok_and(|output| output.status.success());
     if !rustfmt_available || !clippy_available {
@@ -230,7 +238,6 @@ async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
         return;
     }
 
-    let root = tempdir().expect("workspace");
     let private = tempdir().expect("private runtime state");
     std::fs::create_dir_all(root.path().join("crate/src")).expect("source directory");
     std::fs::write(
