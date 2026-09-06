@@ -179,6 +179,7 @@ fn plugin_sandbox_policy(
     let policy = SandboxPolicy::new(roots, NetworkPolicy::Deny)
         .and_then(|policy| policy.with_read_roots(read_roots))
         .map_err(|sandbox| error(&sandbox.to_string()))?
+        .with_only_declared_reads()
         .without_process_creation();
     #[cfg(target_os = "macos")]
     let policy = if matches!(profile.mode, rw_ext::PluginSandboxMode::Preparation { .. }) {
@@ -408,7 +409,10 @@ fn intrinsic_plugin_read_roots(
         "/lib64",
         "/etc/ld.so.cache",
         "/dev",
-        "/proc",
+        "/proc/self",
+        "/proc/meminfo",
+        "/sys/devices/system/cpu",
+        "/sys/fs/cgroup",
         "/private/etc",
         "/private/var/db",
         "/private/var/OOPJit",

@@ -31,7 +31,7 @@ use super::{
     sensitive_home_roots, serde_json,
 };
 
-/// Linux's default compatibility roots. These are deliberately explicit:
+/// Linux's default shell runtime roots. These are deliberately explicit:
 /// Landlock cannot subtract a credential directory after granting `/`.
 /// Optional multilib and virtual-filesystem entries are skipped when the
 /// host does not provide them.
@@ -259,8 +259,10 @@ fn install_landlock(policy: &SandboxPolicy, program: &OsString) -> Result<(), Sa
         .into_iter()
         .collect::<Vec<_>>();
     let mut read_grants = BTreeMap::new();
-    for root in SYSTEM_READ_ROOTS {
-        collect_system_read_root(Path::new(root), &homes, &mut read_grants)?;
+    if policy.system_read_roots {
+        for root in SYSTEM_READ_ROOTS {
+            collect_system_read_root(Path::new(root), &homes, &mut read_grants)?;
+        }
     }
     match (&policy.read_roots, &policy.read_root_kinds) {
         (Some(read_roots), Some(read_root_kinds)) if read_roots.len() == read_root_kinds.len() => {

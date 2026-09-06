@@ -107,6 +107,7 @@ pub struct SandboxPolicy {
     read_root_kinds: Option<Vec<RootKind>>,
     network: NetworkPolicy,
     allow_process_creation: bool,
+    system_read_roots: bool,
     #[cfg(target_os = "linux")]
     preparation: Option<PreparationFilesystem>,
     #[cfg(target_os = "macos")]
@@ -177,6 +178,7 @@ impl SandboxPolicy {
             read_roots: None,
             read_root_kinds: None,
             allow_process_creation: true,
+            system_read_roots: true,
             #[cfg(target_os = "linux")]
             preparation: None,
             #[cfg(target_os = "macos")]
@@ -238,6 +240,15 @@ impl SandboxPolicy {
         Ok(self)
     }
 
+    /// Uses only the explicitly declared read and write roots. The caller must
+    /// include its executable, runtime libraries, and required OS data paths.
+    /// Linux does not add the general shell system-read grants to this policy.
+    #[must_use]
+    pub fn with_only_declared_reads(mut self) -> Self {
+        self.system_read_roots = false;
+        self
+    }
+
     /// Exact roots visible to a read-restricted child, if narrowing was requested.
     #[must_use]
     pub fn read_roots(&self) -> Option<&[PathBuf]> {
@@ -259,6 +270,7 @@ impl SandboxPolicy {
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
             allow_process_creation: self.allow_process_creation,
+            system_read_roots: self.system_read_roots,
             #[cfg(target_os = "linux")]
             preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]
@@ -277,6 +289,7 @@ impl SandboxPolicy {
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
             allow_process_creation: self.allow_process_creation,
+            system_read_roots: self.system_read_roots,
             #[cfg(target_os = "linux")]
             preparation: self.preparation.clone(),
             #[cfg(target_os = "macos")]
