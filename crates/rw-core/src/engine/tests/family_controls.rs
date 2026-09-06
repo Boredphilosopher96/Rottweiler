@@ -81,8 +81,8 @@ async fn explicit_root_driver_answers_exact_child_question_without_changing_chil
             _ => {}
         }
     };
-    let state = child.live_state().await.expect("child state");
-    let active = state.active_turn.as_ref().expect("active question turn");
+    let scalar = child.live_state().await.expect("child state");
+    let active = scalar.active_turn.as_ref().expect("active question turn");
     let (source, turn_id) = started.expect("durable turn start");
     assert_eq!(active.turn_id, turn_id);
     assert_eq!(active.started, Some(source));
