@@ -141,9 +141,7 @@ async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
         .recovered
         .pruned_tool_outputs
         .insert("0:0".to_owned(), 100);
-    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
-        .await
-        .expect("actor");
+    let (handle, tool_sources) = spawn_with_tool_sources(actor_config).await;
 
     let snapshot = handle.context_snapshot().await.expect("context snapshot");
     let system = snapshot
@@ -167,13 +165,13 @@ async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
     assert_eq!(tool_results.len(), 2, "no aggregate tool-turn duplicate");
     let pruned = tool_results
         .iter()
-        .find(|item| item.item_id.0 == "tool_result:0:0")
+        .find(|item| item.item_id.0 == format!("tool_result:{}:0", tool_sources[0].0))
         .expect("first tool result");
     assert!(pruned.state.pinned);
     assert!(pruned.state.pruned);
     let second = tool_results
         .iter()
-        .find(|item| item.item_id.0 == "tool_result:0:1")
+        .find(|item| item.item_id.0 == format!("tool_result:{}:1", tool_sources[0].0))
         .expect("second tool result");
     assert!(second.state.pinned);
     assert!(!second.state.pruned);
@@ -320,9 +318,7 @@ async fn pruning_uses_provider_visible_toon_size_and_persists_that_reclamation()
         recent,
         text_turn(Role::User, "newer user boundary"),
     ];
-    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
-        .await
-        .expect("actor");
+    let (handle, tool_sources) = spawn_with_tool_sources(actor_config).await;
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run pruning").await.expect("message");
     let events = collect_turn(&mut events).await;
@@ -332,7 +328,7 @@ async fn pruning_uses_provider_visible_toon_size_and_persists_that_reclamation()
         PendingEvent::ToolOutputPruned {
             source,
             reclaimed_tokens,
-        } if source.sequence == rw_types::SequenceId(1) && source.block_index == 0 && *reclaimed_tokens == provider_visible_tokens
+        } if source.sequence == tool_sources[0] && source.block_index == 0 && *reclaimed_tokens == provider_visible_tokens
     )));
     let requests = model.requests();
     assert_eq!(requests.len(), 1);
@@ -483,4 +479,27 @@ fn output_pruning_targets_one_block_despite_repeated_provider_aliases() {
         &mut ToonPromptEncoder::default(),
     );
     assert_eq!(other, value);
+}
+
+async fn spawn_with_tool_sources(
+    config: crate::engine::tests::fixtures::history::TestActorConfig,
+) -> (crate::engine::SessionHandle, Vec<rw_types::SequenceId>) {
+    let config = crate::engine::tests::fixtures::history::bind(config)
+        .await
+        .expect("bound history");
+    let sources = config
+        .event_sink
+        .test_events_after(None)
+        .await
+        .expect("seed source")
+        .into_iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConversationToolResultsCommitted { meta, .. } => Some(meta.sequence_id),
+            _ => None,
+        })
+        .collect();
+    (
+        crate::engine::SessionActor::spawn(config).expect("actor"),
+        sources,
+    )
 }

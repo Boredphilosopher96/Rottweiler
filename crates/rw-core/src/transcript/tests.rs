@@ -421,7 +421,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
                 .index()
                 .page(0, 64, 1024 * 1024)
                 .expect("complete semantic page");
-            assert_eq!(page.rows.len(), 55);
+            assert_eq!(page.rows.len(), 54);
             assert_eq!(page.head.prefix, view.prefix_identity());
             assert_eq!(page.head.generation, 1);
             assert!(
@@ -435,7 +435,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
                 .iter()
                 .find(|row| row.source == SequenceId(3))
                 .expect("original tool row");
-            assert_eq!(tool.revision, SequenceId(54));
+            assert_eq!(tool.revision, SequenceId(53));
             let TranscriptContent::Tool {
                 status: TranscriptToolStatus::Finished { output, .. },
                 ..
@@ -451,7 +451,7 @@ fn bounded_projector_resumes_hidden_rewind_after_every_transaction() {
                     .expect("removed anchor")
                     .expect("replacement")
                     .source,
-                SequenceId(53)
+                SequenceId(52)
             );
             completed = true;
             break;
@@ -498,7 +498,7 @@ fn mixed_rewind_events() -> Vec<EngineEvent> {
         input(1, 1, "original prompt".into())[1].clone(),
         start(3, 0),
     ];
-    for sequence in 4..54 {
+    for sequence in 4..53 {
         events.push(EngineEvent::CommandFinished {
             meta: meta(sequence),
             name: "status".into(),
@@ -506,7 +506,18 @@ fn mixed_rewind_events() -> Vec<EngineEvent> {
             unrestorable_paths: vec![],
         });
     }
-    events.push(finish(54, 0, "authoritative complete output"));
+    events.push(finish(53, 0, "authoritative complete output"));
+    events.push(
+        crate::engine::PendingEvent::TurnFinished {
+            turn: 1,
+            status: crate::engine::AgentTurnStatus::Completed,
+            usage: crate::engine::SessionUsage::default(),
+            cost: rw_types::Cost::Unavailable {
+                reason: "fixture".into(),
+            },
+        }
+        .stamp(meta(54)),
+    );
     events.push(EngineEvent::TurnStarted {
         meta: meta(55),
         turn_id: TurnId("2".into()),
@@ -657,8 +668,14 @@ fn encoded_row_budget_can_stop_mid_page_without_skipping_canonical_events() {
 fn projector_finishes_a_tool_from_an_earlier_raw_page_after_reopen() {
     let root = tempdir().expect("root");
     let mut journal = SegmentedJournal::open(root.path(), "semantic").expect("journal");
-    let mut events = vec![start(0, 0)];
-    events.extend((1..65).map(|sequence| EngineEvent::PluginStatusChanged {
+    let mut events = vec![
+        EngineEvent::TurnStarted {
+            meta: meta(0),
+            turn_id: TurnId("1".into()),
+        },
+        start(1, 0),
+    ];
+    events.extend((2..65).map(|sequence| EngineEvent::PluginStatusChanged {
         meta: meta(sequence),
         plugin_id: "probe".into(),
         status: "ready".into(),
@@ -680,7 +697,7 @@ fn projector_finishes_a_tool_from_an_earlier_raw_page_after_reopen() {
     assert_eq!(page.rows.len(), 1);
     assert_eq!(
         (page.rows[0].source, page.rows[0].revision),
-        (SequenceId(0), SequenceId(65))
+        (SequenceId(1), SequenceId(65))
     );
     let TranscriptContent::Tool {
         status: TranscriptToolStatus::Finished { output, .. },

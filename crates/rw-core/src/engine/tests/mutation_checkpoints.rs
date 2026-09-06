@@ -27,7 +27,6 @@ use rw_tools::CapabilityManifest;
 use rw_tools::ToolDescriptor;
 use rw_tools::ToolRegistry;
 use rw_tools::ToolResult;
-use rw_types::Role;
 use rw_types::ToolCapability;
 use rw_types::config::PermissionDecision;
 use serde_json::Value;
@@ -345,8 +344,11 @@ async fn interrupt_during_mutating_tool_finishes_checkpoint_and_commits_cancelle
     let persisted = sink.events.lock().expect("sink events");
     assert!(persisted.iter().any(|event| matches!(
         &event.kind,
-        PendingEvent::ConversationTurnCommitted { turn, .. }
-            if turn.role == Role::Tool
+        PendingEvent::ConversationToolResultsCommitted { results, .. }
+            if results.len() == 1 && persisted.iter().any(|completion|
+                completion.sequence == results[0].finished_source && matches!(
+                    &completion.kind, PendingEvent::ToolCallFinished { invocation_id, is_error: true, .. }
+                        if invocation_id == &results[0].invocation_id))
     )));
 }
 
