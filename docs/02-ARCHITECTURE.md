@@ -346,9 +346,13 @@ allocation admission for payloads, ring storage, and client identities. At most
 Committed batches move their prepared allocation into shared immutable delivery
 guards; commit queue credits are released independently. When live bytes fill,
 durable publication stores only sequence fences. Replay uses a separate aggregate
-allowance for four worst-case 16 MiB source + 64 MiB decoded + 64 MiB preparation
-windows (plus 16 KiB descriptors each), shrinking each completed page to its measured
-prepared allocation. Pages contain at most 256 events and 16 MiB encoded source.
+allowance of 256 MiB plus 32 KiB. Source JSON is released before normalization,
+so one construction reserves the larger of source plus decoded bytes (80 MiB)
+and original plus normalized bytes (128 MiB), plus 16 KiB of page descriptors.
+One FIFO construction owner spans physical read and normalization; delivered
+pages retain only their measured bytes. Pages contain at most 256 events and
+16 MiB encoded source. The resulting 384 MiB plus 32 KiB storage-delivery
+admission envelope is distinct from combined engine/frontend RSS acceptance.
 Replay admission has 64 waiters and a 30-second deadline; dropping a receive future
 cancels admission or preserves its already-owned read task for the next poll.
 Returned guards retain allocation credit even after ring/page eviction. A consumer

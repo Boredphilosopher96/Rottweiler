@@ -6,7 +6,7 @@
 mod budget;
 mod receiver;
 use super::{AgentLoopError, RoutedEvent};
-use budget::{Budget, Credit};
+use budget::{Budget, Credit, ReplayAdmission};
 pub(super) use receiver::{LiveReceiver, Received};
 use rw_types::{
     ClientId, EngineEvent, SequenceId,
@@ -52,13 +52,17 @@ impl AsRef<EngineEvent> for SessionEventDelivery {
     }
 }
 impl SessionEventDelivery {
-    pub(super) async fn replay_credit() -> Result<Credit, AgentLoopError> {
+    pub(super) async fn replay_credit() -> Result<ReplayAdmission, AgentLoopError> {
         budget::replay().await
     }
     pub(super) fn from_replay(
         events: Vec<EngineEvent>,
-        mut credit: Credit,
+        admission: ReplayAdmission,
     ) -> Result<std::collections::VecDeque<Self>, AgentLoopError> {
+        let ReplayAdmission {
+            mut credit,
+            construction: _construction,
+        } = admission;
         let count = events.len();
         let plan =
             AllocationPlan::new(events).map_err(|_| AgentLoopError::EventDeliverySaturated)?;

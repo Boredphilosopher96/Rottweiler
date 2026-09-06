@@ -4,11 +4,16 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-pub(super) const MAX_REPLAY_BYTES: usize = 2 * rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES
-    + rw_store::session::journal::MAX_JOURNAL_APPEND_BYTES
-    + 16 * 1024;
+// Source JSON is released before normalization starts: the maximum of
+// decoded+source and original+normalized storage, not their sum.
+pub(super) const MAX_REPLAY_BYTES: usize = {
+    let read = rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES
+        + rw_store::session::journal::MAX_JOURNAL_APPEND_BYTES;
+    let prepare = 2 * rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES;
+    (if read > prepare { read } else { prepare }) + 16 * 1024
+};
 static LIVE: OnceLock<Arc<Budget>> = OnceLock::new();
-static REPLAY: OnceLock<Arc<Budget>> = OnceLock::new();
+static REPLAY: OnceLock<ReplayPool> = OnceLock::new();
 static SUBSCRIPTIONS: OnceLock<Arc<Budget>> = OnceLock::new();
 
 #[derive(Debug)]
@@ -70,14 +75,54 @@ impl Drop for Credit {
 pub(super) fn live() -> Arc<Budget> {
     Arc::clone(LIVE.get_or_init(|| Budget::new(128 * 1024 * 1024)))
 }
-// Four worst-case decoded + original JSON + normalized-copy windows, plus
-// page descriptor storage. Completed reads shrink to their measured prepared
-// page bytes. Admission waits outside actors; held results can never wait on
-// the journal writer's commit credits.
-pub(super) async fn replay() -> Result<Credit, AgentLoopError> {
-    let budget = REPLAY.get_or_init(|| Budget::new(4 * MAX_REPLAY_BYTES));
-    budget
-        .reserve_wait(MAX_REPLAY_BYTES, std::time::Duration::from_secs(30))
+/// Construction owns the FIFO permit through physical read and normalization.
+/// Prepared payloads keep only byte credit after construction finishes.
+pub(in crate::engine) struct ReplayAdmission {
+    pub(super) credit: Credit,
+    pub(super) construction: tokio::sync::OwnedSemaphorePermit,
+}
+struct ReplayPool {
+    bytes: Arc<Budget>,
+    construction: Arc<tokio::sync::Semaphore>,
+    waiters: Arc<Budget>,
+}
+impl ReplayPool {
+    fn new(bytes: usize) -> Self {
+        Self {
+            bytes: Budget::new(bytes),
+            construction: Arc::new(tokio::sync::Semaphore::new(1)),
+            waiters: Budget::new(64),
+        }
+    }
+    async fn admit(
+        &self,
+        bytes: usize,
+        deadline: std::time::Duration,
+    ) -> Result<ReplayAdmission, AgentLoopError> {
+        let _waiting = self.waiters.reserve(1)?;
+        tokio::time::timeout(deadline, async {
+            // FIFO construction admission prevents fresh readers racing ahead
+            // of queued readers whenever a delivered page releases its bytes.
+            let construction = self
+                .construction
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| AgentLoopError::EventDeliverySaturated)?;
+            let credit = self.bytes.reserve_wait(bytes, deadline).await?;
+            Ok(ReplayAdmission {
+                credit,
+                construction,
+            })
+        })
+        .await
+        .map_err(|_| AgentLoopError::EventDeliverySaturated)?
+    }
+}
+pub(super) async fn replay() -> Result<ReplayAdmission, AgentLoopError> {
+    REPLAY
+        .get_or_init(|| ReplayPool::new(2 * MAX_REPLAY_BYTES))
+        .admit(MAX_REPLAY_BYTES, std::time::Duration::from_secs(30))
         .await
 }
 impl Budget {
@@ -154,5 +199,105 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(budget.used(), 0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod replay_tests {
+    use super::{MAX_REPLAY_BYTES, ReplayPool};
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn maximum_page_results_keep_credit_while_next_reader_uses_fifo_construction() {
+        let pool = ReplayPool::new(2 * MAX_REPLAY_BYTES);
+        let mut first = pool
+            .admit(MAX_REPLAY_BYTES, Duration::from_secs(30))
+            .await
+            .expect("maximum read");
+        first
+            .credit
+            .shrink(rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES)
+            .expect("maximum prepared result");
+        let next = pool.admit(MAX_REPLAY_BYTES, Duration::from_secs(30));
+        tokio::pin!(next);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut next)
+                .await
+                .is_err()
+        );
+        assert_eq!(pool.waiters.used(), 1);
+        let later = pool.admit(MAX_REPLAY_BYTES, Duration::from_secs(30));
+        tokio::pin!(later);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut later)
+                .await
+                .is_err()
+        );
+        let super::ReplayAdmission {
+            credit: retained,
+            construction,
+        } = first;
+        drop(construction);
+        let second = next
+            .await
+            .expect("FIFO next read can admit maximum alongside retained result");
+        assert_eq!(
+            pool.bytes.used(),
+            MAX_REPLAY_BYTES + rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut later)
+                .await
+                .is_err()
+        );
+        drop(second);
+        let third = later.await.expect("next queued construction");
+        drop(third);
+        assert_eq!(
+            pool.bytes.used(),
+            rw_store::session::journal::MAX_JOURNAL_DECODE_BYTES
+        );
+        drop(retained);
+        assert_eq!(pool.bytes.used(), 0);
+        assert_eq!(pool.waiters.used(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_results_expire_admission_and_cancelled_waits_refund_all_queue_owners() {
+        let pool = ReplayPool::new(128);
+        let held = pool
+            .bytes
+            .reserve(100)
+            .expect("caller retains delivered guards");
+        let waiting = pool.admit(64, Duration::from_secs(30));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert_eq!(pool.construction.available_permits(), 0);
+        // A canceled FIFO waiter neither enters a source reader nor holds bytes.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(1),
+                pool.admit(64, Duration::from_secs(30))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(pool.waiters.used(), 1);
+        assert!(waiting.await.is_err());
+        assert_eq!(pool.construction.available_permits(), 1);
+        assert_eq!(pool.waiters.used(), 0);
+        assert_eq!(pool.bytes.used(), 100);
+        drop(held);
+        drop(
+            pool.admit(64, Duration::from_secs(30))
+                .await
+                .expect("read after caller releases guards"),
+        );
+        assert_eq!(pool.bytes.used(), 0);
     }
 }
