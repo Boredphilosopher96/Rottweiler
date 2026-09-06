@@ -190,8 +190,11 @@ fn oversized_active_materialization_is_rejected_from_admission_metadata() {
     }
     catch_up(&mut recovery, &journal.read_view(), &modes);
     let head = recovery.head().expect("head");
-    let bytes = super::encoding::encode(&head, super::MAX_RECOVERY_HEAD_BYTES)
-        .expect("production metadata admission");
+    let bytes = super::encoding::encode(
+        &head,
+        rw_store::session::recovery_index::MAX_RECOVERY_HEAD_BYTES,
+    )
+    .expect("production metadata admission");
     // Only three u64 source counters grow; both physical cursors remain one digit.
     // Their largest decimal width bounds growth independently of the 35MiB payload.
     assert!(bytes.len() <= initial_head_bytes + 3 * u64::MAX.to_string().len());
