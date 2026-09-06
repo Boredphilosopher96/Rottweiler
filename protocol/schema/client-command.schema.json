@@ -2626,6 +2626,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "known_view",
         "position",
         "max_items",
         "max_bytes"
@@ -2673,6 +2674,7 @@
         "session_id",
         "projection_version",
         "generation",
+        "through",
         "digest"
       ]
     },

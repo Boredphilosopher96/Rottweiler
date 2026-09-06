@@ -3765,13 +3765,13 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "model"
+        "model",
+        "provider"
       ]
     },
     "SessionApproval": {
@@ -5189,6 +5189,7 @@
         "session_id",
         "projection_version",
         "generation",
+        "through",
         "digest"
       ]
     },
@@ -5703,7 +5704,9 @@
           },
           "additionalProperties": false,
           "required": [
-            "type"
+            "type",
+            "through",
+            "target"
           ]
         },
         {
@@ -5795,6 +5798,7 @@
         "id",
         "ordinal",
         "revision",
+        "agent_turn",
         "content"
       ]
     },
@@ -5908,6 +5912,7 @@
             "name",
             "call_index",
             "arguments",
+            "diff",
             "status"
           ]
         },
@@ -5973,7 +5978,10 @@
           "additionalProperties": false,
           "required": [
             "type",
-            "active"
+            "command",
+            "output",
+            "active",
+            "status"
           ]
         },
         {
@@ -6347,7 +6355,8 @@
             "type",
             "status",
             "result",
-            "touched_file_count"
+            "touched_file_count",
+            "diff"
           ]
         }
       ]
@@ -6419,7 +6428,8 @@
           "additionalProperties": false,
           "required": [
             "type",
-            "requested"
+            "requested",
+            "replacement"
           ]
         }
       ]
@@ -6513,6 +6523,7 @@
         "view",
         "source",
         "offset",
+        "next_offset",
         "total_bytes",
         "format",
         "text"
@@ -6679,7 +6690,10 @@
           ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "after_item_id"
+      ]
     },
     "ContextItemId": {
       "description": "Stable identifier of one assembled context item.",
@@ -6820,64 +6834,55 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "daily_cost_cap_micros_usd": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "session_ai_credit_cap_micros": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "daily_ai_credit_cap_micros": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "session_token_cap": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "daily_token_cap": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "spend_rate_alarm_micros_usd_per_minute": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "ai_credit_rate_alarm_micros_per_minute": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "token_rate_alarm_per_minute": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "hard_cap_reached": {
           "type": "boolean"
@@ -6922,6 +6927,15 @@
         "daily_subscription_tokens",
         "trailing_minute_subscription_tokens",
         "cache_hit_basis_points",
+        "session_cost_cap_micros_usd",
+        "daily_cost_cap_micros_usd",
+        "session_ai_credit_cap_micros",
+        "daily_ai_credit_cap_micros",
+        "session_token_cap",
+        "daily_token_cap",
+        "spend_rate_alarm_micros_usd_per_minute",
+        "ai_credit_rate_alarm_micros_per_minute",
+        "token_rate_alarm_per_minute",
         "hard_cap_reached",
         "session_monetary_accounting_complete",
         "daily_monetary_accounting_complete",
@@ -7691,15 +7705,13 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "max_output_tokens": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         }
       },
       "additionalProperties": false,
@@ -7707,7 +7719,9 @@
         "tool_calling",
         "vision",
         "thinking",
-        "cache_behavior"
+        "cache_behavior",
+        "max_context_tokens",
+        "max_output_tokens"
       ]
     },
     "ModelCacheBehavior": {
@@ -8034,6 +8048,7 @@
       "required": [
         "server",
         "transport",
+        "endpoint",
         "origin",
         "defer_tools",
         "fingerprint",
