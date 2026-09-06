@@ -88,35 +88,57 @@ fn typed_event_destinations_have_identical_byte_oracles() {
     verify(&corpus());
 }
 
+fn repetitions(variable: &str, default: &str) -> usize {
+    let count = std::env::var(variable)
+        .unwrap_or_else(|_| default.into())
+        .parse()
+        .expect("positive repetition count");
+    assert!((1..=1_000_000).contains(&count));
+    count
+}
+
+fn measure(case: Case, events: &[EngineEvent], repetitions: usize) -> (u128, usize) {
+    let started = Instant::now();
+    let mut total = 0;
+    for _ in 0..repetitions {
+        for event in events {
+            let (length, bytes) = encode(case, black_box(event));
+            total += black_box(length);
+            black_box(bytes);
+        }
+    }
+    (started.elapsed().as_nanos(), total)
+}
+
 #[test]
 #[ignore = "matched release CPU measurement; prints per-round observations"]
 fn matched_json_destination_cpu() {
-    let repetitions: usize = std::env::var("RW_JSON_REPETITIONS")
-        .unwrap_or_else(|_| "1000".into())
-        .parse()
-        .expect("positive repetition count");
-    assert!((1..=1_000_000).contains(&repetitions));
     let events = corpus();
-    let expected = verify(&events) * repetitions;
+    let small = [events[0].clone(), events[1].clone(), events[4].clone()];
+    let body = [events[2].clone(), events[3].clone(), events[5].clone()];
+    let workloads = [
+        (
+            "small",
+            &small,
+            repetitions("RW_JSON_SMALL_REPETITIONS", "10000"),
+        ),
+        ("body", &body, repetitions("RW_JSON_REPETITIONS", "1000")),
+    ];
+    let oracles = [verify(&small), verify(&body)];
     for round in 0..8 {
-        for offset in 0..CASES.len() {
-            let case = CASES[(offset + round) % CASES.len()];
-            let started = Instant::now();
-            let mut total = 0;
-            for _ in 0..repetitions {
-                for event in &events {
-                    let (length, bytes) = encode(case, black_box(event));
-                    total += black_box(length);
-                    black_box(bytes);
-                }
+        for index in 0..workloads.len() {
+            let workload = (index + round) % workloads.len();
+            let (name, events, repetitions) = workloads[workload];
+            for offset in 0..CASES.len() {
+                let case = CASES[(offset + round) % CASES.len()];
+                let (elapsed, total) = measure(case, events, repetitions);
+                assert_eq!(total, oracles[workload] * repetitions);
+                println!(
+                    "{{\"round\":{round},\"warmup\":{},\"workload\":\"{name}\",\"case\":\"{case:?}\",\"calls\":{},\"encoded_bytes\":{total},\"elapsed_ns\":{elapsed}}}",
+                    round < 2,
+                    repetitions * events.len(),
+                );
             }
-            let elapsed = started.elapsed().as_nanos();
-            assert_eq!(total, expected);
-            println!(
-                "{{\"round\":{round},\"warmup\":{},\"case\":\"{case:?}\",\"calls\":{},\"encoded_bytes\":{total},\"elapsed_ns\":{elapsed}}}",
-                round < 2,
-                repetitions * events.len(),
-            );
         }
     }
     verify(&events);
