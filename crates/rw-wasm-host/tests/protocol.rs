@@ -62,12 +62,36 @@ fn manifest() -> PluginManifest {
 }
 
 fn component(output: &str) -> Vec<u8> {
+    component_for_input(output, None)
+}
+
+fn component_for_input(output: &str, expected: Option<&str>) -> Vec<u8> {
+    let expected = expected.unwrap_or_default();
+    let expected_at = 256 + output.len();
+    let heap = 4096 + output.len() + expected.len();
+    let verify = if expected.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"
+            local.get $input_len i32.const {length} i32.ne if unreachable end
+            (block $done (loop $compare
+              local.get $index i32.const {length} i32.ge_u br_if $done
+              local.get $input local.get $index i32.add i32.load8_u
+              i32.const {expected_at} local.get $index i32.add i32.load8_u
+              i32.ne if unreachable end
+              local.get $index i32.const 1 i32.add local.set $index
+              br $compare))
+        "#,
+            length = expected.len()
+        )
+    };
     wat::parse_str(format!(
         r#"(component
           (type $hook (func (param "event" string) (param "payload-json" string) (result string)))
           (core module $module
             (memory (export "memory") 1)
-            (global $heap (mut i32) (i32.const 4096))
+            (global $heap (mut i32) (i32.const {heap}))
             (global $calls (mut i32) (i32.const 0))
             (func (export "realloc") (param i32 i32 i32 i32) (result i32)
               (local $result i32)
@@ -78,7 +102,10 @@ fn component(output: &str) -> Vec<u8> {
               global.set $heap
               local.get $result)
             (data (i32.const 256) "{}")
-            (func (export "invoke") (param i32 i32 i32 i32) (result i32)
+            (data (i32.const {expected_at}) "{expected_data}")
+            (func (export "invoke") (param i32 i32) (param $input i32) (param $input_len i32) (result i32)
+              (local $index i32)
+              {verify}
               global.get $calls
               if unreachable end
               i32.const 1
@@ -96,10 +123,20 @@ fn component(output: &str) -> Vec<u8> {
               (memory $instance "memory")
               (realloc (func $instance "realloc"))))
           (export "invoke" (func $invoke)))"#,
-        output.replace('"', "\\22"),
-        output.len()
+        wat_bytes(output),
+        output.len(),
+        expected_data = wat_bytes(expected)
     ))
     .expect("component WAT")
+}
+
+fn wat_bytes(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        write!(encoded, "\\{byte:02x}").expect("WAT byte encoding");
+    }
+    encoded
 }
 
 #[tokio::test]
@@ -245,102 +282,13 @@ async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
     assert!(pool.shutdown().await.is_ok());
 }
 
+#[path = "protocol/capacity.rs"]
+mod capacity;
+
 #[tokio::test]
 #[ignore = "native worker-capacity measurement; run alone with a release helper"]
 async fn worker_capacity_measurement() {
-    use std::{sync::Arc, time::Instant};
-    let helper = std::env::var_os("ROTTWEILER_WASM_BENCH_RECEIPT")
-        .map(std::path::PathBuf::from)
-        .expect("set ROTTWEILER_WASM_BENCH_RECEIPT to the release helper receipt");
-    let receipt: rw_tools::ExecutableDigest =
-        serde_json::from_slice(&std::fs::read(&helper).expect("receipt")).expect("typed receipt");
-    let helper = rw_tools::ApprovedExecutable::from_installed(
-        &helper
-            .parent()
-            .expect("bundle")
-            .join("rottweiler-wasm-host"),
-        &receipt,
-    )
-    .expect("approved release helper");
-    for workers in [1, 2] {
-        let pool = WasmWorkerPool::with_worker_limit(workers).expect("capacity");
-        let hook = WasmProcessHook::new(
-            pool.clone(),
-            helper.clone(),
-            manifest(),
-            component(r#"{"decision":"continue"}"#),
-            WasmHookLimits::default(),
-        )
-        .expect("proxy");
-        let cold = Instant::now();
-        let (first, second) = tokio::join!(hook.validate(), hook.validate());
-        first.expect("cold first");
-        second.expect("cold second");
-        let cold_us = cold.elapsed().as_micros();
-        let mut dispatcher = HookDispatcher::new();
-        hook.register_hooks(&mut dispatcher).expect("registered");
-        let dispatcher = Arc::new(dispatcher);
-        let mut warm_us = Vec::new();
-        for _ in 0..32 {
-            let started = Instant::now();
-            let result = dispatcher
-                .dispatch(rw_ext::HookInput::PreTool(
-                    rw_types::hook_contract::HookToolInput {
-                        id: "call".to_owned(),
-                        name: "read".to_owned(),
-                        arguments: serde_json::json!({}),
-                    },
-                ))
-                .await
-                .expect("settled hook");
-            warm_us.push(started.elapsed().as_micros());
-            assert!(result.failures().is_empty());
-        }
-        let mut concurrent_us = Vec::new();
-        for _ in 0..4 {
-            let started = Instant::now();
-            let mut jobs = Vec::new();
-            for _ in 0..16 {
-                let dispatcher = dispatcher.clone();
-                jobs.push(tokio::spawn(async move {
-                    dispatcher
-                        .dispatch(rw_ext::HookInput::PreTool(
-                            rw_types::hook_contract::HookToolInput {
-                                id: "call".to_owned(),
-                                name: "read".to_owned(),
-                                arguments: serde_json::json!({}),
-                            },
-                        ))
-                        .await
-                        .expect("settled hook")
-                }));
-            }
-            for job in jobs {
-                assert!(job.await.expect("job").failures().is_empty());
-            }
-            concurrent_us.push(started.elapsed().as_micros());
-        }
-        let process_snapshot = std::process::Command::new("ps")
-            .args(["-axo", "pid=,rss="])
-            .output()
-            .expect("RSS sample");
-        let worker_pids = pool.idle_process_ids();
-        assert_eq!(worker_pids.len(), workers);
-        let rss_kib: u64 = String::from_utf8_lossy(&process_snapshot.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                let pid = parts.next()?.parse::<u32>().ok()?;
-                let rss = parts.next()?.parse::<u64>().ok()?;
-                worker_pids.contains(&pid).then_some(rss)
-            })
-            .sum();
-        println!(
-            "{}",
-            serde_json::json!({"workers":workers,"helper":helper.installation_path(),"cold_us":cold_us,"warm_us":warm_us,"concurrent_16_us":concurrent_us,"warm_workers_rss_kib":rss_kib,"process_starts":pool.stats().process_starts,"component_loads":pool.stats().component_loads,"cache_hits":pool.stats().cache_hits})
-        );
-        assert!(pool.shutdown().await.is_ok());
-    }
+    capacity::measure().await;
 }
 
 #[tokio::test]
