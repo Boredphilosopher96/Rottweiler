@@ -161,6 +161,7 @@ class ReleaseContractTests(unittest.TestCase):
         contract = self.module.load_contract(CONTRACT_PATH)
         with tempfile.TemporaryDirectory() as directory:
             paths = [Path(directory) / name for name in ("engine", "wasm", "js", "native")]
+            (Path(directory) / "opentui-licenses.txt").write_text("license fixture")
             for path, size in zip(paths, (1, 1, 115_480_704, 5_500_000), strict=True):
                 with path.open("wb") as output:
                     output.truncate(size)

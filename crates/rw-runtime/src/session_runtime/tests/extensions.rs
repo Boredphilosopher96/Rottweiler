@@ -34,8 +34,6 @@ use super::ToolchainConfig;
 use super::ToolchainRuntime;
 use super::WasmHookLimits;
 use super::WasmProcessHook;
-#[cfg(target_os = "macos")]
-use super::build_command_executor;
 use super::build_read_only_hook_executor;
 use super::builtin_hook_dispatcher;
 use super::compose_runtime_commands;
@@ -48,6 +46,8 @@ use super::semantic_file_tools;
 use super::skill_index_turn;
 use super::tempdir;
 use super::wasm_startup_notice;
+#[cfg(target_os = "macos")]
+use crate::session_runtime::command_execution::build_command_executor;
 
 #[test]
 fn runtime_extension_startup_accepts_malformed_user_skill() {
