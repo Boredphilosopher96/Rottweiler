@@ -161,7 +161,7 @@ impl SubagentSessionFactory for FakeFactory {
 #[async_trait]
 impl SubagentSession for FakeSession {
     fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
-        Default::default()
+        rw_types::family_controls::ChildControlSummary::default()
     }
     async fn child_controls(
         &self,

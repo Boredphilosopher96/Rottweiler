@@ -199,7 +199,7 @@ impl SubagentSession for DeferredActorSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &state.phase {
             Phase::Live(session) => session.control_summary(),
-            _ => Default::default(),
+            _ => rw_types::family_controls::ChildControlSummary::default(),
         }
     }
     async fn child_controls(

@@ -38,8 +38,13 @@ impl CompletionBudget {
         let (pool, units) = if command.is_urgent() {
             (
                 &self.urgent,
-                u32::try_from(rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT)
-                    .expect("urgent completion units fit u32"),
+                const {
+                    assert!(
+                        rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT
+                            <= u32::MAX as usize
+                    );
+                    (rw_types::MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES / UNIT) as u32
+                },
             )
         } else {
             (&self.normal, NORMAL_REPLY_UNITS)
