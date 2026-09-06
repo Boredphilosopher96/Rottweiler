@@ -821,7 +821,6 @@ pub struct SessionReview {
 pub enum QuestionResponseKind {
     Text,
     SelectOne,
-    SelectMany,
 }
 
 /// Explicit handling of existing conversation context when changing models.
@@ -882,7 +881,7 @@ pub struct Question {
 #[serde(deny_unknown_fields)]
 pub struct Answer {
     pub question_id: QuestionId,
-    pub values: Vec<String>,
+    pub value: String,
 }
 
 /// Semantic class of one assembled prompt item.

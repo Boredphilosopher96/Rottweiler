@@ -24,15 +24,15 @@ pub(super) fn snapshot(state: &ActorState) -> Result<SessionControlsSnapshot, Ag
     for questions in state
         .pending_questions
         .values()
-        .map(|value| &value.questions)
+        .map(|value| &value.question)
         .chain(
             state
                 .pending_model_switches
                 .values()
-                .map(|value| &value.questions),
+                .map(|value| &value.question),
         )
     {
-        rw_types::question_admission::validate_questions(questions).map_err(|_| limit())?;
+        rw_types::question_admission::validate_question(questions).map_err(|_| limit())?;
         charge(&mut prepared, questions.prepared_bytes())?;
     }
     for pending in state.pending_approvals.values() {
@@ -58,7 +58,7 @@ pub(super) fn snapshot(state: &ActorState) -> Result<SessionControlsSnapshot, Ag
         .map(|(id, value)| SessionQuestion {
             question_id: QuestionId(id.clone()),
             turn_id: wire_turn_id(value.turn),
-            questions: value.questions.clone(),
+            question: value.question.clone(),
         })
         .chain(
             state
@@ -67,7 +67,7 @@ pub(super) fn snapshot(state: &ActorState) -> Result<SessionControlsSnapshot, Ag
                 .map(|(id, value)| SessionQuestion {
                     question_id: QuestionId(id.clone()),
                     turn_id: wire_turn_id(value.turn),
-                    questions: value.questions.clone(),
+                    question: value.question.clone(),
                 }),
         )
         .collect();

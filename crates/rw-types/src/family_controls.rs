@@ -109,7 +109,7 @@ pub struct ChildControlsSnapshot {
 pub enum ChildControlResponse {
     Question {
         question_id: QuestionId,
-        answers: Vec<Answer>,
+        answer: Answer,
     },
     Approval {
         tool_call_id: ToolCallId,

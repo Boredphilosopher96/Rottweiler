@@ -380,8 +380,8 @@ fn print_mode_auto_answers_structured_ask_user_without_a_third_channel() {
     );
     assert!(events.iter().any(|event| matches!(
         event,
-        EngineEvent::QuestionAnswered { answers, .. }
-            if answers.iter().any(|answer| answer.values == ["first"])
+        EngineEvent::QuestionAnswered { answer, .. }
+            if answer.value == "first"
     )));
     assert!(events.iter().any(|event| matches!(
         event,

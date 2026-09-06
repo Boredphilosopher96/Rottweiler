@@ -233,13 +233,23 @@ pub(super) fn reduce(
         PendingEvent::QuestionAsked {
             turn,
             question_id,
-            questions,
+            question,
         } => {
-            rw_types::question_admission::validate_questions(&questions)
+            if question.id != question_id {
+                return Err(RecoveryError::Invalid("question source identity mismatch"));
+            }
+            rw_types::question_admission::validate_question(&question)
                 .map_err(RecoveryError::Limit)?;
-            head.control
+            if head
+                .control
                 .questions
-                .retain(|question| question.id != question_id.0);
+                .iter()
+                .any(|pending| pending.id == question_id.0)
+            {
+                return Err(RecoveryError::Invalid(
+                    "pending question identity is already in use",
+                ));
+            }
             if head.control.questions.len() >= MAX_QUESTIONS {
                 return Err(RecoveryError::Limit("pending question identities"));
             }
@@ -249,10 +259,13 @@ pub(super) fn reduce(
                 sequence,
             });
         }
-        PendingEvent::QuestionAnswered { question_id, .. } => head
-            .control
-            .questions
-            .retain(|question| question.id != question_id.0),
+        PendingEvent::QuestionAnswered {
+            turn,
+            question_id,
+            answer,
+        } => {
+            super::questions::answer(head, source, turn, &question_id, &answer)?;
+        }
         PendingEvent::SessionTitleUpdated { usage, cost, .. } => {
             head.control.title = Some(sequence);
             if let (Some(usage), Some(cost)) = (usage, cost) {

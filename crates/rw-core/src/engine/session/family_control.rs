@@ -89,12 +89,12 @@ impl ResponseCommand for ChildControlResponse {
         match self {
             Self::Question {
                 question_id,
-                answers,
+                answer,
             } => ClientCommand::AnswerQuestion {
                 meta,
                 session_id,
                 question_id,
-                answers,
+                answer,
             },
             Self::Approval {
                 tool_call_id,

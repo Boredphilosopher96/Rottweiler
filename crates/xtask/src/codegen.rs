@@ -306,12 +306,12 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS,
         ),
         (
-            "MAX_QUESTION_SET_BYTES",
-            rw_types::question_admission::MAX_QUESTION_SET_BYTES,
+            "MAX_QUESTION_BYTES",
+            rw_types::question_admission::MAX_QUESTION_BYTES,
         ),
         (
-            "MAX_QUESTION_SET_PREPARED_BYTES",
-            rw_types::question_admission::MAX_QUESTION_SET_PREPARED_BYTES,
+            "MAX_QUESTION_PREPARED_BYTES",
+            rw_types::question_admission::MAX_QUESTION_PREPARED_BYTES,
         ),
         (
             "MAX_PENDING_QUESTION_BYTES",
@@ -933,10 +933,10 @@ fn contract_fixture() -> ContractFixture {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
                 question_id: QuestionId("question-1".to_owned()),
-                answers: vec![Answer {
+                answer: Answer {
                     question_id: QuestionId("question-1".to_owned()),
-                    values: vec!["yes".to_owned()],
-                }],
+                    value: "yes".to_owned(),
+                },
             },
             ClientCommand::Interrupt {
                 meta: command_meta.clone(),
@@ -1192,46 +1192,27 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 question_id: QuestionId("question-1".to_owned()),
-                questions: vec![
-                    Question {
-                        id: QuestionId("question-1".to_owned()),
-                        prompt: "Continue?".to_owned(),
-                        response_kind: QuestionResponseKind::SelectOne,
-                        options: vec![QuestionOption {
-                            value: "yes".to_owned(),
-                            label: "Yes".to_owned(),
-                            description: None,
-                            model_context_transfer: None,
-                        }],
-                        model_switch: None,
-                    },
-                    Question {
-                        id: QuestionId("question-model-switch".to_owned()),
-                        prompt: "How should the new model receive this conversation?".to_owned(),
-                        response_kind: QuestionResponseKind::SelectOne,
-                        options: vec![QuestionOption {
-                            value: "pass_summary".to_owned(),
-                            label: "Pass summary".to_owned(),
-                            description: Some(
-                                "Compact this conversation, then switch models".to_owned(),
-                            ),
-                            model_context_transfer: Some(ModelContextTransfer::PassSummary),
-                        }],
-                        model_switch: Some(ModelSwitchQuestion {
-                            model: ModelAlias("openai/gpt-5".to_owned()),
-                            provider: Some("openai".to_owned()),
-                        }),
-                    },
-                ],
+                question: Question {
+                    id: QuestionId("question-1".to_owned()),
+                    prompt: "Continue?".to_owned(),
+                    response_kind: QuestionResponseKind::SelectOne,
+                    options: vec![QuestionOption {
+                        value: "yes".to_owned(),
+                        label: "Yes".to_owned(),
+                        description: None,
+                        model_context_transfer: None,
+                    }],
+                    model_switch: None,
+                },
             },
             EngineEvent::QuestionAnswered {
                 meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 question_id: QuestionId("question-1".to_owned()),
-                answers: vec![Answer {
+                answer: Answer {
                     question_id: QuestionId("question-1".to_owned()),
-                    values: vec!["yes".to_owned()],
-                }],
+                    value: "yes".to_owned(),
+                },
             },
             EngineEvent::TurnFinished {
                 meta: event_meta(),

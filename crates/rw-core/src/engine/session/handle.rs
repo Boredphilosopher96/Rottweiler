@@ -585,7 +585,7 @@ impl SessionHandle {
     pub async fn answer_question(
         &self,
         question_id: QuestionId,
-        values: Vec<String>,
+        value: String,
     ) -> Result<bool, AgentLoopError> {
         self.ensure_local_driver().await?;
         Ok(matches!(
@@ -593,10 +593,7 @@ impl SessionHandle {
                 meta: self.local_meta(),
                 session_id: self.session_id.clone(),
                 question_id: question_id.clone(),
-                answers: vec![Answer {
-                    question_id,
-                    values,
-                }],
+                answer: Answer { question_id, value },
             })
             .await?,
             CommandOutcome::Accepted {}

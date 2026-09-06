@@ -290,12 +290,12 @@ pub(super) enum PendingEvent {
     QuestionAsked {
         turn: u64,
         question_id: QuestionId,
-        questions: Vec<Question>,
+        question: Question,
     },
     QuestionAnswered {
         turn: u64,
         question_id: QuestionId,
-        answers: Vec<Answer>,
+        answer: Answer,
     },
 }
 
@@ -788,22 +788,22 @@ impl PendingEvent {
             Self::QuestionAsked {
                 turn,
                 question_id,
-                questions,
+                question,
             } => EngineEvent::QuestionAsked {
                 meta,
                 turn_id: wire_turn_id(turn),
                 question_id,
-                questions,
+                question,
             },
             Self::QuestionAnswered {
                 turn,
                 question_id,
-                answers,
+                answer,
             } => EngineEvent::QuestionAnswered {
                 meta,
                 turn_id: wire_turn_id(turn),
                 question_id,
-                answers,
+                answer,
             },
         }
     }

@@ -509,13 +509,13 @@ pub enum EngineEvent {
         meta: EventMeta,
         turn_id: TurnId,
         question_id: QuestionId,
-        questions: Vec<Question>,
+        question: Question,
     },
     QuestionAnswered {
         meta: EventMeta,
         turn_id: TurnId,
         question_id: QuestionId,
-        answers: Vec<Answer>,
+        answer: Answer,
     },
     ProviderCallAccounted {
         meta: EventMeta,

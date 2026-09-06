@@ -354,7 +354,7 @@ fn command_error(error: &CommandRegistryError) -> AgentLoopError {
     }
 }
 
-/// Only conversational queueing, lease takeover, existing turn answers and
+/// Only conversational queueing, lease takeover, existing turn answer and
 /// read-only requests can cross a pending command's policy boundary.
 pub(super) fn admit_while_pending(command: &rw_types::ClientCommand) -> bool {
     use rw_types::ClientCommand;

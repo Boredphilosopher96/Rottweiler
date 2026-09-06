@@ -247,8 +247,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                     .collect(),
                 model_switch: None,
             };
-            let questions = vec![question];
-            let validation = rw_types::question_admission::validate_questions(&questions);
+            let validation = rw_types::question_admission::validate_question(&question);
             if let Err(error) = validation {
                 let _ = respond.send(Err(rw_tools::ToolError::InvalidInput(error.into())));
                 return Ok(());
@@ -264,7 +263,7 @@ pub(in crate::engine) async fn handle_turn_signal(
             state.pending_questions.insert(
                 question_id.0.clone(),
                 PendingQuestion {
-                    questions: questions.clone(),
+                    question: question.clone(),
                     turn,
                     respond,
                     _admission: admission,
@@ -277,7 +276,7 @@ pub(in crate::engine) async fn handle_turn_signal(
                 PendingEvent::QuestionAsked {
                     turn,
                     question_id,
-                    questions,
+                    question,
                 },
             )
             .await?;

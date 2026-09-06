@@ -177,17 +177,13 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
         .find_map(|event| match event {
             EngineEvent::QuestionAsked {
                 question_id,
-                questions,
+                question,
                 ..
-            } => questions
-                .iter()
-                .find(|question| {
-                    question
-                        .model_switch
-                        .as_ref()
-                        .is_some_and(|target| target.model == ModelAlias("slow".to_owned()))
-                })
-                .map(|question| (question_id.clone(), question)),
+            } => question
+                .model_switch
+                .as_ref()
+                .filter(|target| target.model == ModelAlias("slow".to_owned()))
+                .map(|_| (question_id.clone(), question)),
             _ => None,
         })
         .expect("typed model context question");
@@ -202,10 +198,10 @@ async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
                 meta: protocol_meta("driver", "switch-model-context"),
                 session_id: SessionId("fixture-session".to_owned()),
                 question_id: question_id.clone(),
-                answers: vec![Answer {
+                answer: Answer {
                     question_id,
-                    values: vec!["start_without_context".to_owned()],
-                }],
+                    value: "start_without_context".to_owned(),
+                },
             })
             .await
             .expect("answer model context question"),

@@ -72,14 +72,12 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
             .find_map(|event| match event {
                 EngineEvent::QuestionAsked {
                     question_id,
-                    questions,
+                    question,
                     ..
-                } if questions.iter().any(|question| {
-                    question
-                        .model_switch
-                        .as_ref()
-                        .is_some_and(|target| target.model.0 == "slow")
-                }) =>
+                } if question
+                    .model_switch
+                    .as_ref()
+                    .is_some_and(|target| target.model.0 == "slow") =>
                 {
                     Some(question_id)
                 }
@@ -101,10 +99,10 @@ async fn model_switch_context_choices_are_explicit_and_reach_the_provider_bounda
                     meta: protocol_meta("driver", request),
                     session_id: SessionId("fixture-session".to_owned()),
                     question_id: question_id.clone(),
-                    answers: vec![Answer {
+                    answer: Answer {
                         question_id,
-                        values: vec![model_context_transfer_value(strategy).to_owned()],
-                    }],
+                        value: model_context_transfer_value(strategy).to_owned(),
+                    },
                 })
                 .await
                 .expect("answer model context question"),
@@ -324,11 +322,11 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
         PendingEvent::QuestionAsked {
             turn: 1,
             question_id: question_id.clone(),
-            questions: vec![model_switch_question(
+            question: model_switch_question(
                 question_id.clone(),
                 ModelAlias("slow".to_owned()),
                 None,
-            )],
+            ),
         },
     ));
     let recovered = project_session_events(&events).expect("project pending model question");
@@ -372,10 +370,10 @@ async fn pending_model_switch_question_recovers_and_can_be_answered() {
                 meta: protocol_meta("driver", "answer-recovered"),
                 session_id: SessionId("fixture-session".to_owned()),
                 question_id: question_id.clone(),
-                answers: vec![Answer {
+                answer: Answer {
                     question_id,
-                    values: vec!["pass_full_context".to_owned()],
-                }],
+                    value: "pass_full_context".to_owned(),
+                },
             })
             .await
             .expect("answer recovered question"),

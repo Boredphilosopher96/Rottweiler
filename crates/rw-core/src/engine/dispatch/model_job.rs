@@ -61,10 +61,10 @@ pub(super) fn protocol_alias(command: &ClientCommand, state: &ActorState) -> Opt
         }
         ClientCommand::AnswerQuestion {
             question_id,
-            answers,
+            answer,
             ..
         } => {
-            let strategy = model_switch_answer(answers, question_id)?;
+            let strategy = model_switch_answer(answer, question_id)?;
             (strategy != ModelContextTransfer::PassSummary)
                 .then(|| {
                     state

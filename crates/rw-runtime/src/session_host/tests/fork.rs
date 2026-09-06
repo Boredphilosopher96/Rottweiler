@@ -110,15 +110,13 @@ async fn production_factory_fork_composes_and_resumes_child() {
     let model_question_id = loop {
         if let rw_core::EngineEvent::QuestionAsked {
             question_id,
-            questions,
+            question,
             ..
         } = events.recv().await.expect("parent model question")
-            && questions.iter().any(|question| {
-                question
-                    .model_switch
-                    .as_ref()
-                    .is_some_and(|target| target.model == switched_model)
-            })
+            && question
+                .model_switch
+                .as_ref()
+                .is_some_and(|target| target.model == switched_model)
         {
             break question_id;
         }
@@ -134,10 +132,10 @@ async fn production_factory_fork_composes_and_resumes_child() {
                 },
                 session_id: parent_id.clone(),
                 question_id: model_question_id.clone(),
-                answers: vec![rw_core::Answer {
+                answer: rw_core::Answer {
                     question_id: model_question_id,
-                    values: vec!["pass_full_context".to_owned()],
-                }],
+                    value: "pass_full_context".to_owned(),
+                },
             })
             .await
             .expect("answer parent model context question"),

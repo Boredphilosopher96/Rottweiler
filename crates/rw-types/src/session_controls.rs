@@ -21,7 +21,7 @@ pub const MAX_PENDING_PLAN_PREPARED_BYTES: usize = 1024 * 1024;
 pub struct SessionQuestion {
     pub question_id: QuestionId,
     pub turn_id: TurnId,
-    pub questions: Vec<Question>,
+    pub question: Question,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]

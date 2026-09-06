@@ -531,13 +531,22 @@ pub(super) async fn dispatch_protocol(
         }
         ClientCommand::AnswerQuestion {
             question_id,
-            answers,
+            answer,
             ..
-        } if (!state.pending_questions.contains_key(&question_id.0)
-            && !state.pending_model_switches.contains_key(&question_id.0))
-            || !answers
-                .iter()
-                .any(|answer| answer.question_id == *question_id && !answer.values.is_empty()) =>
+        } if state
+            .pending_questions
+            .get(&question_id.0)
+            .map(|pending| &pending.question)
+            .or_else(|| {
+                state
+                    .pending_model_switches
+                    .get(&question_id.0)
+                    .map(|pending| &pending.question)
+            })
+            .is_none_or(|question| {
+                question.id != *question_id
+                    || rw_types::question_admission::validate_answer(question, answer).is_err()
+            }) =>
         {
             let outcome = protocol_rejection(
                 "invalid_question_answer",
@@ -549,10 +558,10 @@ pub(super) async fn dispatch_protocol(
         }
         ClientCommand::AnswerQuestion {
             question_id,
-            answers,
+            answer,
             ..
         } if state.pending_model_switches.contains_key(&question_id.0)
-            && model_switch_answer(answers, question_id).is_none() =>
+            && model_switch_answer(answer, question_id).is_none() =>
         {
             let outcome = protocol_rejection(
                 "invalid_model_context_transfer",
@@ -1037,19 +1046,14 @@ pub(super) async fn dispatch_protocol(
     let mut precommitted_answer = None;
     if let ClientCommand::AnswerQuestion {
         question_id,
-        answers,
+        answer,
         ..
     } = &command
     {
-        let answer = answers
-            .iter()
-            .find(|answer| answer.question_id == *question_id)
-            .map(|answer| answer.values.join("\n"))
-            .unwrap_or_default();
         let pending = if let Some(pending) = state.pending_questions.remove(&question_id.0) {
-            PrecommittedAnswer::Turn(pending, answer)
+            PrecommittedAnswer::Turn(pending, answer.value.clone())
         } else if let Some(pending) = state.pending_model_switches.remove(&question_id.0) {
-            let Some(strategy) = model_switch_answer(answers, question_id) else {
+            let Some(strategy) = model_switch_answer(answer, question_id) else {
                 state
                     .pending_model_switches
                     .insert(question_id.0.clone(), pending);
@@ -1084,7 +1088,7 @@ pub(super) async fn dispatch_protocol(
             PendingEvent::QuestionAnswered {
                 turn,
                 question_id: question_id.clone(),
-                answers: answers.clone(),
+                answer: answer.clone(),
             },
         )
         .await

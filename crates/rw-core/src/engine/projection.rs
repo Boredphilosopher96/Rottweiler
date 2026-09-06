@@ -62,7 +62,7 @@ pub struct ContextSurgeryAction {
 pub struct RecoveredQuestion {
     pub agent_turn: u64,
     pub question_id: QuestionId,
-    pub questions: Vec<Question>,
+    pub question: Question,
 }
 
 /// Deterministic durable repair for a tool call that was committed by the
@@ -771,13 +771,22 @@ impl SessionProjector {
                 PendingEvent::QuestionAsked {
                     turn,
                     question_id,
-                    questions,
+                    question,
                 } => {
-                    rw_types::question_admission::validate_questions(questions)
+                    if question.id != *question_id {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "question source identity mismatch",
+                        ));
+                    }
+                    rw_types::question_admission::validate_question(question)
                         .map_err(SessionProjectionError::InvalidQuestion)?;
-                    if !pending_questions.contains_key(&question_id.0)
-                        && pending_questions.len()
-                            >= rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS
+                    if pending_questions.contains_key(&question_id.0) {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "pending question identity is already in use",
+                        ));
+                    }
+                    if pending_questions.len()
+                        >= rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS
                     {
                         return Err(SessionProjectionError::InvalidQuestion(
                             "pending request count exceeds admission",
@@ -788,12 +797,26 @@ impl SessionProjector {
                         RecoveredQuestion {
                             agent_turn: *turn,
                             question_id: question_id.clone(),
-                            questions: questions.clone(),
+                            question: question.clone(),
                         },
                     );
                 }
                 PendingEvent::ToolApprovalResolved { .. } => {}
-                PendingEvent::QuestionAnswered { question_id, .. } => {
+                PendingEvent::QuestionAnswered {
+                    turn,
+                    question_id,
+                    answer,
+                } => {
+                    let pending = pending_questions.get(&question_id.0).ok_or(
+                        SessionProjectionError::InvalidQuestion("answer has no pending question"),
+                    )?;
+                    if pending.agent_turn != *turn {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "answer turn mismatch",
+                        ));
+                    }
+                    rw_types::question_admission::validate_answer(&pending.question, answer)
+                        .map_err(SessionProjectionError::InvalidQuestion)?;
                     pending_questions.remove(&question_id.0);
                 }
                 PendingEvent::WorkspaceRootsChanged {

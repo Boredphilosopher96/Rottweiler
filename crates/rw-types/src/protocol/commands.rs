@@ -142,7 +142,7 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
         question_id: QuestionId,
-        answers: Vec<Answer>,
+        answer: Answer,
     },
     SwitchMode {
         meta: CommandMeta,

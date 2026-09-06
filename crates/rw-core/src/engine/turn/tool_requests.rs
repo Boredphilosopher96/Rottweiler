@@ -547,7 +547,7 @@ pub(super) async fn prepare_tool_call(
 }
 
 fn validate_question_input(request: &AskUserInput) -> Result<(), ToolError> {
-    use rw_types::question_admission::{MAX_QUESTION_SET_BYTES, MAX_QUESTION_SET_PREPARED_BYTES};
+    use rw_types::question_admission::{MAX_QUESTION_BYTES, MAX_QUESTION_PREPARED_BYTES};
     if request.options.len() > rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS {
         return Err(ToolError::InvalidInput(
             "question option count exceeds admission".into(),
@@ -564,8 +564,8 @@ fn validate_question_input(request: &AskUserInput) -> Result<(), ToolError> {
             total.and_then(|bytes| bytes.checked_add(option.capacity().saturating_mul(2)))
         },
     );
-    if request.question.len() > MAX_QUESTION_SET_BYTES
-        || retained.is_none_or(|bytes| bytes > MAX_QUESTION_SET_PREPARED_BYTES / 2)
+    if request.question.len() > MAX_QUESTION_BYTES
+        || retained.is_none_or(|bytes| bytes > MAX_QUESTION_PREPARED_BYTES / 2)
     {
         return Err(ToolError::InvalidInput(
             "question payload exceeds admission".into(),
@@ -621,7 +621,7 @@ mod question_admission_tests {
         let error = asker
             .ask(
                 AskUserInput {
-                    question: "x".repeat(rw_types::question_admission::MAX_QUESTION_SET_BYTES + 1),
+                    question: "x".repeat(rw_types::question_admission::MAX_QUESTION_BYTES + 1),
                     options: vec![],
                     allow_free_text: true,
                 },

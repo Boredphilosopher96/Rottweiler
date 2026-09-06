@@ -98,17 +98,16 @@ pub(super) async fn run_print(
         }
         if let EngineEvent::QuestionAsked {
             question_id,
-            questions,
+            question,
             ..
         } = &event
-            && let Some(question) = questions.first()
         {
             let answer = question.options.first().map_or_else(
                 || "No interactive answer is available in headless mode.".to_owned(),
                 |option| option.value.clone(),
             );
             actor
-                .answer_question(question_id.clone(), vec![answer])
+                .answer_question(question_id.clone(), answer)
                 .await
                 .map_err(display_agent_error)?;
         }
@@ -369,11 +368,10 @@ pub(super) async fn run_repl(
                                         .await
                                         .map_err(display_agent_error)?;
                                 }
-                                PendingInteraction::Question { id, .. } => {
-                                    let _ = actor
-                                        .answer_question(id, vec![line])
-                                        .await
-                                        .map_err(display_agent_error)?;
+                                PendingInteraction::Question { id, prompt, options } => {
+                                    if !actor.answer_question(id.clone(), line).await.map_err(display_agent_error)? {
+                                        interactions.push_front(PendingInteraction::Question { id, prompt, options });
+                                    }
                                 }
                                 PendingInteraction::Permission { tool_call_id, invocation_id, binding, .. } => {
                                     let decision = parse_approval(&line);
@@ -438,10 +436,9 @@ pub(super) async fn run_repl(
                 }
                 if let EngineEvent::QuestionAsked {
                     question_id,
-                    questions,
+                    question,
                     ..
                 } = &event
-                    && let Some(question) = questions.first()
                 {
                     let announce = interactions.is_empty();
                     interactions.push_back(PendingInteraction::Question {

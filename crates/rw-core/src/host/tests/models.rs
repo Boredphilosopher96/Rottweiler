@@ -259,10 +259,10 @@ async fn pending_switch_is_not_persisted_and_each_context_choice_persists_on_com
                     meta: meta("spoofed", "answer"),
                     session_id,
                     question_id: question_id.clone(),
-                    answers: vec![rw_types::Answer {
+                    answer: rw_types::Answer {
                         question_id,
-                        values: vec![strategy.to_owned()],
-                    }],
+                        value: strategy.to_owned(),
+                    },
                 },
             )
             .await

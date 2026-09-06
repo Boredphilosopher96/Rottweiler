@@ -183,24 +183,27 @@ impl CanonicalHistory {
         reader.selection(control, &mut result)?;
         reader.workspace_and_plans(control, &mut result)?;
         reader.messages(control, &mut result)?;
-        for question in &control.questions {
+        for selected in &control.questions {
             let PendingEvent::QuestionAsked {
                 turn,
                 question_id,
-                questions,
-            } = reader.event(question.sequence)?
+                question,
+            } = reader.event(selected.sequence)?
             else {
                 return Err(RecoveryError::Invalid("question source selector"));
             };
-            if turn != question.agent_turn || question_id.0 != question.id {
+            if turn != selected.agent_turn
+                || question_id.0 != selected.id
+                || question.id != question_id
+            {
                 return Err(RecoveryError::Invalid("question source identity"));
             }
-            rw_types::question_admission::validate_questions(&questions)
+            rw_types::question_admission::validate_question(&question)
                 .map_err(RecoveryError::Limit)?;
             result.pending_questions.push(RecoveredQuestion {
                 agent_turn: turn,
                 question_id,
-                questions,
+                question,
             });
         }
         for (id, sequence) in &head.plugin_statuses {

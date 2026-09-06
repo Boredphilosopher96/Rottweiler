@@ -92,12 +92,12 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
         if let EngineEvent::QuestionAsked {
             meta,
             question_id,
-            questions,
+            question,
             ..
         } = events.recv().await.expect("question event")
         {
             assert_eq!(meta.caused_by, Some(RequestId("send-question".to_owned())));
-            assert_eq!(questions[0].prompt, "Continue?");
+            assert_eq!(question.prompt, "Continue?");
             break question_id;
         }
     };
@@ -107,10 +107,7 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
         .expect("live controls without replay");
     assert_eq!(controls.controls.questions.len(), 1);
     assert_eq!(controls.controls.questions[0].question_id, question_id);
-    assert_eq!(
-        controls.controls.questions[0].questions[0].prompt,
-        "Continue?"
-    );
+    assert_eq!(controls.controls.questions[0].question.prompt, "Continue?");
     assert!(controls.through.is_some());
     let asked_prefix = sink
         .events
@@ -140,16 +137,41 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
             .pending_questions
             .contains_key(&question_id.0)
     );
+    assert!(matches!(
+        handle
+            .dispatch(ClientCommand::AnswerQuestion {
+                meta: protocol_meta("driver", "unlisted option"),
+                session_id: session_id.clone(),
+                question_id: question_id.clone(),
+                answer: Answer {
+                    question_id: question_id.clone(),
+                    value: "not a displayed option".into()
+                },
+            })
+            .await
+            .expect("rejected option"),
+        CommandOutcome::Rejected { .. }
+    ));
+    assert_eq!(
+        handle
+            .controls()
+            .await
+            .expect("still pending")
+            .controls
+            .questions
+            .len(),
+        1
+    );
     assert_eq!(
         handle
             .dispatch(ClientCommand::AnswerQuestion {
                 meta: protocol_meta("driver", "answer"),
                 session_id,
                 question_id: question_id.clone(),
-                answers: vec![Answer {
+                answer: Answer {
                     question_id,
-                    values: vec!["yes".to_owned()],
-                }],
+                    value: "yes".to_owned(),
+                },
             })
             .await
             .expect("answer"),
@@ -167,9 +189,9 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
     let mut durable_answer = false;
     loop {
         let event = events.recv().await.expect("terminal event");
-        if let EngineEvent::QuestionAnswered { meta, answers, .. } = &event {
+        if let EngineEvent::QuestionAnswered { meta, answer, .. } = &event {
             assert_eq!(meta.caused_by, Some(RequestId("answer".to_owned())));
-            assert_eq!(answers[0].values, ["yes"]);
+            assert_eq!(answer.value, "yes");
             durable_answer = true;
         }
         if matches!(event, EngineEvent::TurnFinished { .. }) {
@@ -276,10 +298,10 @@ async fn question_answer_persistence_failure_rejects_ack_and_stops_tool_continua
                 meta: protocol_meta("driver", "failed-answer"),
                 session_id,
                 question_id: question_id.clone(),
-                answers: vec![Answer {
+                answer: Answer {
                     question_id,
-                    values: vec!["yes".to_owned()],
-                }],
+                    value: "yes".to_owned(),
+                },
             })
             .await
             .expect("answer outcome"),

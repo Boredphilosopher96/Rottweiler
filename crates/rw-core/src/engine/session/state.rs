@@ -227,7 +227,7 @@ pub(in crate::engine) struct ActorState {
 }
 
 pub(in crate::engine) struct PendingQuestion {
-    pub(in crate::engine) questions: Vec<rw_types::Question>,
+    pub(in crate::engine) question: rw_types::Question,
     pub(in crate::engine) _admission: tokio::sync::OwnedSemaphorePermit,
     pub(in crate::engine) turn: u64,
     pub(in crate::engine) respond: oneshot::Sender<Result<String, rw_tools::ToolError>>,
@@ -240,7 +240,7 @@ pub(in crate::engine) enum PrecommittedAnswer {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::engine) struct PendingModelSwitch {
-    pub(in crate::engine) questions: Vec<rw_types::Question>,
+    pub(in crate::engine) question: rw_types::Question,
     pub(in crate::engine) turn: u64,
     pub(in crate::engine) model: ModelAlias,
     pub(in crate::engine) provider: Option<String>,
@@ -274,21 +274,17 @@ impl ActorState {
             .pending_questions
             .iter()
             .filter_map(|(question_id, recovered)| {
-                recovered
-                    .questions
-                    .iter()
-                    .find_map(|question| question.model_switch.as_ref())
-                    .map(|target| {
-                        (
-                            question_id.clone(),
-                            PendingModelSwitch {
-                                questions: recovered.questions.clone(),
-                                turn: recovered.agent_turn,
-                                model: target.model.clone(),
-                                provider: target.provider.clone(),
-                            },
-                        )
-                    })
+                recovered.question.model_switch.as_ref().map(|target| {
+                    (
+                        question_id.clone(),
+                        PendingModelSwitch {
+                            question: recovered.question.clone(),
+                            turn: recovered.agent_turn,
+                            model: target.model.clone(),
+                            provider: target.provider.clone(),
+                        },
+                    )
+                })
             })
             .collect();
         let queued_positions = recovered

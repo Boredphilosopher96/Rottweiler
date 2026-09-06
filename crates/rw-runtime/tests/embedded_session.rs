@@ -136,7 +136,7 @@ async fn exercise() -> Result<()> {
                 answered = true;
                 session
                     .handle()
-                    .answer_question(question_id, vec!["second".to_owned()])
+                    .answer_question(question_id, "second".to_owned())
                     .await?;
             }
             EngineEvent::TextDelta { text: delta, .. } => text.push_str(&delta),

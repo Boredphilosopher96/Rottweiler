@@ -409,16 +409,9 @@ fn model_switch_question(
     }
 }
 
-fn model_switch_answer(
-    answers: &[Answer],
-    question_id: &QuestionId,
-) -> Option<ModelContextTransfer> {
-    let values = &answers
-        .iter()
-        .find(|answer| answer.question_id == *question_id)?
-        .values;
-    (values.len() == 1)
-        .then(|| parse_model_context_transfer(&values[0]))
+fn model_switch_answer(answer: &Answer, question_id: &QuestionId) -> Option<ModelContextTransfer> {
+    (answer.question_id == *question_id)
+        .then(|| parse_model_context_transfer(&answer.value))
         .flatten()
 }
 

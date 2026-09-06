@@ -250,12 +250,12 @@ pub(in crate::engine) fn recovered_pending_event(
         EngineEvent::QuestionAnswered {
             turn_id,
             question_id,
-            answers,
+            answer,
             ..
         } => PendingEvent::QuestionAnswered {
             turn: parse_turn_id(turn_id)?,
             question_id: question_id.clone(),
-            answers: answers.clone(),
+            answer: answer.clone(),
         },
         EngineEvent::HookFailed {
             event,
@@ -496,12 +496,12 @@ pub(in crate::engine) fn recovered_pending_event(
         EngineEvent::QuestionAsked {
             turn_id,
             question_id,
-            questions,
+            question,
             ..
         } => PendingEvent::QuestionAsked {
             turn: parse_turn_id(turn_id)?,
             question_id: question_id.clone(),
-            questions: questions.clone(),
+            question: question.clone(),
         },
         EngineEvent::Error { error, .. } => PendingEvent::Error {
             message: error.message.clone(),

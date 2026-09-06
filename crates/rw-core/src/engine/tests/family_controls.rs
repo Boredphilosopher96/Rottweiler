@@ -95,10 +95,10 @@ async fn explicit_root_driver_answers_exact_child_question_without_changing_chil
     );
     let response = ChildControlResponse::Question {
         question_id: question_id.clone(),
-        answers: vec![Answer {
+        answer: Answer {
             question_id,
-            values: vec!["yes".into()],
-        }],
+            value: "yes".into(),
+        },
     };
     let authority = root
         .family_control_authority(&ClientId("root-control-driver".into()))
