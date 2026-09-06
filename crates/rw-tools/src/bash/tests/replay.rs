@@ -56,6 +56,16 @@ fn command_recordings_require_complete_explicit_request_contracts() {
         write(&unknown);
         assert!(ReplayCommandExecutor::load(fixtures.path(), workspace.path()).is_err());
     }
+    let mut unknown_output = occurrence.clone();
+    unknown_output["output"] = json!([{"stream": "stdout", "content": "ok", "extra": false}]);
+    write(&unknown_output);
+    assert!(ReplayCommandExecutor::load(fixtures.path(), workspace.path()).is_err());
+    let mut unknown_outcome = occurrence;
+    unknown_outcome["terminal"] = json!({
+        "type": "success", "outcome": {"exit_code": 0, "extra": false}
+    });
+    write(&unknown_outcome);
+    assert!(ReplayCommandExecutor::load(fixtures.path(), workspace.path()).is_err());
 }
 
 #[tokio::test]

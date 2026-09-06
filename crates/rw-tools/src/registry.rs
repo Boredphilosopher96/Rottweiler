@@ -217,6 +217,7 @@ impl CancellationToken {
 
 /// One live output fragment, normally emitted by an executing shell command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolOutputChunk {
     pub stream: ToolOutputStream,
     pub content: String,

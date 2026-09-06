@@ -65,6 +65,7 @@ pub enum BashSandboxMode {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandOutcome {
     pub exit_code: i32,
 }
