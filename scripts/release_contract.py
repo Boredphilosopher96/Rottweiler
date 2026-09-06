@@ -33,6 +33,7 @@ EXPECTED_MEMBER_IDS = {
     "wasm_host",
     "wasm_host_identity",
     "opentui_native",
+    "opentui_licenses",
 }
 
 
@@ -345,6 +346,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
         maximum_allowed_product_bytes = (
             member_by_id["installer"].max_bytes
             + member_by_id["wasm_host_identity"].max_bytes
+            + member_by_id["opentui_licenses"].max_bytes
             + budgets.engine_less_than_bytes
             + budgets.wasm_host_less_than_bytes
             + budgets.js_bundle_less_than_bytes
@@ -385,6 +387,7 @@ def validate_build(
         "wasm_host": wasm_host,
         "js_host": js_host,
         "opentui_native": opentui_native,
+        "opentui_licenses": opentui_native.parent / Path(_member_by_id(platform, "opentui_licenses").path).name,
     }
     sizes: dict[str, int] = {}
     for member_id, path in paths.items():
@@ -639,6 +642,7 @@ def render_typescript(contract: ReleaseContract) -> str:
     lines = [
         "// @generated TypeScript projection by scripts/release_contract.py; do not edit.",
         f"export const JS_HOST_EXECUTABLE_NAME = {json.dumps(host_name)} as const",
+        f"export const OPENTUI_LICENSES_NAME = {json.dumps(Path(_member_by_id(contract.platforms[0], 'opentui_licenses').path).name)} as const",
         f"export const JS_HOST_ROLES = {json.dumps(contract.js_host_roles, sort_keys=True)} as const",
         "",
         "export interface ReleaseProductBudgets {",
@@ -818,6 +822,7 @@ def stage_release(
         "wasm_host": wasm_host,
         "js_host": js_host,
         "opentui_native": opentui_native,
+        "opentui_licenses": opentui_native.parent / Path(_member_by_id(platform, "opentui_licenses").path).name,
     }
     output.mkdir(parents=True, mode=0o755)
     for directory in _archive_directories(platform):

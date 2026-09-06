@@ -77,6 +77,7 @@ module Utils
       raise "toolchain not installed" unless PROVISIONED == [TOOLS.fetch("rust")]
       raise "nonisolated Cargo home" unless ENV["CARGO_HOME"] == "#{ROOT}/target/head-toolchains/cargo"
       raise "nonisolated Rustup home" unless ENV["RUSTUP_HOME"] == "#{ROOT}/target/head-toolchains/rustup"
+      raise "missing pinned Zig archive" unless ENV["ROTTWEILER_ZIG_ARCHIVE"] == (ROOT/"zig.tar.xz").to_s && (ROOT/"zig.tar.xz").file?
       raise "wrong toolchain" unless ENV["RUSTUP_TOOLCHAIN"] == TOOLS.fetch("rust")
       raise "tools not ahead of ambient PATH" unless ENV["PATH"].start_with?("#{ROOT}/target/head-toolchains/bin:/formula/rustup/bin:")
       raise "missing Linux strip owner" if OS.linux? && ENV["ROTTWEILER_STRIP_BIN"] != "/formula/binutils/bin/strip"
@@ -104,9 +105,11 @@ class InstallPath < Pathname
 end
 class Resource
   attr_accessor :owner
-  def initialize(_name, &block); instance_eval(&block); end
-  def url(value); raise "wrong resource URL" unless value == TOOLS.fetch("bun").fetch("url"); end
-  def sha256(value); raise "wrong checksum" unless value == TOOLS.fetch("bun").fetch("sha256"); end
+  def initialize(name, &block); @tool = name.end_with?("-zig") ? "zig" : "bun"; instance_eval(&block); end
+  def url(value); raise "wrong resource URL" unless value == TOOLS.fetch(@tool).fetch("url"); end
+  def sha256(value); raise "wrong checksum" unless value == TOOLS.fetch(@tool).fetch("sha256"); end
+  def cached_download; ROOT/"zig.tar.xz"; end
+  def fetch; cached_download.write("verified Zig archive"); end
   def stage
     directory = ROOT/"resource"
     directory.mkpath

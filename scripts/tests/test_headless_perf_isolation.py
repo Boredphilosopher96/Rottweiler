@@ -138,7 +138,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("const MAX_RUNTIME_BYTES = 32 * 1024 * 1024", runtime)
         self.assertIn("Linux Bun compiled output bytes:", build)
         self.assertIn(native_strip, build)
-        self.assertIn("process.platform === \"darwin\"", build)
+        self.assertIn("process.platform !== \"darwin\"", build)
         self.assertIn("releasePlatformForNodeTarget", build)
         self.assertIn("productBudgets.jsBundleLessThanBytes", build)
         self.assertNotIn("100_000_000", build)
@@ -192,7 +192,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         for relative in ("crates/rw-cli/tests/perf_gate.sh", "scripts/native_candidate.py",
-                         "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
+                         "scripts/opentui_native.py", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
             destination = fixture.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / relative, destination)

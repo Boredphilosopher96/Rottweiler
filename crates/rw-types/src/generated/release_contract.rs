@@ -74,6 +74,12 @@ const DARWIN_ARM64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         mode: 0o644,
         max_bytes: 104_857_600,
     },
+    ReleaseArchiveMember {
+        id: "opentui_licenses",
+        path: "bin/opentui-licenses.txt",
+        mode: 0o644,
+        max_bytes: 131_072,
+    },
 ];
 
 const DARWIN_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
@@ -112,6 +118,12 @@ const DARWIN_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         path: "bin/libopentui.dylib",
         mode: 0o644,
         max_bytes: 104_857_600,
+    },
+    ReleaseArchiveMember {
+        id: "opentui_licenses",
+        path: "bin/opentui-licenses.txt",
+        mode: 0o644,
+        max_bytes: 131_072,
     },
 ];
 
@@ -152,6 +164,12 @@ const LINUX_AARCH64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         mode: 0o644,
         max_bytes: 104_857_600,
     },
+    ReleaseArchiveMember {
+        id: "opentui_licenses",
+        path: "bin/opentui-licenses.txt",
+        mode: 0o644,
+        max_bytes: 131_072,
+    },
 ];
 
 const LINUX_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
@@ -190,6 +208,12 @@ const LINUX_X86_64_ARCHIVE_MEMBERS: &[ReleaseArchiveMember] = &[
         path: "bin/libopentui.so",
         mode: 0o644,
         max_bytes: 104_857_600,
+    },
+    ReleaseArchiveMember {
+        id: "opentui_licenses",
+        path: "bin/opentui-licenses.txt",
+        mode: 0o644,
+        max_bytes: 131_072,
     },
 ];
 

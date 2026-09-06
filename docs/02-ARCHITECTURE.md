@@ -88,6 +88,14 @@ Closing a local session waits for actor effects, finalizes durable projections a
 session-local state, then settles services. Dropping a client or a cleanup waiter
 requests that same independently owned shutdown; it cannot cancel cleanup.
 
+The native renderer is built from checksum-verified OpenTUI source and the exact
+Zig release in `contracts/opentui-native.json`. Editor views and glyph/link pool
+entries use individually reclaimable native allocations, so destroying interleaved
+views returns their storage. The native candidate builder owns source patches,
+offline vendored Zig dependencies, compiler archives and cache identity under its
+Cargo target's `opentui-native` directory. The shared JavaScript host uses that
+verified sidecar; its archive includes the upstream and dependency license notice.
+
 The headless REPL accepts UTF-8 lines up to 128 KiB, including a final partial line
 at EOF. CR, LF and CRLF delimit lines. Erase removes one Unicode codepoint;
 erase and Ctrl-U print the complete retained draft at a fresh prompt on a new

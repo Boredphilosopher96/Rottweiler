@@ -1050,3 +1050,8 @@ patterns = ["packages/plugin-sdk/src/generated/*-validator.*"]
 id = "session-children-contract"
 path = "crates/rw-types/src/session_children.rs"
 symbols = ["MAX_ACTIVE_CHILDREN", "MAX_CHILD_TASK_PREVIEW_BYTES", "SessionChildrenSnapshot::validate"]
+
+[[owner]]
+id = "opentui-native-source-contract"
+path = "contracts/opentui-native.json"
+symbols = ["package_version", "source", "zig", "patches", "flags"]

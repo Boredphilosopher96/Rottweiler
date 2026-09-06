@@ -45,6 +45,8 @@ class ReleaseInstallTests(unittest.TestCase):
         identity.write_text(json.dumps({"bytes": wasm_host.stat().st_size, "sha256": hashlib.sha256(wasm_host.read_bytes()).hexdigest()}) + "\n")
         native = binary_dir / PLATFORM_CONTRACT.native_library
         native.write_bytes(b"native fixture\n")
+        licenses = next(member for member in PLATFORM_CONTRACT.archive_members if member.id == "opentui_licenses")
+        (release / licenses.path).write_text("native license fixture\n")
         (release / "install.sh").chmod(0o755)
         rw.chmod(0o755)
         tui.chmod(0o755)

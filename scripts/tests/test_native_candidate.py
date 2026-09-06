@@ -33,7 +33,7 @@ class NativeCandidateFixture:
         self.addCleanup(self.temporary.cleanup)
         self.repo = Path(self.temporary.name) / "repo"
         self.repo.mkdir()
-        for name in ("Cargo.toml", "rust-toolchain.toml", ".bun-version", "contracts/release-contract.json",
+        for name in ("packages/tui/scripts/native-lifetime-probe.ts", "contracts/opentui-native.json", "patches/opentui/reclaim-native-owners.patch", "Cargo.toml", "rust-toolchain.toml", ".bun-version", "contracts/release-contract.json",
                      "packages/tui/package.json", "packages/plugin-sdk/package.json", "packages/plugin-host/package.json", "packages/js-host/package.json"):
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +51,7 @@ class NativeCandidateFixture:
         self.identity = {
             "source": native_candidate.source_identity(self.repo), "platform": self.platform.id,
             "target": f"{self.platform.rust_arch}-apple-darwin" if self.platform.system == "Darwin" else f"{self.platform.rust_arch}-unknown-linux-gnu",
-            "version": "0.1.4", "toolchains": {"rust": f"rustc {rust} (fixture)", "bun": bun + "+fixture"},
+            "version": "0.1.4", "toolchains": {"rust": f"rustc {rust} (fixture)", "bun": bun + "+fixture", "opentui_native": native_candidate.opentui_native.identity(self.repo, self.platform.id)},
             "profile": {"name": "release", "debug": 0, "opt_level": "3" if self.platform.system == "Darwin" else "s", "environment": {}},
             "cargo_configuration": {},
         }

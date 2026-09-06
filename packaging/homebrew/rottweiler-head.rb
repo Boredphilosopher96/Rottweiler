@@ -49,9 +49,17 @@ class Rottweiler < Formula
     end
     resource.owner = self
     resource.stage { (directory/"bin").install "bun" }
+    zig = tools.fetch("zig")
+    zig_resource = Resource.new("rottweiler-head-zig") do
+      url zig.fetch("url")
+      sha256 zig.fetch("sha256")
+    end
+    zig_resource.owner = self
+    zig_resource.fetch
     rustup_bin = Formula["rustup"].opt_bin
     with_env(
       PATH: "#{directory}/bin:#{rustup_bin}:#{ENV.fetch('PATH')}",
+      ROTTWEILER_ZIG_ARCHIVE: zig_resource.cached_download,
       CARGO_HOME: directory/"cargo", RUSTUP_HOME: directory/"rustup",
       RUSTUP_TOOLCHAIN: tools.fetch("rust"), RUSTUP_AUTO_INSTALL: "0",
       RUSTUP_DIST_SERVER: "https://static.rust-lang.org", RUSTC: rustup_bin/"rustc"

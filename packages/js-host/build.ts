@@ -15,7 +15,7 @@ import { dirname, isAbsolute, join } from "node:path"
 
 import type { BunPlugin } from "bun"
 
-import { JS_HOST_EXECUTABLE_NAME, JS_HOST_ROLES, releasePlatformForNodeTarget } from "./generated/release-contract.ts"
+import { JS_HOST_EXECUTABLE_NAME, JS_HOST_ROLES, OPENTUI_LICENSES_NAME, releasePlatformForNodeTarget } from "./generated/release-contract.ts"
 
 import { SOURCE_HOST_ABI, SOURCE_BUNDLE_FORMAT } from "../plugin-host/src/protocol"
 
@@ -58,26 +58,6 @@ function cleanupOrphanedTempBuilds(): void {
 cleanupOrphanedBunBuilds()
 cleanupOrphanedTempBuilds()
 
-function nativePackage(): string {
-  if (process.platform === "darwin" && process.arch === "x64") return "@opentui/core-darwin-x64"
-  if (process.platform === "darwin" && process.arch === "arm64") return "@opentui/core-darwin-arm64"
-  if (process.platform === "win32" && process.arch === "x64") return "@opentui/core-win32-x64"
-  if (process.platform === "win32" && process.arch === "arm64") return "@opentui/core-win32-arm64"
-  if (process.platform === "linux") {
-    const libc = process.env.OPENTUI_LIBC
-    if (libc !== undefined && libc !== "" && libc !== "glibc" && libc !== "musl") {
-      throw new Error(`OPENTUI_LIBC must be glibc or musl, got ${libc}`)
-    }
-    const suffix = libc === "musl" ? "-musl" : ""
-    if (process.arch === "x64") return `@opentui/core-linux-x64${suffix}`
-    if (process.arch === "arm64") return `@opentui/core-linux-arm64${suffix}`
-  }
-  throw new Error(`OpenTUI does not support ${process.platform}-${process.arch}`)
-}
-
-const selectedNativePackage = nativePackage()
-const selectedNativeEntry = Bun.resolveSync(selectedNativePackage, tuiDirectory)
-const selectedNativeDirectory = dirname(selectedNativeEntry)
 const selectedReleasePlatform = releasePlatformForNodeTarget(
   process.platform,
   process.arch,
@@ -87,7 +67,12 @@ if (selectedReleasePlatform === undefined && process.platform !== "win32") {
 }
 const selectedNativeLibrary =
   selectedReleasePlatform?.nativeLibrary ?? "opentui.dll"
-const selectedNativePath = join(selectedNativeDirectory, selectedNativeLibrary)
+const nativeBuild = spawnSync(process.env.PYTHON ?? "python3", [join(import.meta.dir, "../../scripts/build-opentui-native.py")], {
+  encoding: "utf8", stdio: ["ignore", "pipe", "inherit"],
+})
+if (nativeBuild.error !== undefined || nativeBuild.status !== 0) throw new Error("verified OpenTUI native build failed")
+const selectedNativePath = nativeBuild.stdout.trim()
+if (!isAbsolute(selectedNativePath) || !existsSync(selectedNativePath)) throw new Error("native builder returned no verified artifact")
 const treeSitterAssetDigest = createHash("sha256")
   .update(readFileSync(join(tuiDirectory, "bun.lock")))
   .update(readFileSync(join(tuiDirectory, "src/tree-sitter-runtime.ts")))
@@ -247,6 +232,7 @@ if (process.platform === "linux") {
 mkdirSync(outputDirectory, { recursive: true })
 const outputNativePath = join(outputDirectory, selectedNativeLibrary)
 copyFileSync(selectedNativePath, outputNativePath)
+copyFileSync(join(dirname(selectedNativePath), OPENTUI_LICENSES_NAME), join(outputDirectory, OPENTUI_LICENSES_NAME))
 stripLinuxNativeLibrary(outputNativePath)
 signDarwinArtifact(outputExecutable, "JavaScript host")
 signDarwinArtifact(outputNativePath, "OpenTUI native library")

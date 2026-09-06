@@ -39,6 +39,12 @@
         "path": "bin/{native_library}",
         "mode": "0644",
         "max_bytes": 104857600
+      },
+      {
+        "id": "opentui_licenses",
+        "path": "bin/opentui-licenses.txt",
+        "mode": "0644",
+        "max_bytes": 131072
       }
     ]
   },

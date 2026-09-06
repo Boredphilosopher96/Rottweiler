@@ -1,5 +1,6 @@
 // @generated TypeScript projection by scripts/release_contract.py; do not edit.
 export const JS_HOST_EXECUTABLE_NAME = "rottweiler-js-host" as const
+export const OPENTUI_LICENSES_NAME = "opentui-licenses.txt" as const
 export const JS_HOST_ROLES = {"source_plugin": "source-plugin", "tui": "tui"} as const
 
 export interface ReleaseProductBudgets {

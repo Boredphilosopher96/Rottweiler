@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class HomebrewToolchainTests(unittest.TestCase):
     def fixture(self, directory: str) -> Path:
         root = Path(directory)
-        for name in (".bun-version", "rust-toolchain.toml", tools.DIGESTS, "contracts/release-contract.json",
+        for name in ("contracts/opentui-native.json", ".bun-version", "rust-toolchain.toml", tools.DIGESTS, "contracts/release-contract.json",
                      *(f"packages/{package}/package.json" for package in ("tui", "plugin-host", "plugin-sdk", "js-host"))):
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -37,6 +37,8 @@ class HomebrewToolchainTests(unittest.TestCase):
             self.assertEqual(manifest["bun"]["url"],
                              f"https://github.com/oven-sh/bun/releases/download/bun-v{bun}/bun-{suffix}.zip")
             self.assertRegex(manifest["bun"]["sha256"], r"^[a-f0-9]{64}$")
+            self.assertRegex(manifest["zig"]["sha256"], r"^[a-f0-9]{64}$")
+            self.assertTrue(manifest["zig"]["url"].startswith("https://ziglang.org/download/"))
         with self.assertRaises(ValueError):
             tools.manifest(ROOT, "Windows", "AMD64")
 

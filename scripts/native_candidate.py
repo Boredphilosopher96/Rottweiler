@@ -12,6 +12,7 @@ import tarfile
 import tomllib
 
 import artifact_bundle
+import opentui_native
 from release_contract import load_contract, validate_build, verify_archive
 
 RECEIPT = "build.json"
@@ -104,7 +105,7 @@ def build_identity(repo: Path) -> dict:
         "platform": platform.id,
         "target": target,
         "version": version,
-        "toolchains": {"rust": rust_identity, "bun": bun_identity},
+        "toolchains": {"rust": rust_identity, "bun": bun_identity, "opentui_native": opentui_native.identity(repo, platform.id)},
         "profile": {"name": "release", "debug": 0,
                     "opt_level": "3" if platform.system == "Darwin" else "s",
                     "environment": environment},
@@ -147,6 +148,7 @@ def verify(root: Path, repo: Path, *, expected_identity: dict | None = None) -> 
         raise ValueError("candidate source or native platform differs from the gate")
     if expected_identity is not None and identity != expected_identity:
         raise ValueError("candidate source/toolchain/target/profile tuple differs from the build")
+    opentui_native.validate_identity(repo, identity["platform"], identity["toolchains"].get("opentui_native"))
     rust, bun = pinned_toolchains(repo)
     if not identity["toolchains"]["rust"].startswith(f"rustc {rust} ") or identity["toolchains"]["bun"].split("+", 1)[0] != bun:
         raise ValueError("candidate toolchain differs from the source pins")

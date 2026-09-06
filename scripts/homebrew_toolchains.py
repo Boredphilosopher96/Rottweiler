@@ -11,6 +11,7 @@ import tomllib
 import urllib.request
 
 from native_candidate import pinned_toolchains
+import opentui_native
 from release_contract import load_contract
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +48,7 @@ def manifest(root: Path, system: str, machine: str) -> dict:
     rust, _ = pinned_toolchains(root)
     configuration = tomllib.loads((root / "rust-toolchain.toml").read_text())["toolchain"]
     return {"rust": rust, "profile": configuration["profile"], "components": configuration["components"],
-            "bun": verified_resources(root)[target.id]}
+            "bun": verified_resources(root)[target.id], "zig": opentui_native.contract(root)["zig"]["artifacts"][target.id]}
 
 
 def refresh(root: Path) -> None:

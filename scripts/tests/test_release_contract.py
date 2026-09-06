@@ -108,7 +108,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(contract.js_host_roles, {"tui": "tui", "source_plugin": "source-plugin"})
         for platform in contract.platforms:
             self.assertEqual({member.id for member in platform.archive_members},
-                             {"installer", "engine", "js_host", "wasm_host", "wasm_host_identity", "opentui_native"})
+                             {"installer", "engine", "js_host", "wasm_host", "wasm_host_identity", "opentui_native", "opentui_licenses"})
             host = next(member for member in platform.archive_members if member.id == "js_host")
             self.assertEqual(host.path, "bin/rottweiler-js-host")
             self.assertEqual(host.max_bytes, 150_000_000)
@@ -245,6 +245,7 @@ class ReleaseContractTests(unittest.TestCase):
             tui.write_bytes(b"tui")
             native = root / "libopentui.dylib"
             native.write_bytes(b"native")
+            (root / "opentui-licenses.txt").write_text("license fixture")
             self.module.validate_build(
                 contract, "darwin-arm64", engine, wasm_host, tui, native
             )
@@ -263,6 +264,7 @@ class ReleaseContractTests(unittest.TestCase):
                 source = root / member_id
                 source.write_bytes(member_id.encode("ascii"))
                 sources[member_id] = source
+            (root / "opentui-licenses.txt").write_text("license fixture")
             # Cargo's public executable is hard-linked to its deps artifact.
             cargo_peer = root / "cargo-deps-engine"
             os.link(sources["engine"], cargo_peer)
