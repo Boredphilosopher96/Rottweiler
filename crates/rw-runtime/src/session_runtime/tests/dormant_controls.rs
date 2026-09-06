@@ -127,6 +127,12 @@ fn factory(
 #[tokio::test]
 async fn reopened_dormant_plan_is_discovered_selected_and_answered_without_inference() {
     let private = tempfile::tempdir().expect("private");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        private.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("private storage permissions");
     let workspace = tempfile::tempdir().expect("workspace");
     let session = SessionId("saved-child".into());
     seed(private.path(), &session);
