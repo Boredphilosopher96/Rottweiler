@@ -13,6 +13,7 @@ use std::{sync::Arc, time::Duration};
 async fn interrupt_acknowledges_while_opening_journal_commit_is_blocked() {
     let root = tempfile::TempDir::new().expect("workspace");
     let sink = Arc::new(BlockingBatchSink {
+        should_block: |events| events.len() > 1,
         persisted: std::sync::Mutex::default(),
         blocked_once: std::sync::atomic::AtomicBool::default(),
         entered: tokio::sync::Notify::default(),

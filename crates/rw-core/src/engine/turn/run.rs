@@ -394,7 +394,7 @@ pub(super) async fn run_turn(
             snapshot.context_window_reason.clone(),
             snapshot.stable_prefix_hash.clone(),
         );
-        send_event(
+        if persist_event(
             &signals,
             PendingEvent::ContextUsage {
                 turn,
@@ -409,7 +409,13 @@ pub(super) async fn run_turn(
                 provider_input_tokens: 0,
                 correction_millionths: input_estimate.correction_millionths,
             },
-        );
+        )
+        .await
+        .is_err()
+        {
+            status = AgentTurnStatus::Failed;
+            break;
+        }
         let cache_hint = (assembled.stable_prefix_turn_count > 0 || !assembled.tools.is_empty())
             .then(|| CacheHint {
                 stable_prefix_turns: u32::try_from(assembled.stable_prefix_turn_count)

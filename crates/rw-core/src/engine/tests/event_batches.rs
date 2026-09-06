@@ -45,6 +45,7 @@ use tokio::time::timeout;
 async fn opening_batch_is_fully_persisted_before_any_event_is_broadcast() {
     let root = TempDir::new().expect("tempdir");
     let sink = Arc::new(BlockingBatchSink {
+        should_block: |events| events.len() > 1,
         persisted: Mutex::new(Vec::new()),
         blocked_once: AtomicBool::new(false),
         entered: Notify::new(),

@@ -13,6 +13,7 @@ mod compaction_recovery;
 mod completion_hooks;
 mod context;
 mod context_reads;
+mod context_source_commit;
 mod control_admission;
 mod deferred_children;
 mod diff_approval;

@@ -767,6 +767,7 @@ impl SessionEventSink for MalformedBatchSink {
 }
 
 pub(in crate::engine::tests) struct BlockingBatchSink {
+    pub(in crate::engine::tests) should_block: fn(&[EngineEvent]) -> bool,
     pub(in crate::engine::tests) persisted: Mutex<Vec<EngineEvent>>,
     pub(in crate::engine::tests) blocked_once: AtomicBool,
     pub(in crate::engine::tests) entered: Notify,
@@ -834,7 +835,7 @@ impl SessionEventSink for BlockingBatchSink {
     ) -> Result<Arc<rw_core_batch::AdmittedEventBatch>, AgentLoopError> {
         let events = batch.events();
 
-        if events.len() > 1 && !self.blocked_once.swap(true, Ordering::SeqCst) {
+        if (self.should_block)(events) && !self.blocked_once.swap(true, Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
         }
