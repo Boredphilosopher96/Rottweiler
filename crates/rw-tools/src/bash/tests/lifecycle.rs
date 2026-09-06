@@ -142,7 +142,7 @@ async fn foreground_cleanup_and_recording_survive_caller_drop() {
     assert_eq!(occurrences.len(), 1);
     assert!(matches!(
         occurrences[0].terminal,
-        RecordedCommandTerminal::Cancelled
+        RecordedCommandTerminal::Cancelled {}
     ));
     std::fs::write(&writes, b"next mutation").expect("conflicting write");
     tokio::time::sleep(Duration::from_millis(50)).await;

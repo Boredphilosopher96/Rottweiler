@@ -306,11 +306,7 @@ class CiHardeningContractTests(unittest.TestCase):
             2,
         )
         self.assertEqual(
-            workflow.count("bun install --cwd packages/plugin-sdk --frozen-lockfile"),
-            2,
-        )
-        self.assertEqual(
-            workflow.count("bun install --cwd packages/tui --frozen-lockfile"),
+            workflow.count("python3 scripts/ci_inventory.py install js-host --build-dependencies"),
             2,
         )
         for boundary in (

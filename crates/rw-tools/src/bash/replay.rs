@@ -51,7 +51,7 @@ pub(super) struct CanonicalCommandRequest {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum RecordedCommandTerminal {
     Success { outcome: CommandOutcome },
-    Cancelled,
+    Cancelled {},
     CommandError { message: String },
     OutputError { message: String },
 }
@@ -281,7 +281,7 @@ impl CommandExecutor for ReplayCommandExecutor {
         }
         match occurrence.terminal {
             RecordedCommandTerminal::Success { outcome } => Ok(outcome),
-            RecordedCommandTerminal::Cancelled => Err(ToolError::Cancelled),
+            RecordedCommandTerminal::Cancelled {} => Err(ToolError::Cancelled),
             RecordedCommandTerminal::CommandError { message } => Err(ToolError::Command(message)),
             RecordedCommandTerminal::OutputError { message } => Err(ToolError::Output(message)),
         }
@@ -334,7 +334,7 @@ pub(super) fn recorded_terminal(
 ) -> RecordedCommandTerminal {
     match result {
         Ok(outcome) => RecordedCommandTerminal::Success { outcome: *outcome },
-        Err(ToolError::Cancelled) => RecordedCommandTerminal::Cancelled,
+        Err(ToolError::Cancelled) => RecordedCommandTerminal::Cancelled {},
         Err(ToolError::Output(message)) => RecordedCommandTerminal::OutputError {
             message: message.clone(),
         },
@@ -365,7 +365,7 @@ pub(super) fn redact_command_occurrence(
         | RecordedCommandTerminal::OutputError { message } => {
             *message = redactor.redact(message);
         }
-        RecordedCommandTerminal::Success { .. } | RecordedCommandTerminal::Cancelled => {}
+        RecordedCommandTerminal::Success { .. } | RecordedCommandTerminal::Cancelled {} => {}
     }
     occurrence
 }
