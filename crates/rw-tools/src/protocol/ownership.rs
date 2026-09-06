@@ -114,6 +114,7 @@ impl Physical {
                     }
                 }
             }
+            self.group = None;
             // A caller can drop this wait; the actual proxy job remains in its owner.
             if let Some(proxy) = self.proxy.take() {
                 self.proxy_job = Some(tokio::task::spawn_blocking(move || drop(proxy)));
@@ -132,7 +133,6 @@ impl Physical {
             {
                 return Err(io::Error::other("protocol proxy effects remain unsettled"));
             }
-            self.group = None;
             Ok(())
         })
         .await

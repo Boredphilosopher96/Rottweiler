@@ -62,6 +62,10 @@ fn receipts_reject_unapproved_identity_bytes_and_digest() {
             ..approved.clone()
         },
         ExecutableArtifactIdentity {
+            bytes: 256 * 1024 * 1024 + 1,
+            ..approved.clone()
+        },
+        ExecutableArtifactIdentity {
             sha256: "0".repeat(64),
             ..approved.clone()
         },
