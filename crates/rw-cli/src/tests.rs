@@ -253,12 +253,10 @@ fn detached_readiness_requires_explicit_process_ownership() -> Result<(), serde_
         "started": false,
     });
     for field in ["version", "socket", "token", "session_id", "started"] {
-        let mut incomplete = descriptor.clone();
-        incomplete
-            .as_object_mut()
-            .expect("descriptor")
-            .remove(field);
-        assert!(serde_json::from_value::<DetachedServerReady>(incomplete).is_err());
+        let mut incomplete: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(descriptor.clone())?;
+        incomplete.remove(field);
+        assert!(serde_json::from_value::<DetachedServerReady>(incomplete.into()).is_err());
     }
     let mut unknown = descriptor;
     unknown["extra"] = serde_json::json!(false);

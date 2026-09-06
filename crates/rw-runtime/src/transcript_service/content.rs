@@ -174,7 +174,7 @@ mod tests {
     use super::*;
 
     fn document(bytes: usize) -> TranscriptDocument {
-        let event = EngineEvent::ConversationTurnCommitted {
+        let event = rw_types::EngineEvent::ConversationTurnCommitted {
             meta: rw_types::EventMeta {
                 protocol_version: rw_types::PROTOCOL_VERSION,
                 session_id: SessionId("document".into()),
