@@ -104,3 +104,47 @@ async fn rejected_request_releases_unstarted_read_without_waiting_for_a_worker()
     owner.settle().await.expect("no local effect started");
     assert!(owner.current.lock().expect("slot").is_none());
 }
+
+#[cfg(unix)]
+#[test]
+fn fifo_fixture_is_rejected_without_waiting_for_a_writer() {
+    let directory = crate::recording::tests::unique_temp_directory("recording-fifo");
+    std::fs::create_dir_all(&directory).expect("directory");
+    let path = directory.join("fixture.json");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    let source = path.clone();
+    let (sent, received) = std::sync::mpsc::channel();
+    let worker =
+        std::thread::spawn(move || sent.send(read_fixture(source)).expect("result observer"));
+    let result = received.recv_timeout(Duration::from_secs(1));
+    if result.is_err() {
+        // Release an incorrectly blocking open before failing the test; no
+        // forgotten physical worker is left behind by a regression.
+        let rescue = rustix::fs::open(
+            &path,
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )
+        .expect("release FIFO open");
+        received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("rescued reader")
+            .expect_err("non-regular source");
+        drop(rescue);
+    }
+    worker.join().expect("worker settled");
+    std::fs::remove_dir_all(directory).expect("cleanup");
+    assert_eq!(
+        result
+            .expect("read did not wait for FIFO writer")
+            .expect_err("non-regular source")
+            .kind,
+        ProviderErrorKind::Protocol
+    );
+}

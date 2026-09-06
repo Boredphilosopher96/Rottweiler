@@ -197,11 +197,17 @@ pub(super) fn read_bounded(
     check: impl Fn() -> Result<(), ProviderError>,
 ) -> Result<Vec<u8>, ProviderError> {
     check()?;
-    let mut file = std::fs::File::open(path).map_err(|_| {
+    let mut file = open_source(path).map_err(|_| {
         ProviderError::new(ProviderErrorKind::ReplayMiss, "replay fixture unavailable")
     })?;
-    let len = usize::try_from(file.metadata().map_err(|error| io_error(&error))?.len())
-        .map_err(|_| size_error())?;
+    let metadata = file.metadata().map_err(|error| io_error(&error))?;
+    if !metadata.is_file() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Protocol,
+            "recording source must be a regular file",
+        ));
+    }
+    let len = usize::try_from(metadata.len()).map_err(|_| size_error())?;
     if len > limit {
         return Err(size_error());
     }
@@ -225,6 +231,23 @@ pub(super) fn read_bounded(
     bytes.truncate(used);
     Ok(bytes)
 }
+#[cfg(unix)]
+fn open_source(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    // O_NONBLOCK prevents a substituted FIFO from stalling before descriptor
+    // type validation. Regular files preserve ordinary read semantics.
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map(std::fs::File::from)
+    .map_err(std::io::Error::from)
+}
+#[cfg(not(unix))]
+fn open_source(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 fn size_error() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Protocol,
