@@ -1,10 +1,11 @@
+import { SubagentCatalog } from "../subagent-catalog"
 import { ChildDisplayController } from "../child-display"
 import { readSessionState } from "../state/recovery"
 import { installLiveTail } from "../state/tail-recovery"
 import { FamilyControlsController } from "../family-controls"
 import { sameChildTarget, type FamilyControlsReader } from "../family-controls-reader"
 import { resolveFamilyHistory } from "../family-history"
-import { MAX_ACTIVE_CHILDREN, type ChildControlResponse, type ChildControlTarget, type FamilyControlRow } from "../../../../protocol/types"
+import type { ChildControlResponse, ChildControlTarget, FamilyControlRow } from "../../../../protocol/types"
 import { readControls, resolvedApproval } from "../state/controls"
 import { childPassiveInteractionState } from "../subagent-state"
 import type { TranscriptRenderable } from "../components"
@@ -33,7 +34,6 @@ import {
   boundSubagentState,
   childEngineEvent,
   initialSubagentState,
-  sanitizeSubagentDescriptor,
   type ComposerDraft,
   type SubagentDescriptor,
 } from "../subagent-state"
@@ -73,7 +73,8 @@ export class ChildUiController {
   #scope: object = {}
   #resetting = false
   #subagentListError: string | null = null
-  #subagentDescriptors: readonly SubagentDescriptor[] = []
+  readonly #catalog: SubagentCatalog
+  get #subagentDescriptors(): readonly SubagentDescriptor[] { return this.#catalog.values }
   get #activeChildState(): RottweilerState | null { return this.#host.allocations.child }
   set #activeChildState(value: RottweilerState | null) { this.#host.allocations.set("child", value) }
   #historicalChild: { readonly sessionId: string; readonly task: string; readonly target: SessionReadTarget } | null = null
@@ -96,6 +97,7 @@ export class ChildUiController {
   #displayError: string | null = null
   readonly #todos: TodoController
   constructor(host: ChildUiHost) {
+    this.#catalog = new SubagentCatalog(host.history.controller.cache.allocations)
     this.draftStore = new ComposerDraftStore(undefined, undefined, host.history.controller.cache.allocations)
     this.#host = host
     this.#family = host.familyControls === undefined ? null : new FamilyControlsController({
@@ -263,7 +265,7 @@ export class ChildUiController {
     this.#sourceOwner?.release(); this.#sourceOwner = null; this.#sourceError = null
     this.#todos.reset()
     this.#scope = {}
-    this.#subagentListError = null; this.#subagentDescriptors = []; this.#activeChildState = null
+    this.#subagentListError = null; this.#catalog.clear(); this.#activeChildState = null
     this.#historicalChild = null; this.#activeReadTarget = null; this.draftStore.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
     this.#subagentErrorBaseline = undefined
     this.#resetting = false
@@ -271,8 +273,7 @@ export class ChildUiController {
   pickerClosed(): void { this.#subagentActionId = null }
   acceptCatalog(values: readonly SubagentDescriptor[]): void {
     this.#subagentListError = null
-    this.#subagentDescriptors = values.slice(0, MAX_ACTIVE_CHILDREN).map(sanitizeSubagentDescriptor)
-      .filter((descriptor): descriptor is SubagentDescriptor => descriptor !== null)
+    this.#catalog.replace(values)
     if (this.#familyChild === null && this.#activeSubagentId !== null && this.subagentDescriptor(this.#activeSubagentId) === undefined && this.#historicalChild === null) this.leaveSubagent()
     else this.#host.refresh()
   }
@@ -489,9 +490,7 @@ export class ChildUiController {
   }
 
   setSubagentActivity(subagentId: string, activity: SubagentDescriptor["activity"]): void {
-    this.#subagentDescriptors = this.#subagentDescriptors.map((subagent) =>
-      subagent.subagent_id === subagentId ? { ...subagent, activity } : subagent,
-    )
+    this.#catalog.activity(subagentId, activity)
   }
 
   presentedState(): RottweilerState {
@@ -667,9 +666,7 @@ export class ChildUiController {
       subagents,
       subagentOrder: this.#host.state.subagentOrder.filter((candidate) => candidate !== subagentId),
     }
-    this.#subagentDescriptors = this.#subagentDescriptors.filter(
-      (subagent) => subagent.subagent_id !== subagentId,
-    )
+    this.#catalog.remove(subagentId)
     this.draftStore.remove(`child:${subagentId}`)
     this.#host.refresh()
     this.requestSubagents()

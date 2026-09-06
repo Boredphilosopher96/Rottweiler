@@ -8,6 +8,8 @@ import {
   type RottweilerState,
 } from "./state"
 import { isWireEngineEvent } from "./transport"
+import { MAX_CHILD_TASK_PREVIEW_BYTES } from "../../../protocol/types"
+import { utf8Prefix } from "./state/display-buffer"
 import { boundedUiText } from "./ui-presentation"
 
 const MAX_SUBAGENT_ID_LENGTH = 256
@@ -41,12 +43,13 @@ export function sanitizeSubagentDescriptor(
     !safeSubagentIdentifier(descriptor.subagent_id) ||
     !safeSubagentIdentifier(descriptor.child_session_id)
   ) return null
-  const task = boundedUiText(descriptor.task, 512)
+  const task = boundedUiText(utf8Prefix(descriptor.task, MAX_CHILD_TASK_PREVIEW_BYTES), 512)
   return {
-    ...descriptor,
+    subagent_id: descriptor.subagent_id, child_session_id: descriptor.child_session_id,
+    isolation: descriptor.isolation, activity: descriptor.activity,
     task: task.length === 0 ? "Untitled child agent" : task,
-    agent: boundedUiText(descriptor.agent, 128),
-    model: boundedUiText(descriptor.model, 256),
+    agent: boundedUiText(utf8Prefix(descriptor.agent, MAX_CHILD_TASK_PREVIEW_BYTES), 128),
+    model: boundedUiText(utf8Prefix(descriptor.model, MAX_CHILD_TASK_PREVIEW_BYTES), 256),
   }
 }
 
