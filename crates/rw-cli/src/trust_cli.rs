@@ -192,12 +192,11 @@ pub(super) async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Res
             continue;
         }
         let manifest = plugin.load_manifest()?;
-        let process = rw_runtime::plugin::resolve_plugin_process(
-            plugin,
-            &storage_root,
-            &std::env::current_exe().into_diagnostic()?,
-        )
-        .await?;
+        let helper =
+            rw_tools::SandboxHelper::from_running(&std::env::current_exe().into_diagnostic()?)
+                .into_diagnostic()?;
+        let process =
+            rw_runtime::plugin::resolve_plugin_process(plugin, &storage_root, &helper).await?;
         let scope = match plugin.origin {
             executable_config::ExecutableConfigOrigin::User(_) => "user",
             executable_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
