@@ -84,6 +84,7 @@ pub(super) async fn run_turn(
     mut budgeter: Budgeter,
     local_session_accounting: SessionAccountingFallback,
     mode: SessionMode,
+    opening_spend: BudgetUsage,
 ) -> TurnOutcome {
     let approver = ChannelApprover {
         signals: signals.clone(),
@@ -197,9 +198,9 @@ pub(super) async fn run_turn(
     let mut status = AgentTurnStatus::MaxTurns;
     let mut deferred_terminal_delta = None;
     let mut deferred_terminal_turn = None;
-    let mut current_turn_cost_micros = 0_u64;
-    let mut current_turn_credit_micros = 0_u64;
-    let mut current_turn_tokens = 0_u64;
+    let mut current_turn_cost_micros = opening_spend.cost_micros_usd;
+    let mut current_turn_credit_micros = opening_spend.ai_credit_micros;
+    let mut current_turn_tokens = opening_spend.subscription_tokens;
     let budget_config = config.model.budget_config();
     let mut turn_cost = None;
     let mut citation_admission = rw_types::citation_admission::CitationAdmission::default();

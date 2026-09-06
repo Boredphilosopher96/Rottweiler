@@ -63,7 +63,29 @@ pub(super) async fn start_manual_compaction(
     if let Err(error) = tasks.spawn(Arc::clone(&config), cancellation.clone(), async move {
         let mut summary = fallback;
         let result = async {
-            let page = crate::engine::turn::history_context::read_view(&history).await?;
+            let page = history
+                .conversation_page(
+                    0..history.conversation().turns,
+                    crate::engine::recovery::HistoryMaterializationLimits::default(),
+                )
+                .await?;
+            if page.has_more {
+                drop(page);
+                let (compacted, _) = crate::engine::turn::history_compaction::compact(
+                    history,
+                    Vec::new(),
+                    &config,
+                    &cancellation,
+                    &signals,
+                    summary_turn,
+                    CompactionReason::Manual,
+                    instructions,
+                    local_session_accounting,
+                )
+                .await?;
+                summary = crate::engine::session::ConversationSummary::from_turns(&compacted.turns);
+                return Ok(());
+            }
             let owned = page
                 .map_async(|page| async {
                     let mut conversation = page.turns;

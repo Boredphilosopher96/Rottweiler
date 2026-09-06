@@ -270,11 +270,38 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     tasks.spawn(Arc::clone(&config), cancellation.clone(), async move {
         let fallback = panic_conversation.clone();
         let outcome = AssertUnwindSafe(async {
-            let page = super::history_context::read_view(&history).await?;
+            let page = history
+                .conversation_page(
+                    0..history.conversation().turns,
+                    crate::engine::recovery::HistoryMaterializationLimits::default(),
+                )
+                .await?;
+            let (page, opening_spend) = if page.has_more {
+                drop(page);
+                super::history_compaction::compact(
+                    history,
+                    opening_conversation,
+                    &config,
+                    &cancellation,
+                    &signals,
+                    turn,
+                    rw_types::CompactionReason::Automatic,
+                    None,
+                    local_session_accounting,
+                )
+                .await?
+            } else {
+                (
+                    page.map(|mut page| {
+                        page.turns.extend(opening_conversation);
+                        page
+                    }),
+                    super::accounting::BudgetUsage::default(),
+                )
+            };
             let run_signals = signals.clone();
             let completed = page
-                .map_async(|mut page| async move {
-                    page.turns.extend(opening_conversation);
+                .map_async(|page| async move {
                     run_turn(
                         turn,
                         turn_tasks,
@@ -290,6 +317,7 @@ pub(in crate::engine) async fn start_turn_with_overrides(
                         state_budgeter,
                         local_session_accounting,
                         state_mode,
+                        opening_spend,
                     )
                     .await
                 })

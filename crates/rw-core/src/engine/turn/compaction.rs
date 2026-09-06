@@ -115,6 +115,7 @@ pub(super) async fn execute_compaction(
     current_turn_credit_micros: u64,
     current_turn_tokens: u64,
     enforce_budget_via_signals: bool,
+    streaming: bool,
 ) -> Result<CompactionExecution, AgentLoopError> {
     let hook_result = dispatch_hook(
         &config.hooks,
@@ -156,7 +157,7 @@ pub(super) async fn execute_compaction(
             .as_ref()
             .map(|value| config.secret_redactor.redact(value)),
     };
-    let automatic_continue = !input.suppress_auto_continue;
+    let automatic_continue = !streaming && !input.suppress_auto_continue;
     let mut latest = BTreeMap::<String, &ContextSurgeryAction>::new();
     for action in surgery {
         latest.insert(action.item_id.0.clone(), action);
@@ -304,7 +305,10 @@ pub(super) async fn execute_compaction(
                 Ok(ProviderEvent::MessageStart { model }) => reported_model = Some(model),
                 Ok(ProviderEvent::TextDelta { text }) => {
                     let text = text_redactor.push(&text);
-                    summary.push_str(&text);
+                    if let Err(error) = append_summary(&mut summary, &text) {
+                        failed = Some(error);
+                        break;
+                    }
                     if !text.is_empty() {
                         send_compaction_progress(
                             signals,
@@ -348,6 +352,19 @@ pub(super) async fn execute_compaction(
             mark_unsettled(signals, cancellation, error.to_string());
             return Err(error);
         }
+        if failed.is_none() {
+            let text_tail = text_redactor.finish();
+            if let Err(error) = append_summary(&mut summary, &text_tail) {
+                failed = Some(error);
+            } else if !text_tail.is_empty() {
+                send_compaction_progress(
+                    signals,
+                    turn,
+                    attempt,
+                    CompactionProgressKind::Text(text_tail),
+                );
+            }
+        }
         if let Some(error) = failed {
             if let Some((cost, false)) = persist_failed_compaction_attempt(
                 config,
@@ -388,16 +405,6 @@ pub(super) async fn execute_compaction(
             }
             last_error = Some(error);
             continue;
-        }
-        let text_tail = text_redactor.finish();
-        summary.push_str(&text_tail);
-        if !text_tail.is_empty() {
-            send_compaction_progress(
-                signals,
-                turn,
-                attempt,
-                CompactionProgressKind::Text(text_tail),
-            );
         }
         let thinking_tail = thinking_redactor.finish();
         if !thinking_tail.is_empty() {
@@ -566,6 +573,7 @@ pub(in crate::engine) async fn compact_during_turn(
             current_turn_credit_micros,
             current_turn_tokens,
             true,
+            false,
         )
         .await?;
         for compacted_turn in &execution.conversation {
@@ -640,4 +648,15 @@ pub(in crate::engine) async fn compact_during_turn(
             Err(error)
         }
     }
+}
+
+fn append_summary(summary: &mut String, text: &str) -> Result<(), AgentLoopError> {
+    const MAX_SUMMARY_BYTES: usize = 256 * 1024;
+    if text.len() > MAX_SUMMARY_BYTES.saturating_sub(summary.len()) {
+        return Err(AgentLoopError::Provider(
+            "compaction summary exceeds admitted bytes".into(),
+        ));
+    }
+    summary.push_str(text);
+    Ok(())
 }

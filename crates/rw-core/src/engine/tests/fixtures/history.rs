@@ -245,6 +245,9 @@ impl SessionHistoryView for View {
     fn conversation(&self) -> ConversationCut {
         self.cut
     }
+    fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
+        Ok(HistoryRead::new((), Arc::clone(&self.root)))
+    }
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
         Ok(HistoryRead::new(
             self.history

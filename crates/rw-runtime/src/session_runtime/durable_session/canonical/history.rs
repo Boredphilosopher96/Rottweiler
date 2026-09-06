@@ -75,6 +75,9 @@ impl SessionHistoryView for CapturedHistory {
     fn conversation(&self) -> ConversationCut {
         self.cut
     }
+    fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
+        Ok(HistoryRead::new((), self.journal.retain_history()?))
+    }
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
         self.query(CanonicalHistory::bootstrap).await
     }

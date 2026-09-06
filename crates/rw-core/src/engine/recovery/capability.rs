@@ -23,6 +23,10 @@ pub trait SessionHistoryView: Send + Sync {
     fn through(&self) -> Option<SequenceId>;
     fn conversation(&self) -> ConversationCut;
 
+    /// Reserve the application-wide working allowance before context transformation.
+    /// The owner must remain live through temporary buffers and delivered results.
+    fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError>;
+
     /// Resolve live controls and interrupted input at this exact prefix.
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError>;
 

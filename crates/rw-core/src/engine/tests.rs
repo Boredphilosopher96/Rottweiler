@@ -20,6 +20,7 @@ mod doom_loop;
 mod event_batches;
 pub(crate) mod fixtures;
 mod generation_lifetime;
+mod history_compaction;
 mod hooks;
 mod model_preparation;
 mod model_selection;
