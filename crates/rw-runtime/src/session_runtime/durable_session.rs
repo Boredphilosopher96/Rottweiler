@@ -11,6 +11,7 @@ use crate::journal_service::JournalRegistration;
 use crate::journal_service::JournalService;
 use async_trait::async_trait;
 use miette::Result;
+#[cfg(test)]
 use miette::miette;
 use rw_core::AgentLoopError;
 use rw_core::BudgetLedgerQuery;
