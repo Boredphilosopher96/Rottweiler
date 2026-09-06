@@ -506,7 +506,7 @@ fn install_network_floor(policy_proxy: bool) -> Result<(), SandboxError> {
     .into_iter()
     .map(|syscall| (syscall, Vec::new()))
     .collect::<BTreeMap<_, _>>();
-    denied.insert(libc::SYS_socketpair, local_stream_pair_rules()?);
+    denied.insert(libc::SYS_socketpair, local_connected_pair_rules()?);
     if policy_proxy {
         let non_inet = SeccompRule::new(vec![
             SeccompCondition::new(
@@ -554,9 +554,9 @@ fn install_network_floor(policy_proxy: bool) -> Result<(), SandboxError> {
     seccompiler::apply_filter(&filter).map_err(sandbox_backend)
 }
 
-fn local_stream_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
-    // Local full-duplex stream pairs are process-local IPC used by Tokio
-    // and MCP transports; they cannot cross the empty network namespace.
+fn local_connected_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
+    // Connected stream/sequence-packet pairs are local IPC used by Tokio
+    // and Rust's fork/exec error channel. Neither kind can be retargeted.
     // Datagram pairs are deliberately excluded because one endpoint can
     // be reconnected to a pathname socket after creation. Exact type
     // matching also rejects every flag except CLOEXEC and NONBLOCK.
@@ -570,7 +570,7 @@ fn local_stream_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
         .map_err(sandbox_backend)?,
     ])
     .map_err(sandbox_backend)?;
-    let mut invalid_unix_stream_type = vec![
+    let mut invalid_unix_pair_type = vec![
         SeccompCondition::new(
             0,
             SeccompCmpArgLen::Dword,
@@ -584,8 +584,12 @@ fn local_stream_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
         libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
         libc::SOCK_STREAM | libc::SOCK_NONBLOCK,
         libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+        libc::SOCK_SEQPACKET,
+        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+        libc::SOCK_SEQPACKET | libc::SOCK_NONBLOCK,
+        libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
     ] {
-        invalid_unix_stream_type.push(
+        invalid_unix_pair_type.push(
             SeccompCondition::new(
                 1,
                 SeccompCmpArgLen::Dword,
@@ -595,8 +599,8 @@ fn local_stream_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
             .map_err(sandbox_backend)?,
         );
     }
-    let invalid_unix_stream_type =
-        SeccompRule::new(invalid_unix_stream_type).map_err(sandbox_backend)?;
+    let invalid_unix_pair_type =
+        SeccompRule::new(invalid_unix_pair_type).map_err(sandbox_backend)?;
     let nonzero_pair_protocol = SeccompRule::new(vec![
         SeccompCondition::new(2, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, 0)
             .map_err(sandbox_backend)?,
@@ -604,7 +608,7 @@ fn local_stream_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
     .map_err(sandbox_backend)?;
     Ok(vec![
         non_unix_pair,
-        invalid_unix_stream_type,
+        invalid_unix_pair_type,
         nonzero_pair_protocol,
     ])
 }
