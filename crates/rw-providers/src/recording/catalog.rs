@@ -19,6 +19,9 @@ pub(super) const MANIFEST_BYTES: usize = crate::types::MAX_PROVIDER_MODEL_CATALO
 // Includes serde tagged-content intermediates and vector/string growth. Source
 // bytes are separately limited to 64 MiB and released before the next file.
 const DECODE_BYTES: usize = 4 * replay_reads::MAX_FIXTURE_BYTES;
+// The manifest stays alive while each fixture is verified, so it has a separate
+// small decode allowance rather than borrowing the fixture's full window.
+const MANIFEST_DECODE_BYTES: usize = 4 * MANIFEST_BYTES;
 struct CatalogPool {
     verifier: Arc<tokio::sync::Semaphore>,
     waiters: Arc<tokio::sync::Semaphore>,
@@ -134,18 +137,18 @@ fn scan(
 }
 
 pub(super) fn decode_fixture(bytes: &[u8]) -> Result<RecordFixture, ProviderError> {
-    admit(bytes, replay_reads::MAX_FIXTURE_BYTES)?;
+    admit(bytes, replay_reads::MAX_FIXTURE_BYTES, DECODE_BYTES)?;
     serde_json::from_slice(bytes).map_err(|error| invalid(&error))
 }
 pub(super) fn decode_manifest(bytes: &[u8]) -> Result<CapabilityManifest, ProviderError> {
-    admit(bytes, MANIFEST_BYTES)?;
+    admit(bytes, MANIFEST_BYTES, MANIFEST_DECODE_BYTES)?;
     serde_json::from_slice(bytes).map_err(|error| invalid(&error))
 }
 pub(super) fn admit_fixture(bytes: &[u8]) -> Result<(), ProviderError> {
-    admit(bytes, replay_reads::MAX_FIXTURE_BYTES)
+    admit(bytes, replay_reads::MAX_FIXTURE_BYTES, DECODE_BYTES)
 }
 pub(super) fn admit_manifest(bytes: &[u8]) -> Result<(), ProviderError> {
-    admit(bytes, MANIFEST_BYTES)
+    admit(bytes, MANIFEST_BYTES, MANIFEST_DECODE_BYTES)
 }
 
 pub(super) fn encode_manifest(value: &CapabilityManifest) -> Result<Vec<u8>, ProviderError> {
@@ -166,7 +169,7 @@ fn encode(value: &impl serde::Serialize, limit: usize) -> Result<Vec<u8>, Provid
     Ok(bytes)
 }
 
-fn admit(bytes: &[u8], encoded_limit: usize) -> Result<(), ProviderError> {
+fn admit(bytes: &[u8], encoded_limit: usize, decoded_limit: usize) -> Result<(), ProviderError> {
     let shape = preflight_json(
         bytes,
         JsonStructureLimits {
@@ -201,7 +204,7 @@ fn admit(bytes: &[u8], encoded_limit: usize) -> Result<(), ProviderError> {
             .checked_mul(slot.checked_mul(4)?)
             .and_then(|slots| slots.checked_add(json))
     });
-    if decoded.is_none_or(|bytes| bytes > DECODE_BYTES) {
+    if decoded.is_none_or(|bytes| bytes > decoded_limit) {
         return Err(exhausted("recording exceeds decoded allocation admission"));
     }
     Ok(())
