@@ -674,7 +674,7 @@ async fn active_children_query_is_mode_free_bounded_and_source_qualified() {
         .journal
         .append(EngineEvent::TurnStarted {
             meta: meta(80),
-            turn_id: rw_types::TurnId("turn-80".into()),
+            turn_id: rw_types::TurnId("80".into()),
         })
         .expect("active parent turn");
     fixture
