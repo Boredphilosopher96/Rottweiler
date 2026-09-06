@@ -4,14 +4,15 @@ import { createHash } from "node:crypto"
 export interface InteractionSelection {
   readonly fingerprint: string
   readonly index: number
+  readonly composer: boolean
 }
 
 export function parseInteractionSelection(value: unknown): InteractionSelection | null {
   if (typeof value !== "object" || value === null) return null
   const item = value as Record<string, unknown>
   return typeof item.fingerprint === "string" && /^[0-9a-f]{64}$/.test(item.fingerprint)
-    && typeof item.index === "number" && Number.isSafeInteger(item.index) && item.index >= 0 && item.index <= 65536
-    ? { fingerprint: item.fingerprint, index: item.index } : null
+    && typeof item.composer === "boolean" && typeof item.index === "number" && Number.isSafeInteger(item.index) && item.index >= 0 && item.index <= 65536
+    ? { fingerprint: item.fingerprint, index: item.index, composer: item.composer } : null
 }
 
 /** Incremental framing avoids allocating a second encoded approval diff or question body. */

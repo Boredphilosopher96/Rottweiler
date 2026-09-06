@@ -344,11 +344,14 @@ async function main(): Promise<void> {
     },
   })
   const { readTuiRecycleState, recycleTuiIfNeeded } = await import("./recycle-state")
-  const recycledState = readTuiRecycleState(recycleStatePath)
+  using recycleAllocation = allocations.reserve("decoding", 0)
+  let recycledState = readTuiRecycleState(recycleStatePath, recycleAllocation)
   if (recycledState !== null) {
     app.restoreRecycleState(recycledState)
     renderer.on(openTui.CliRenderEvents.FRAME, () => app.applyPendingRecycleScroll())
   }
+  recycledState = null
+  recycleAllocation.release()
   startupFrame.destroy()
   renderer.root.add(app)
   appMounted = true
@@ -367,7 +370,7 @@ async function main(): Promise<void> {
     if (exitRequested || observedRss < tuiRssRecycleBytes) return
     if (Date.now() < nextRecycleAttemptAt) return
     nextRecycleAttemptAt = Date.now() + 10_000
-    recycleTuiIfNeeded({
+    recycleTuiIfNeeded({ allocations,
       observedBytes: observedRss,
       thresholdBytes: tuiRssRecycleBytes,
       path: recycleStatePath,

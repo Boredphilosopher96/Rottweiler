@@ -137,7 +137,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
   captureSelection(): InteractionSelection | null {
     if (!this.visible || this.#selectionFingerprint === null) return null
     const selected = this.select.getSelectedOption()
-    return { fingerprint: this.#selectionFingerprint, index: Math.max(0, this.select.options.indexOf(selected!)) }
+    return { composer: this.usesComposer, fingerprint: this.#selectionFingerprint, index: Math.max(0, this.select.options.indexOf(selected!)) }
   }
 
   restoreSelection(selection: InteractionSelection): boolean {

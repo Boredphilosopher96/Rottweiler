@@ -465,6 +465,7 @@ export class RottweilerApp extends BoxRenderable {
       requests: this.#projectionRequests, terminalHandover: this.#options.terminalHandover,
       get sessionId() { return app.#sessionId }, get destroyed() { return app.#destroyed },
       get reviewOpen() { return app.#reviewOpen }, set reviewOpen(value) { app.#reviewOpen = value },
+      admitAnswer: content => this.#clientRestore.admitAnswer(content),
       onExit: () => this.#options.onExit?.(), onComposerInput: value => this.#options.onComposerInput?.(value),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       projectRejection: outcome => this.#projectRejection(outcome), invalidSlash: message => this.#projectInvalidSlashCommand(message),
@@ -1277,6 +1278,7 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#clientRestore.dispose()
     this.#contributions.close()
     this.#todos.dispose()
     this.#sessions.reset()

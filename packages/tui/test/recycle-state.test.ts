@@ -1,3 +1,4 @@
+import { ClientAllocationOwner } from "../src/client-allocation"
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -14,7 +15,7 @@ import {
 
 const roots: string[] = []
 const clientState: AppClientState = {
-  schemaVersion: 3, sessionId: "session-local",
+  schemaVersion: 4, child: null, parentComposer: null, interaction: null, sessionId: "session-local",
   composer: { content: "unfinished prompt", attachments: [], cursorOffset: 3, selection: { start: 1, end: 3 } },
   subagentDrafts: [], primaryView: "conversation", history: { following: false, anchor: { id: "37", offset: -2 } }, toolsScrollTop: 0,
   inputMode: "standard", focus: "composer", theme: "kennel", picker: null,
@@ -36,8 +37,9 @@ describe("TUI recycle state", () => {
 
     expect(writeTuiRecycleState(path, state)).toBe(true)
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(state)
-    expect(readTuiRecycleState(path)).toEqual(state)
-    expect(readTuiRecycleState(path)).toBeNull()
+    using allocation = new ClientAllocationOwner().reserve("decoding", 0)
+    expect(readTuiRecycleState(path, allocation)).toEqual(state)
+    expect(readTuiRecycleState(path, allocation)).toBeNull()
   })
 
   test("rejects malformed and permission-broad handoffs", async () => {
@@ -48,7 +50,8 @@ describe("TUI recycle state", () => {
     const broad = join(root, "broad.json")
     await writeFile(broad, '{"schemaVersion":1,"draft":"x","scrollTop":1}\n', { mode: 0o644 })
     await chmod(broad, 0o644)
-    expect(readTuiRecycleState(broad)).toBeNull()
+    using allocation = new ClientAllocationOwner().reserve("decoding", 0)
+    expect(readTuiRecycleState(broad, allocation)).toBeNull()
 
     const unsafeParent = join(root, "unsafe")
     await mkdir(unsafeParent, { mode: 0o755 })
@@ -70,4 +73,21 @@ describe("TUI recycle state", () => {
     } })).toBeNull()
   })
 
+})
+
+test("handoff rejects child ancestry substitution and refuses decoding before allocation", async () => {
+  const { parseRecycleChild } = await import("../src/recycle-child")
+  expect(parseRecycleChild({ type: "live", target: { session_id: "different", ancestry: [{ subagent_id: "a", session_id: "child" }] } }, "root")).toBeNull()
+  expect(parseRecycleChild({ type: "live", target: { session_id: "root", ancestry: [{ subagent_id: "a", session_id: "root" }] } }, "root")).toBeNull()
+  expect(parseRecycleChild({ type: "historical", target: { sessionId: "child", scope: { type: "descendant", root_session_id: "another-root",
+    ancestry: [{ subagent_id: "a", session_id: "child", source_sequence: "2" }] } } }, "root")).toBeNull()
+  const root = await mkdtemp(join(tmpdir(), "rw-handoff-admission-")); roots.push(root); await chmod(root, 0o700)
+  const path = join(root, "state.json")
+  expect(writeTuiRecycleState(path, clientState)).toBe(true)
+  const allocations = new ClientAllocationOwner(undefined, 1024)
+  using refused = allocations.reserve("decoding", 0)
+  expect(readTuiRecycleState(path, refused)).toBeNull()
+  expect(allocations.usage.bytes).toBe(0)
+  // Admission refusal does not consume the private draft.
+  expect(JSON.parse(await readFile(path, "utf8"))).toEqual(clientState)
 })

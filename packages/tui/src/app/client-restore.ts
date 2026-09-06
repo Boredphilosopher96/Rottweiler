@@ -1,3 +1,6 @@
+import { interactionFingerprint, type InteractionSelection } from "../interaction-selection"
+import type { ClientAllocationLease } from "../client-allocation"
+import { retainedJsonBytes } from "../retained-json"
 import { directSessionRead } from "../session-reader"
 import type { RottweilerApp, PrimaryView } from "../app"
 import type { PickerController } from "../picker-controller"
@@ -73,8 +76,30 @@ interface ClientRestoreHost {
 }
 export class ClientRestoreController {
   #pendingClientState: AppClientState | null = null
+  #pendingAllocation: ClientAllocationLease | null = null
+  #pendingMounted = false
+  #answerGuard: { readonly session: string; readonly control: string; readonly text: string; readonly child: string } | null = null
+  #interaction: InteractionSelection | null = null
   constructor(readonly host: ClientRestoreHost) {}
-  discard(): void { this.#pendingClientState = null }
+  discard(): void {
+    this.#pendingClientState = null; this.#interaction = null
+    this.#pendingAllocation?.release(); this.#pendingAllocation = null
+  }
+  dispose(): void { this.discard(); this.#answerGuard = null }
+  admitAnswer(content: string): boolean {
+    const guard = this.#answerGuard
+    if (guard === null) return true
+    if (guard.session !== this.host.sessionId) { this.#answerGuard = null; return true }
+    const current = this.host.ui.interactionPanel.captureSelection()
+    if (interactionFingerprint(content) !== guard.text || (current?.fingerprint === guard.control
+      && interactionFingerprint(this.host.children.captureRecycleTarget()) === guard.child)) {
+      this.#answerGuard = null
+      return true
+    }
+    this.host.submission.notice = "This draft belongs to a different question. Edit it before sending."
+    this.host.ui.setState(this.host.ui.state)
+    return false
+  }
   captureComposerState(): ClientComposerState {
     return {
       content: this.host.ui.composer.value,
@@ -103,23 +128,29 @@ export class ClientRestoreController {
   /** Return no handoff while an interaction needs its current process or cannot fit the private cap. */
   recycleState(): AppClientState | null {
     const kind = this.host.pickerController.kind
-    if (this.host.children.controlsPending || this.host.children.activeId !== null || this.host.children.draftStore.usage.pending > 0 || this.host.submissionsInFlight > 0
+    if (this.host.children.controlsPending || (this.host.children.activeId !== null && this.host.children.captureRecycleTarget() === null) || this.host.children.draftStore.usage.pending > 0 || this.host.submissionsInFlight > 0
       || this.host.submission.terminalSuspended || this.host.ui.state.shell.active || this.host.ui.state.replay.active
       || this.host.providers.hasPendingAction
       || this.host.ui.state.providerAuth.pending !== null || this.host.mcp.hasDraft
       || this.host.sessions.pending
       || (kind === "timeline" && !this.host.sessions.timelineRestorable)
-      || this.host.reviewOpen || this.host.ui.outputViewer.visible || this.host.ui.interactionPanel.visible
+      || this.host.reviewOpen || this.host.ui.outputViewer.visible
       || (kind !== null && !isRestorablePicker(kind))) return null
     const history = this.host.ui.transcript.captureHistoryViewport()
     if (history === null) return null
     const surface = this.clientPickerSurface()
     const selected = surface?.selectedId ?? this.host.ui.picker.select.getSelectedOption()?.value
     return parseTuiRecycleState({
-      schemaVersion: 3,
+      schemaVersion: 4,
+      child: this.host.children.captureRecycleTarget(),
+      parentComposer: this.host.children.activeId === null ? null : this.host.children.draftStore.get("parent"),
+      interaction: this.host.ui.interactionPanel.captureSelection(),
       sessionId: this.host.sessionId,
       composer: this.captureComposerState(),
-      subagentDrafts: [...this.host.children.drafts],
+      subagentDrafts: this.host.children.activeId === null ? [...this.host.children.drafts] : [
+        ...this.host.children.drafts.filter(entry => entry.id !== this.host.children.activeId),
+        { id: this.host.children.activeId, draft: { content: this.host.ui.composer.value, attachments: [...this.host.ui.composer.attachments] } },
+      ],
       primaryView: this.host.ui.primaryView,
       history,
       toolsScrollTop: Math.max(0, this.host.ui.toolsWorkspace.activityScroller.scrollTop),
@@ -144,12 +175,19 @@ export class ClientRestoreController {
   /** Rebuild view bindings from client-owned data; projection responses remain engine-owned. */
   restoreRecycleState(state: AppClientState): void {
     if (state.sessionId !== this.host.sessionId) return
-    if (!this.host.children.restoreDrafts({ content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)) return
+    const owner = this.host.history.cache.allocations.reserve("drafts", retainedJsonBytes(state, 64 * 1024 * 1024))
+    let installed = false
+    try {
+    if (!this.host.children.restoreDrafts(state.parentComposer ?? { content: state.composer.content, attachments: state.composer.attachments }, state.subagentDrafts)) { owner.release(); return }
+    this.discard(); this.#pendingMounted = state.child === null
+    this.#answerGuard = state.interaction?.composer ? { session: state.sessionId, control: state.interaction.fingerprint,
+      text: interactionFingerprint(state.composer.content), child: interactionFingerprint(state.child) } : null
     this.host.providers.suppressOnboarding()
     const theme = this.host.resolveTheme(themeByName(state.theme) ?? kennelTheme)
     if (theme.name !== this.host.theme.name) this.host.applyTheme(theme)
-    this.restoreComposerState(state.composer)
-    this.host.submission.restoreInput(state.composer.content)
+    if (state.child === null) this.restoreComposerState(state.composer)
+    else this.host.children.restoreComposerDraft(null)
+    this.host.submission.restoreInput(this.host.ui.composer.value)
     this.host.input.restore(state.inputMode, state.focus)
     this.host.setPrimaryView(state.primaryView)
     const picker = state.picker
@@ -183,16 +221,28 @@ export class ClientRestoreController {
         ? null : this.host.resolveTheme(themeByName(picker.themeBeforePreview) ?? kennelTheme))
       this.host.pickerController.refresh()
     }
-    void this.host.history.restoreViewport(directSessionRead(this.host.sessionId), state.history)
+    if (state.child === null) void this.host.history.restoreViewport(directSessionRead(this.host.sessionId), state.history)
+    this.#pendingAllocation = owner
+    this.#interaction = state.interaction
     this.#pendingClientState = state
     this.host.ui.setState(this.host.ui.state)
     this.host.input.focusForInputMode()
+    installed = true
+    } finally { if (!installed) { this.discard(); owner.release() } }
   }
 
   /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */
   applyPendingRecycleScroll(): void {
     const state = this.#pendingClientState
     if (state === null) return
+    if (!this.#pendingMounted) {
+      if (state.child === null || !this.host.children.restoreRecycleTarget(state.child)) return
+      this.#pendingMounted = true
+      this.restoreComposerState(state.composer); this.host.submission.restoreInput(state.composer.content)
+      void this.host.history.restoreViewport(this.host.children.readTarget, state.history)
+    }
+    const selectionReady = this.#interaction === null || this.host.ui.interactionPanel.restoreSelection(this.#interaction)
+    if (selectionReady) this.#interaction = null
     const transcriptReady = !this.host.history.snapshot.loading
       && this.host.history.snapshot.page !== null
     if (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0) {
@@ -215,7 +265,7 @@ export class ClientRestoreController {
         pickerReady = state.picker.selectedId === null || index >= 0
       }
     }
-    if (transcriptReady && toolsReady && transcriptBlocksReady && toolsBlocksReady && pickerReady) this.#pendingClientState = null
+    if (transcriptReady && toolsReady && transcriptBlocksReady && toolsBlocksReady && pickerReady && selectionReady) this.discard()
   }
 
 }

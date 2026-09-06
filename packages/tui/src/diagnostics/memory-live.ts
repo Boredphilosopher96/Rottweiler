@@ -28,7 +28,7 @@ export async function exerciseLiveOwners(app: RottweilerApp, fixture: MemoryFixt
   await render()
   if (Object.keys(app.state.questions).length !== MEMORY_LOAD.questions) throw new Error("pending questions were dropped")
   sample("mounted-controls-live-tool-previews")
-  if (app.recycleState() !== null) throw new Error("unsettled interaction unexpectedly allowed recycle")
+  if (app.recycleState()?.interaction == null) throw new Error("pending interaction has no bounded handoff")
 
   const document = new DocumentController(fixture.reader, app.historyCache, snapshot => {
     if (snapshot.open) app.outputViewer.showDocument(snapshot)

@@ -120,7 +120,7 @@ test("leaving a child preserves its unsettled response owner and defers renderer
     expect(app.interactionPanel.visible).toBe(false)
     expect(app.recycleState()).toBeNull()
     let recycled = false
-    expect(recycleTuiIfNeeded({ observedBytes: 500, thresholdBytes: 384, path: "/unused-family-handoff.json",
+    expect(recycleTuiIfNeeded({ allocations: app.historyCache.allocations, observedBytes: 500, thresholdBytes: 384, path: "/unused-family-handoff.json",
       capture: () => app.recycleState(), recycle: () => { recycled = true },
     })).toBe(false)
     expect(recycled).toBe(false)

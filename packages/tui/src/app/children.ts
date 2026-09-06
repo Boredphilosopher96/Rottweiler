@@ -1,3 +1,5 @@
+import { retainedJsonBytes } from "../retained-json"
+import type { RecycleChildTarget } from "../recycle-child"
 import { SubagentCatalog } from "../subagent-catalog"
 import { ChildDisplayController } from "../child-display"
 import { readSessionState } from "../state/recovery"
@@ -246,6 +248,34 @@ export class ChildUiController {
     if (this.#activeReadTarget !== null) return this.#activeReadTarget
     if (this.#parentReadTarget?.sessionId !== this.#host.sessionId) this.#parentReadTarget = directSessionRead(this.#host.sessionId)
     return this.#parentReadTarget
+  }
+  captureRecycleTarget(): RecycleChildTarget | null {
+    if (this.#familyChild !== null) return { type: "live", target: this.#familyChild }
+    if (this.#historicalChild !== null) return { type: "historical", target: this.#historicalChild.target }
+    return null
+  }
+  restoreRecycleTarget(saved: RecycleChildTarget): boolean {
+    if (saved.type === "live") {
+      if (this.#familyChild !== null && sameChildTarget(saved.target, this.#familyChild)) return this.sourceReady && this.familyControlReady
+      const row = this.#family?.rows.find(row => sameChildTarget(row.target, saved.target) && row.controls.available)
+      if (row === undefined) return false
+      this.enterFamily(row)
+      return false
+    }
+    if (this.#historicalChild?.target === saved.target) return true
+    if (!this.saveComposerDraft() || saved.target.scope.type !== "descendant") return false
+    this.#family?.select(null); this.#familyChild = null; this.#sourceRequest?.abort()
+    const allocation = this.#host.history.controller.cache.allocations.reserve("children", retainedJsonBytes(saved.target, 65536))
+    const previous = this.#sourceOwner
+    this.#sourceOwner = { target: saved.target, release: () => allocation.release() }
+    this.#activeReadTarget = saved.target
+    previous?.release()
+    this.#historicalChild = { sessionId: saved.target.sessionId, task: "Child history", target: saved.target }
+    this.#activeSubagentId = saved.target.scope.ancestry.at(-1)!.subagent_id
+    this.#activeChildState = createInitialState()
+    this.#todos.open(saved.target); this.restoreComposerDraft(this.#activeSubagentId)
+    this.#host.refresh(); this.#host.focus()
+    return true
   }
   get activeId(): string | null { return this.#activeSubagentId }
   get historical(): { readonly sessionId: string; readonly task: string } | null { return this.#historicalChild }

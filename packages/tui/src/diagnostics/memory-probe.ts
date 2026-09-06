@@ -33,7 +33,8 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
   let captured = false
   let restored = false
   const handoffPath = join(workDirectory, "client-handoff.json")
-  const handoff = readTuiRecycleState(handoffPath)
+  using handoffAllocation = allocations.reserve("decoding", 0)
+  let handoff = readTuiRecycleState(handoffPath, handoffAllocation)
   const sample = (cycle: number, stage: string) => samples.push({ cycle, stage, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage })
   const until = async (condition: () => boolean) => {
     const deadline = performance.now() + 10_000
@@ -65,6 +66,8 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
         app.restoreRecycleState(handoff)
         requireThat(app.composer.value.startsWith("handoff draft "), "recycled draft was not restored")
         restored = true
+        handoff = null
+        handoffAllocation.release()
       }
       await until(() => app!.transcript.mountedCards.size > 0)
       app.composer.restoreDraft(`draft ${cycle} ${"d".repeat(MEMORY_LOAD.draftBytes)}`, [{ name: "notes.txt", media_type: "text/plain", data: { type: "text", content: "attachment ".repeat(24_000) } }])
@@ -124,7 +127,7 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
       await exerciseLiveOwners(app, fixture, allocations, async () => { await setup.renderOnce(); await setup.flush() }, stage => sample(cycle, stage))
       app.composer.restoreDraft(`handoff draft ${cycle}`, [])
       if (cycle === cycles - 1 && shouldRecycle) {
-        captured = recycleTuiIfNeeded({ observedBytes: 1, thresholdBytes: 1, path: handoffPath, capture: () => app!.recycleState(), recycle: () => { process.exitCode = 75 } })
+        captured = recycleTuiIfNeeded({ allocations, observedBytes: 1, thresholdBytes: 1, path: handoffPath, capture: () => app!.recycleState(), recycle: () => { process.exitCode = 75 } })
         requireThat(captured, "explicit handoff did not capture restorable state")
       }
       app.destroy(); app = null

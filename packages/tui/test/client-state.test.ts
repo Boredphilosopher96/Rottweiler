@@ -107,7 +107,7 @@ describe("client-owned renderer handoff", () => {
     const root = mkdtempSync(join(tmpdir(), "rw-client-recycle-"))
     let exits = 0
     try {
-      expect(recycleTuiIfNeeded({ observedBytes: 500 * 1024 * 1024, thresholdBytes: 384 * 1024 * 1024,
+      expect(recycleTuiIfNeeded({ allocations: app.historyCache.allocations, observedBytes: 500 * 1024 * 1024, thresholdBytes: 384 * 1024 * 1024,
         path: join(root, "handoff.json"), capture: () => app.recycleState(), recycle: () => { exits += 1 },
       })).toBe(false)
       expect(exits).toBe(0)
@@ -116,11 +116,11 @@ describe("client-owned renderer handoff", () => {
       renderer.root.remove(app)
       app.destroyRecursively()
       const plain = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
-      expect(recycleTuiIfNeeded({ observedBytes: 500 * 1024 * 1024, thresholdBytes: 384 * 1024 * 1024,
+      expect(recycleTuiIfNeeded({ allocations: app.historyCache.allocations, observedBytes: 500 * 1024 * 1024, thresholdBytes: 384 * 1024 * 1024,
         path: undefined, capture: () => plain.recycleState(), recycle: () => { exits += 1 },
       })).toBe(false)
       expect(exits).toBe(0)
-      expect(recycleTuiIfNeeded({ observedBytes: 500 * 1024 * 1024, thresholdBytes: 384 * 1024 * 1024,
+      expect(recycleTuiIfNeeded({ allocations: app.historyCache.allocations, observedBytes: 500 * 1024 * 1024, thresholdBytes: 384 * 1024 * 1024,
         path: join(root, "handoff.json"), capture: () => plain.recycleState(), recycle: () => { exits += 1 },
       })).toBe(true)
       expect(exits).toBe(1)
@@ -152,7 +152,7 @@ describe("client-owned renderer handoff", () => {
     const root = mkdtempSync(join(tmpdir(), "rw-history-recycle-"))
     let exits = 0
     try {
-      expect(recycleTuiIfNeeded({ observedBytes: 500, thresholdBytes: 384,
+      expect(recycleTuiIfNeeded({ allocations: app.historyCache.allocations, observedBytes: 500, thresholdBytes: 384,
         path: join(root, "handoff.json"), capture: () => app.recycleState(), recycle: () => { exits++ },
       })).toBe(false)
       expect(exits).toBe(0)
@@ -177,7 +177,7 @@ describe("client-owned renderer handoff", () => {
     const root = mkdtempSync(join(tmpdir(), "rw-input-recycle-"))
     let exits = 0
     try {
-      expect(recycleTuiIfNeeded({ observedBytes: 500, thresholdBytes: 384,
+      expect(recycleTuiIfNeeded({ allocations: app.historyCache.allocations, observedBytes: 500, thresholdBytes: 384,
         path: join(root, "handoff.json"), capture: () => app.recycleState(), recycle: () => { exits++ },
       })).toBe(false)
       expect(exits).toBe(0)

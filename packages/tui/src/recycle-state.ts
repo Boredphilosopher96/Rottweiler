@@ -4,13 +4,18 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
-  readFileSync,
+  fstatSync,
+  readSync,
+  constants,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs"
 import { dirname } from "node:path"
 
+import { parseRecycleChild, type RecycleChildTarget } from "./recycle-child"
+import { parseInteractionSelection, type InteractionSelection } from "./interaction-selection"
+import { ClientAllocationError, type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
 import type { Attachment } from "./protocol"
 import { MAX_ATTACHMENTS_PER_DRAFT } from "./composer-drafts"
 import type { ComposerDraft } from "./subagent-state"
@@ -20,6 +25,7 @@ import { parseU64 } from "./transport/types"
 import type { InputMode, VimFocus } from "./keybindings"
 
 export const MAX_RECYCLE_STATE_BYTES = 8 * 1024 * 1024
+export const MAX_RECYCLE_PREPARED_BYTES = 64 * 1024 * 1024
 export const RESTORABLE_PICKERS = [
   "palette", "keyboardHelp", "commands", "attachments", "mcp", "modes", "models",
   "providers", "permissions", "permissionMode", "trust", "queuedMessages",
@@ -45,7 +51,10 @@ export interface TranscriptClientState {
 
 /** Only editable client state belongs here; engine projections and credentials do not. */
 export interface AppClientState {
-  readonly schemaVersion: 3
+  readonly schemaVersion: 4
+  readonly child: RecycleChildTarget | null
+  readonly parentComposer: ComposerDraft | null
+  readonly interaction: InteractionSelection | null
   readonly sessionId: string
   readonly composer: ClientComposerState
   readonly subagentDrafts: readonly { readonly id: string; readonly draft: ComposerDraft }[]
@@ -74,10 +83,12 @@ export function isRestorablePicker(kind: string): kind is RestorablePickerKind {
 }
 
 /** Consume a private, one-shot TUI recycle handoff. Invalid files fail closed. */
-export function readTuiRecycleState(path: string | undefined): AppClientState | null {
+export function readTuiRecycleState(path: string | undefined, allocation: ClientAllocationLease): AppClientState | null {
   if (path === undefined || path.length === 0) return null
+  let descriptor: number | null = null
   try {
-    const metadata = lstatSync(path)
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const metadata = fstatSync(descriptor)
     if (
       metadata.isSymbolicLink() ||
       !metadata.isFile() ||
@@ -85,12 +96,21 @@ export function readTuiRecycleState(path: string | undefined): AppClientState | 
       (metadata.mode & 0o077) !== 0 ||
       (process.getuid !== undefined && metadata.uid !== process.getuid())
     ) return null
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
+    allocation.admit(metadata.size * 32 + 65536)
+    const bytes = Buffer.alloc(metadata.size + 1)
+    let used = 0
+    while (used < bytes.length) {
+      const count = readSync(descriptor, bytes, used, bytes.length - used, null)
+      if (count === 0) break
+      used += count
+    }
+    if (used !== metadata.size) return null
+    const parsed: unknown = JSON.parse(bytes.subarray(0, used).toString("utf8"))
     unlinkSync(path)
     return parseTuiRecycleState(parsed)
   } catch {
     return null
-  }
+  } finally { if (descriptor !== null) closeSync(descriptor) }
 }
 
 /** Atomically persist the small TUI-only state lost during an RSS recycle. */
@@ -129,6 +149,7 @@ export function writeTuiRecycleState(path: string | undefined, state: AppClientS
 }
 
 export function recycleTuiIfNeeded(options: {
+  readonly allocations: ClientAllocationOwner
   readonly observedBytes: number
   readonly thresholdBytes: number
   readonly path: string | undefined
@@ -136,10 +157,13 @@ export function recycleTuiIfNeeded(options: {
   readonly recycle: () => void
 }): boolean {
   if (options.observedBytes < options.thresholdBytes) return false
-  const state = options.capture()
-  if (state === null || !writeTuiRecycleState(options.path, state)) return false
-  options.recycle()
-  return true
+  try {
+    using _preparation = options.allocations.reserve("decoding", MAX_RECYCLE_PREPARED_BYTES)
+    const state = options.capture()
+    if (state === null || !writeTuiRecycleState(options.path, state)) return false
+    options.recycle()
+    return true
+  } catch (error) { if (error instanceof ClientAllocationError) return false; throw error }
 }
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -184,7 +208,7 @@ function parseBlocks(value: unknown): ClientBlockState | null {
 }
 
 export function parseTuiRecycleState(value: unknown): AppClientState | null {
-  if (!record(value) || value.schemaVersion !== 3 || !label(value.sessionId)
+  if (!record(value) || value.schemaVersion !== 4 || !label(value.sessionId)
     || !record(value.composer) || !offset(value.composer.cursorOffset)
     || !offset(value.toolsScrollTop)
     || (value.primaryView !== "conversation" && value.primaryView !== "tools")
@@ -210,6 +234,11 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
   const reasoning = parseExpansion(value.transcript.reasoning)
   if (blocks === null || toolExpansion === null || reasoning === null) return null
   const transcript: TranscriptClientState = { blocks, tools: toolExpansion, reasoning }
+  const child = value.child === null ? null : parseRecycleChild(value.child, value.sessionId)
+  const parentComposer = value.parentComposer === null ? null : parseDraft(value.parentComposer)
+  const interaction = value.interaction === null ? null : parseInteractionSelection(value.interaction)
+  if ((value.child !== null && child === null) || (value.interaction !== null && interaction === null)
+    || (child === null ? value.parentComposer !== null : parentComposer === null)) return null
   const draft = parseDraft(value.composer)
   if (draft === null) return null
   const textBytes = Buffer.byteLength(draft.content)
@@ -240,7 +269,7 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
       onboarding: item.onboarding, themeBeforePreview: item.themeBeforePreview }
   }
   return {
-    schemaVersion: 3, sessionId: value.sessionId,
+    schemaVersion: 4, sessionId: value.sessionId, child, parentComposer, interaction,
     composer: { ...draft, cursorOffset: value.composer.cursorOffset,
       selection },
     subagentDrafts, primaryView: value.primaryView === "tools" ? "tools" : "conversation",

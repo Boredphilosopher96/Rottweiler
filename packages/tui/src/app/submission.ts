@@ -39,6 +39,7 @@ interface SubmissionHost {
   readonly destroyed: boolean
   readonly terminalHandover: TerminalHandoverAdapter | undefined
   reviewOpen: boolean
+  admitAnswer(content: string): boolean
   onExit(): void
   onComposerInput(value: string): void
   projectError(code: string, message: string, retryable?: boolean): void
@@ -73,6 +74,7 @@ export class SubmissionController {
     content: string,
     attachments: readonly Attachment[],
   ): Promise<boolean> {
+    if (!this.host.admitAnswer(content)) return false
     using replyAllocation = this.host.requests.allocate()
     const scope = this.#scope
     this.host.sessions.clearRewind()

@@ -41,7 +41,7 @@ test("interaction highlights survive renders and decoded snapshots, but never ch
 test("local interaction fingerprints frame values and bound selection parsing", () => {
   expect(interactionFingerprint(["ab", "c"])).not.toBe(interactionFingerprint(["a", "bc"]))
   expect(interactionFingerprint(["\ud800"])).not.toBe(interactionFingerprint(["\ufffd"]))
-  expect(parseInteractionSelection({ fingerprint: "a".repeat(64), index: 2 })).not.toBeNull()
-  expect(parseInteractionSelection({ fingerprint: "a".repeat(65), index: 2 })).toBeNull()
-  expect(parseInteractionSelection({ fingerprint: "a".repeat(64), index: -1 })).toBeNull()
+  expect(parseInteractionSelection({ composer: false, fingerprint: "a".repeat(64), index: 2 })).not.toBeNull()
+  expect(parseInteractionSelection({ composer: false, fingerprint: "a".repeat(65), index: 2 })).toBeNull()
+  expect(parseInteractionSelection({ composer: false, fingerprint: "a".repeat(64), index: -1 })).toBeNull()
 })
