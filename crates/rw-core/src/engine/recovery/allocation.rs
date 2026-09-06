@@ -75,6 +75,7 @@ impl RecoveryBootstrap {
             vector(&controls.queued_messages, |_| Some(0)),
             vector(&controls.accepted_messages, |_| Some(0)),
             vector(&controls.pending_questions, |_| Some(0)),
+            vector(&controls.plugin_statuses, |_| Some(0)),
             repairs,
         ]))
     }
@@ -97,6 +98,7 @@ fn head_heap(head: &RecoveryHead) -> Option<usize> {
     let control = &head.control;
     sum([
         heap(&head.session_id),
+        heap(&head.plugin_statuses),
         head.accounting.retained_heap_bytes(),
         heap(&control.driver),
         heap(&control.mode_id),

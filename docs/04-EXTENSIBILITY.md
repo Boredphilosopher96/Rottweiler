@@ -398,3 +398,13 @@ The admitted owner continues observing slow cleanup and returns shared capacity
 only after actual proof; an unprovable or panicked owner stays quarantined.
 This proves local resource retirement;
 it does not assert that a remote service stopped inference or settled billing.
+
+### Session status
+
+A plugin status is a short status-bar value: at most 1,024 UTF-8 bytes, without
+control characters. An empty value clears that plugin's entry. Each session
+admits at most 64 nonempty plugin statuses; updates to an existing entry and
+clears remain available at capacity. Admission happens before journal append.
+Rich text and larger content belong in UI panels. The session-state snapshot
+returns each retained status with its canonical source sequence so clients can
+recover it without replaying the session transcript.

@@ -296,3 +296,59 @@ fn completed_boundary_bootstrap_matches_rewind_without_materializing_history() {
         "removed boundary cannot be reused"
     );
 }
+
+#[test]
+fn status_bootstrap_recovers_latest_sources_and_durable_clears() {
+    let root = tempfile::tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    let update = |id: &str, status: &str| PendingEvent::PluginStatusChanged {
+        plugin_id: id.into(),
+        status: status.into(),
+    };
+    append(
+        &mut journal,
+        vec![
+            update("worker", "old"),
+            update("other", "ready"),
+            update("worker", "working"),
+        ],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    drop(recovery);
+    let mut recovery = CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("reopen");
+    let statuses = |recovery: &CanonicalRecovery| {
+        recovery
+            .snapshot()
+            .expect("snapshot")
+            .bind_source(&journal.read_view())
+            .expect("source")
+            .bootstrap()
+            .expect("bootstrap")
+    };
+    let recovered = statuses(&recovery);
+    assert_eq!(recovered.controls.plugin_statuses.len(), 2);
+    let worker = recovered
+        .controls
+        .plugin_statuses
+        .iter()
+        .find(|entry| entry.plugin_id == "worker")
+        .expect("worker");
+    assert_eq!(worker.status, "working");
+    assert_eq!(worker.source, SequenceId(2));
+    assert!(recovered.retained_bytes().expect("charged") > worker.status.len());
+    drop(recovered);
+    append(&mut journal, vec![update("worker", "")]);
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let cleared = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source")
+        .bootstrap()
+        .expect("cleared");
+    assert_eq!(cleared.controls.plugin_statuses.len(), 1);
+    assert_eq!(cleared.controls.plugin_statuses[0].plugin_id, "other");
+}

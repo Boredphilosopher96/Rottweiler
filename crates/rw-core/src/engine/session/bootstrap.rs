@@ -29,6 +29,7 @@ pub struct SessionActorRecovery {
     pub pending_questions: BTreeMap<String, RecoveredQuestion>,
     pub accounting: SessionAccountingState,
     pub latest_budget: Option<rw_types::session_state::SessionBudgetState>,
+    pub plugin_statuses: Vec<rw_types::session_state::SessionPluginStatus>,
     pub budgeter: Budgeter,
     pub interrupted_compaction: bool,
     pub model_alias: Option<String>,
@@ -111,6 +112,7 @@ impl SessionActorRecovery {
                 .collect(),
             accounting: head.accounting,
             latest_budget: controls.latest_budget,
+            plugin_statuses: controls.plugin_statuses,
             budgeter: Budgeter::from_snapshot(head.budget)
                 .map_err(|_| AgentLoopError::Persistence("canonical budget metadata".into()))?,
             interrupted_compaction,

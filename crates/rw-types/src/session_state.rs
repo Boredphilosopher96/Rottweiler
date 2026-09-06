@@ -12,6 +12,36 @@ pub const MAX_SESSION_STATE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_SESSION_STATE_PREPARED_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SESSION_QUEUE_PREVIEW_BYTES: usize = 1024;
 pub const MAX_SESSION_QUEUE_ITEMS: usize = 128;
+pub const MAX_PLUGIN_STATUS_BYTES: usize = 1024;
+pub const MAX_SESSION_PLUGIN_STATUSES: usize = 64;
+
+/// Validate the status bar contract. An empty status clears the plugin entry.
+/// # Errors
+/// Rejects noncanonical identities, control characters, or oversized UTF-8 text.
+pub fn validate_plugin_status(plugin_id: &str, status: &str) -> Result<(), &'static str> {
+    if plugin_id.is_empty()
+        || plugin_id.len() > 64
+        || !plugin_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+    {
+        return Err("plugin status requires a bounded canonical plugin id");
+    }
+    if status.len() > MAX_PLUGIN_STATUS_BYTES || status.chars().any(char::is_control) {
+        return Err("plugin status exceeds its UTF-8 byte limit or contains control characters");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPluginStatus {
+    #[schemars(length(min = 1, max = 64), regex(pattern = "^[a-z0-9_.-]+$"))]
+    pub plugin_id: String,
+    #[schemars(length(min = 1, max = MAX_PLUGIN_STATUS_BYTES), extend("x-rw-max-utf8-bytes" = MAX_PLUGIN_STATUS_BYTES))]
+    pub status: String,
+    pub source: SequenceId,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema, TS, Allocation)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +76,8 @@ pub struct SessionStateSnapshot {
     pub compaction: Option<SessionCompactionState>,
     #[schemars(length(max = MAX_SESSION_QUEUE_ITEMS))]
     pub queued_messages: Vec<SessionQueuedPreview>,
+    #[schemars(length(max = MAX_SESSION_PLUGIN_STATUSES))]
+    pub plugin_statuses: Vec<SessionPluginStatus>,
     #[serde(deserialize_with = "Option::deserialize")]
     #[schemars(schema_with = "crate::schema::required_nullable::<SessionBudgetState>")]
     pub budget: Option<SessionBudgetState>,

@@ -27,7 +27,6 @@ use crate::engine::AgentLoopError;
 use crate::engine::MAX_CAPTURED_SHELL_OUTPUT_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_TITLE_BYTES;
-use crate::engine::MAX_PLUGIN_STATUS_BYTES;
 use crate::engine::RoutedEvent;
 use crate::engine::SessionSnapshot;
 use crate::engine::dispatch::admission::dispatch_protocol;
@@ -213,14 +212,16 @@ pub(super) async fn handle_actor_command(
         } => {
             let result = async {
                 validate_plugin_id(&plugin_id)?;
-                validate_plugin_text("plugin status", &status, MAX_PLUGIN_STATUS_BYTES)?;
+                rw_types::session_state::validate_plugin_status(&plugin_id, &status)
+                    .map_err(|message| AgentLoopError::InvalidConfiguration(message.into()))?;
                 if state.poisoned {
                     return Err(AgentLoopError::InvalidConfiguration(
                         "session requires recovery before plugin status updates".to_owned(),
                     ));
                 }
                 let status = config.secret_redactor.redact(&status);
-                validate_plugin_text("redacted plugin status", &status, MAX_PLUGIN_STATUS_BYTES)?;
+                rw_types::session_state::validate_plugin_status(&plugin_id, &status)
+                    .map_err(|message| AgentLoopError::InvalidConfiguration(message.into()))?;
                 emit(
                     state,
                     events,

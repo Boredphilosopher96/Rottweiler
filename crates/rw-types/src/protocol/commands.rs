@@ -661,6 +661,9 @@ macro_rules! read_commands {
     };
 }
 read_commands!(
+    GetContext,
+    GetCost,
+    DumpPrompt,
     GetSessionState,
     GetSessionControls,
     GetUiCatalog,

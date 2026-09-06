@@ -3,7 +3,6 @@ use crate::engine::MAX_PLUGIN_ID_BYTES;
 use crate::engine::MAX_PLUGIN_MESSAGE_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_TITLE_BYTES;
-use crate::engine::MAX_PLUGIN_STATUS_BYTES;
 use crate::engine::MessageDisposition;
 use crate::engine::session::state::ActorCommand;
 use std::fmt;
@@ -205,7 +204,8 @@ impl PluginSessionCapability {
     /// and a closed actor.
     pub async fn set_status(&self, status: impl Into<String>) -> Result<(), AgentLoopError> {
         let status = status.into();
-        validate_plugin_text("plugin status", &status, MAX_PLUGIN_STATUS_BYTES)?;
+        rw_types::session_state::validate_plugin_status(&self.plugin_id, &status)
+            .map_err(|message| AgentLoopError::InvalidConfiguration(message.into()))?;
         let (respond, receive) = oneshot::channel();
         self.commands
             .send(ActorCommand::PluginSetStatus {

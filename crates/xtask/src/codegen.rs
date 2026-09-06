@@ -2,8 +2,8 @@ use rw_types::session_children::{
     SessionChildState, SessionChildrenResult, SessionChildrenSnapshot,
 };
 use rw_types::session_state::{
-    SessionActiveTurn, SessionBudgetState, SessionCompactionState, SessionQueuedPreview,
-    SessionShellState, SessionStateSnapshot,
+    SessionActiveTurn, SessionBudgetState, SessionCompactionState, SessionPluginStatus,
+    SessionQueuedPreview, SessionShellState, SessionStateSnapshot,
 };
 mod envelope;
 
@@ -327,6 +327,14 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::session_state::MAX_SESSION_QUEUE_PREVIEW_BYTES,
         ),
         (
+            "MAX_SESSION_PLUGIN_STATUSES",
+            rw_types::session_state::MAX_SESSION_PLUGIN_STATUSES,
+        ),
+        (
+            "MAX_PLUGIN_STATUS_BYTES",
+            rw_types::session_state::MAX_PLUGIN_STATUS_BYTES,
+        ),
+        (
             "MAX_SESSION_QUEUE_ITEMS",
             rw_types::session_state::MAX_SESSION_QUEUE_ITEMS,
         ),
@@ -421,6 +429,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(SessionControls);
     declaration!(SessionControlsSnapshot);
     declaration!(SessionStateSnapshot);
+    declaration!(SessionPluginStatus);
     declaration!(SessionChildState);
     declaration!(SessionChildrenResult);
     declaration!(SessionChildrenSnapshot);

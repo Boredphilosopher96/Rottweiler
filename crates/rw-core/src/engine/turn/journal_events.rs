@@ -32,6 +32,7 @@ pub(in crate::engine) async fn emit_batch(
     if kinds.is_empty() {
         return Ok(Vec::new());
     }
+    state.live.admit_statuses(&kinds)?;
     let first_expected = match state.sequence {
         Some(sequence) => sequence
             .checked_add(1)

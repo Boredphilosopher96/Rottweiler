@@ -17,10 +17,62 @@ pub(in crate::engine) struct LiveState {
     pub(in crate::engine) turn_source: Option<(TurnId, SequenceId)>,
     pub(in crate::engine) compaction: Option<SessionCompactionState>,
     pub(in crate::engine) budget: Option<SessionBudgetState>,
+    pub(in crate::engine) plugin_statuses: Vec<rw_types::session_state::SessionPluginStatus>,
 }
 impl LiveState {
+    pub(in crate::engine) fn admit_statuses(
+        &self,
+        kinds: &[crate::engine::PendingEvent],
+    ) -> Result<(), AgentLoopError> {
+        if !kinds.iter().any(|kind| {
+            matches!(
+                kind,
+                crate::engine::PendingEvent::PluginStatusChanged { .. }
+            )
+        }) {
+            return Ok(());
+        }
+        let mut identities: std::collections::BTreeSet<&str> = self
+            .plugin_statuses
+            .iter()
+            .map(|entry| entry.plugin_id.as_str())
+            .collect();
+        for kind in kinds {
+            if let crate::engine::PendingEvent::PluginStatusChanged { plugin_id, status } = kind {
+                rw_types::session_state::validate_plugin_status(plugin_id, status)
+                    .map_err(|message| AgentLoopError::InvalidConfiguration(message.into()))?;
+                if status.is_empty() {
+                    identities.remove(plugin_id.as_str());
+                } else {
+                    identities.insert(plugin_id);
+                    if identities.len() > rw_types::session_state::MAX_SESSION_PLUGIN_STATUSES {
+                        return Err(AgentLoopError::InvalidConfiguration(
+                            "active plugin status limit reached".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     pub(in crate::engine) fn observe(&mut self, event: &EngineEvent, running: Option<u64>) {
         match event {
+            EngineEvent::PluginStatusChanged {
+                meta,
+                plugin_id,
+                status,
+            } => {
+                self.plugin_statuses
+                    .retain(|entry| entry.plugin_id != *plugin_id);
+                if !status.is_empty() {
+                    self.plugin_statuses
+                        .push(rw_types::session_state::SessionPluginStatus {
+                            plugin_id: plugin_id.clone(),
+                            status: status.clone(),
+                            source: meta.sequence_id,
+                        });
+                }
+            }
             EngineEvent::TurnStarted { meta, turn_id } => {
                 self.turn_source = Some((turn_id.clone(), meta.sequence_id));
             }
@@ -122,6 +174,55 @@ fn append_preview(preview: &mut TranscriptTailText, text: &str) {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_admission_tracks_batch_clears_before_durable_append() {
+        use crate::engine::PendingEvent;
+        use rw_types::session_state::{
+            MAX_PLUGIN_STATUS_BYTES, MAX_SESSION_PLUGIN_STATUSES, SessionPluginStatus,
+        };
+        let live = LiveState {
+            plugin_statuses: (0..MAX_SESSION_PLUGIN_STATUSES)
+                .map(|index| SessionPluginStatus {
+                    plugin_id: format!("plugin-{index}"),
+                    status: "ready".into(),
+                    source: SequenceId(index as u64),
+                })
+                .collect(),
+            ..LiveState::default()
+        };
+        let update = |id: &str, status: String| PendingEvent::PluginStatusChanged {
+            plugin_id: id.into(),
+            status,
+        };
+        assert!(
+            live.admit_statuses(&[update("overflow", "ready".into())])
+                .is_err()
+        );
+        assert!(
+            live.admit_statuses(&[update("plugin-0", "updated".into())])
+                .is_ok()
+        );
+        assert!(
+            live.admit_statuses(&[
+                update("plugin-0", String::new()),
+                update("replacement", "ready".into())
+            ])
+            .is_ok()
+        );
+        assert!(
+            live.admit_statuses(&[update(
+                "plugin-0",
+                "€".repeat(MAX_PLUGIN_STATUS_BYTES / 3 + 1)
+            )])
+            .is_err()
+        );
+        assert!(
+            live.admit_statuses(&[update("plugin-0", "bad\nstatus".into())])
+                .is_err()
+        );
+        assert_eq!(live.plugin_statuses.len(), MAX_SESSION_PLUGIN_STATUSES);
+    }
 
     fn active() -> LiveState {
         LiveState {

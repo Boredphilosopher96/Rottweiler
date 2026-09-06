@@ -487,6 +487,21 @@ pub(super) fn reduce(
         } => {
             super::extension::apply(head, rows, sequence, &plugin_id, &transaction)?;
         }
+        PendingEvent::PluginStatusChanged { plugin_id, status } => {
+            rw_types::session_state::validate_plugin_status(&plugin_id, &status)
+                .map_err(RecoveryError::Invalid)?;
+            if status.is_empty() {
+                head.plugin_statuses.remove(&plugin_id);
+            } else {
+                if !head.plugin_statuses.contains_key(&plugin_id)
+                    && head.plugin_statuses.len()
+                        >= rw_types::session_state::MAX_SESSION_PLUGIN_STATUSES
+                {
+                    return Err(RecoveryError::Limit("active plugin statuses"));
+                }
+                head.plugin_statuses.insert(plugin_id, sequence);
+            }
+        }
         PendingEvent::ToolApprovalResolved { .. }
         | PendingEvent::ToolOutput { .. }
         | PendingEvent::PermissionRequested { .. }
@@ -497,7 +512,6 @@ pub(super) fn reduce(
         | PendingEvent::SubagentSpawned { .. }
         | PendingEvent::SubagentFinished { .. }
         | PendingEvent::PluginMessageInjected { .. }
-        | PendingEvent::PluginStatusChanged { .. }
         | PendingEvent::UiNotification { .. } => {}
     }
     head.next_sequence = sequence

@@ -26,6 +26,7 @@ pub(in crate::engine) fn snapshot(
         state.mode_id.prepared_bytes(),
         state.live.budget.prepared_bytes(),
         state.live.compaction.prepared_bytes(),
+        state.live.plugin_statuses.prepared_bytes(),
     ];
     let mut prepared = 32 * 1024_usize;
     for bytes in header {
@@ -88,6 +89,7 @@ pub(in crate::engine) fn snapshot(
         shell,
         compaction: state.live.compaction.clone(),
         queued_messages,
+        plugin_statuses: state.live.plugin_statuses.clone(),
         budget: state.live.budget.clone(),
     };
     rw_types::session_controls::encoded_size(&result, session_state::MAX_SESSION_STATE_BYTES)

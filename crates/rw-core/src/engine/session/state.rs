@@ -297,6 +297,7 @@ impl ActorState {
         Self {
             live: super::live_state::LiveState {
                 budget: recovered.latest_budget,
+                plugin_statuses: recovered.plugin_statuses,
                 ..Default::default()
             },
             session_id,

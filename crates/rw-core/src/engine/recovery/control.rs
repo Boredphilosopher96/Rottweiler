@@ -31,6 +31,7 @@ pub struct RecoveredMessage {
 pub struct RecoveryControlPayloads {
     pub conversation: super::ConversationMetadata,
     pub latest_budget: Option<rw_types::session_state::SessionBudgetState>,
+    pub plugin_statuses: Vec<rw_types::session_state::SessionPluginStatus>,
     pub title: Option<String>,
     pub resolved_model: Option<String>,
     pub todos: rw_types::todo::TodoSnapshot,
@@ -196,6 +197,25 @@ impl CanonicalHistory {
                 question_id,
                 questions,
             });
+        }
+        for (id, sequence) in &head.plugin_statuses {
+            let PendingEvent::PluginStatusChanged { plugin_id, status } =
+                reader.event(*sequence)?
+            else {
+                return Err(RecoveryError::Invalid("plugin status source selector"));
+            };
+            rw_types::session_state::validate_plugin_status(&plugin_id, &status)
+                .map_err(RecoveryError::Invalid)?;
+            if &plugin_id != id || status.is_empty() {
+                return Err(RecoveryError::Invalid("plugin status source identity"));
+            }
+            result
+                .plugin_statuses
+                .push(rw_types::session_state::SessionPluginStatus {
+                    plugin_id,
+                    status,
+                    source: *sequence,
+                });
         }
         result.source_bytes = reader.bytes;
         result.decoded_bytes = reader.decoded_bytes;

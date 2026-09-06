@@ -228,6 +228,7 @@ pub struct RecoveryHead {
     pub budget: rw_context::BudgetSnapshot,
     pub accounting: crate::engine::SessionAccountingState,
     pub latest_budget: Option<SequenceId>,
+    pub plugin_statuses: std::collections::BTreeMap<String, SequenceId>,
     pub(super) extension_root: Option<SequenceId>,
     pub(super) compacting: Option<ConversationCut>,
     pub(super) context_cut: u64,
@@ -255,6 +256,7 @@ impl RecoveryHead {
             budget: rw_context::Budgeter::default().snapshot(),
             accounting: crate::engine::SessionAccountingState::default(),
             latest_budget: None,
+            plugin_statuses: Default::default(),
             compacting: None,
             context_cut: 0,
             maintenance: None,
@@ -266,6 +268,16 @@ impl RecoveryHead {
             || self.control.questions.len() > MAX_QUESTIONS
         {
             return Err(RecoveryError::Limit("active queue/question identities"));
+        }
+        if self.plugin_statuses.len() > rw_types::session_state::MAX_SESSION_PLUGIN_STATUSES {
+            return Err(RecoveryError::Limit("active plugin statuses"));
+        }
+        for (id, source) in &self.plugin_statuses {
+            rw_types::session_state::validate_plugin_status(id, "")
+                .map_err(RecoveryError::Invalid)?;
+            if source.0 >= self.next_sequence {
+                return Err(RecoveryError::Invalid("plugin status source"));
+            }
         }
         rw_context::Budgeter::from_snapshot(self.budget)
             .map_err(|_| RecoveryError::Invalid("budget reconciliation"))?;
