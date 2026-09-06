@@ -333,8 +333,15 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
     let mut fixture = Fixture::new(1, "tool request");
     fixture
         .journal
-        .append(&EngineEvent::ToolCallStarted {
+        .append(&EngineEvent::TurnStarted {
             meta: meta(2),
+            turn_id: rw_types::TurnId("1".into()),
+        })
+        .expect("active turn");
+    fixture
+        .journal
+        .append(&EngineEvent::ToolCallStarted {
+            meta: meta(3),
             turn_id: rw_types::TurnId("1".into()),
             tool_call_id: rw_types::ToolCallId("provider-id".into()),
             invocation_id: rw_types::ToolInvocationId("host-invocation".into()),
@@ -352,7 +359,7 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
         .journal
         .append(&EngineEvent::ToolCallFinished {
             presentation: None,
-            meta: meta(3),
+            meta: meta(4),
             turn_id: rw_types::TurnId("1".into()),
             tool_call_id: rw_types::ToolCallId("provider-id".into()),
             invocation_id: rw_types::ToolInvocationId("host-invocation".into()),
@@ -375,11 +382,11 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
     assert_eq!(after.view.generation, before.view.generation);
     assert_eq!(after.items.len(), before.items.len());
     assert_eq!(after.items[1].id, before.items[1].id);
-    assert_eq!(after.items[1].revision, SequenceId(3));
+    assert_eq!(after.items[1].revision, SequenceId(4));
     assert_eq!(
         after.invalidation,
         TranscriptInvalidation::Items {
-            items: vec![TranscriptItemId(SequenceId(2))]
+            items: vec![TranscriptItemId(SequenceId(3))]
         }
     );
 }
@@ -514,8 +521,12 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
     fixture
         .journal
         .append_batch([
-            EngineEvent::ToolCallStarted {
+            EngineEvent::TurnStarted {
                 meta: meta(0),
+                turn_id: TurnId("1".into()),
+            },
+            EngineEvent::ToolCallStarted {
+                meta: meta(1),
                 turn_id: TurnId("1".into()),
                 tool_call_id: ToolCallId("provider-reused".into()),
                 invocation_id: invocation.clone(),
@@ -524,7 +535,7 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
                 call_index: 0,
             },
             EngineEvent::ToolCallFinished {
-                meta: meta(1),
+                meta: meta(2),
                 turn_id: TurnId("1".into()),
                 tool_call_id: ToolCallId("provider-reused".into()),
                 invocation_id: invocation.clone(),
@@ -552,7 +563,7 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
     assert_eq!(
         fixture
             .service
-            .tool_presentation(session.clone(), invocation.clone(), Some(SequenceId(1)))
+            .tool_presentation(session.clone(), invocation.clone(), Some(SequenceId(2)))
             .await
             .expect("exact source"),
         Some(presentation)
@@ -563,7 +574,7 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
             .tool_presentation(
                 session.clone(),
                 ToolInvocationId("different".into()),
-                Some(SequenceId(1))
+                Some(SequenceId(2))
             )
             .await
             .expect("missing invocation"),
@@ -572,7 +583,7 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
     fixture
         .journal
         .append(&EngineEvent::ConversationRewound {
-            meta: meta(2),
+            meta: meta(3),
             to_agent_turn: 0,
             operation_id: "rewind-source".into(),
             unrestorable_paths: vec![],
@@ -585,14 +596,14 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
     assert!(
         fixture
             .service
-            .tool_presentation(session.clone(), invocation.clone(), Some(SequenceId(1)))
+            .tool_presentation(session.clone(), invocation.clone(), Some(SequenceId(2)))
             .await
             .is_err()
     );
     assert_eq!(
         fixture
             .service
-            .tool_presentation(session, invocation, Some(SequenceId(2)))
+            .tool_presentation(session, invocation, Some(SequenceId(3)))
             .await
             .expect("removed effective source"),
         None
