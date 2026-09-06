@@ -4,7 +4,7 @@ use crate::server::ServerEngine as _;
 use rw_store::session::SessionEventLog;
 use rw_types::session_read::{SessionReadAncestor, SessionReadScope};
 use rw_types::{
-    Block, ClientRole, CommandMeta, CommandReply, EventMeta, RequestId, Role, Turn, TurnMeta,
+    ClientRole, CommandMeta, CommandReply, EventMeta, RequestId,
     transcript::{TranscriptPosition, TranscriptRead, TranscriptReadResult},
 };
 
@@ -15,28 +15,38 @@ fn meta(request: &str) -> CommandMeta {
         request_id: RequestId(request.into()),
     }
 }
+fn input_events(
+    session: &str,
+    sequence: u64,
+    agent_turn: u64,
+    content: String,
+) -> [EngineEvent; 2] {
+    [
+        EngineEvent::UserMessageAccepted {
+            meta: descendant_meta(session, sequence),
+            turn_id: rw_types::TurnId(agent_turn.to_string()),
+            content,
+            attachments: vec![],
+        },
+        EngineEvent::ConversationInputCommitted {
+            meta: descendant_meta(session, sequence + 1),
+            agent_turn,
+            accepted_source: SequenceId(sequence),
+            selection: rw_types::conversation_input::InputSelection::Accepted {},
+        },
+    ]
+}
 fn fixture(count: u64) -> (tempfile::TempDir, HistoricalReplayEngine) {
     let root = tempfile::tempdir().expect("root");
     let mut journal = SessionEventLog::open(root.path(), "history").expect("journal");
-    for sequence in 0..count {
+    for ordinal in 0..count {
         journal
-            .append(EngineEvent::ConversationTurnCommitted {
-                meta: EventMeta {
-                    protocol_version: rw_core::PROTOCOL_VERSION,
-                    session_id: SessionId("history".into()),
-                    sequence_id: SequenceId(sequence),
-                    emitted_at: "2026-09-04T00:00:00Z".into(),
-                    caused_by: None,
-                },
-                agent_turn: sequence,
-                turn: Turn {
-                    role: Role::User,
-                    blocks: vec![Block::Text {
-                        text: format!("body-{sequence}"),
-                    }],
-                    meta: TurnMeta::default(),
-                },
-            })
+            .append_batch(input_events(
+                "history",
+                ordinal * 2,
+                ordinal,
+                format!("body-{ordinal}"),
+            ))
             .expect("append");
     }
     drop(journal);
@@ -75,7 +85,7 @@ async fn historical_availability_is_not_raw_replay_and_pages_are_direct_authenti
     assert!(matches!(
         event,
         EngineEvent::SessionHistoryReady {
-            through_sequence: Some(SequenceId(299)),
+            through_sequence: Some(SequenceId(599)),
             ..
         }
     ));
@@ -84,7 +94,7 @@ async fn historical_availability_is_not_raw_replay_and_pages_are_direct_authenti
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
     let mut replies = Vec::new();
-    for id in ["catchup", "page"] {
+    for id in ["catchup", "catchup-next", "page"] {
         let reply = engine
             .dispatch(client.clone(), read(id))
             .await
@@ -97,7 +107,7 @@ async fn historical_availability_is_not_raw_replay_and_pages_are_direct_authenti
     let CommandReply::Read {
         outcome: CommandOutcome::Accepted {},
         events: page_events,
-    } = &replies[1]
+    } = &replies[2]
     else {
         panic!("read page")
     };
@@ -115,7 +125,7 @@ async fn historical_availability_is_not_raw_replay_and_pages_are_direct_authenti
     assert_eq!(meta.request_id.0, "page");
     assert_eq!(page.items.len(), 4);
     assert_eq!(page.items[0].ordinal.0, 296);
-    assert_eq!(page.items[3].id.0, SequenceId(299));
+    assert_eq!(page.items[3].id.0, SequenceId(599));
     assert!(
         matches!(
             events.try_recv(),
@@ -128,7 +138,7 @@ async fn historical_availability_is_not_raw_replay_and_pages_are_direct_authenti
             .subscribe(
                 client,
                 Some(SessionId("history".into())),
-                Some(SequenceId(300))
+                Some(SequenceId(600))
             )
             .await
             .is_err()
@@ -221,7 +231,7 @@ async fn historical_task_reads_are_source_owned_and_session_bound() {
             meta: EventMeta {
                 protocol_version: rw_core::PROTOCOL_VERSION,
                 session_id: SessionId("history".into()),
-                sequence_id: SequenceId(1),
+                sequence_id: SequenceId(2),
                 emitted_at: "2026-09-04T00:00:00Z".into(),
                 caused_by: None,
             },
@@ -244,7 +254,7 @@ async fn historical_task_reads_are_source_owned_and_session_bound() {
     assert!(
         matches!(parsed, CommandReply::Read { outcome: CommandOutcome::Accepted {}, events }
         if matches!(&events[..], [EngineEvent::TodosRead { result: rw_types::todo::TodoReadResult::Ready { todos }, .. }]
-            if todos.through == Some(SequenceId(1)) && todos.snapshot == snapshot))
+            if todos.through == Some(SequenceId(2)) && todos.snapshot == snapshot))
     );
     let foreign = engine
         .dispatch(
@@ -278,13 +288,13 @@ fn descendant_fixture() -> (tempfile::TempDir, HistoricalReplayEngine, SessionRe
     let mut parent = SessionEventLog::open(root.path(), "history").expect("parent");
     parent
         .append(EngineEvent::TurnStarted {
-            meta: descendant_meta("history", 1),
+            meta: descendant_meta("history", 2),
             turn_id: rw_types::TurnId("1".into()),
         })
         .expect("turn");
     parent
         .append(EngineEvent::SubagentSpawned {
-            meta: descendant_meta("history", 2),
+            meta: descendant_meta("history", 3),
             subagent_id: rw_types::SubagentId("agent".into()),
             child_session_id: SessionId("child".into()),
             task: "Inspect".into(),
@@ -293,21 +303,11 @@ fn descendant_fixture() -> (tempfile::TempDir, HistoricalReplayEngine, SessionRe
     drop(parent);
     let mut child = SessionEventLog::open(root.path(), "child").expect("child");
     child
-        .append(EngineEvent::ConversationTurnCommitted {
-            meta: descendant_meta("child", 0),
-            agent_turn: 0,
-            turn: Turn {
-                role: Role::User,
-                blocks: vec![Block::Text {
-                    text: "child body".into(),
-                }],
-                meta: TurnMeta::default(),
-            },
-        })
+        .append_batch(input_events("child", 0, 0, "child body".into()))
         .expect("child message");
     child
         .append(EngineEvent::TodoStateCommitted {
-            meta: descendant_meta("child", 1),
+            meta: descendant_meta("child", 2),
             snapshot: rw_types::todo::TodoSnapshot::default(),
         })
         .expect("tasks");
@@ -317,7 +317,7 @@ fn descendant_fixture() -> (tempfile::TempDir, HistoricalReplayEngine, SessionRe
         ancestry: vec![SessionReadAncestor {
             subagent_id: rw_types::SubagentId("agent".into()),
             session_id: SessionId("child".into()),
-            source_sequence: SequenceId(2),
+            source_sequence: SequenceId(3),
         }],
     };
     (root, engine, scope)
@@ -348,7 +348,7 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
         .expect("authorized tasks");
     assert!(
         matches!(result.events(), [EngineEvent::TodosRead { session_id, result: rw_types::todo::TodoReadResult::Ready { todos }, .. }]
-        if session_id.0 == "child" && todos.through == Some(SequenceId(1)))
+        if session_id.0 == "child" && todos.through == Some(SequenceId(2)))
     );
     let mut page_command = read("child-page");
     if let ClientCommand::ReadTranscript {
@@ -397,7 +397,7 @@ async fn historical_child_reads_require_effective_source_ancestry_and_reject_rew
     let mut parent = SessionEventLog::open(root.path(), "history").expect("rewind parent");
     parent
         .append(EngineEvent::ConversationRewound {
-            meta: descendant_meta("history", 3),
+            meta: descendant_meta("history", 4),
             to_agent_turn: 0,
             operation_id: "rewind-child".into(),
             unrestorable_paths: vec![],
@@ -440,7 +440,7 @@ async fn tail_reads_are_direct_and_reject_a_foreign_root() {
         .expect("reply");
     let decoded: CommandReply = serde_json::from_slice(&reply.bytes).expect("typed reply");
     assert!(
-        matches!(decoded, CommandReply::Read { events, outcome: CommandOutcome::Accepted {} } if matches!(&events[..], [EngineEvent::TranscriptTailReady { session_id, result: TranscriptTailResult::Ready { page }, .. }] if session_id.0 == "history" && page.view.through == Some(SequenceId(0))))
+        matches!(decoded, CommandReply::Read { events, outcome: CommandOutcome::Accepted {} } if matches!(&events[..], [EngineEvent::TranscriptTailReady { session_id, result: TranscriptTailResult::Ready { page }, .. }] if session_id.0 == "history" && page.view.through == Some(SequenceId(1))))
     );
     drop(reply);
     let ClientCommand::ReadTranscriptTail { meta, read, .. } = command else {
@@ -479,9 +479,9 @@ async fn historical_child_snapshot_uses_only_its_root_and_effective_descendants(
     else {
         panic!("snapshot")
     };
-    assert_eq!(snapshot.through, Some(SequenceId(2)));
+    assert_eq!(snapshot.through, Some(SequenceId(3)));
     assert_eq!(snapshot.children.len(), 1);
-    assert_eq!(snapshot.children[0].spawned, SequenceId(2));
+    assert_eq!(snapshot.children[0].spawned, SequenceId(3));
     assert_eq!(snapshot.children[0].child_session_id.0, "child");
     assert_eq!(snapshot.children[0].task_preview, "Inspect");
     let child = engine
