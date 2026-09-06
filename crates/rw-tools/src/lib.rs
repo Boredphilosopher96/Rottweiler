@@ -102,3 +102,6 @@ pub use rw_sandbox::{
     ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest, ExecutableLaunch,
     SandboxHelper,
 };
+
+#[cfg(test)]
+mod test_support;

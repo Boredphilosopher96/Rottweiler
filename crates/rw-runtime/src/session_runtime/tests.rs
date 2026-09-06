@@ -717,7 +717,7 @@ impl rw_core::SubagentSessionFactory for RecoveryProbeFactory {
 #[async_trait]
 impl rw_core::SubagentSession for RecoveryProbeSession {
     fn control_summary(&self) -> rw_types::family_controls::ChildControlSummary {
-        Default::default()
+        rw_types::family_controls::ChildControlSummary::default()
     }
     async fn child_controls(
         &self,

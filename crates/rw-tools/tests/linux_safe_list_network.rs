@@ -62,7 +62,13 @@ sys.exit(92)
                 .expect("sandbox policy"),
         );
         let executor = TokioCommandExecutor::default()
-            .sandboxed(policy)
+            .sandboxed(
+                policy,
+                rw_sandbox::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("native driver"),
+                )
+                .expect("running helper"),
+            )
             .with_command_safety(classifier)
             .with_policy_egress(true);
         let outcome = executor

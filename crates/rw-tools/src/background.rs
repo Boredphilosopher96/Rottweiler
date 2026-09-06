@@ -1351,7 +1351,10 @@ mod tests {
                 // support. This fixture exercises process-group ownership only,
                 // so the request deliberately bypasses sandbox-helper composition;
                 // native sandbox enforcement has separate acceptance coverage.
-                Arc::new(TokioCommandExecutor::default().sandboxed(policy)),
+                Arc::new(
+                    TokioCommandExecutor::default()
+                        .sandboxed(policy, crate::test_support::sandbox_helper()),
+                ),
                 &session,
                 CommandRequest {
                     sandbox: BashSandboxMode::Unsandboxed,
@@ -1405,8 +1408,10 @@ mod tests {
             crate::SandboxPolicy::new([root.path()], crate::NetworkPolicy::Deny)
                 .expect("sandbox policy"),
         );
-        let executor: Arc<dyn CommandExecutor> =
-            Arc::new(TokioCommandExecutor::default().sandboxed(policy));
+        let executor: Arc<dyn CommandExecutor> = Arc::new(
+            TokioCommandExecutor::default()
+                .sandboxed(policy, crate::test_support::sandbox_helper()),
+        );
         let manager = Arc::new(BackgroundProcessManager::new(
             Arc::new(IdentityCommandFixtureRedactor),
             BackgroundProcessLimits::default(),

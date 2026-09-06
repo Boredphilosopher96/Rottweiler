@@ -207,8 +207,7 @@ impl Write for SourceWriter {
         if total > self.0.capacity() {
             let capacity = total
                 .next_power_of_two()
-                .max(4096)
-                .min(MAX_ENCODED_SOURCE_BYTES);
+                .clamp(4096, MAX_ENCODED_SOURCE_BYTES);
             self.0
                 .try_reserve_exact(capacity - self.0.len())
                 .map_err(std::io::Error::other)?;

@@ -286,22 +286,24 @@ pub(super) fn build_command_executor_for_policy(
     let policy_egress_available = allow_policy_egress
         && command_mode_can_open_proxy(&command_fixture_mode)
         && probe_policy_egress().support == SandboxSupport::Enforced;
-    let live_command_executor = || -> Arc<dyn CommandExecutor> {
-        Arc::new(
+    let live_command_executor = || -> Result<Arc<dyn CommandExecutor>> {
+        let helper = crate::plugin_process::helper_executable()
+            .map_err(|error| miette!("command sandbox helper could not resolve: {error}"))?;
+        Ok(Arc::new(
             TokioCommandExecutor::with_execution_lease(Arc::clone(execution_lease))
-                .sandboxed(Arc::clone(sandbox_policy))
+                .sandboxed(Arc::clone(sandbox_policy), helper)
                 .with_command_safety(Arc::clone(command_safety))
                 .with_policy_egress(policy_egress_available)
                 .with_upstream_proxy(global_proxy.map(|proxy| proxy.upstream.clone())),
-        )
+        ))
     };
     match command_fixture_mode {
-        CommandFixtureMode::Live => Ok(live_command_executor()),
+        CommandFixtureMode::Live => live_command_executor(),
         CommandFixtureMode::Record {
             directory,
             redactor,
         } => RecordingCommandExecutor::new_with_redactor(
-            live_command_executor(),
+            live_command_executor()?,
             directory,
             workspace,
             Arc::new(SharedCommandFixtureRedactor(redactor)),

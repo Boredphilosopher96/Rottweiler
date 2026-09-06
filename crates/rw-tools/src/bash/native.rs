@@ -34,7 +34,7 @@ use super::process_group::{terminate_and_wait_process_group, terminate_process_g
 pub struct TokioCommandExecutor {
     native_cleanup: Arc<NativeCleanup>,
     execution_lease: Option<Arc<ExecutionLease>>,
-    sandbox: Option<Arc<SandboxPolicy>>,
+    sandbox: Option<CommandSandbox>,
     policy_egress_available: bool,
     upstream_proxy: Option<UpstreamProxy>,
     safety: Arc<CommandSafetyClassifier>,
@@ -42,6 +42,12 @@ pub struct TokioCommandExecutor {
     proxy_lifecycles: Option<Arc<Mutex<Vec<rw_sandbox::ProxyLifecycle>>>>,
     #[cfg(all(test, unix))]
     launch_gate_hook: Option<Arc<LaunchGateTestHook>>,
+}
+
+#[derive(Clone, Debug)]
+struct CommandSandbox {
+    policy: Arc<SandboxPolicy>,
+    helper: rw_sandbox::SandboxHelper,
 }
 
 #[cfg(all(test, unix))]
@@ -89,8 +95,12 @@ impl TokioCommandExecutor {
 
     /// Runs every command inside the supplied native OS sandbox.
     #[must_use]
-    pub fn sandboxed(mut self, policy: Arc<SandboxPolicy>) -> Self {
-        self.sandbox = Some(policy);
+    pub fn sandboxed(
+        mut self,
+        policy: Arc<SandboxPolicy>,
+        helper: rw_sandbox::SandboxHelper,
+    ) -> Self {
+        self.sandbox = Some(CommandSandbox { policy, helper });
         self
     }
 
@@ -190,15 +200,20 @@ impl CommandExecutor for TokioCommandExecutor {
                 .push(proxy.lifecycle());
         }
         let read_only_policy = (request.sandbox == BashSandboxMode::ReadOnly || built_in_read_only)
-            .then(|| self.sandbox.as_deref().map(SandboxPolicy::read_only))
+            .then(|| {
+                self.sandbox
+                    .as_ref()
+                    .map(|sandbox| sandbox.policy.read_only())
+            })
             .flatten();
         let sandbox = if request.sandbox == BashSandboxMode::ReadOnly || built_in_read_only {
             read_only_policy.as_ref()
         } else if request.sandbox == BashSandboxMode::Sandboxed {
-            self.sandbox.as_deref()
+            self.sandbox.as_ref().map(|sandbox| sandbox.policy.as_ref())
         } else {
             None
         };
+        let sandbox = sandbox.zip(self.sandbox.as_ref().map(|sandbox| &sandbox.helper));
         let mut guarded = guarded_process(&request, sandbox, egress_proxy.as_ref())?;
         let child = guarded
             .command
@@ -565,7 +580,7 @@ pub(super) fn command_egress_proxy(
 
 pub(super) fn guarded_process(
     request: &CommandRequest,
-    sandbox: Option<&SandboxPolicy>,
+    sandbox: Option<(&SandboxPolicy, &rw_sandbox::SandboxHelper)>,
     egress_proxy: Option<&SupervisedEgressProxy>,
 ) -> Result<GuardedCommand, ToolError> {
     #[cfg(target_os = "macos")]
@@ -604,7 +619,7 @@ pub(super) fn guarded_process(
     #[cfg(target_os = "linux")]
     let mut helper_pin = None;
     let mut helper = None;
-    let (program, args) = if let Some(base_policy) = sandbox {
+    let (program, args) = if let Some((base_policy, approved_helper)) = sandbox {
         let policy = if network {
             let proxy = egress_proxy.ok_or_else(|| {
                 ToolError::Command(
@@ -619,11 +634,7 @@ pub(super) fn guarded_process(
         } else {
             base_policy.with_network(SandboxNetworkPolicy::Deny)
         };
-        let executable = std::env::current_exe()
-            .map_err(|error| ToolError::Command(format!("sandbox helper unavailable: {error}")))?;
-        let approved_helper = rw_sandbox::SandboxHelper::from_running(&executable)
-            .map_err(|error| ToolError::Command(error.to_string()))?;
-        let plan = shell_launch_plan(&policy, &approved_helper, Path::new("/bin/sh"), &shell_args)
+        let plan = shell_launch_plan(&policy, approved_helper, Path::new("/bin/sh"), &shell_args)
             .map_err(|error| ToolError::Command(error.to_string()))?;
         #[cfg(target_os = "linux")]
         let plan = {
@@ -631,7 +642,7 @@ pub(super) fn guarded_process(
             helper_pin = plan.take_helper_pin();
             plan
         };
-        helper = Some(approved_helper);
+        helper = Some(approved_helper.clone());
         (plan.program, plan.args)
     } else {
         (PathBuf::from("/bin/sh"), shell_args)

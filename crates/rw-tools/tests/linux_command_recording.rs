@@ -96,11 +96,22 @@ fn main() {
             SandboxPolicy::new([&hook_scratch], NetworkPolicy::Deny).expect("hook policy"),
         );
         let ordinary_live: Arc<dyn CommandExecutor> = Arc::new(
-            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease))
-                .sandboxed(ordinary_policy),
+            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease)).sandboxed(
+                ordinary_policy,
+                rw_sandbox::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("native driver"),
+                )
+                .expect("running helper"),
+            ),
         );
         let hook_live: Arc<dyn CommandExecutor> = Arc::new(
-            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease)).sandboxed(hook_policy),
+            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease)).sandboxed(
+                hook_policy,
+                rw_sandbox::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("native driver"),
+                )
+                .expect("running helper"),
+            ),
         );
         let ordinary = RecordingCommandExecutor::new(ordinary_live, &recordings, &workspace)
             .expect("ordinary recorder");

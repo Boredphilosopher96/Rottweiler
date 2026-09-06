@@ -335,7 +335,7 @@ async fn sandboxed_eperm_and_explicit_unsandboxed_escape_have_distinct_boundarie
             .expect("sandbox policy"),
     );
     let executor = TokioCommandExecutor::default()
-        .sandboxed(policy)
+        .sandboxed(policy, crate::test_support::sandbox_helper())
         .with_policy_egress(true);
     let sink = Arc::new(RecordingSink::default());
     let command = format!(
@@ -435,7 +435,7 @@ sys.exit(92)
             .expect("test safe-list classifier"),
     );
     let executor = TokioCommandExecutor::default()
-        .sandboxed(policy)
+        .sandboxed(policy, crate::test_support::sandbox_helper())
         .with_command_safety(Arc::clone(&classifier))
         .with_policy_egress(true);
     assert_eq!(classifier.classify(&command), CommandSafety::SafeListed);
@@ -467,10 +467,13 @@ async fn requested_domains_receive_one_command_scoped_proxy_only() {
     std::fs::create_dir(&scratch).expect("scratch");
     let lifecycles = Arc::new(Mutex::new(Vec::new()));
     let executor = TokioCommandExecutor::default()
-        .sandboxed(Arc::new(
-            SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
-                .expect("sandbox policy"),
-        ))
+        .sandboxed(
+            Arc::new(
+                SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
+                    .expect("sandbox policy"),
+            ),
+            crate::test_support::sandbox_helper(),
+        )
         .with_policy_egress(true)
         .with_proxy_lifecycle_observer(Arc::clone(&lifecycles));
     let sink = Arc::new(RecordingSink::default());
@@ -550,10 +553,13 @@ async fn safe_listed_git_status_really_runs_inside_the_sandbox() {
         classify_safe_command("git status --short"),
         CommandSafety::SafeListed
     );
-    let executor = TokioCommandExecutor::default().sandboxed(Arc::new(
-        SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
-            .expect("sandbox policy"),
-    ));
+    let executor = TokioCommandExecutor::default().sandboxed(
+        Arc::new(
+            SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
+                .expect("sandbox policy"),
+        ),
+        crate::test_support::sandbox_helper(),
+    );
     let sink = Arc::new(RecordingSink::default());
     let outcome = executor
         .run(
