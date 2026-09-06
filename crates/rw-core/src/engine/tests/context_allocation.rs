@@ -44,6 +44,7 @@ async fn context_work_is_admitted_before_copies_and_owned_through_delivery() {
             HistoryRead::new((), Owner(dropped.clone())),
             &config,
             &oversized,
+            &[super::context_cache::source(1)],
             &VecDeque::new()
         )
         .is_err()
@@ -55,6 +56,7 @@ async fn context_work_is_admitted_before_copies_and_owned_through_delivery() {
         HistoryRead::new((), Owner(dropped.clone())),
         &config,
         &[text_turn(Role::User, "bounded")],
+        &[super::context_cache::source(1)],
         &VecDeque::new(),
     )
     .expect("working allowance");

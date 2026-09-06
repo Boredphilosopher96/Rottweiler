@@ -25,7 +25,7 @@ use std::{
     sync::Arc,
 };
 
-fn source(sequence: u64) -> ConversationSource {
+pub(super) fn source(sequence: u64) -> ConversationSource {
     ConversationSource {
         sequence: SequenceId(sequence),
         has_resolved_model: false,
@@ -109,6 +109,7 @@ fn incremental_context_matches_full_requests_across_source_and_configuration_cha
         HistoryRead::new((), ()),
         &configs[0],
         &conversation,
+        &sources,
         &queued,
     )
     .expect("admitted");
@@ -155,9 +156,17 @@ fn incremental_context_matches_full_requests_across_source_and_configuration_cha
             }
             _ => {}
         }
-        working = readmit(working, config, &conversation, &queued).expect("replanned");
+        working = readmit(working, config, &conversation, &sources, &queued).expect("replanned");
         for repetition in 0..2 {
             let prior_normalizations = working.normalizations();
+            let prior_profiles = working.profile_scans();
+            working =
+                readmit(working, config, &conversation, &sources, &queued).expect("warm profile");
+            assert_eq!(
+                working.profile_scans(),
+                prior_profiles,
+                "warm admission must not rescan immutable payloads"
+            );
             let cached = assemble_session_context(
                 config,
                 &working,
@@ -169,6 +178,7 @@ fn incremental_context_matches_full_requests_across_source_and_configuration_cha
             )
             .expect("cached");
             if repetition == 1 {
+                assert_eq!(working.profile_scans(), prior_profiles);
                 assert_eq!(
                     working.normalizations(),
                     prior_normalizations,
@@ -204,27 +214,56 @@ fn measure_incremental_context_against_full_assembly() {
     let sources = (1..=128).map(source).collect::<Vec<_>>();
     let queued = VecDeque::new();
     let pruned = BTreeMap::new();
-    let working =
-        admit(HistoryRead::new((), ()), &config, &conversation, &queued).expect("working");
-    drop(
-        assemble_session_context(
-            &config,
-            &working,
-            &conversation,
-            &sources,
-            &queued,
-            &[],
-            &pruned,
-        )
-        .expect("warm"),
-    );
+    let mut working = admit(
+        HistoryRead::new((), ()),
+        &config,
+        &conversation,
+        &sources,
+        &queued,
+    )
+    .expect("working");
+    let mode = std::env::var("ROTTWEILER_CONTEXT_MEASURE_MODE").unwrap_or_else(|_| "paired".into());
+    assert!(matches!(mode.as_str(), "paired" | "cached" | "full"));
+    if mode != "full" {
+        drop(
+            assemble_session_context(
+                &config,
+                &working,
+                &conversation,
+                &sources,
+                &queued,
+                &[],
+                &pruned,
+            )
+            .expect("warm"),
+        );
+    }
     for sample in 0..200 {
         for cached in if sample % 2 == 0 {
             [true, false]
         } else {
             [false, true]
         } {
+            if (mode == "cached" && !cached) || (mode == "full" && cached) {
+                continue;
+            }
             let started = std::time::Instant::now();
+            let full_working = if cached {
+                working = readmit(working, &config, &conversation, &sources, &queued)
+                    .expect("cached profile");
+                None
+            } else {
+                Some(
+                    admit(
+                        HistoryRead::new((), ()),
+                        &config,
+                        &conversation,
+                        &sources,
+                        &queued,
+                    )
+                    .expect("full profile"),
+                )
+            };
             let result = if cached {
                 assemble_session_context(
                     &config,
@@ -247,6 +286,7 @@ fn measure_incremental_context_against_full_assembly() {
             }
             .expect("assembly");
             std::hint::black_box(&result);
+            std::hint::black_box(&full_working);
             eprintln!(
                 "context_sample,{sample},{cached},{}",
                 started.elapsed().as_nanos()
@@ -263,8 +303,14 @@ fn prefix_replacement_keeps_an_older_source_cache_entry() {
     let mut sources = vec![source(1), source(2)];
     let queued = VecDeque::new();
     let pruned = BTreeMap::new();
-    let mut working =
-        admit(HistoryRead::new((), ()), &config, &conversation, &queued).expect("working");
+    let mut working = admit(
+        HistoryRead::new((), ()),
+        &config,
+        &conversation,
+        &sources,
+        &queued,
+    )
+    .expect("working");
     drop(
         assemble_session_context(
             &config,
@@ -280,7 +326,7 @@ fn prefix_replacement_keeps_an_older_source_cache_entry() {
     let before = working.normalizations();
     conversation[0] = text_turn(Role::Assistant, "new summary");
     sources[0] = source(40);
-    working = readmit(working, &config, &conversation, &queued).expect("replanned");
+    working = readmit(working, &config, &conversation, &sources, &queued).expect("replanned");
     let cached = assemble_session_context(
         &config,
         &working,

@@ -31,13 +31,14 @@ impl Reservation {
         self,
         config: &SessionActorConfig,
         conversation: &[Turn],
+        sources: &[ConversationSource],
     ) -> Result<ContextWorkingSet, AgentLoopError> {
         match self {
             Self::Fresh(reserved) => {
-                context_memory::admit(reserved, config, conversation, &VecDeque::new())
+                context_memory::admit(reserved, config, conversation, sources, &VecDeque::new())
             }
             Self::Retained(working) => {
-                context_memory::readmit(working, config, conversation, &VecDeque::new())
+                context_memory::readmit(working, config, conversation, sources, &VecDeque::new())
             }
         }
     }
@@ -77,7 +78,7 @@ impl ProviderContext<'_> {
                     let conversation = worker_conversation
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let working = reservation.admit(&config, &conversation)?;
+                    let working = reservation.admit(&config, &conversation, &sources)?;
                     let events = if prune {
                         context::prune_plan(&working, &conversation, &sources, &surgery, &pruned)?
                     } else {

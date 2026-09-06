@@ -60,8 +60,13 @@ pub(in crate::engine) async fn assemble_view(
             rw_tools::CancellationToken::default(),
             rw_resources::ResourceClass::Cpu,
             move || {
-                let working =
-                    super::context_memory::admit(reserved, &config, &page.turns, &queued)?;
+                let working = super::context_memory::admit(
+                    reserved,
+                    &config,
+                    &page.turns,
+                    &page.sources,
+                    &queued,
+                )?;
                 let surgery = page
                     .context_actions
                     .iter()
