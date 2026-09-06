@@ -1,5 +1,6 @@
 //! Deterministic bounded source generation and an independent definition oracle.
 use super::*;
+use std::fmt::Write as _;
 use std::fs;
 
 pub(super) const FILE_BYTES: usize = 4096;
@@ -47,7 +48,6 @@ impl Repository {
         let mut source = String::with_capacity(FILE_BYTES);
         for slot in 0..DEFINITIONS {
             let name = Self::name(file, revision, slot);
-            use std::fmt::Write as _;
             match file % 3 {
                 0 => writeln!(source, "pub fn {name}() -> u64 {{ 7 }}")?,
                 1 => writeln!(source, "def {name}():\n    return 7")?,
