@@ -1,3 +1,5 @@
+mod resolver;
+
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     pin::Pin,
@@ -201,6 +203,7 @@ pub async fn provider_reachability_probe(
         ));
     }
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(request.timeout)
@@ -296,6 +299,7 @@ pub async fn guarded_http_request(
         .into());
     }
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
@@ -621,6 +625,7 @@ pub async fn guarded_http_fetch(
         .into());
     }
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(request.timeout.min(Duration::from_secs(15)))
@@ -772,6 +777,7 @@ pub(crate) fn build_client_with_proxy_auth(
     // Never let reqwest's ambient system-proxy discovery create an undocumented
     // precedence path. ProxySettings has already resolved explicit/env/NO_PROXY.
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
@@ -850,7 +856,9 @@ pub(crate) fn response_error(response: &Response) -> Option<ProviderError> {
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn transport_error(error: reqwest::Error) -> ProviderError {
-    let kind = if error.is_timeout() {
+    let kind = if resolver::admission_failed(&error) {
+        ProviderErrorKind::ResourceExhausted
+    } else if error.is_timeout() {
         ProviderErrorKind::Timeout
     } else if error.is_builder() {
         ProviderErrorKind::InvalidRequest
