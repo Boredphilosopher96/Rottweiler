@@ -14,11 +14,13 @@ HTTP_BOUNDARY = ROOT / "crates/rw-providers/src/http.rs"
 # purpose is proving that an MCP child cannot open an outbound connection.
 SANDBOX_PROXY_BOUNDARY = ROOT / "crates/rw-sandbox/src/proxy.rs"
 SANDBOX_OS_BOUNDARY = ROOT / "crates/rw-sandbox/src/lib.rs"
+SANDBOX_LINUX_BOUNDARY = ROOT / "crates/rw-sandbox/src/linux.rs"
 MCP_SANDBOX_FIXTURE = ROOT / "crates/rw-mcp/src/bin/rw-mcp-fixture.rs"
 RAW_NETWORK_BOUNDARIES = {
     HTTP_BOUNDARY,
     SANDBOX_PROXY_BOUNDARY,
     SANDBOX_OS_BOUNDARY,
+    SANDBOX_LINUX_BOUNDARY,
     MCP_SANDBOX_FIXTURE,
 }
 FORBIDDEN_DIRECT = (
@@ -46,6 +48,10 @@ FORBIDDEN_DIRECT = (
 
 CFG_TEST = re.compile(
     r"#\s*\[\s*cfg\s*\(\s*(?:test|all\s*\(\s*test\b[^]\n]*\))\s*\)\s*\]"
+)
+FILE_CFG_TEST = re.compile(
+    r"\A\s*(?:#\s*!\s*\[[^\]]*\]\s*)*"
+    r"#\s*!\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]"
 )
 CHAR_LITERAL = re.compile(
     r"'(?:\\(?:u\{[0-9A-Fa-f_]+\}|x[0-9A-Fa-f]{2}|.)|[^\\'\r\n])'"
@@ -188,6 +194,8 @@ def _cfg_test_item_end(masked: str, start: int) -> int:
 def production_source(path: Path) -> str:
     source = path.read_text(encoding="utf-8")
     masked = _masked_rust(source)
+    if FILE_CFG_TEST.match(masked):
+        return ""
     retained: list[str] = []
     cursor = 0
     for match in CFG_TEST.finditer(masked):

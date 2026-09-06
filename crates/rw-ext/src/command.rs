@@ -11,6 +11,7 @@ pub struct CommandDescriptor {
     description: String,
     argument_hint: Option<String>,
     source: CommandSource,
+    host_tools: Arc<[String]>,
 }
 
 impl CommandDescriptor {
@@ -22,7 +23,15 @@ impl CommandDescriptor {
             description: description.into(),
             argument_hint: None,
             source: CommandSource::Builtin,
+            host_tools: Arc::from([]),
         }
+    }
+
+    /// Exact host tools this command may request through its invocation capability.
+    #[must_use]
+    pub fn with_host_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.host_tools = names.into_iter().collect();
+        self
     }
 
     /// Adds the concise argument hint shown alongside the command.
@@ -65,11 +74,17 @@ impl CommandDescriptor {
 /// A parsed command invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandInvocation {
+    origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
     name: String,
     arguments: String,
 }
 
 impl CommandInvocation {
+    #[must_use]
+    pub fn origin(&self) -> Option<&rw_types::extension_invocation::ExtensionInvocationId> {
+        self.origin.as_ref()
+    }
+
     /// Canonical command name, without the leading slash.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -255,14 +270,81 @@ impl<Context, Output> CommandRegistry<Context, Output> {
         context: &mut Context,
         line: &str,
     ) -> Result<Output, CommandRegistryError> {
+        self.bind_line(line)?.execute(context).await
+    }
+
+    /// Binds a parsed slash command before asynchronous execution.
+    /// # Errors
+    /// Rejects invalid syntax or an absent exact registration.
+    pub fn bind_line(
+        &self,
+        line: &str,
+    ) -> Result<BoundCommand<Context, Output>, CommandRegistryError> {
         let invocation = parse_invocation(line)?;
-        let Some(registered) = self.commands.get(invocation.name()) else {
-            return Err(CommandRegistryError::Unknown {
-                name: invocation.name,
-            });
-        };
-        let name = invocation.name.clone();
-        match AssertUnwindSafe(registered.handler.execute(context, invocation))
+        self.bind(&invocation.name, invocation.arguments)
+    }
+
+    /// Captures the exact registered handler and inert arguments at admission.
+    /// Subsequent registry replacement cannot retarget the invocation.
+    ///
+    /// # Errors
+    /// Rejects noncanonical or absent command names.
+    pub fn bind(
+        &self,
+        name: &str,
+        arguments: String,
+    ) -> Result<BoundCommand<Context, Output>, CommandRegistryError> {
+        validate_name(name)?;
+        let registered = self
+            .commands
+            .get(name)
+            .ok_or_else(|| CommandRegistryError::Unknown {
+                name: name.to_owned(),
+            })?;
+        Ok(BoundCommand {
+            host_tools: Arc::clone(&registered.descriptor.host_tools),
+            handler: Arc::clone(&registered.handler),
+            invocation: CommandInvocation {
+                origin: None,
+                name: name.to_owned(),
+                arguments,
+            },
+        })
+    }
+}
+
+/// One admitted command bound to its actual implementation, never a later name lookup.
+pub struct BoundCommand<Context, Output> {
+    host_tools: Arc<[String]>,
+    handler: Arc<dyn CommandHandler<Context, Output>>,
+    invocation: CommandInvocation,
+}
+impl<Context, Output> BoundCommand<Context, Output> {
+    #[must_use]
+    pub fn host_tools(&self) -> Arc<[String]> {
+        Arc::clone(&self.host_tools)
+    }
+    #[must_use]
+    pub fn with_origin(
+        mut self,
+        origin: rw_types::extension_invocation::ExtensionInvocationId,
+    ) -> Self {
+        self.invocation.origin = Some(origin);
+        self
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.invocation.name()
+    }
+
+    /// Executes the captured implementation through the shared panic boundary.
+    ///
+    /// # Errors
+    /// Reports implementation rejection or panic.
+    pub async fn execute(&self, context: &mut Context) -> Result<Output, CommandRegistryError> {
+        let name = self.invocation.name.clone();
+        match AssertUnwindSafe(self.handler.execute(context, self.invocation.clone()))
             .catch_unwind()
             .await
         {
@@ -305,6 +387,7 @@ fn parse_invocation(line: &str) -> Result<CommandInvocation, CommandRegistryErro
     let name = &without_slash[..split_at];
     validate_name(name)?;
     Ok(CommandInvocation {
+        origin: None,
         name: name.to_owned(),
         arguments: without_slash[split_at..].trim_start().to_owned(),
     })
@@ -371,6 +454,32 @@ mod tests {
             Ok("review".to_owned())
         );
         assert_eq!(context, ["built-in:2 ", "extension:src/"]);
+    }
+
+    #[tokio::test]
+    async fn captured_command_cannot_retarget_a_replaced_registration() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(CommandDescriptor::new("open", "Open"), Append("first"))
+            .expect("first registration");
+        let admitted = registry
+            .bind("open", "{\"path\":\"a b\"}".into())
+            .expect("bound action");
+        assert!(registry.unregister("open"));
+        registry
+            .register(CommandDescriptor::new("open", "Open"), Append("second"))
+            .expect("replacement registration");
+        let mut context = Vec::new();
+        admitted
+            .execute(&mut context)
+            .await
+            .expect("admitted implementation");
+        assert_eq!(context, ["first:{\"path\":\"a b\"}"]);
+        registry
+            .dispatch_line(&mut context, "/open later")
+            .await
+            .expect("new implementation");
+        assert_eq!(context[1], "second:later");
     }
 
     #[test]

@@ -1,9 +1,17 @@
+mod approved;
+pub use approved::ApprovedProtocolCommand;
+use approved::PreparedProtocol;
+pub(crate) use approved::ProcessExecutable;
+mod ownership;
+pub(crate) use ownership::ProcessOwner;
+
 use std::{
     collections::BTreeSet,
     ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -12,7 +20,7 @@ use rw_sandbox::{
     EgressPolicy, LaunchPlan, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
     normalize_egress_domain, shell_launch_plan,
 };
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
 
 /// Exact argv request for a long-lived, line/framed protocol child.
 #[derive(Clone, Debug)]
@@ -67,12 +75,20 @@ pub trait ProtocolChildLauncher: Send + Sync {
 /// Executables and cwd values are canonicalized and checked against the
 /// launcher authority roots. The child receives only the fixed HOME/TMPDIR
 /// values and explicitly approved environment keys.
+#[derive(Clone)]
 pub struct SandboxedProtocolLauncher {
+    authority: ProtocolAuthority,
     workspace_roots: Vec<PathBuf>,
     scratch: PathBuf,
-    helper_executable: PathBuf,
+    helper_executable: rw_sandbox::SandboxHelper,
     allowed_environment: BTreeSet<String>,
     sandbox_unavailable: Option<String>,
+}
+
+#[derive(Clone)]
+enum ProtocolAuthority {
+    TrustedBinary,
+    Approved(Arc<ApprovedProtocolCommand>),
 }
 
 impl SandboxedProtocolLauncher {
@@ -85,7 +101,7 @@ impl SandboxedProtocolLauncher {
     pub fn new(
         workspace_roots: &[PathBuf],
         scratch: impl AsRef<Path>,
-        helper_executable: impl AsRef<Path>,
+        helper_executable: &rw_sandbox::SandboxHelper,
         allowed_environment: impl IntoIterator<Item = String>,
     ) -> io::Result<Self> {
         let workspace_roots = workspace_roots
@@ -99,9 +115,10 @@ impl SandboxedProtocolLauncher {
                 "unsafe protocol scratch directory",
             ));
         }
-        let helper_executable = trusted_executable(helper_executable.as_ref(), &workspace_roots)?;
+        let helper_executable = helper_executable.clone();
         let capability = rw_sandbox::probe();
         Ok(Self {
+            authority: ProtocolAuthority::TrustedBinary,
             workspace_roots,
             scratch,
             helper_executable,
@@ -112,6 +129,13 @@ impl SandboxedProtocolLauncher {
                 })
             }),
         })
+    }
+
+    /// Binds exact host-approved bytes; every spawn must match this command.
+    #[must_use]
+    pub fn with_approved_command(mut self, command: ApprovedProtocolCommand) -> Self {
+        self.authority = ProtocolAuthority::Approved(Arc::new(command));
+        self
     }
 
     fn cwd(&self, requested: Option<&Path>) -> io::Result<PathBuf> {
@@ -140,25 +164,61 @@ impl SandboxedProtocolLauncher {
 impl ProtocolChildLauncher for SandboxedProtocolLauncher {
     async fn spawn(&self, request: &ProtocolChildRequest) -> io::Result<SpawnedProtocolChild> {
         validate_request(request, &self.allowed_environment)?;
+        let process_credit = rw_resources::try_acquire(rw_resources::ResourceClass::Process)
+            .map_err(io::Error::other)?;
+        let launcher = self.clone();
+        let request = request.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            launcher.spawn_owned(&request, process_credit)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+}
+
+impl SandboxedProtocolLauncher {
+    fn spawn_owned(
+        &self,
+        request: &ProtocolChildRequest,
+        process_credit: rw_resources::ResourceLease,
+    ) -> io::Result<SpawnedProtocolChild> {
+        validate_request(request, &self.allowed_environment)?;
         if let Some(reason) = &self.sandbox_unavailable {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("sandboxed protocol execution is unavailable: {reason}"),
             ));
         }
-        let executable = trusted_executable(&request.executable, &self.workspace_roots)?;
-        let identity = executable_identity(&executable)?;
+        let prepared = match &self.authority {
+            ProtocolAuthority::TrustedBinary => {
+                let program = trusted_executable(&request.executable, &self.workspace_roots)?;
+                PreparedProtocol {
+                    read_roots: vec![program.clone()],
+                    program,
+                    args: request.args.iter().map(OsString::from).collect(),
+                    authority: ProcessExecutable::TrustedBinary,
+                }
+            }
+            ProtocolAuthority::Approved(command) => command.prepare(request)?,
+        };
+        let original_identity = match self.authority {
+            ProtocolAuthority::TrustedBinary => Some(executable_identity(&prepared.program)?),
+            ProtocolAuthority::Approved(_) => None,
+        };
         let cwd = self.cwd(request.working_directory.as_deref())?;
-        let (policy, proxy) = self.sandbox_policy(request, &executable)?;
-        let args = request.args.iter().map(OsString::from).collect::<Vec<_>>();
-        let mut plan = shell_launch_plan(&policy, &self.helper_executable, &executable, &args)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        // Close the canonicalization-to-spawn replacement window as far as the
-        // platform API permits. Linux additionally pins the sandbox helper in LaunchPlan.
-        if executable_identity(&executable)? != identity {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "protocol executable changed during launch",
+        let (policy, proxy) = self.sandbox_policy(request, &prepared.read_roots)?;
+        let mut plan = shell_launch_plan(
+            &policy,
+            &self.helper_executable,
+            &prepared.program,
+            &prepared.args,
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        if let Some(expected) = original_identity
+            && executable_identity(&prepared.program)? != expected
+        {
+            return Err(io::Error::other(
+                "protocol trusted executable changed during launch",
             ));
         }
         let mut command = tokio::process::Command::new(&plan.program);
@@ -184,25 +244,29 @@ impl ProtocolChildLauncher for SandboxedProtocolLauncher {
         }
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn()?;
+        let child = command.spawn()?;
         release_helper_pin(&mut plan);
-        let process_group = child.id();
-        let stdin = child
+        let mut owner = ProcessOwner::new(
+            child,
+            self.helper_executable.clone(),
+            process_credit,
+            proxy,
+            prepared.authority,
+        );
+        let stdin = owner
+            .child()?
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("protocol stdin unavailable"))?;
-        let stdout = child
+        let stdout = owner
+            .child()?
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("protocol stdout unavailable"))?;
         Ok(SpawnedProtocolChild {
             stdin,
             stdout,
-            handle: Box::new(TokioProtocolHandle {
-                child,
-                process_group,
-                _proxy: proxy,
-            }),
+            handle: Box::new(TokioProtocolHandle(owner)),
         })
     }
 }
@@ -211,11 +275,24 @@ impl SandboxedProtocolLauncher {
     fn sandbox_policy(
         &self,
         request: &ProtocolChildRequest,
-        executable: &Path,
+        intrinsic: &[PathBuf],
     ) -> io::Result<(SandboxPolicy, Option<SupervisedEgressProxy>)> {
         let mut write_roots = vec![self.scratch.clone()];
         write_roots.extend(self.approved_roots(&request.sandbox.write_roots)?);
-        let mut read_roots = intrinsic_protocol_read_roots(executable, &self.scratch);
+        if matches!(self.authority, ProtocolAuthority::Approved(_)) {
+            for pinned in intrinsic {
+                if write_roots
+                    .iter()
+                    .any(|write| pinned.starts_with(write) || write.starts_with(pinned))
+                {
+                    return Err(io::Error::other(
+                        "MCP write authority overlaps pinned command bytes",
+                    ));
+                }
+            }
+        }
+        let mut read_roots = intrinsic_protocol_read_roots(&self.scratch);
+        read_roots.extend(intrinsic.iter().cloned());
         read_roots.extend(self.approved_roots(&request.sandbox.read_roots)?);
         read_roots.extend(write_roots.iter().cloned());
         read_roots.sort();
@@ -270,8 +347,8 @@ impl SandboxedProtocolLauncher {
     }
 }
 
-fn intrinsic_protocol_read_roots(executable: &Path, scratch: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![executable.to_path_buf(), scratch.to_path_buf()];
+fn intrinsic_protocol_read_roots(scratch: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![scratch.to_path_buf()];
     for candidate in [
         "/System",
         "/Library/Apple",
@@ -316,6 +393,7 @@ fn validated_domains(domains: &[String]) -> io::Result<Vec<String>> {
 }
 
 fn validate_request(request: &ProtocolChildRequest, allowed: &BTreeSet<String>) -> io::Result<()> {
+    validate_request_bounds(request)?;
     if request.executable.as_os_str().is_empty()
         || request.args.iter().any(|arg| arg.contains('\0'))
     {
@@ -335,6 +413,46 @@ fn validate_request(request: &ProtocolChildRequest, allowed: &BTreeSet<String>) 
                 "protocol environment key is not approved",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_request_bounds(request: &ProtocolChildRequest) -> io::Result<()> {
+    let argument_bytes = request
+        .args
+        .iter()
+        .try_fold(0usize, |total, arg| total.checked_add(arg.len()));
+    if request.args.len() > 256
+        || argument_bytes.is_none_or(|bytes| bytes > 1024 * 1024)
+        || request.environment.len() > 256
+        || request
+            .environment
+            .iter()
+            .any(|(key, value)| key.len() > 256 || value.len() > 16 * 1024)
+        || request.sandbox.read_roots.len() > MAX_PROTOCOL_ROOTS
+        || request.sandbox.write_roots.len() > MAX_PROTOCOL_ROOTS
+        || request.sandbox.allowed_domains.len() > MAX_PROTOCOL_DOMAINS
+        || request.executable.as_os_str().len() > 4096
+        || request
+            .working_directory
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().len() > 4096)
+        || request
+            .sandbox
+            .read_roots
+            .iter()
+            .chain(&request.sandbox.write_roots)
+            .any(|path| path.as_os_str().len() > 4096)
+        || request
+            .sandbox
+            .allowed_domains
+            .iter()
+            .any(|domain| domain.len() > 253)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "protocol request exceeds bounded launch authority",
+        ));
     }
     Ok(())
 }
@@ -404,73 +522,14 @@ fn has_symlink_provenance(path: &Path) -> bool {
     false
 }
 
-struct TokioProtocolHandle {
-    child: Child,
-    process_group: Option<u32>,
-    _proxy: Option<SupervisedEgressProxy>,
-}
-
+struct TokioProtocolHandle(ProcessOwner);
 #[async_trait]
 impl ProtocolProcessHandle for TokioProtocolHandle {
     async fn observe_exit(&mut self, deadline: Duration) -> io::Result<Option<ExitStatus>> {
-        match tokio::time::timeout(deadline, self.child.wait()).await {
-            Ok(status) => status.map(Some),
-            Err(_) => Ok(None),
-        }
+        self.0.observe_exit(deadline).await
     }
-
     async fn terminate_and_reap(&mut self, deadline: Duration) -> io::Result<()> {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        #[cfg(not(unix))]
-        self.child.start_kill()?;
-        tokio::time::timeout(deadline, self.child.wait())
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "protocol child did not exit")
-            })??;
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let end = tokio::time::Instant::now() + deadline;
-            while rustix::process::test_kill_process_group(group).is_ok() {
-                if tokio::time::Instant::now() >= end {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "protocol process group did not exit",
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-        self.process_group = None;
-        Ok(())
-    }
-}
-
-impl Drop for TokioProtocolHandle {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            // Async cancellation can drop a connector while rmcp initialization
-            // is pending. Signal the complete group synchronously so descendants
-            // cannot survive merely because the async reap path was cancelled.
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        let _ = self.child.start_kill();
+        self.0.settle(deadline).await
     }
 }
 
@@ -501,11 +560,12 @@ mod tests {
     async fn protocol_launcher_rejects_environment_outside_allowlist_before_spawn() {
         let workspace = tempfile::tempdir().expect("workspace");
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("test executable");
+        let helper = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical helper executable");
         let launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            helper,
+            &rw_sandbox::SandboxHelper::from_running(&helper).expect("running helper"),
             Vec::<String>::new(),
         )
         .expect("launcher");
@@ -528,11 +588,12 @@ mod tests {
     async fn protocol_launcher_rejects_an_unavailable_sandbox_before_spawn() {
         let workspace = tempfile::tempdir().expect("workspace");
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("test executable");
+        let helper = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical helper executable");
         let mut launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            helper,
+            &rw_sandbox::SandboxHelper::from_running(&helper).expect("running helper"),
             Vec::<String>::new(),
         )
         .expect("launcher");
@@ -555,20 +616,24 @@ mod tests {
     fn protocol_authority_is_workspace_bounded_and_defaults_fail_closed() {
         let workspace = tempfile::tempdir().expect("workspace");
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("test executable");
+        let helper = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical helper executable");
         let allowed = workspace.path().join("allowed");
         std::fs::create_dir(&allowed).expect("allowed root");
         let launcher = SandboxedProtocolLauncher::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            helper,
+            &rw_sandbox::SandboxHelper::from_running(&helper).expect("running helper"),
             Vec::<String>::new(),
         )
         .expect("launcher");
         let executable = PathBuf::from("/usr/bin/true");
 
         let (default_policy, proxy) = launcher
-            .sandbox_policy(&request(ProtocolSandboxPolicy::default()), &executable)
+            .sandbox_policy(
+                &request(ProtocolSandboxPolicy::default()),
+                std::slice::from_ref(&executable),
+            )
             .expect("default policy");
         assert!(matches!(default_policy.network(), NetworkPolicy::Deny));
         assert!(proxy.is_none());
@@ -584,7 +649,7 @@ mod tests {
             allowed_domains: vec!["api.example.com".to_owned()],
         });
         let (policy, proxy) = launcher
-            .sandbox_policy(&scoped, &executable)
+            .sandbox_policy(&scoped, std::slice::from_ref(&executable))
             .expect("scoped policy");
         assert!(matches!(
             policy.network(),
@@ -599,7 +664,7 @@ mod tests {
         });
         assert!(
             launcher
-                .sandbox_policy(&outside_request, &executable)
+                .sandbox_policy(&outside_request, std::slice::from_ref(&executable))
                 .is_err()
         );
     }

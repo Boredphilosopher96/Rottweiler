@@ -4,7 +4,6 @@ import { describe, expect, test } from "bun:test"
 import {
   boundSubagentState,
   childPassiveInteractionState,
-  mergeComposerDraft,
   sanitizeSubagentDescriptor,
   type SubagentDescriptor,
 } from "../src/subagent-state"
@@ -38,22 +37,6 @@ describe("subagent state boundary", () => {
     expect(sanitized?.model.length).toBeLessThanOrEqual(256)
   })
 
-  test("restores rejected composer content without duplicating attachments", () => {
-    const attachment = {
-      name: "lib.rs",
-      source_path: "src/lib.rs",
-      media_type: "text/plain",
-      data: { type: "text" as const, content: "fn main() {}" },
-    }
-    const restored = mergeComposerDraft(
-      { content: "new draft", attachments: [attachment] },
-      "rejected draft",
-      [attachment],
-    )
-    expect(restored.content).toBe("rejected draft\nnew draft")
-    expect(restored.attachments).toEqual([attachment])
-  })
-
   test("bounds child projections and removes passive mutation prompts", () => {
     const state = createInitialState()
     const turns = Object.fromEntries(
@@ -76,6 +59,7 @@ describe("subagent state boundary", () => {
       tools: {
         approval: {
           toolCallId: "approval",
+          invocationId: "approval",
           turnId: "1",
           name: "write",
           status: "awaiting_approval",
@@ -83,8 +67,8 @@ describe("subagent state boundary", () => {
           capabilities: ["write_filesystem"],
           rationale: null,
           diff: null,
-          chunks: toolOutputBuffer([]),
-          output: null,
+          diffSource: null, chunks: toolOutputBuffer([]),
+          display: null, source: null,
           isError: null,
           callIndex: 0,
           timing: { kind: "unknown" },

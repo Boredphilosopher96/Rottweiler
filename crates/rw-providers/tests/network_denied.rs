@@ -15,7 +15,7 @@ fn request() -> ProviderRequest {
         model: "network-denied-canary".to_owned(),
         turns: Vec::new(),
         tools: Vec::new(),
-        tool_choice: ToolChoice::Auto,
+        tool_choice: ToolChoice::Auto {},
         max_output_tokens: 1,
         temperature: None,
         thinking: ThinkingLevel::Off,

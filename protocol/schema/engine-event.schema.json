@@ -10,6 +10,389 @@
           "$ref": "#/$defs/CommandAckMeta"
         },
         "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/SessionNavigationTarget"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_navigation_requested"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SessionStateSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_state_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SessionControlsSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_controls_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/FamilyControlsSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "family_controls_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "result": {
+          "$ref": "#/$defs/ChildReadScopeResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "child_read_scope_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SessionStateSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "child_state_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/ChildControlsSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "child_controls_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "catalog": {
+          "$ref": "#/$defs/UiCatalog"
+        },
+        "type": {
+          "type": "string",
+          "const": "ui_catalog_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "catalog"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "panels": {
+          "$ref": "#/$defs/UiPanels"
+        },
+        "type": {
+          "type": "string",
+          "const": "ui_panels_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "panels"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/TodoSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "todo_state_committed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "result": {
+          "$ref": "#/$defs/SessionChildrenResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_children_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "result": {
+          "$ref": "#/$defs/TodoReadResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "todos_read"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "result": {
+          "$ref": "#/$defs/TranscriptTailResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "transcript_tail_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "result": {
+          "$ref": "#/$defs/TranscriptReadResult"
+        },
+        "type": {
+          "type": "string",
+          "const": "transcript_page_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "result"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "page": {
+          "$ref": "#/$defs/TranscriptContentPage"
+        },
+        "type": {
+          "type": "string",
+          "const": "transcript_content_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "page"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
           "anyOf": [
             {
               "$ref": "#/$defs/SessionId"
@@ -27,6 +410,7 @@
           "const": "command_acknowledged"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -50,6 +434,7 @@
           "const": "context_snapshot_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -74,6 +459,7 @@
           "const": "cost_snapshot_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -98,6 +484,7 @@
           "const": "session_review_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -128,6 +515,7 @@
           "const": "session_review_updated"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -154,11 +542,44 @@
           "const": "prompt_dump_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "session_id",
         "dump"
+      ]
+    },
+    {
+      "description": "Paged historical content is available; no durable replay cursor is implied.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "through_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "session_history_ready"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
       ]
     },
     {
@@ -185,6 +606,7 @@
           "const": "session_replay_completed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -211,6 +633,7 @@
           "const": "session_forked"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -236,6 +659,7 @@
           "const": "session_exported"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -260,6 +684,7 @@
           "const": "sessions_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -286,118 +711,12 @@
           "const": "subagents_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "session_id",
         "subagents"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "child_session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "events": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SubagentReplayItem"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "subagent_replay_batch"
-        }
-      },
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "subagent_id",
-        "child_session_id",
-        "events"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "through_sequence": {
-          "description": "Last child sequence included in this page, if the page is non-empty.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "next_cursor": {
-          "description": "Cursor to pass as `after_sequence` for the next forward page.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "tail_sequence": {
-          "description": "Durable tail observed by the descriptor-stable page scan.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "has_more": {
-          "description": "Whether another forward page remains after `next_cursor`.",
-          "type": "boolean"
-        },
-        "events_before_page": {
-          "description": "Number of durable child events preceding the first event in this page.",
-          "type": "string"
-        },
-        "truncated": {
-          "description": "Whether the requested view omitted events before or after this page.",
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "subagent_replay_completed"
-        }
-      },
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "subagent_id",
-        "has_more",
-        "events_before_page",
-        "truncated"
       ]
     },
     {
@@ -423,6 +742,7 @@
           "const": "sessions_search_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -454,6 +774,7 @@
           "const": "command_descriptors_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -485,6 +806,7 @@
           "const": "modes_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -519,33 +841,34 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ModelAliasDescriptor"
-          },
-          "default": []
+          }
         },
         "providers": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/ProviderDescriptor"
-          },
-          "default": []
+          }
         },
         "cached": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "truncated": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "type": {
           "type": "string",
           "const": "models_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
-        "models"
+        "models",
+        "aliases",
+        "providers",
+        "cached",
+        "truncated"
       ]
     },
     {
@@ -568,6 +891,7 @@
           "const": "settings_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -595,6 +919,7 @@
           "const": "mcp_servers_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -622,6 +947,7 @@
           "const": "runtime_services_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -646,6 +972,7 @@
           "const": "mcp_server_approval_reviewed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -670,6 +997,7 @@
           "const": "permissions_listed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -706,6 +1034,7 @@
           "const": "provider_auth_started"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -736,6 +1065,7 @@
           "const": "provider_configured"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -776,6 +1106,7 @@
           "const": "provider_auth_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -810,6 +1141,7 @@
           "const": "provider_activation_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -842,6 +1174,7 @@
           "const": "workspace_files_found"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -867,6 +1200,7 @@
           "const": "workspace_file_preview_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -891,6 +1225,7 @@
           "const": "workspace_status_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -915,6 +1250,7 @@
           "const": "workspace_diff_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -933,6 +1269,7 @@
           "const": "host_shutdown"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta"
@@ -952,6 +1289,7 @@
           "const": "session_created"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -981,6 +1319,7 @@
           "const": "workspace_roots_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1003,6 +1342,7 @@
           "const": "driver_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1032,6 +1372,7 @@
           "const": "message_queued"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1054,6 +1395,7 @@
           "const": "queued_message_removed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1071,9 +1413,31 @@
           "const": "queued_messages_cleared"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "accepted_source": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "type": {
+          "type": "string",
+          "const": "user_message_retained"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "accepted_source"
       ]
     },
     {
@@ -1099,6 +1463,7 @@
           "const": "user_message_accepted"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1142,6 +1507,7 @@
           "const": "session_title_updated"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1169,6 +1535,7 @@
           "const": "plugin_message_injected"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1195,11 +1562,38 @@
           "const": "plugin_status_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "plugin_id",
         "status"
+      ]
+    },
+    {
+      "description": "An actor-authorized extension state transaction committed to this session.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "plugin_id": {
+          "type": "string"
+        },
+        "transaction": {
+          "$ref": "#/$defs/ExtensionStateTransaction"
+        },
+        "type": {
+          "type": "string",
+          "const": "extension_state_committed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "plugin_id",
+        "transaction"
       ]
     },
     {
@@ -1223,12 +1617,99 @@
           "const": "ui_notification"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "plugin_id",
         "title",
         "message"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "agent_turn": {
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/$defs/ContextSelection"
+        },
+        "type": {
+          "type": "string",
+          "const": "conversation_context_committed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "agent_turn",
+        "selection"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "agent_turn": {
+          "type": "string"
+        },
+        "accepted_source": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "selection": {
+          "$ref": "#/$defs/InputSelection"
+        },
+        "type": {
+          "type": "string",
+          "const": "conversation_input_committed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "agent_turn",
+        "accepted_source",
+        "selection"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "agent_turn": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolResultReference"
+          }
+        },
+        "logical": {
+          "$ref": "#/$defs/ToolResultAdmission"
+        },
+        "type": {
+          "type": "string",
+          "const": "conversation_tool_results_committed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "agent_turn",
+        "results",
+        "logical"
       ]
     },
     {
@@ -1248,6 +1729,7 @@
           "const": "conversation_turn_committed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1278,6 +1760,7 @@
           "const": "conversation_rewound"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1300,6 +1783,7 @@
           "const": "turn_started"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1323,6 +1807,7 @@
           "const": "text_delta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1353,6 +1838,7 @@
           "const": "thinking_delta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1383,11 +1869,46 @@
           "const": "citation_delta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "turn_id",
         "uri"
+      ]
+    },
+    {
+      "description": "Replaceable operational display state, excluded from the durable journal.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "progress": {
+          "$ref": "#/$defs/ToolProgress"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_progress"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "session_id",
+        "turn_id",
+        "tool_call_id",
+        "invocation_id",
+        "progress"
       ]
     },
     {
@@ -1401,6 +1922,9 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "name": {
           "type": "string"
@@ -1416,11 +1940,13 @@
           "const": "tool_call_started"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "name",
         "args",
         "call_index"
@@ -1437,6 +1963,42 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_approval_resolved"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "tool_call_id",
+        "invocation_id",
+        "decision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "name": {
           "type": "string"
@@ -1466,11 +2028,13 @@
           "const": "tool_approval_needed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "name",
         "args",
         "capabilities",
@@ -1490,6 +2054,9 @@
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
         },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
         "diff": {
           "$ref": "#/$defs/UnifiedDiff"
         },
@@ -1498,11 +2065,13 @@
           "const": "tool_diff_ready"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "diff"
       ]
     },
@@ -1518,6 +2087,9 @@
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
         },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
         "stream": {
           "$ref": "#/$defs/ToolOutputStream"
         },
@@ -1529,11 +2101,13 @@
           "const": "tool_output_delta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "stream",
         "chunk"
       ]
@@ -1541,6 +2115,16 @@
     {
       "type": "object",
       "properties": {
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
@@ -1549,6 +2133,9 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "output": {
           "$ref": "#/$defs/ToolOutput"
@@ -1566,11 +2153,14 @@
           "const": "tool_call_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
+        "presentation",
         "meta",
         "turn_id",
         "tool_call_id",
+        "invocation_id",
         "output",
         "is_error",
         "call_index"
@@ -1588,23 +2178,21 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "questions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Question"
-          }
+        "question": {
+          "$ref": "#/$defs/Question"
         },
         "type": {
           "type": "string",
           "const": "question_asked"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "turn_id",
         "question_id",
-        "questions"
+        "question"
       ]
     },
     {
@@ -1619,23 +2207,46 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "answers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Answer"
-          }
+        "answer": {
+          "$ref": "#/$defs/Answer"
         },
         "type": {
           "type": "string",
           "const": "question_answered"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "turn_id",
         "question_id",
-        "answers"
+        "answer"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "call": {
+          "$ref": "#/$defs/ProviderCallIdentity"
+        },
+        "actuals": {
+          "$ref": "#/$defs/ProviderCallActuals"
+        },
+        "type": {
+          "type": "string",
+          "const": "provider_call_accounted"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "call",
+        "actuals"
       ]
     },
     {
@@ -1661,6 +2272,7 @@
           "const": "turn_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1690,8 +2302,7 @@
         },
         "context_window_known": {
           "description": "False when zero capacity means unknown rather than exhausted.",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "context_window_reason": {
           "type": [
@@ -1709,22 +2320,20 @@
           "maximum": 65535
         },
         "estimated_input_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "provider_input_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "correction_millionths": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "type": {
           "type": "string",
           "const": "context_usage_updated"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1732,8 +2341,12 @@
         "used_tokens",
         "usable_tokens",
         "reserved_tokens",
+        "context_window_known",
         "stable_prefix_hash",
-        "cache_hit_basis_points"
+        "cache_hit_basis_points",
+        "estimated_input_tokens",
+        "provider_input_tokens",
+        "correction_millionths"
       ]
     },
     {
@@ -1765,6 +2378,7 @@
           "const": "budget_status_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1790,6 +2404,7 @@
           "const": "compaction_started"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1800,6 +2415,12 @@
       "description": "Connection-scoped boundary for one compaction provider attempt.\nThis never enters the durable session sequence.",
       "type": "object",
       "properties": {
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "revision": {
+          "type": "string"
+        },
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
@@ -1816,8 +2437,11 @@
           "const": "compaction_attempt_started"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
+        "started",
+        "revision",
         "session_id",
         "summary_turn_id",
         "attempt"
@@ -1827,6 +2451,12 @@
       "description": "Connection-scoped provider text produced while a compaction summary is\ngenerated. This never enters the durable session sequence.",
       "type": "object",
       "properties": {
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "revision": {
+          "type": "string"
+        },
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
@@ -1846,8 +2476,11 @@
           "const": "compaction_text_delta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
+        "started",
+        "revision",
         "session_id",
         "summary_turn_id",
         "attempt",
@@ -1858,6 +2491,12 @@
       "description": "Connection-scoped provider reasoning produced during compaction.",
       "type": "object",
       "properties": {
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "revision": {
+          "type": "string"
+        },
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
@@ -1877,8 +2516,11 @@
           "const": "compaction_thinking_delta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
+        "started",
+        "revision",
         "session_id",
         "summary_turn_id",
         "attempt",
@@ -1906,6 +2548,7 @@
           "const": "compaction_attempt_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1934,8 +2577,7 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "cost": {
           "anyOf": [
@@ -1945,14 +2587,14 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "type": {
           "type": "string",
           "const": "compaction_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1974,6 +2616,7 @@
           "const": "compaction_failed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2000,6 +2643,7 @@
           "const": "subagent_spawned"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2025,6 +2669,7 @@
           "const": "subagent_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2055,12 +2700,15 @@
             }
           ]
         },
-        "event": true,
+        "event": {
+          "description": "Null invalidates child history at the required canonical `child_sequence`.\nA non-null value is a bounded preview; complete content remains in the child log."
+        },
         "type": {
           "type": "string",
           "const": "subagent_progress"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "parent_session_id",
@@ -2075,8 +2723,8 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
+        "source": {
+          "$ref": "#/$defs/ContextBlockId"
         },
         "reclaimed_tokens": {
           "type": "string"
@@ -2086,10 +2734,11 @@
           "const": "tool_output_pruned"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
-        "tool_call_id",
+        "source",
         "reclaimed_tokens"
       ]
     },
@@ -2111,6 +2760,7 @@
           "const": "mode_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2136,6 +2786,7 @@
           "const": "permission_mode_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta"
@@ -2155,6 +2806,7 @@
           "const": "plan_submitted"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2184,6 +2836,7 @@
           "const": "plan_reviewed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2224,6 +2877,7 @@
           "const": "model_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2245,6 +2899,7 @@
           "const": "model_context_cleared"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2261,18 +2916,19 @@
           "$ref": "#/$defs/ContextItemId"
         },
         "effective_after_agent_turn": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "type": {
           "type": "string",
           "const": "context_item_pinned"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
-        "item_id"
+        "item_id",
+        "effective_after_agent_turn"
       ]
     },
     {
@@ -2285,18 +2941,19 @@
           "$ref": "#/$defs/ContextItemId"
         },
         "effective_after_agent_turn": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "type": {
           "type": "string",
           "const": "context_item_evicted"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
-        "item_id"
+        "item_id",
+        "effective_after_agent_turn"
       ]
     },
     {
@@ -2335,6 +2992,7 @@
           "const": "user_shell_state_changed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2365,6 +3023,7 @@
           "const": "hook_failed"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2397,6 +3056,7 @@
           "const": "command_finished"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2425,6 +3085,7 @@
           "const": "guard_triggered"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2447,6 +3108,7 @@
           "const": "error"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -2475,6 +3137,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "protocol_version",
         "client_id",
@@ -2494,6 +3157,3378 @@
       "description": "Stable identifier of an engine session.",
       "type": "string"
     },
+    "SessionNavigationTarget": {
+      "description": "A request to the initiating client, resolved through its ordinary session/history APIs.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "session"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "session_id"
+          ]
+        },
+        {
+          "description": "Select the nearest surviving transcript row at or before this durable sequence.",
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "transcript"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "sequence"
+          ]
+        }
+      ]
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "SessionStateSnapshot": {
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "driver_client_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClientId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_alias": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thinking": {
+          "$ref": "#/$defs/ThinkingLevel"
+        },
+        "mode_id": {
+          "$ref": "#/$defs/ModeId"
+        },
+        "active_turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionActiveTurn"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_turns": {
+          "type": "string"
+        },
+        "shell": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionShellState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "compaction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionCompactionState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queued_messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionQueuedPreview"
+          },
+          "maxItems": 128
+        },
+        "plugin_statuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionPluginStatus"
+          },
+          "maxItems": 64
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionBudgetState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "through",
+        "driver_client_id",
+        "title",
+        "model_alias",
+        "provider",
+        "thinking",
+        "mode_id",
+        "active_turn",
+        "completed_turns",
+        "shell",
+        "compaction",
+        "queued_messages",
+        "plugin_statuses",
+        "budget"
+      ]
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
+      "type": "string"
+    },
+    "ThinkingLevel": {
+      "description": "Provider-neutral thinking effort selected by a model alias or session.",
+      "oneOf": [
+        {
+          "description": "Do not request provider reasoning output.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Prefer the provider's least expensive reasoning mode.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Prefer a balanced reasoning mode.",
+          "type": "string",
+          "const": "medium"
+        },
+        {
+          "description": "Prefer the provider's strongest reasoning mode.",
+          "type": "string",
+          "const": "high"
+        }
+      ]
+    },
+    "ModeId": {
+      "description": "Open identifier of a built-in or extension-provided mode.",
+      "type": "string"
+    },
+    "SessionActiveTurn": {
+      "type": "object",
+      "properties": {
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "started": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "started"
+      ]
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "SessionShellState": {
+      "type": "object",
+      "properties": {
+        "shell_id": {
+          "$ref": "#/$defs/ShellId"
+        },
+        "command_preview": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "shell_id",
+        "command_preview",
+        "truncated"
+      ]
+    },
+    "ShellId": {
+      "description": "Engine-generated identifier of one foreground user shell.",
+      "type": "string"
+    },
+    "SessionCompactionState": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "text": {
+          "$ref": "#/$defs/TranscriptTailText"
+        },
+        "thinking": {
+          "$ref": "#/$defs/TranscriptTailText"
+        },
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "started": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "text",
+        "thinking",
+        "summary_turn_id",
+        "started",
+        "attempt"
+      ]
+    },
+    "TranscriptTailText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 65536,
+          "x-rw-max-utf8-bytes": 65536
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "truncated"
+      ]
+    },
+    "SessionQueuedPreview": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "position",
+        "preview",
+        "truncated"
+      ]
+    },
+    "SessionPluginStatus": {
+      "type": "object",
+      "properties": {
+        "plugin_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "x-rw-max-utf8-bytes": 160
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "source": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plugin_id",
+        "status",
+        "source"
+      ]
+    },
+    "SessionBudgetState": {
+      "type": "object",
+      "properties": {
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "level": {
+          "$ref": "#/$defs/BudgetLevel"
+        },
+        "scope": {
+          "$ref": "#/$defs/BudgetScope"
+        },
+        "unit": {
+          "$ref": "#/$defs/BudgetUnit"
+        },
+        "current": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "turn_id",
+        "level",
+        "scope",
+        "unit",
+        "current",
+        "limit"
+      ]
+    },
+    "BudgetLevel": {
+      "description": "Severity of a budget transition.",
+      "type": "string",
+      "enum": [
+        "warning",
+        "spend_rate_alarm",
+        "hard_cap"
+      ]
+    },
+    "BudgetScope": {
+      "description": "Scope whose spend triggered a budget transition.",
+      "type": "string",
+      "enum": [
+        "session",
+        "daily",
+        "trailing_minute"
+      ]
+    },
+    "BudgetUnit": {
+      "description": "Billing unit evaluated by a budget guardrail.",
+      "type": "string",
+      "enum": [
+        "micros_usd",
+        "ai_credit_micros",
+        "tokens"
+      ]
+    },
+    "SessionControlsSnapshot": {
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "controls": {
+          "$ref": "#/$defs/SessionControls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "through",
+        "controls"
+      ]
+    },
+    "SessionControls": {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionQuestion"
+          },
+          "maxItems": 64
+        },
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionApproval"
+          },
+          "maxItems": 128
+        },
+        "pending_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "questions",
+        "approvals",
+        "pending_plan"
+      ]
+    },
+    "SessionQuestion": {
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "question": {
+          "$ref": "#/$defs/Question"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "turn_id",
+        "question"
+      ]
+    },
+    "QuestionId": {
+      "description": "Stable identifier of an interactive question.",
+      "type": "string"
+    },
+    "Question": {
+      "description": "A typed question sent to an interactive client.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "response_kind": {
+          "$ref": "#/$defs/QuestionResponseKind"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          }
+        },
+        "model_switch": {
+          "description": "Present only when this question gates a model switch.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelSwitchQuestion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "prompt",
+        "response_kind",
+        "options"
+      ]
+    },
+    "QuestionResponseKind": {
+      "description": "Shape of a response accepted for an interactive question.",
+      "type": "string",
+      "enum": [
+        "text",
+        "select_one"
+      ]
+    },
+    "QuestionOption": {
+      "description": "A selectable response to an engine question.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_context_transfer": {
+          "description": "Present only for the three typed model-context transfer choices.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelContextTransfer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "ModelContextTransfer": {
+      "description": "Explicit handling of existing conversation context when changing models.",
+      "oneOf": [
+        {
+          "description": "Compact the current conversation, then give the summary to the new model.",
+          "type": "string",
+          "const": "pass_summary"
+        },
+        {
+          "description": "Keep the complete current conversation for the new model.",
+          "type": "string",
+          "const": "pass_full_context"
+        },
+        {
+          "description": "Retain only system/project instructions and start a fresh conversation.",
+          "type": "string",
+          "const": "start_without_context"
+        }
+      ]
+    },
+    "ModelSwitchQuestion": {
+      "description": "Target retained in a durable model-switch interaction until the user chooses\nhow existing context should cross the model boundary.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "provider"
+      ]
+    },
+    "SessionApproval": {
+      "type": "object",
+      "properties": {
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "args": true,
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCapability"
+          }
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnifiedDiff"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "invocation_id",
+        "tool_call_id",
+        "turn_id",
+        "name",
+        "args",
+        "capabilities",
+        "rationale",
+        "diff"
+      ]
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
+    },
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ToolCapability": {
+      "description": "Capabilities used by the permission engine for a tool invocation.",
+      "type": "string",
+      "enum": [
+        "read_filesystem",
+        "write_filesystem",
+        "network",
+        "execute"
+      ]
+    },
+    "UnifiedDiff": {
+      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "unified_diff": {
+          "type": "string"
+        },
+        "arguments_hash": {
+          "type": "string"
+        },
+        "base_hash": {
+          "type": "string"
+        },
+        "diff_hash": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "path",
+        "unified_diff",
+        "arguments_hash",
+        "base_hash",
+        "diff_hash",
+        "truncated"
+      ]
+    },
+    "PlanArtifact": {
+      "description": "Durable plan submitted before entering execute mode.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "summary_md": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          }
+        },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "summary_md",
+        "steps",
+        "open_questions"
+      ]
+    },
+    "PlanStep": {
+      "description": "One verifiable step in a model-submitted plan artifact.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "files_touched": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verification": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "files_touched",
+        "verification"
+      ]
+    },
+    "FamilyControlsSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "description": "Reconnect starts with an unconditional read; this fence belongs to the live host.",
+          "$ref": "#/$defs/SequenceId"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FamilyControlRow"
+          },
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "children"
+      ],
+      "x-rw-max-json-bytes": 524288
+    },
+    "FamilyControlRow": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "controls": {
+          "$ref": "#/$defs/ChildControlSummary"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "controls"
+      ]
+    },
+    "ChildControlTarget": {
+      "description": "An exact path through the live parent's owned child bindings.",
+      "type": "object",
+      "properties": {
+        "ancestry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChildControlHop"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ancestry",
+        "session_id"
+      ]
+    },
+    "ChildControlHop": {
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "ChildControlSummary": {
+      "description": "Revision is a live control fence, not a journal cursor. `through` is the durable cut.",
+      "type": "object",
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "questions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "approvals": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "pending_plan": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "through",
+        "questions",
+        "approvals",
+        "pending_plan",
+        "available"
+      ]
+    },
+    "ChildReadScopeResult": {
+      "description": "Bounded canonical ancestry resolution does not block live control reads.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "$ref": "#/$defs/SessionReadScope"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "scope"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "session_id",
+            "through",
+            "target"
+          ]
+        }
+      ]
+    },
+    "SessionReadScope": {
+      "description": "Direct session authority or an explicit path from an independently authorized root.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "root_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "ancestry": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionReadAncestor"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "type": {
+              "type": "string",
+              "const": "descendant"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "root_session_id",
+            "ancestry"
+          ]
+        }
+      ]
+    },
+    "SessionReadAncestor": {
+      "description": "A hop is bound to its parent's canonical spawn source, never just a child name.",
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source_sequence": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id",
+        "source_sequence"
+      ]
+    },
+    "ChildControlsSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SessionControlsSnapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "snapshot"
+      ]
+    },
+    "UiCatalog": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiCatalogEntry"
+          },
+          "maxItems": 128
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "entries"
+      ],
+      "x-rw-max-json-bytes": 262144
+    },
+    "UiCatalogEntry": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/UiContributionOwner"
+        },
+        "descriptor": {
+          "$ref": "#/$defs/UiDisplayDescriptor"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "descriptor"
+      ]
+    },
+    "UiContributionOwner": {
+      "type": "object",
+      "properties": {
+        "extension": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "generation": {
+          "$ref": "#/$defs/UiGenerationId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "extension",
+        "generation"
+      ]
+    },
+    "UiGenerationId": {
+      "description": "An application-minted endpoint epoch; restarting the same artifact creates a\ndifferent generation. It is a correlation identifier, never permission.",
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "UiDisplayDescriptor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "surface": {
+          "$ref": "#/$defs/UiDisplaySurface"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiDisplayField"
+          },
+          "maxItems": 32
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiDisplayAction"
+          },
+          "maxItems": 4
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "surface",
+        "fields",
+        "actions"
+      ]
+    },
+    "UiDisplaySurface": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tool_name": {
+              "type": "string"
+            },
+            "surface": {
+              "type": "string",
+              "const": "tool"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface",
+            "tool_name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "surface": {
+              "type": "string",
+              "const": "panel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface"
+          ]
+        }
+      ]
+    },
+    "UiDisplayField": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "kind": {
+              "type": "string",
+              "const": "badge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "max_items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "max_items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "columns": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rw-max-utf8-bytes": 128,
+                "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+              }
+            },
+            "max_rows": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "columns",
+            "max_rows"
+          ]
+        }
+      ]
+    },
+    "UiDisplayAction": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "UiPanels": {
+      "description": "One coalesced surface per live panel. Historical tool surfaces use their\ncanonical result source and do not consume this ephemeral registry.",
+      "type": "object",
+      "properties": {
+        "panels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiPanelSnapshot"
+          },
+          "maxItems": 8
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "panels"
+      ],
+      "x-rw-max-json-bytes": 524288
+    },
+    "UiPanelSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "presentation": {
+          "$ref": "#/$defs/UiPresentation"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "presentation"
+      ]
+    },
+    "UiPresentation": {
+      "description": "A self-contained, host-produced surface. A canonical tool result retains this\ndescriptor so historical rendering does not consult a different live plugin.",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/UiContributionOwner"
+        },
+        "descriptor": {
+          "$ref": "#/$defs/UiDisplayDescriptor"
+        },
+        "projected": {
+          "$ref": "#/$defs/UiProjectedFields"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "descriptor",
+        "projected"
+      ],
+      "x-rw-max-json-bytes": 65536,
+      "x-rw-array-pair": {
+        "left": [
+          "descriptor",
+          "fields"
+        ],
+        "right": [
+          "projected",
+          "fields"
+        ],
+        "identity": "id",
+        "discriminator": "kind",
+        "maxItems": 32,
+        "collections": [
+          {
+            "tag": "list",
+            "values": "values",
+            "limit": "max_items"
+          },
+          {
+            "tag": "table",
+            "values": "rows",
+            "limit": "max_rows",
+            "width": "columns"
+          }
+        ]
+      }
+    },
+    "UiProjectedFields": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiProjectedField"
+          },
+          "maxItems": 32
+        },
+        "truncated": {
+          "description": "At least one source value was truncated by a declared or aggregate bound.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "fields",
+        "truncated"
+      ]
+    },
+    "UiProjectedField": {
+      "description": "Host-produced data, keyed by the declared field identity. Missing/wrong-shaped\nsource values become null or empty collections instead of executing coercions.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "x-rw-max-utf8-bytes": 4096,
+                  "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "x-rw-max-utf8-bytes": 4096,
+                  "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "badge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "values": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-rw-max-utf8-bytes": 4096,
+                "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "rows": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "x-rw-max-utf8-bytes": 4096,
+                  "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "rows"
+          ]
+        }
+      ]
+    },
+    "EventMeta": {
+      "description": "Metadata common to persisted and streamed events.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sequence_id": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "emitted_at": {
+          "type": "string"
+        },
+        "caused_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "session_id",
+        "sequence_id",
+        "emitted_at"
+      ]
+    },
+    "TodoSnapshot": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TodoItem"
+          },
+          "maxItems": 128
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "x-rw-item-budget": {
+        "array": "items",
+        "identity": "id",
+        "fields": [
+          "id",
+          "content"
+        ],
+        "maxUtf8Bytes": 65536
+      }
+    },
+    "TodoItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+          "x-rw-max-utf8-bytes": 256
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+          "x-rw-max-utf8-bytes": 4096
+        },
+        "status": {
+          "$ref": "#/$defs/TodoStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "content",
+        "status"
+      ]
+    },
+    "TodoStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed",
+        "blocked"
+      ]
+    },
+    "SessionChildrenResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "snapshot": {
+              "$ref": "#/$defs/SessionChildrenSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "through",
+            "target"
+          ]
+        }
+      ]
+    },
+    "SessionChildrenSnapshot": {
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionChildState"
+          },
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "through",
+        "children"
+      ],
+      "x-rw-max-json-bytes": 2097152,
+      "x-rw-item-budget": {
+        "array": "children",
+        "identity": "subagent_id",
+        "fields": [],
+        "maxUtf8Bytes": 0
+      }
+    },
+    "SessionChildState": {
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "spawned": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "spawned_turn": {
+          "type": "string"
+        },
+        "task_preview": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-rw-max-utf8-bytes": 1024
+        },
+        "task_truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "child_session_id",
+        "spawned",
+        "spawned_turn",
+        "task_preview",
+        "task_truncated"
+      ]
+    },
+    "TodoReadResult": {
+      "description": "One bounded read either returns an exact snapshot or reports indexed progress.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "todos": {
+              "$ref": "#/$defs/TodoReadSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "todos"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "through",
+            "target"
+          ]
+        }
+      ]
+    },
+    "TodoReadSnapshot": {
+      "description": "Exact source prefix applied to a complete task-list read.",
+      "type": "object",
+      "properties": {
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot": {
+          "$ref": "#/$defs/TodoSnapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "through",
+        "snapshot"
+      ]
+    },
+    "TranscriptTailResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "page": {
+              "$ref": "#/$defs/TranscriptTailPage"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "page"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "$ref": "#/$defs/TranscriptView"
+            },
+            "identity": {
+              "$ref": "#/$defs/TranscriptTailIdentity"
+            },
+            "type": {
+              "type": "string",
+              "const": "changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "view",
+            "identity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "through",
+            "target"
+          ]
+        }
+      ]
+    },
+    "TranscriptTailPage": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "identity": {
+          "$ref": "#/$defs/TranscriptTailIdentity"
+        },
+        "content": {
+          "$ref": "#/$defs/TranscriptTailContent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view",
+        "identity",
+        "content"
+      ],
+      "x-rw-max-json-bytes": 1048576
+    },
+    "TranscriptView": {
+      "description": "Exact canonical prefix interpreted by a complete semantic view.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "projection_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "minItems": 32,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "projection_version",
+        "generation",
+        "through",
+        "digest"
+      ]
+    },
+    "TranscriptGeneration": {
+      "description": "Current semantic ordering generation, changed by rewind.",
+      "type": "string"
+    },
+    "TranscriptTailIdentity": {
+      "description": "Structural and response identity; pages can advance their source cut within this identity.",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "turn_started": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "turn_started",
+        "response_epoch",
+        "tools_epoch"
+      ]
+    },
+    "TranscriptTailContent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "preview": {
+              "$ref": "#/$defs/TranscriptTailText"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "preview"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "preview": {
+              "$ref": "#/$defs/TranscriptTailText"
+            },
+            "type": {
+              "type": "string",
+              "const": "thinking"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "preview"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptTailCitation"
+              },
+              "maxItems": 32
+            },
+            "next_offset": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "citations"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset",
+            "items",
+            "next_offset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptTailTool"
+              },
+              "maxItems": 32
+            },
+            "next_offset": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "tools"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset",
+            "items",
+            "next_offset"
+          ]
+        }
+      ]
+    },
+    "TranscriptTailCitation": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "uri": {
+          "type": "string",
+          "maxLength": 65536,
+          "x-rw-max-utf8-bytes": 65536
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 65536,
+          "x-rw-max-utf8-bytes": 65536
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "uri",
+        "title"
+      ]
+    },
+    "TranscriptTailTool": {
+      "description": "Active invocation preview. Argument and diff bodies remain canonical content sources.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "call_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "arguments": {
+          "$ref": "#/$defs/TranscriptBodyPreview"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output": {
+          "$ref": "#/$defs/TranscriptTailText"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "turn_id",
+        "invocation_id",
+        "name",
+        "call_index",
+        "arguments",
+        "diff",
+        "output"
+      ]
+    },
+    "TranscriptBodyPreview": {
+      "description": "A bounded prefix with an authoritative source for the complete body.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "format": {
+          "$ref": "#/$defs/TranscriptPreviewFormat"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "format",
+        "complete",
+        "source"
+      ]
+    },
+    "TranscriptPreviewFormat": {
+      "description": "Preview syntax. Incomplete JSON is display text and must not be parsed as JSON.",
+      "type": "string",
+      "enum": [
+        "text",
+        "json"
+      ]
+    },
+    "TranscriptContentSource": {
+      "description": "Body location within the exact journal prefix carried by its enclosing view.",
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "selector": {
+          "$ref": "#/$defs/TranscriptContentSelector"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "selector"
+      ]
+    },
+    "TranscriptContentSelector": {
+      "description": "A closed selector into one canonical event. It never names a filesystem path.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "conversation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_block"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_arguments"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_output"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_diff"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_presentation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "invocation_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "command_message"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_command"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_output"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_task"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_result"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_diff"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "TranscriptReadResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "page": {
+              "$ref": "#/$defs/TranscriptPage"
+            },
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "page"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "through": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "catching_up"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "through",
+            "target"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "$ref": "#/$defs/TranscriptView"
+            },
+            "type": {
+              "type": "string",
+              "const": "ordering_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "view"
+          ]
+        }
+      ]
+    },
+    "TranscriptPage": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "first_ordinal": {
+          "$ref": "#/$defs/TranscriptOrdinal"
+        },
+        "total_items": {
+          "$ref": "#/$defs/TranscriptOrdinal"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TranscriptItem"
+          }
+        },
+        "anchor": {
+          "$ref": "#/$defs/TranscriptAnchor"
+        },
+        "invalidation": {
+          "$ref": "#/$defs/TranscriptInvalidation"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view",
+        "first_ordinal",
+        "total_items",
+        "items",
+        "anchor",
+        "invalidation"
+      ]
+    },
+    "TranscriptOrdinal": {
+      "description": "Logical row position, distinct from a canonical event sequence.",
+      "type": "string"
+    },
+    "TranscriptItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TranscriptItemId"
+        },
+        "ordinal": {
+          "$ref": "#/$defs/TranscriptOrdinal"
+        },
+        "revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "agent_turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content": {
+          "$ref": "#/$defs/TranscriptContent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "ordinal",
+        "revision",
+        "agent_turn",
+        "content"
+      ]
+    },
+    "TranscriptItemId": {
+      "description": "Stable item identity, independent of its current logical ordinal.",
+      "$ref": "#/$defs/SequenceId"
+    },
+    "TranscriptContent": {
+      "description": "Bounded, renderer-independent content of one stable logical transcript row.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "status": {
+              "$ref": "#/$defs/TurnStatus"
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            },
+            "cost": {
+              "$ref": "#/$defs/Cost"
+            },
+            "type": {
+              "type": "string",
+              "const": "turn_summary"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "turn_id",
+            "status",
+            "usage",
+            "cost"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "role": {
+              "$ref": "#/$defs/Role"
+            },
+            "blocks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptConversationBlock"
+              }
+            },
+            "omitted_blocks": {
+              "type": "boolean"
+            },
+            "source": {
+              "$ref": "#/$defs/TranscriptContentSource"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "role",
+            "blocks",
+            "omitted_blocks",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "name": {
+              "type": "string"
+            },
+            "call_index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "arguments": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "diff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptBodyPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptToolStatus"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "invocation_id",
+            "name",
+            "call_index",
+            "arguments",
+            "diff",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "message": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "command"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "name",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptBodyPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptBodyPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "active": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "type": {
+              "type": "string",
+              "const": "shell"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "command",
+            "output",
+            "active",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "subagent_id": {
+              "$ref": "#/$defs/SubagentId"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "task": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "status": {
+              "$ref": "#/$defs/TranscriptSubagentStatus"
+            },
+            "type": {
+              "type": "string",
+              "const": "subagent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "subagent_id",
+            "session_id",
+            "task",
+            "status"
+          ]
+        }
+      ]
+    },
+    "TurnStatus": {
+      "description": "Terminal state of an agent turn.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "interrupted",
+        "failed",
+        "max_turns",
+        "doom_loop",
+        "budget_exceeded"
+      ]
+    },
+    "Usage": {
+      "description": "Provider-reported token accounting normalized by the router.",
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "string"
+        },
+        "cache_read_tokens": {
+          "type": "string"
+        },
+        "cache_write_tokens": {
+          "type": "string"
+        },
+        "reasoning_tokens": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens"
+      ]
+    },
+    "Cost": {
+      "description": "Provider-neutral billing/quota disposition for a completed turn. A missing\nprice is never represented as a zero-dollar API charge.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "amount_micros": {
+              "type": "string"
+            },
+            "currency": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "monetary"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "amount_micros",
+            "currency"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "credits_micros": {
+              "type": "string"
+            },
+            "nominal_amount_micros": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "currency": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "ai_credits"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "credits_micros"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "used": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "subscription_quota"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "unavailable"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "Role": {
+      "description": "A provider-neutral role in the conversation IR.",
+      "type": "string",
+      "enum": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ]
+    },
+    "TranscriptConversationBlock": {
+      "description": "Displayable conversation content; provider continuation signatures stay in IR.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "body"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "reasoning"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "body"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/TranscriptContentSource"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "citation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "body"
+          ]
+        }
+      ]
+    },
+    "TranscriptToolStatus": {
+      "description": "Tool invocation lifecycle independent of provider call/result IR placement.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "running"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "is_error": {
+              "type": "boolean"
+            },
+            "output": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "presentation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptToolPresentation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "is_error",
+            "output",
+            "presentation"
+          ]
+        }
+      ]
+    },
+    "TranscriptToolPresentation": {
+      "description": "Compact reference to a complete host-projected tool surface.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "source"
+      ]
+    },
+    "TranscriptSubagentStatus": {
+      "description": "Child lifecycle without retaining its full historical event projection.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "running"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/SubagentStatus"
+            },
+            "result": {
+              "$ref": "#/$defs/TranscriptBodyPreview"
+            },
+            "touched_file_count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "diff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptContentSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "status",
+            "result",
+            "touched_file_count",
+            "diff"
+          ]
+        }
+      ]
+    },
+    "SubagentStatus": {
+      "description": "Terminal disposition of one child-agent invocation.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "max_turns"
+      ]
+    },
+    "TranscriptAnchor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "unspecified"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "exact"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "requested": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "replacement": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TranscriptItemId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "replaced"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "requested",
+            "replacement"
+          ]
+        }
+      ]
+    },
+    "TranscriptInvalidation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "all"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptItemId"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "items"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "items"
+          ]
+        }
+      ]
+    },
+    "TranscriptContentPage": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "next_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "format": {
+          "$ref": "#/$defs/TranscriptPreviewFormat"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view",
+        "source",
+        "offset",
+        "next_offset",
+        "total_bytes",
+        "format",
+        "text"
+      ]
+    },
     "CommandOutcome": {
       "description": "Immediate disposition of a client command, delivered on the event channel.",
       "oneOf": [
@@ -2505,6 +6540,7 @@
               "const": "accepted"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -2520,6 +6556,7 @@
               "const": "rejected"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "error"
@@ -2545,6 +6582,7 @@
         },
         "details": true
       },
+      "additionalProperties": false,
       "required": [
         "category",
         "code",
@@ -2569,6 +6607,17 @@
       "description": "Exact engine-side context breakdown for one assembled request.",
       "type": "object",
       "properties": {
+        "through": {
+          "description": "Exact canonical source prefix used to assemble this read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "turn_id": {
           "anyOf": [
             {
@@ -2593,8 +6642,7 @@
         },
         "context_window_known": {
           "description": "False when zero capacity means unknown rather than exhausted.",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "context_window_reason": {
           "description": "Provider-neutral explanation for an unknown context window.",
@@ -2616,18 +6664,16 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "stable_prefix_hash",
         "used_tokens",
         "usable_tokens",
         "reserved_tokens",
+        "context_window_known",
         "cache_breakpoints",
         "items"
       ]
-    },
-    "TurnId": {
-      "description": "Stable identifier of a conversation turn.",
-      "type": "string"
     },
     "CacheBreakpoint": {
       "description": "One explicit cache boundary after an assembled item.",
@@ -2643,7 +6689,11 @@
             }
           ]
         }
-      }
+      },
+      "additionalProperties": false,
+      "required": [
+        "after_item_id"
+      ]
     },
     "ContextItemId": {
       "description": "Stable identifier of one assembled context item.",
@@ -2679,6 +6729,7 @@
           "$ref": "#/$defs/ContextItemState"
         }
       },
+      "additionalProperties": false,
       "required": [
         "item_id",
         "kind",
@@ -2718,6 +6769,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "pinned",
         "evicted",
@@ -2732,11 +6784,15 @@
         "utc_day": {
           "type": "string"
         },
-        "turns": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/TurnAccounting"
-          }
+        "subscription_quota": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionQuotaSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "session_usage": {
           "$ref": "#/$defs/Usage"
@@ -2760,16 +6816,13 @@
           "type": "string"
         },
         "session_subscription_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_subscription_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "trailing_minute_subscription_tokens": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "cache_hit_basis_points": {
           "type": "integer",
@@ -2781,64 +6834,55 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "daily_cost_cap_micros_usd": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "session_ai_credit_cap_micros": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "daily_ai_credit_cap_micros": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "session_token_cap": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "daily_token_cap": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "spend_rate_alarm_micros_usd_per_minute": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "ai_credit_rate_alarm_micros_per_minute": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "token_rate_alarm_per_minute": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "hard_cap_reached": {
           "type": "boolean"
@@ -2850,33 +6894,28 @@
           "type": "boolean"
         },
         "session_subscription_quota_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "session_cost_unavailable_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "session_non_usd_monetary_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_subscription_quota_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_cost_unavailable_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         },
         "daily_non_usd_monetary_entries": {
-          "type": "string",
-          "default": "0"
+          "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "utc_day",
-        "turns",
+        "subscription_quota",
         "session_usage",
         "session_cost_micros_usd",
         "session_ai_credit_micros",
@@ -2884,165 +6923,51 @@
         "daily_ai_credit_micros",
         "trailing_minute_cost_micros_usd",
         "trailing_minute_ai_credit_micros",
+        "session_subscription_tokens",
+        "daily_subscription_tokens",
+        "trailing_minute_subscription_tokens",
         "cache_hit_basis_points",
+        "session_cost_cap_micros_usd",
+        "daily_cost_cap_micros_usd",
+        "session_ai_credit_cap_micros",
+        "daily_ai_credit_cap_micros",
+        "session_token_cap",
+        "daily_token_cap",
+        "spend_rate_alarm_micros_usd_per_minute",
+        "ai_credit_rate_alarm_micros_per_minute",
+        "token_rate_alarm_per_minute",
         "hard_cap_reached",
         "session_monetary_accounting_complete",
-        "daily_monetary_accounting_complete"
+        "daily_monetary_accounting_complete",
+        "session_subscription_quota_entries",
+        "session_cost_unavailable_entries",
+        "session_non_usd_monetary_entries",
+        "daily_subscription_quota_entries",
+        "daily_cost_unavailable_entries",
+        "daily_non_usd_monetary_entries"
       ]
     },
-    "TurnAccounting": {
-      "description": "Usage and billing attributed to one completed agent turn.",
+    "SubscriptionQuotaSummary": {
       "type": "object",
       "properties": {
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
+        "used": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
         },
-        "attribution": {
-          "$ref": "#/$defs/AccountingAttribution"
-        },
-        "usage": {
-          "$ref": "#/$defs/Usage"
-        },
-        "cost": {
-          "$ref": "#/$defs/Cost"
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "x-rw-max-utf8-bytes": 128
         }
       },
+      "additionalProperties": false,
       "required": [
-        "turn_id",
-        "attribution",
-        "usage",
-        "cost"
-      ]
-    },
-    "AccountingAttribution": {
-      "description": "Runtime role to which usage and cost are attributed.",
-      "type": "string",
-      "enum": [
-        "main",
-        "compaction",
-        "subagent",
-        "title"
-      ]
-    },
-    "Usage": {
-      "description": "Provider-reported token accounting normalized by the router.",
-      "type": "object",
-      "properties": {
-        "input_tokens": {
-          "type": "string"
-        },
-        "output_tokens": {
-          "type": "string"
-        },
-        "cache_read_tokens": {
-          "type": "string"
-        },
-        "cache_write_tokens": {
-          "type": "string"
-        },
-        "reasoning_tokens": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "input_tokens",
-        "output_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "reasoning_tokens"
-      ]
-    },
-    "Cost": {
-      "description": "Provider-neutral billing/quota disposition for a completed turn. A missing\nprice is never represented as a zero-dollar API charge.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "amount_micros": {
-              "type": "string"
-            },
-            "currency": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "monetary"
-            }
-          },
-          "required": [
-            "kind",
-            "amount_micros",
-            "currency"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "credits_micros": {
-              "type": "string"
-            },
-            "nominal_amount_micros": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "currency": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "ai_credits"
-            }
-          },
-          "required": [
-            "kind",
-            "credits_micros"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "used": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "unit": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "subscription_quota"
-            }
-          },
-          "required": [
-            "kind"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "reason": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "unavailable"
-            }
-          },
-          "required": [
-            "kind",
-            "reason"
-          ]
-        }
+        "used",
+        "unit"
       ]
     },
     "SessionReview": {
@@ -3059,6 +6984,7 @@
           }
         }
       },
+      "additionalProperties": false,
       "required": [
         "session_id",
         "files"
@@ -3093,6 +7019,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "unified_diff",
@@ -3123,6 +7050,17 @@
       "description": "Exact assembled model request exposed for prompt transparency.",
       "type": "object",
       "properties": {
+        "through": {
+          "description": "Exact canonical source prefix used to assemble this read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "turn_id": {
           "anyOf": [
             {
@@ -3161,6 +7099,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "model_alias",
         "turns",
@@ -3169,10 +7108,6 @@
         "cache_breakpoints",
         "estimated_tokens"
       ]
-    },
-    "ModelAlias": {
-      "description": "Provider-blind model alias resolved by the engine router.",
-      "type": "string"
     },
     "Turn": {
       "description": "One conversation turn in the internal message representation.",
@@ -3191,20 +7126,11 @@
           "$ref": "#/$defs/TurnMeta"
         }
       },
+      "additionalProperties": false,
       "required": [
         "role",
         "blocks",
         "meta"
-      ]
-    },
-    "Role": {
-      "description": "A provider-neutral role in the conversation IR.",
-      "type": "string",
-      "enum": [
-        "system",
-        "user",
-        "assistant",
-        "tool"
       ]
     },
     "Block": {
@@ -3221,6 +7147,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "text"
@@ -3243,6 +7170,7 @@
               "const": "thinking"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "content"
@@ -3263,6 +7191,7 @@
               "const": "tool_call"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "id",
@@ -3287,6 +7216,7 @@
               "const": "tool_result"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "id",
@@ -3308,6 +7238,7 @@
               "const": "image"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "media_type",
@@ -3337,16 +7268,13 @@
               "const": "citation"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "uri"
           ]
         }
       ]
-    },
-    "ToolCallId": {
-      "description": "Stable identifier assigned to a model tool call.",
-      "type": "string"
     },
     "ToolOutput": {
       "description": "Provider-neutral output produced by a tool.",
@@ -3362,6 +7290,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "text"
@@ -3376,6 +7305,7 @@
               "const": "structured"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "value"
@@ -3395,6 +7325,7 @@
               "const": "mixed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "parts"
@@ -3416,6 +7347,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "text"
@@ -3430,6 +7362,7 @@
               "const": "structured"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "value"
@@ -3449,6 +7382,7 @@
               "const": "image"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "media_type",
@@ -3471,6 +7405,7 @@
               "const": "inline_base64"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "data"
@@ -3487,6 +7422,7 @@
               "const": "url"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "url"
@@ -3502,25 +7438,26 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "model": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "synthetic": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "summary": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         }
-      }
+      },
+      "additionalProperties": false,
+      "required": [
+        "synthetic",
+        "summary"
+      ]
     },
     "PromptTool": {
       "description": "Provider-neutral tool definition included in a prompt dump.",
@@ -3534,15 +7471,12 @@
         },
         "input_schema": true
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "description",
         "input_schema"
       ]
-    },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
-      "type": "string"
     },
     "SessionDescriptor": {
       "description": "One active or resumable session returned by the engine host.",
@@ -3552,9 +7486,8 @@
           "$ref": "#/$defs/SessionId"
         },
         "title": {
-          "description": "Human-facing session title. Empty only when reading an older peer.",
-          "type": "string",
-          "default": ""
+          "description": "Human-facing session title.",
+          "type": "string"
         },
         "workspace_name": {
           "type": "string"
@@ -3576,8 +7509,10 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "session_id",
+        "title",
         "workspace_name",
         "model",
         "shell_active"
@@ -3609,6 +7544,7 @@
           "$ref": "#/$defs/SubagentActivity"
         }
       },
+      "additionalProperties": false,
       "required": [
         "subagent_id",
         "child_session_id",
@@ -3618,10 +7554,6 @@
         "isolation",
         "activity"
       ]
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
-      "type": "string"
     },
     "SubagentIsolation": {
       "description": "Filesystem isolation selected for one child agent.",
@@ -3646,20 +7578,6 @@
         "idle"
       ]
     },
-    "SubagentReplayItem": {
-      "description": "One ordered durable child event carried inside a bounded replay batch.",
-      "type": "object",
-      "properties": {
-        "child_sequence": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "event": true
-      },
-      "required": [
-        "child_sequence",
-        "event"
-      ]
-    },
     "CommandDescriptor": {
       "type": "object",
       "properties": {
@@ -3673,14 +7591,15 @@
           "type": "string"
         },
         "source": {
-          "$ref": "#/$defs/CommandSource",
-          "default": "builtin"
+          "$ref": "#/$defs/CommandSource"
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "description",
-        "usage"
+        "usage",
+        "source"
       ]
     },
     "CommandSource": {
@@ -3710,15 +7629,12 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "description",
         "current"
       ]
-    },
-    "ModeId": {
-      "description": "Open identifier of a built-in or extension-provided mode.",
-      "type": "string"
     },
     "ModelDescriptor": {
       "description": "One concrete provider/model discovered from a live authenticated catalog.",
@@ -3740,8 +7656,7 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ModelAlias"
-          },
-          "default": []
+          }
         },
         "current": {
           "type": "boolean"
@@ -3759,10 +7674,12 @@
           "$ref": "#/$defs/ModelCapabilities"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "display_name",
         "provider",
+        "aliases",
         "current",
         "available",
         "capabilities"
@@ -3788,22 +7705,23 @@
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "max_output_tokens": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "tool_calling",
         "vision",
         "thinking",
-        "cache_behavior"
+        "cache_behavior",
+        "max_context_tokens",
+        "max_output_tokens"
       ]
     },
     "ModelCacheBehavior": {
@@ -3832,6 +7750,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "alias",
         "candidates",
@@ -3871,6 +7790,7 @@
           ]
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "auth_kind",
@@ -3928,6 +7848,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "key",
         "label",
@@ -3969,6 +7890,7 @@
           "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "enabled",
@@ -3990,6 +7912,7 @@
               "const": "disabled"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -4002,6 +7925,7 @@
               "const": "connecting"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -4014,6 +7938,7 @@
               "const": "ready"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -4026,6 +7951,7 @@
               "const": "approval_required"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -4041,6 +7967,7 @@
               "const": "failed"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "message"
@@ -4054,6 +7981,7 @@
               "const": "stopping"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type"
           ]
@@ -4071,6 +7999,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "kind",
         "name"
@@ -4115,9 +8044,11 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "server",
         "transport",
+        "endpoint",
         "origin",
         "defer_tools",
         "fingerprint",
@@ -4172,6 +8103,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "default",
         "effective_rules",
@@ -4225,6 +8157,7 @@
           "$ref": "#/$defs/PermissionDecision"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "pattern",
@@ -4248,6 +8181,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "scope",
@@ -4284,6 +8218,7 @@
               "const": "oauth"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "authorization_url",
@@ -4304,6 +8239,7 @@
               "const": "device_flow"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "verification_uri",
@@ -4323,6 +8259,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "is_directory"
@@ -4348,6 +8285,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "media_type",
@@ -4370,6 +8308,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "content"
@@ -4386,6 +8325,7 @@
               "const": "inline_base64"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "data"
@@ -4416,6 +8356,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "workspace_name",
         "changed_paths",
@@ -4439,48 +8380,12 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "unified_diff",
         "truncated",
         "binary"
-      ]
-    },
-    "EventMeta": {
-      "description": "Metadata common to persisted and streamed events.",
-      "type": "object",
-      "properties": {
-        "protocol_version": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "sequence_id": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "emitted_at": {
-          "type": "string"
-        },
-        "caused_by": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RequestId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "protocol_version",
-        "session_id",
-        "sequence_id",
-        "emitted_at"
       ]
     },
     "WorkspaceRootDescriptor": {
@@ -4499,6 +8404,7 @@
           "type": "boolean"
         }
       },
+      "additionalProperties": false,
       "required": [
         "index",
         "path",
@@ -4506,9 +8412,12 @@
       ]
     },
     "StoredAttachment": {
-      "description": "Durable content-addressed attachment metadata persisted in the event log.",
+      "description": "Durable attachment content and its identity, independent of mutable local paths.",
       "type": "object",
       "properties": {
+        "data": {
+          "$ref": "#/$defs/AttachmentData"
+        },
         "name": {
           "type": "string"
         },
@@ -4528,11 +8437,243 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
+        "data",
         "name",
         "media_type",
         "content_hash",
         "byte_len"
+      ]
+    },
+    "ExtensionStateTransaction": {
+      "description": "One compare-and-swap against the host-bound plugin namespace.\nThe committed event sequence becomes its revision. An acknowledgement and\nits state changes share the same durable commit.",
+      "type": "object",
+      "properties": {
+        "expected_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mutations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExtensionStateMutation"
+          }
+        },
+        "acknowledged": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtensionDeliveryCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected_revision",
+        "mutations",
+        "acknowledged"
+      ]
+    },
+    "ExtensionStateMutation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "value": true,
+            "action": {
+              "type": "string",
+              "const": "set"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "key",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string",
+              "const": "delete"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "key"
+          ]
+        }
+      ]
+    },
+    "ExtensionDeliveryCursor": {
+      "description": "The journal identity of one delivered event, independent of transport retries.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "sequence"
+      ]
+    },
+    "ContextSelection": {
+      "description": "Explicit sources for context produced or retained by the host.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "type": {
+              "type": "string",
+              "const": "plan_review"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "selected_source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "body_source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "type": {
+              "type": "string",
+              "const": "retained"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selected_source",
+            "body_source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "continuation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "InputSelection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "accepted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "transformed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text"
+          ]
+        }
+      ]
+    },
+    "ToolResultReference": {
+      "description": "A provider result selects exactly one earlier authoritative completion body.",
+      "type": "object",
+      "properties": {
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "finished_source": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "invocation_id",
+        "finished_source"
+      ]
+    },
+    "ToolResultAdmission": {
+      "type": "object",
+      "properties": {
+        "encoded_bytes": {
+          "type": "string"
+        },
+        "nodes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "string_bytes": {
+          "type": "string"
+        },
+        "depth": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "encoded_bytes",
+        "nodes",
+        "string_bytes",
+        "depth"
       ]
     },
     "UnrestorablePath": {
@@ -4546,55 +8687,67 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "reason"
       ]
     },
-    "ToolCapability": {
-      "description": "Capabilities used by the permission engine for a tool invocation.",
-      "type": "string",
-      "enum": [
-        "read_filesystem",
-        "write_filesystem",
-        "network",
-        "execute"
-      ]
-    },
-    "UnifiedDiff": {
-      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+    "ToolProgress": {
+      "description": "Replaceable display state; never authoritative tool output or a durable record.",
       "type": "object",
       "properties": {
-        "proposal_id": {
-          "type": "string"
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+(?![\\s\\S])"
         },
-        "path": {
-          "type": "string"
-        },
-        "unified_diff": {
-          "type": "string"
-        },
-        "arguments_hash": {
-          "type": "string"
-        },
-        "base_hash": {
-          "type": "string"
-        },
-        "diff_hash": {
-          "type": "string"
-        },
-        "truncated": {
-          "type": "boolean"
+        "amount": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgressAmount"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
+      "additionalProperties": false,
       "required": [
-        "proposal_id",
-        "path",
-        "unified_diff",
-        "arguments_hash",
-        "base_hash",
-        "diff_hash",
-        "truncated"
+        "message"
+      ]
+    },
+    "ProgressAmount": {
+      "description": "Optional bounded work-count observation. It cannot grant more execution time.",
+      "type": "object",
+      "properties": {
+        "completed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "completed",
+        "total"
+      ]
+    },
+    "ApprovalDecision": {
+      "description": "A driver's decision at the permission chokepoint.",
+      "type": "string",
+      "enum": [
+        "allow_once",
+        "allow_session",
+        "allow_project",
+        "deny"
       ]
     },
     "ToolOutputStream": {
@@ -4605,129 +8758,6 @@
         "stderr"
       ]
     },
-    "QuestionId": {
-      "description": "Stable identifier of an interactive question.",
-      "type": "string"
-    },
-    "Question": {
-      "description": "A typed question sent to an interactive client.",
-      "type": "object",
-      "properties": {
-        "id": {
-          "$ref": "#/$defs/QuestionId"
-        },
-        "prompt": {
-          "type": "string"
-        },
-        "response_kind": {
-          "$ref": "#/$defs/QuestionResponseKind"
-        },
-        "options": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/QuestionOption"
-          }
-        },
-        "model_switch": {
-          "description": "Present only when this question gates a model switch.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModelSwitchQuestion"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "id",
-        "prompt",
-        "response_kind",
-        "options"
-      ]
-    },
-    "QuestionResponseKind": {
-      "description": "Shape of a response accepted for an interactive question.",
-      "type": "string",
-      "enum": [
-        "text",
-        "select_one",
-        "select_many"
-      ]
-    },
-    "QuestionOption": {
-      "description": "A selectable response to an engine question.",
-      "type": "object",
-      "properties": {
-        "value": {
-          "type": "string"
-        },
-        "label": {
-          "type": "string"
-        },
-        "description": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "model_context_transfer": {
-          "description": "Present only for the three typed model-context transfer choices.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModelContextTransfer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "value",
-        "label"
-      ]
-    },
-    "ModelContextTransfer": {
-      "description": "Explicit handling of existing conversation context when changing models.",
-      "oneOf": [
-        {
-          "description": "Compact the current conversation, then give the summary to the new model.",
-          "type": "string",
-          "const": "pass_summary"
-        },
-        {
-          "description": "Keep the complete current conversation for the new model.",
-          "type": "string",
-          "const": "pass_full_context"
-        },
-        {
-          "description": "Retain only system/project instructions and start a fresh conversation.",
-          "type": "string",
-          "const": "start_without_context"
-        }
-      ]
-    },
-    "ModelSwitchQuestion": {
-      "description": "Target retained in a durable model-switch interaction until the user chooses\nhow existing context should cross the model boundary.",
-      "type": "object",
-      "properties": {
-        "model": {
-          "$ref": "#/$defs/ModelAlias"
-        },
-        "provider": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "model"
-      ]
-    },
     "Answer": {
       "description": "One answer returned for a question entry.",
       "type": "object",
@@ -4735,55 +8765,84 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "values": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "value": {
+          "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "question_id",
-        "values"
+        "value"
       ]
     },
-    "TurnStatus": {
-      "description": "Terminal state of an agent turn.",
-      "type": "string",
-      "enum": [
-        "completed",
-        "interrupted",
-        "failed",
-        "max_turns",
-        "doom_loop",
-        "budget_exceeded"
+    "ProviderCallIdentity": {
+      "description": "Host-assigned logical call identity plus a distinct provider attempt.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "description": "Session which owns the provider request.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "budget_session_id": {
+          "description": "Immutable root session whose cap covers this session and its descendants.",
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn_id": {
+          "description": "Durable agent turn which owns this request.",
+          "$ref": "#/$defs/TurnId"
+        },
+        "attribution": {
+          "description": "Separates ordinary generation from compaction, title, and child usage.",
+          "$ref": "#/$defs/AccountingAttribution"
+        },
+        "call_id": {
+          "description": "Bounded host-generated identity, never a model-supplied tool identifier.",
+          "type": "string"
+        },
+        "attempt": {
+          "description": "Retries under a logical call must increment this value.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "budget_session_id",
+        "turn_id",
+        "attribution",
+        "call_id",
+        "attempt"
       ]
     },
-    "BudgetLevel": {
-      "description": "Severity of a budget transition.",
+    "AccountingAttribution": {
+      "description": "Runtime role to which usage and cost are attributed.",
       "type": "string",
       "enum": [
-        "warning",
-        "spend_rate_alarm",
-        "hard_cap"
+        "main",
+        "compaction",
+        "subagent",
+        "title"
       ]
     },
-    "BudgetScope": {
-      "description": "Scope whose spend triggered a budget transition.",
-      "type": "string",
-      "enum": [
-        "session",
-        "daily",
-        "trailing_minute"
-      ]
-    },
-    "BudgetUnit": {
-      "description": "Billing unit evaluated by a budget guardrail.",
-      "type": "string",
-      "enum": [
-        "micros_usd",
-        "ai_credit_micros",
-        "tokens"
+    "ProviderCallActuals": {
+      "description": "Provider-reported actuals; a missing or ambiguous terminal is never represented as zero.",
+      "type": "object",
+      "properties": {
+        "usage": {
+          "description": "Normalized input, output, cache and reasoning usage.",
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "description": "Normalized monetary, credit, subscription, or unavailable accounting.",
+          "$ref": "#/$defs/Cost"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "usage",
+        "cost"
       ]
     },
     "CompactionReason": {
@@ -4815,8 +8874,7 @@
           "type": "array",
           "items": {
             "type": "string"
-          },
-          "default": []
+          }
         },
         "diff_artifact": {
           "anyOf": [
@@ -4841,26 +8899,17 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "subagent_id",
         "session_id",
         "status",
         "final_text",
+        "touched_files",
         "usage",
         "cost",
         "turns",
         "duration_millis"
-      ]
-    },
-    "SubagentStatus": {
-      "description": "Terminal disposition of one child-agent invocation.",
-      "type": "string",
-      "enum": [
-        "completed",
-        "failed",
-        "cancelled",
-        "timed_out",
-        "max_turns"
       ]
     },
     "DiffArtifact": {
@@ -4883,6 +8932,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "id",
         "base_commit",
@@ -4901,6 +8951,7 @@
           "$ref": "#/$defs/TouchedFileStatus"
         }
       },
+      "additionalProperties": false,
       "required": [
         "path",
         "status"
@@ -4916,57 +8967,23 @@
         "type_changed"
       ]
     },
-    "PlanArtifact": {
-      "description": "Durable plan submitted before entering execute mode.",
+    "ContextBlockId": {
+      "description": "A block inside one authoritative conversation source event.",
       "type": "object",
       "properties": {
-        "title": {
-          "type": "string"
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
         },
-        "summary_md": {
-          "type": "string"
-        },
-        "steps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PlanStep"
-          }
-        },
-        "open_questions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
+        "block_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
         }
       },
+      "additionalProperties": false,
       "required": [
-        "title",
-        "summary_md",
-        "steps"
-      ]
-    },
-    "PlanStep": {
-      "description": "One verifiable step in a model-submitted plan artifact.",
-      "type": "object",
-      "properties": {
-        "description": {
-          "type": "string"
-        },
-        "files_touched": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
-        "verification": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "description",
-        "verification"
+        "sequence",
+        "block_index"
       ]
     },
     "PlanDecision": {
@@ -4976,35 +8993,6 @@
         "approve",
         "reject"
       ]
-    },
-    "ThinkingLevel": {
-      "description": "Provider-neutral thinking effort selected by a model alias or session.",
-      "oneOf": [
-        {
-          "description": "Do not request provider reasoning output.",
-          "type": "string",
-          "const": "off"
-        },
-        {
-          "description": "Prefer the provider's least expensive reasoning mode.",
-          "type": "string",
-          "const": "low"
-        },
-        {
-          "description": "Prefer a balanced reasoning mode.",
-          "type": "string",
-          "const": "medium"
-        },
-        {
-          "description": "Prefer the provider's strongest reasoning mode.",
-          "type": "string",
-          "const": "high"
-        }
-      ]
-    },
-    "ShellId": {
-      "description": "Engine-generated identifier of one foreground user shell.",
-      "type": "string"
     }
   }
 }

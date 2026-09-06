@@ -5,10 +5,9 @@ import type {
   ToolProjection,
 } from "../state"
 import { presentTool } from "./tool-presentation"
-import { toolPlainText, toolStructuredData } from "./format"
 import { truncateToCells } from "./text"
 
-import { DISPLAY_TRUNCATION_MARKER, LIVE_OUTPUT_TRUNCATION_MARKER, type ToolOutputView } from "../state/display-buffer"
+import { DISPLAY_TRUNCATION_MARKER, LIVE_OUTPUT_TRUNCATION_MARKER, type ToolOutputPreview } from "../state/display-buffer"
 
 const OUTPUT_WINDOW_LINES = 8
 
@@ -42,7 +41,7 @@ export type ActivityOutputPresentation =
 export interface ToolActivityPresentation {
   readonly kind: "tool"
   readonly key: `tool:${string}`
-  readonly toolCallId: string
+  readonly invocationId: string
   readonly name: string
   readonly subject: string
   readonly outcome: ToolOutcomePresentation
@@ -108,17 +107,10 @@ export function projectToolsWorkspace(
     ? []
     : Object.values(state.tools)
       .filter((tool) => tool.turnId === turnId)
-      .sort((left, right) => left.callIndex - right.callIndex || left.toolCallId.localeCompare(right.toolCallId))
+      .sort((left, right) => left.callIndex - right.callIndex || left.invocationId.localeCompare(right.invocationId))
       .map((tool) => projectToolActivity(tool, nowMs, state.replay.active))
-  let selectedShell: NonNullable<RottweilerState["transcript"][number]["shell"]> | null = null
-  for (let index = state.transcript.length - 1; index >= 0; index -= 1) {
-    const entry = state.transcript[index]
-    const shell = entry?.presentation === "shell_result" ? entry.shell : undefined
-    if (shell === undefined) continue
-    if (state.shell.shellId !== null && shell.shellId !== state.shell.shellId) continue
-    selectedShell = shell
-    break
-  }
+  const selectedShell = state.latestShell !== null
+    && (state.shell.shellId === null || state.latestShell.shellId === state.shell.shellId) ? state.latestShell : null
   const shells: readonly ShellActivityPresentation[] = selectedShell === null
     ? []
     : [{
@@ -151,14 +143,14 @@ export function projectToolActivity(
   const presentation = presentTool(tool)
   const outcome = toolOutcome(tool, presentation.summary)
   const output = tool.status === "finished"
-    ? outputWindow(presentation.details, "head", presentation.details.includes(LIVE_OUTPUT_TRUNCATION_MARKER) || hasDroppedOutput(tool))
-    : liveOutputWindow(tool.chunks.read())
+    ? outputWindow(presentation.details, "head", presentation.details.includes(LIVE_OUTPUT_TRUNCATION_MARKER) || tool.display?.truncated === true)
+    : liveOutputWindow(tool.chunks.preview())
   const fallbackSubject = argumentSubject(tool.args)
 
   return {
     kind: "tool",
-    key: `tool:${tool.toolCallId}`,
-    toolCallId: tool.toolCallId,
+    key: `tool:${tool.invocationId}`,
+    invocationId: tool.invocationId,
     name: tool.name,
     subject: truncateToCells((presentation.subject || fallbackSubject).replace(/\s+/g, " ").trim(), 80),
     outcome,
@@ -233,10 +225,10 @@ function toolOutcome(tool: ToolProjection, summary: string): ToolOutcomePresenta
 }
 
 function isPermissionDenied(tool: ToolProjection): boolean {
-  return tool.isError === true && /^permission denied for tool/i.test(toolPlainText(tool.output).trim())
+  return tool.display?.permissionDenied === true
 }
 
-function liveOutputWindow(view: ToolOutputView): ActivityOutputPresentation {
+function liveOutputWindow(view: ToolOutputPreview): ActivityOutputPresentation {
   if (view.lineCount === 0) return view.sourceTruncated
     ? { kind: "text", text: DISPLAY_TRUNCATION_MARKER, retainedLineCount: 0, visibleLineCount: 1, hiddenRetainedLineCount: 0, window: "tail", sourceTruncated: true }
     : { kind: "none" }
@@ -307,17 +299,6 @@ function argumentSubject(args: unknown): string {
     if (typeof value === "string" && value.trim() !== "") return value
   }
   return ""
-}
-
-function hasDroppedOutput(tool: ToolProjection): boolean {
-  const data = toolStructuredData(tool.output)
-  return isRecord(data) && positiveNumber(data.dropped_output_bytes)
-}
-
-function positiveNumber(value: unknown): boolean {
-  if (typeof value === "number") return Number.isFinite(value) && value > 0
-  if (typeof value === "string") return /^\d+$/.test(value) && BigInt(value) > 0n
-  return false
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

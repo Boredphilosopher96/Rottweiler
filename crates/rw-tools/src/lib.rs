@@ -6,13 +6,21 @@
 
 mod background;
 mod bash;
+mod delegation;
+pub use delegation::{
+    DelegatedEffect, DelegatedTools, ToolEffectGrant, ToolEffectHost, ToolEffectScope,
+};
 mod files;
 mod intelligence;
 mod interaction;
+mod invocation_effects;
+pub mod presentation;
 mod protocol;
+pub use presentation::ToolPresentationPlan;
 mod registry;
 mod search;
 mod symbols;
+pub mod todo;
 mod web;
 mod worktree;
 
@@ -33,7 +41,7 @@ pub use background::{
 pub use bash::terminate_and_wait_process_group;
 pub use bash::{
     BashInput, BashSandboxMode, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome,
-    CommandRequest, CommandSafety, CommandSafetyClassifier, ExecutionLease,
+    CommandRequest, CommandSafety, CommandSafetyClassifier, CommandScratch, ExecutionLease,
     IdentityCommandFixtureRedactor, RecordingCommandExecutor, ReplayCommandExecutor,
     TokioCommandExecutor, classify_safe_command,
 };
@@ -45,25 +53,22 @@ pub use intelligence::{
     CodeIntelligenceProvider, DefinitionTool, DiagnosticsInput, DiagnosticsTool, PositionInput,
     ReferencesTool, RenameInput, RenameTool, SandboxedLspSpawner, discover_sandboxed_lsp_servers,
 };
-pub use interaction::{
-    AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool, TodoAction, TodoInput, TodoItem,
-    TodoStatus, TodoTool,
-};
+pub use interaction::{AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool};
 pub use protocol::{
-    ProtocolChildLauncher, ProtocolChildRequest, ProtocolProcessHandle, ProtocolSandboxPolicy,
-    SandboxedProtocolLauncher, SpawnedProtocolChild,
+    ApprovedProtocolCommand, ProtocolChildLauncher, ProtocolChildRequest, ProtocolProcessHandle,
+    ProtocolSandboxPolicy, SandboxedProtocolLauncher, SpawnedProtocolChild,
 };
 pub use registry::{
     ApprovalPreview, CancellationToken, CapabilityManifest, McpToolPolicy, MutationScope,
-    NoopOutputSink, SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode,
-    SubagentProgressEvent, Tool, ToolBehavior, ToolContext, ToolDescriptor, ToolError,
-    ToolInvocationSemantics, ToolLimits, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult,
-    WorkspaceBinding, validate_mcp_virtual_tool,
+    NoopOutputSink, NoopProgressSink, SubagentEventSink, SubagentLifecycleEvent,
+    SubagentLifecycleMode, SubagentProgressEvent, Tool, ToolBehavior, ToolContext, ToolDescriptor,
+    ToolError, ToolInvocationSemantics, ToolLimits, ToolOutputChunk, ToolOutputSink,
+    ToolProgressSink, ToolRegistry, ToolResult, WorkspaceBinding, validate_mcp_virtual_tool,
 };
 pub use rw_intel::{
     CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,
-    Language, Location, LspConfig, LspProcessHandle, LspProcessSpawner, LspServerConfig, Position,
-    Range, RenameResult, SpawnedLspProcess, SymbolIndex, WorkspaceUriMapper,
+    Language, Location, LspConfig, LspError, LspProcessHandle, LspProcessSpawner, LspServerConfig,
+    Position, Range, RenameResult, SpawnedLspProcess, SymbolIndex, WorkspaceUriMapper,
 };
 #[doc(hidden)]
 pub use rw_sandbox::{
@@ -72,16 +77,31 @@ pub use rw_sandbox::{
     maybe_run_helper as maybe_run_sandbox_helper, normalize_egress_domain, probe as probe_sandbox,
     probe_policy_egress, shell_launch_plan,
 };
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use rw_sandbox::{PreparationExecutable, PreparationFilesystem};
 pub use rw_types::{DiffArtifact, TouchedFile, TouchedFileStatus};
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};
-pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceSymbolIndex};
+pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceIndexPool, WorkspaceSymbolIndex};
+pub use todo::{
+    TodoAction, TodoAdmission, TodoInput, TodoItem, TodoStateStore, TodoStatus, TodoTool,
+    prepare_todo_update,
+};
 pub use web::{
     ConfiguredSearchApi, FetchRequest, FetchResponse, WebFetchInput, WebFetchTool, WebFetcher,
     WebSearchInput, WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchSource,
     WebSearchTool, WebSearcher,
 };
 pub use worktree::{
-    ApplyWorktreeDiffInput, ApplyWorktreeDiffTool, ChildReturnArtifact, DiffArtifactAuthority,
-    SessionDiffArtifactAuthority, WorktreeIsolation, WorktreeLease, WorktreeLeaseRecord,
-    WorktreeLimits,
+    ApplyWorktreeDiffInput, ApplyWorktreeDiffTool, AuthorizedDiffArtifact, ChildReturnArtifact,
+    DiffArtifactAuthority, WorktreeAllocation, WorktreeIsolation, WorktreeLease,
+    WorktreeLeaseRecord, WorktreeLimits, validate_diff_artifact,
 };
+
+pub use rw_sandbox::{
+    ApprovedCode, ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest,
+    ExecutableLaunch, SandboxHelper,
+};
+
+#[cfg(test)]
+mod test_support;

@@ -43,8 +43,7 @@ For v1 and later, the protected `release` environment also supplies the paid
 live-smoke keys, a dated OpenAI or Anthropic evaluation model, its reviewed
 Terminal-Bench baseline, and the external dogfood-ledger secret documented in
 `docs/07-VERIFICATION.md`. Those v1 qualification inputs are not required for a
-pre-v1 tag. GitHub Models was retired on 2026-07-30 and is not a release
-dependency; Terminal-Bench selects the matching paid provider key only inside
+pre-v1 tag. Terminal-Bench selects the matching paid provider key only inside
 its step. For v1 and later, the native macOS ARM64 runner and the Linux X64
 soak runner must be online. Linux core measurements, WSL2,
 and Harbor's containers use fixed disposable GitHub-hosted images. These are

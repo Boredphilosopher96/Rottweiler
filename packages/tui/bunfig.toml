@@ -1,0 +1,4 @@
+preload = ["./scripts/native-preload.ts"]
+
+[test]
+preload = ["./scripts/native-preload.ts"]

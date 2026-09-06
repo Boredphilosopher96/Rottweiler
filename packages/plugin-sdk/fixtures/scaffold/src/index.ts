@@ -7,14 +7,15 @@ export const plugin = definePlugin({
     tools: {
       hello: ({ input }) => ({
         content: `Hello, ${String(input.name ?? "world")}!`,
+        truncated: false,
         data: { text: `Hello, ${String(input.name ?? "world")}!` },
       }),
     },
     hooks: {
       pre_tool: ({ payload }) =>
         payload.name === "bash"
-          ? { decision: "deny", message: "This plugin blocks shell execution" }
-          : { decision: "allow" },
+          ? { decision: "block", message: "This plugin blocks shell execution" }
+          : { decision: "continue" },
     },
   },
 })

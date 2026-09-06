@@ -752,6 +752,7 @@ mod tests {
             meta: meta(sequence),
             turn_id: TurnId("1".to_owned()),
             tool_call_id: ToolCallId(format!("tool-{sequence}")),
+            invocation_id: rw_types::ToolInvocationId(format!("tool-{sequence}")),
             name: name.to_owned(),
             args: serde_json::json!({}),
             call_index: 0,
@@ -848,6 +849,7 @@ mod tests {
                 meta: meta(parent_id, 0, "2026-07-10T01:00:00.000Z"),
                 turn_id: TurnId("1".to_owned()),
                 tool_call_id: ToolCallId("read-1".to_owned()),
+                invocation_id: rw_types::ToolInvocationId("read-1".to_owned()),
                 name: "read".to_owned(),
                 args: serde_json::json!({}),
                 call_index: 0,
@@ -881,6 +883,7 @@ mod tests {
                 meta: meta(child_id, 0, "2026-07-10T02:00:00.000Z"),
                 turn_id: TurnId("1".to_owned()),
                 tool_call_id: ToolCallId("read-2".to_owned()),
+                invocation_id: rw_types::ToolInvocationId("read-2".to_owned()),
                 name: "read".to_owned(),
                 args: serde_json::json!({}),
                 call_index: 0,
@@ -969,9 +972,8 @@ mod tests {
         assert!(json.contains("\"subscription_quota_entries\":1"));
         assert!(json.contains("\"attribution\":\"subagent\""));
 
-        AccountingLedger::open(root.path())
-            .and_then(|ledger| ledger.replace_all(&[]))
-            .expect("make projection stale");
+        std::fs::remove_file(root.path().join("index.sqlite")).expect("remove fixture index");
+        AccountingLedger::open(root.path()).expect("create an empty stale fixture index");
         assert!(
             collect(
                 root.path(),

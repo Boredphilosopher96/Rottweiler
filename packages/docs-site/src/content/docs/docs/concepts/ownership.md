@@ -25,5 +25,5 @@ Generated schemas, fixtures, SDK declarations, raw Markdown, agent indexes, and
 HTML are projections. A projection has a drift check or is created during the
 build; it does not become a second hand-maintained authority.
 
-Compatibility aliases are not part of this model. Callers move to the owned
-surface and obsolete APIs are deleted.
+Implementations and callers use the owned contract directly. Boundary validators
+reject inputs outside it.

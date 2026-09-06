@@ -1,3 +1,5 @@
+import { prepareToolDisplay } from "../../src/state/tool-display"
+import { conversationItem, toolItem, sessionReaderFor, emptySessionReader } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { afterEach, describe, expect, test } from "bun:test"
@@ -8,9 +10,9 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp, type RottweilerApp } from "../../src/app"
-import type { EngineEvent } from "../../src/protocol"
+import type { TranscriptItem } from "../../src/protocol"
 import type { RottweilerState, ToolProjection } from "../../src/state"
-import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
+import { createInitialState } from "../../src/state"
 
 const usage = {
   input_tokens: "1200",
@@ -28,41 +30,12 @@ function fixtureState(): RottweilerState {
     connection: { phase: "connected", attempt: 0, error: null, gap: null },
     mode: "execute",
     model: "fast",
-    transcript: [
-      {
-        sequenceId: "1",
-        agentTurn: "1",
-        turn: {
-          role: "user",
-          blocks: [{ type: "text", text: "Add reconnect-safe streaming to the TUI." }],
-          meta: { synthetic: false, summary: false },
-        },
-      },
-      {
-        sequenceId: "2",
-        agentTurn: "1",
-        turn: {
-          role: "assistant",
-          blocks: [
-            {
-              type: "text",
-              text: "## Done\n\nThe event stream now resumes from the last durable sequence.",
-            },
-            {
-              type: "citation",
-              uri: "https://example.invalid/contract",
-              title: "Protocol contract",
-            },
-          ],
-          meta: { synthetic: false, summary: false, model: "fixture-fast" },
-        },
-      },
-    ],
     turns: {
       "1": { turnId: "1", status: "completed", usage, cost: money, timing: { kind: "unknown" } },
     },
     context: {
       turn_id: "1",
+      through: null,
       stable_prefix_hash: "stable-fixture",
       used_tokens: "6400",
       usable_tokens: "32000",
@@ -101,7 +74,7 @@ function fixtureState(): RottweilerState {
     },
     cost: {
       utc_day: "2026-01-01",
-      turns: [],
+      subscription_quota: null,
       session_usage: usage,
       session_cost_micros_usd: "12450",
       session_ai_credit_micros: "0",
@@ -174,6 +147,7 @@ function fixtureState(): RottweilerState {
 function pendingTool(diff: boolean): ToolProjection {
   return {
     toolCallId: diff ? "edit-tool" : "bash-tool",
+    invocationId: diff ? "edit-tool" : "bash-tool",
     turnId: "2",
     name: diff ? "edit" : "bash",
     args: diff ? { path: "src/main.rs" } : { command: "cargo test" },
@@ -192,100 +166,32 @@ function pendingTool(diff: boolean): ToolProjection {
           truncated: false,
         }
       : null,
-    chunks: toolOutputBuffer([]),
-    output: null,
+    diffSource: null, chunks: toolOutputBuffer([]),
+    display: null, source: null,
     isError: null,
     callIndex: 0,
     timing: { kind: "unknown" },
   }
 }
 
-function replayFixtureState(): RottweilerState {
-  const eventMeta = (sequence: string) => ({
-    protocol_version: 1,
-    session_id: "session-golden-replay",
-    sequence_id: sequence,
-    emitted_at: `2026-01-01T00:00:0${sequence}Z`,
-  })
-  const events: EngineEvent[] = [
-    { type: "mode_changed", meta: eventMeta("1"), mode: "execute", definition_fingerprint: "fixture" },
-    { type: "model_changed", meta: eventMeta("2"), model: "fast" },
-    {
-      type: "conversation_turn_committed",
-      meta: eventMeta("3"),
-      agent_turn: "1",
-      turn: {
-        role: "user",
-        blocks: [{ type: "text", text: "Replay the saved session without changing it." }],
-        meta: { synthetic: false, summary: false },
-      },
-    },
-    { type: "turn_started", meta: eventMeta("4"), turn_id: "2" },
-    {
-      type: "tool_call_started",
-      meta: eventMeta("5"),
-      turn_id: "2",
-      tool_call_id: "historical-read",
-      name: "read",
-      args: { path: "PROJECT.md" },
-      call_index: 0,
-    },
-    {
-      type: "tool_call_finished",
-      meta: eventMeta("6"),
-      turn_id: "2",
-      tool_call_id: "historical-read",
-      output: { type: "text", text: "Historical PROJECT.md contents" },
-      is_error: false,
-      call_index: 0,
-    },
-    {
-      type: "conversation_turn_committed",
-      meta: eventMeta("7"),
-      agent_turn: "2",
-      turn: {
-        role: "tool",
-        blocks: [{
-          type: "tool_result",
-          id: "historical-read",
-          output: { type: "text", text: "Historical PROJECT.md contents" },
-          is_error: false,
-        }],
-        meta: { synthetic: false, summary: false },
-      },
-    },
-    {
-      type: "conversation_turn_committed",
-      meta: eventMeta("8"),
-      agent_turn: "2",
-      turn: {
-        role: "assistant",
-        blocks: [
-          {
-            type: "text",
-            text: "## Historical result\n\nThe saved event log rendered through the retained TUI.",
-          },
-        ],
-        meta: { synthetic: false, summary: false, model: "fixture-fast" },
-      },
-    },
-    {
-      type: "turn_finished",
-      meta: eventMeta("9"),
-      turn_id: "2",
-      status: "completed",
-      usage,
-      cost: money,
-    },
+function historicalItems(): TranscriptItem[] {
+  return [
+    conversationItem(3, "user", "Replay the saved session without changing it."),
+    toolItem(5, "read", '{"path":"PROJECT.md"}', "Historical PROJECT.md contents"),
+    conversationItem(8, "assistant", "## Historical result\n\nThe saved event log rendered through the retained TUI."),
+    { id: "9", ordinal: "3", revision: "9", agent_turn: "2",
+      content: { type: "turn_summary", turn_id: "2", status: "completed", usage, cost: money } },
   ]
-  const replayed = events.reduce(
-    (state, event) => reduceRottweilerState(state, engineEvent(event)),
-    createInitialState(),
-  )
-  return {
-    ...replayed,
-    connection: { phase: "connected", attempt: 0, error: null, gap: null },
-  }
+}
+
+function conversationItems(): TranscriptItem[] {
+  const answer = conversationItem(2, "assistant", "## Done\n\nThe event stream now resumes from the last durable sequence.")
+  if (answer.content.type === "conversation") answer.content.blocks.push({
+    type: "citation", body: { text: "Protocol contract — https://example.invalid/contract", format: "text", complete: true, source: { sequence: "2", selector: { type: "conversation_block", index: 1 } } },
+  })
+  return [conversationItem(1, "user", "Add reconnect-safe streaming to the TUI."), answer,
+    { id: "3", ordinal: "2", revision: "3", agent_turn: "1",
+      content: { type: "turn_summary", turn_id: "1", status: "completed", usage, cost: money } }]
 }
 
 function toolsFixtureState(): RottweilerState {
@@ -296,6 +202,7 @@ function toolsFixtureState(): RottweilerState {
     extra: Partial<ToolProjection>,
   ): ToolProjection => ({
     toolCallId,
+    invocationId: toolCallId,
     turnId: "tools-turn",
     name: "read",
     args: { path: `${toolCallId}.ts` },
@@ -303,8 +210,8 @@ function toolsFixtureState(): RottweilerState {
     capabilities: [],
     rationale: null,
     diff: null,
-    chunks: toolOutputBuffer([]),
-    output: { type: "text", text: "Completed retained output" },
+    diffSource: null, chunks: toolOutputBuffer([]),
+    display: prepareToolDisplay({ type: "text", text: "Completed retained output" }, null, { path: `${toolCallId}.ts` }, false), source: null,
     isError: false,
     callIndex,
     timing: { kind: "closed", startedAtMs, finishedAtMs: startedAtMs + 5_000 },
@@ -321,26 +228,26 @@ function toolsFixtureState(): RottweilerState {
         stream: "stdout",
         chunk: Array.from({ length: 12 }, (_, index) => `component check ${index + 1} passed`).join("\n"),
       }]),
-      output: null,
+      display: null, source: null,
       isError: null,
       timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 39_000 },
     }),
     makeTool("denied-edit", 3, {
       name: "edit",
       args: { path: "generated/output.ts" },
-      output: { type: "text", text: "permission denied for tool edit" },
+      display: prepareToolDisplay({ type: "text", text: "permission denied for tool edit" }, null, { path: "generated/output.ts" }, true), source: null,
       isError: true,
     }),
     makeTool("failed-edit", 4, {
       name: "edit",
       args: { path: "packages/tui/src/app.ts" },
-      output: { type: "text", text: "validation failed" },
+      display: prepareToolDisplay({ type: "text", text: "validation failed" }, null, { path: "packages/tui/src/app.ts" }, true), source: null,
       isError: true,
     }),
     makeTool("explicit-diagnostics", 5, {
       name: "diagnostics",
       args: { path: "packages/tui/src/app.ts" },
-      output: { type: "text", text: "No diagnostics." },
+      display: prepareToolDisplay({ type: "text", text: "No diagnostics." }, null, { path: "packages/tui/src/app.ts" }, false), source: null,
     }),
   ]
   return {
@@ -351,7 +258,7 @@ function toolsFixtureState(): RottweilerState {
       text: "",
       thinking: "",
       citations: [],
-      toolCallIds: tools.map((tool) => tool.toolCallId),
+      toolInvocationIds: tools.map((tool) => tool.invocationId),
       finished: null,
     }),
     turns: {
@@ -363,7 +270,7 @@ function toolsFixtureState(): RottweilerState {
         timing: { kind: "open", startedAtMs, lastObservedAtMs: startedAtMs + 40_000 },
       },
     },
-    tools: Object.fromEntries(tools.map((tool) => [tool.toolCallId, tool])),
+    tools: Object.fromEntries(tools.map((tool) => [tool.invocationId, tool])),
     queuedMessages: [
       { position: "1", content: "Run the complete suite" },
       { position: "2", content: "Inspect the direct raster" },
@@ -374,6 +281,7 @@ function toolsFixtureState(): RottweilerState {
 interface ScreenScenario {
   readonly name: string
   readonly state: RottweilerState
+  readonly history?: readonly TranscriptItem[]
   readonly setup?: (app: RottweilerApp) => void
   readonly replaySessionId?: string
 }
@@ -381,7 +289,7 @@ interface ScreenScenario {
 function scenarios(): ScreenScenario[] {
   const base = fixtureState()
   return [
-    { name: "01-ready", state: { ...createInitialState(), connection: base.connection } },
+    { name: "01-ready", history: [], state: { ...createInitialState(), connection: base.connection } },
     { name: "02-conversation", state: base },
     {
       name: "03-streaming-thinking-citations",
@@ -392,7 +300,7 @@ function scenarios(): ScreenScenario[] {
           text: "I’m updating the retained render tree without touching history…",
           thinking: "Keep the durable cursor separate from command acknowledgements.",
           citations: [{ uri: "https://example.invalid/sse", title: "SSE contract" }],
-          toolCallIds: [],
+          toolInvocationIds: [],
           finished: null,
         }),
       },
@@ -406,15 +314,16 @@ function scenarios(): ScreenScenario[] {
           text: "Running focused checks.",
           thinking: "",
           citations: [],
-          toolCallIds: ["live-tool"],
+          toolInvocationIds: ["live-tool"],
           finished: null,
         }),
         tools: {
           "live-tool": {
             ...pendingTool(false),
             toolCallId: "live-tool",
+            invocationId: "live-tool",
             status: "running",
-            chunks: toolOutputBuffer([{ stream: "stdout", chunk: "test transport ... ok\ntest reducer ..." }]),
+            diffSource: null, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "test transport ... ok\ntest reducer ..." }]),
           },
         },
       },
@@ -429,10 +338,7 @@ function scenarios(): ScreenScenario[] {
           question: {
             questionId: "question",
             turnId: "2",
-            answered: false,
-            answers: null,
-            questions: [
-              {
+            question: {
                 id: "question",
                 prompt: "Which validation scope should run next?",
                 response_kind: "select_one",
@@ -441,7 +347,6 @@ function scenarios(): ScreenScenario[] {
                   { value: "full", label: "Full suite", description: "All workspace tests" },
                 ],
               },
-            ],
           },
         },
       },
@@ -503,7 +408,7 @@ function scenarios(): ScreenScenario[] {
           text: "I’m collating three isolated reviews in deterministic order.",
           thinking: "",
           citations: [],
-          toolCallIds: [],
+          toolInvocationIds: [],
           finished: null,
         }),
         subagentOrder: ["explore", "tests", "review"],
@@ -555,11 +460,12 @@ function scenarios(): ScreenScenario[] {
     },
     {
       name: "17-historical-session-replay",
-      state: replayFixtureState(),
+      state: { ...createInitialState(), connection: base.connection },
+      history: historicalItems(),
       replaySessionId: "session-golden-replay",
       setup: (app) => {
         app.handleEvent({
-          type: "session_replay_completed",
+          type: "session_history_ready",
           meta: {
             protocol_version: 1,
             client_id: "golden-client",
@@ -623,7 +529,14 @@ describe("M4 golden screens", () => {
       renderer = setup.renderer
       treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
       treeSitter.setMockResult({ highlights: [] })
-      const app = createRottweilerApp(renderer, {
+      const items = scenario.history ?? conversationItems()
+      let reads = 0
+      const source = sessionReaderFor(items)
+      const app = createRottweilerApp(renderer, { sessionReader: { ...source, page: async (...args) => {
+        const result = await source.page(...args)
+        reads += 1
+        return result
+      } },
         initialState: scenario.state,
         requestId: () => "golden-request",
         treeSitterClient: treeSitter,
@@ -633,6 +546,8 @@ describe("M4 golden screens", () => {
       })
       renderer.root.add(app)
       scenario.setup?.(app)
+      await setup.waitFor(() => reads > 0)
+      await setup.renderOnce()
       await setup.waitFor(() => treeSitter?.isHighlighting() === false)
       await setup.flush()
       const frame = setup
@@ -660,7 +575,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace keeps exact production cells at 110 by 32", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })
@@ -685,7 +600,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace removes its rail below 100 columns", async () => {
     const setup = await createTestRenderer({ width: 99, height: 32, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })
@@ -702,7 +617,7 @@ describe("M4 golden screens", () => {
   test("Tools workspace keeps a usable scroller on a short terminal", async () => {
     const setup = await createTestRenderer({ width: 110, height: 11, useThread: false })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
       initialState: toolsFixtureState(),
       nowMs: () => TOOLS_FIXTURE_NOW_MS,
     })

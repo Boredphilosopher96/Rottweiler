@@ -43,6 +43,45 @@ await runPlugin(plugin)
 The manifest is the capability boundary. Declaring a capability does not by
 itself grant approval; the host binds approval to the manifest fingerprint.
 
+## Long-running tools
+
+Tool handlers receive a `ToolHandlerContext`. Use `signal` to stop cooperative
+work and `progress` to replace the current observation:
+
+```ts
+example_work: async (_params, context) => {
+  context.progress({ message: "Reading workspace", amount: { completed: 1, total: 3 } })
+  // Perform bounded work and observe context.signal between steps.
+  return { content: "Completed", data: null }
+}
+```
+
+The host supplies immutable total and renewable idle deadlines in
+`params.lifetime`. Defaults are five minutes total and ninety seconds idle.
+Progress renews only the idle deadline, is coalesced and limited to four deliveries
+per second, and is discarded when the operation closes. Messages contain at most
+256 Unicode characters without control characters. Counts are unsigned 32-bit
+integers with `completed <= total` and `total > 0`.
+
+Progress is transient display state. It does not create durable history, grant
+permissions, or prove that cancelled native work stopped. Hook, command and
+catalog handlers keep the ordinary five-second deadline.
+
+## Hook contracts
+
+Each declaration requires a hook name, class, and failure policy. Transform
+handlers run before policy handlers, followed by observers. A `HookHandler`
+receives the input type for its declared event. It can transform only that
+phase's mutable fields; tool-call and session identity stay fixed.
+
+Policy hooks can block an operation. Permission policies return `allow`, `ask`,
+or `deny`, with the strictest result taking precedence. An `ask` result requires
+fresh approval. Observers return `continue` and cannot write to the workspace.
+
+Cancellation aborts `context.signal`. The request remains active until the
+handler and its cleanup settle. The host terminates an uncooperative plugin at
+its deadline before allowing conflicting work to continue.
+
 ## Scaffold a project
 
 ```sh

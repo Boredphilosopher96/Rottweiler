@@ -4,6 +4,17 @@
 //! policy into an argv-only launch plan consumed by `rw-tools`, and exposes the
 //! Linux helper entry point used immediately before `exec(2)`.
 
+mod executable;
+pub use executable::{
+    ApprovedCode, ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest,
+    ExecutableLaunch,
+};
+mod helper;
+pub use helper::SandboxHelper;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -11,6 +22,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[cfg(target_os = "macos")]
+mod directory_reads;
+
+#[cfg(target_os = "linux")]
+mod preparation;
+#[cfg(target_os = "linux")]
+pub use preparation::{PreparationExecutable, PreparationFilesystem};
 
 mod proxy;
 pub use proxy::{EgressPin, ProxyDenials, ProxyLifecycle, SupervisedEgressProxy, UpstreamProxy};
@@ -95,6 +114,13 @@ pub struct SandboxPolicy {
     #[serde(default)]
     read_root_kinds: Option<Vec<RootKind>>,
     network: NetworkPolicy,
+    allow_process_creation: bool,
+    system_read_roots: bool,
+    self_process_reads: bool,
+    #[cfg(target_os = "linux")]
+    preparation: Option<PreparationFilesystem>,
+    #[cfg(target_os = "macos")]
+    read_directory_ancestors: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -160,8 +186,24 @@ impl SandboxPolicy {
             write_root_kinds,
             read_roots: None,
             read_root_kinds: None,
+            allow_process_creation: true,
+            system_read_roots: true,
+            self_process_reads: false,
+            #[cfg(target_os = "linux")]
+            preparation: None,
+            #[cfg(target_os = "macos")]
+            read_directory_ancestors: Vec::new(),
             network,
         })
+    }
+
+    /// Forbids native child processes while retaining threads and in-place exec.
+    /// On macOS this also removes ambient service delegation and external task access.
+    /// Host-brokered process work needs its own separately owned sandbox.
+    #[must_use]
+    pub fn without_process_creation(mut self) -> Self {
+        self.allow_process_creation = false;
+        self
     }
 
     /// Canonical roots to which writes may be made.
@@ -208,6 +250,24 @@ impl SandboxPolicy {
         Ok(self)
     }
 
+    /// Uses only the explicitly declared read and write roots. The caller must
+    /// include its executable, runtime libraries, and required OS data paths.
+    /// Linux does not add the general shell system-read grants to this policy.
+    #[must_use]
+    pub fn with_only_declared_reads(mut self) -> Self {
+        self.system_read_roots = false;
+        self
+    }
+
+    /// Allows Linux runtime introspection of the worker's own process. The
+    /// helper resolves `/proc/self` after entering its process namespace, so
+    /// this never grants access to the calling host's process directory.
+    #[must_use]
+    pub fn with_self_process_reads(mut self) -> Self {
+        self.self_process_reads = true;
+        self
+    }
+
     /// Exact roots visible to a read-restricted child, if narrowing was requested.
     #[must_use]
     pub fn read_roots(&self) -> Option<&[PathBuf]> {
@@ -228,6 +288,13 @@ impl SandboxPolicy {
             write_root_kinds: self.write_root_kinds.clone(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            allow_process_creation: self.allow_process_creation,
+            system_read_roots: self.system_read_roots,
+            self_process_reads: self.self_process_reads,
+            #[cfg(target_os = "linux")]
+            preparation: self.preparation.clone(),
+            #[cfg(target_os = "macos")]
+            read_directory_ancestors: self.read_directory_ancestors.clone(),
             network,
         }
     }
@@ -241,6 +308,13 @@ impl SandboxPolicy {
             write_root_kinds: Vec::new(),
             read_roots: self.read_roots.clone(),
             read_root_kinds: self.read_root_kinds.clone(),
+            allow_process_creation: self.allow_process_creation,
+            system_read_roots: self.system_read_roots,
+            self_process_reads: self.self_process_reads,
+            #[cfg(target_os = "linux")]
+            preparation: self.preparation.clone(),
+            #[cfg(target_os = "macos")]
+            read_directory_ancestors: self.read_directory_ancestors.clone(),
             network: self.network.clone(),
         }
     }
@@ -256,7 +330,8 @@ pub struct LaunchPlan {
     /// User-visible degradation warnings.  An enforceable plan never carries a
     /// warning; unsupported configurations return an error instead.
     pub warnings: Vec<String>,
-    /// Open descriptor pinning the exact already-running Linux engine inode
+    _helper: SandboxHelper,
+    /// Open descriptor pinning the approved immutable Linux helper executable
     /// until the namespace launcher crosses `exec(2)`.
     #[cfg(target_os = "linux")]
     helper_pin: Option<std::fs::File>,
@@ -358,6 +433,20 @@ impl EgressPolicy {
         self
     }
 
+    /// Checks name authority before DNS resolution, without granting an address.
+    #[must_use]
+    pub fn allows_domain(&self, host: &str) -> bool {
+        let Some(host) = normalize_domain(host) else {
+            return false;
+        };
+        self.allowed_domains.iter().any(|allowed| {
+            host == *allowed
+                || host
+                    .strip_suffix(allowed)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }
+
     /// Evaluates one post-DNS proxy connection.
     #[must_use]
     pub fn evaluate(&self, host: &str, addresses: &[IpAddr]) -> EgressDecision {
@@ -373,12 +462,7 @@ impl EgressPolicy {
         let Some(host) = normalize_domain(host) else {
             return EgressDecision::HardDenied;
         };
-        if self.allowed_domains.iter().any(|allowed| {
-            host == *allowed
-                || host
-                    .strip_suffix(allowed)
-                    .is_some_and(|prefix| prefix.ends_with('.'))
-        }) {
+        if self.allows_domain(&host) {
             EgressDecision::Allowed
         } else {
             EgressDecision::ApprovalRequired
@@ -568,6 +652,7 @@ pub fn probe_policy_egress() -> SandboxCapability {
             .args([
                 "--user",
                 "--map-current-user",
+                "--keep-caps",
                 "--net",
                 "--pid",
                 "--fork",
@@ -611,7 +696,7 @@ fn unavailable(message: &str) -> SandboxCapability {
 ///
 /// `helper_executable` is the trusted Rottweiler executable that recognizes
 /// [`HELPER_ARG`] before parsing user-facing CLI options.  It is used only on
-/// Linux; macOS directly launches Seatbelt.
+/// Linux and for the macOS single-process worker bootstrap.
 ///
 /// # Errors
 ///
@@ -619,49 +704,13 @@ fn unavailable(message: &str) -> SandboxCapability {
 /// platform has no sandbox implementation.
 pub fn shell_launch_plan(
     policy: &SandboxPolicy,
-    helper_executable: &Path,
+    helper_executable: &SandboxHelper,
     shell: &Path,
     shell_args: &[OsString],
 ) -> Result<LaunchPlan, SandboxError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = helper_executable;
-        if let NetworkPolicy::PolicyProxy { port, .. } = &policy.network
-            && !proxy::supervised_proxy_owns_port(*port)
-        {
-            return Err(SandboxError::PolicyProxyUnavailable);
-        }
-        let mut args = vec![
-            OsString::from("-p"),
-            OsString::from(seatbelt_profile(policy)),
-        ];
-        for (index, root) in policy.write_roots.iter().enumerate() {
-            args.push(OsString::from("-D"));
-            let mut definition = OsString::from(format!("RW_WRITE_{index}="));
-            definition.push(root.as_os_str());
-            args.push(definition);
-        }
-        if let Some(read_roots) = &policy.read_roots {
-            for (index, root) in read_roots.iter().enumerate() {
-                args.push(OsString::from("-D"));
-                let mut definition = OsString::from(format!("RW_READ_{index}="));
-                definition.push(root.as_os_str());
-                args.push(definition);
-            }
-        }
-        for (index, root) in sensitive_read_roots().iter().enumerate() {
-            args.push(OsString::from("-D"));
-            let mut definition = OsString::from(format!("RW_SECRET_{index}="));
-            definition.push(root.as_os_str());
-            args.push(definition);
-        }
-        args.push(shell.as_os_str().to_owned());
-        args.extend_from_slice(shell_args);
-        Ok(LaunchPlan {
-            program: PathBuf::from("/usr/bin/sandbox-exec"),
-            args,
-            warnings: Vec::new(),
-        })
+        macos::launch_plan(policy, helper_executable, shell, shell_args)
     }
     #[cfg(target_os = "linux")]
     {
@@ -674,7 +723,8 @@ pub fn shell_launch_plan(
         ) {
             return Err(SandboxError::PolicyProxyUnavailable);
         }
-        let (helper_executable, helper_pin) = pin_linux_helper(helper_executable)?;
+        let helper_owner = helper_executable.clone();
+        let (helper_executable, helper_pin) = helper_executable.pin()?;
         let encoded = serde_json::to_os_string(policy)?;
         let mut args = vec![OsString::from(HELPER_ARG), encoded];
         args.push(shell.as_os_str().to_owned());
@@ -689,24 +739,28 @@ pub fn shell_launch_plan(
             }
             let unshare = audited_linux_tool(&["/usr/bin/unshare"])
                 .ok_or(SandboxError::PolicyProxyUnavailable)?;
-            let mut unshare_args = linux_namespace_args(&helper_executable);
+            let mut unshare_args =
+                linux_namespace_args(&helper_executable, policy.preparation.is_some(), true);
             unshare_args.extend(args);
             return Ok(LaunchPlan {
                 program: unshare,
                 args: unshare_args,
                 warnings: Vec::new(),
+                _helper: helper_owner.clone(),
                 helper_pin: Some(helper_pin),
             });
         }
         let unshare = audited_linux_tool(&["/usr/bin/unshare"]).ok_or_else(|| {
             SandboxError::Unavailable("trusted /usr/bin/unshare is unavailable".to_owned())
         })?;
-        let mut unshare_args = linux_namespace_args(&helper_executable);
+        let mut unshare_args =
+            linux_namespace_args(&helper_executable, policy.preparation.is_some(), false);
         unshare_args.extend(args);
         Ok(LaunchPlan {
             program: unshare,
             args: unshare_args,
             warnings: Vec::new(),
+            _helper: helper_owner.clone(),
             helper_pin: Some(helper_pin),
         })
     }
@@ -722,51 +776,28 @@ pub fn shell_launch_plan(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_namespace_args(helper: &Path) -> Vec<OsString> {
-    vec![
+fn linux_namespace_args(helper: &Path, preparation: bool, proxy: bool) -> Vec<OsString> {
+    let mut args = vec![
         OsString::from("--user"),
-        OsString::from("--map-current-user"),
+        OsString::from(if preparation {
+            "--map-root-user"
+        } else {
+            "--map-current-user"
+        }),
         OsString::from("--net"),
         OsString::from("--pid"),
         OsString::from("--fork"),
         OsString::from("--kill-child"),
-        OsString::from("--"),
-        helper.as_os_str().to_owned(),
-    ]
-}
-
-#[cfg(target_os = "linux")]
-fn pin_linux_helper(helper: &Path) -> Result<(PathBuf, std::fs::File), SandboxError> {
-    use std::fs::File;
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::MetadataExt as _;
-
-    let canonical = helper
-        .canonicalize()
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    if canonical != helper {
-        return Err(SandboxError::UntrustedHelper);
+    ];
+    if proxy {
+        args.push(OsString::from("--keep-caps"));
     }
-    let before = canonical
-        .metadata()
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    if !before.is_file() || before.mode() & 0o111 == 0 {
-        return Err(SandboxError::UntrustedHelper);
+    if preparation {
+        args.extend(["--mount", "--propagation", "private"].map(OsString::from));
     }
-    let file = File::open(&canonical).map_err(|_| SandboxError::UntrustedHelper)?;
-    let pinned = file.metadata().map_err(|_| SandboxError::UntrustedHelper)?;
-    let running = Path::new("/proc/self/exe")
-        .metadata()
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    if (before.dev(), before.ino()) != (pinned.dev(), pinned.ino())
-        || (pinned.dev(), pinned.ino()) != (running.dev(), running.ino())
-    {
-        return Err(SandboxError::UntrustedHelper);
-    }
-    let descriptor = file.as_raw_fd();
-    rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
-        .map_err(|_| SandboxError::UntrustedHelper)?;
-    Ok((PathBuf::from(format!("/proc/self/fd/{descriptor}")), file))
+    args.push(OsString::from("--"));
+    args.push(helper.as_os_str().to_owned());
+    args
 }
 
 #[cfg(target_os = "linux")]
@@ -783,54 +814,6 @@ fn audited_linux_tool(candidates: &[&str]) -> Option<PathBuf> {
         (metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0)
             .then_some(canonical)
     })
-}
-
-#[cfg(target_os = "macos")]
-fn seatbelt_profile(policy: &SandboxPolicy) -> String {
-    let writable = (0..policy.write_roots.len())
-        .map(|index| format!("(subpath (param \"RW_WRITE_{index}\"))"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let readable = policy.read_roots.as_ref().map(|roots| {
-        (0..roots.len())
-            .map(|index| format!("(subpath (param \"RW_READ_{index}\"))"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
-    let network = match &policy.network {
-        NetworkPolicy::Deny => "(deny network*)".to_owned(),
-        NetworkPolicy::PolicyProxy { port, .. } => format!(
-            "(deny network-outbound (require-not (remote ip \"localhost:{port}\"))) (deny network-bind) (deny network-inbound)"
-        ),
-    };
-    let read_rule = readable.map_or_else(String::new, |readable| {
-        format!(
-            "(deny file-read* (require-not (require-any (literal \"/\") (literal \"/dev/null\") {writable} {readable})))"
-        )
-    });
-    let secret_roots = (0..sensitive_read_roots().len())
-        .map(|index| format!("(subpath (param \"RW_SECRET_{index}\"))"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let secret_rule = if secret_roots.is_empty() {
-        String::new()
-    } else {
-        format!("(deny file-read* (require-any {secret_roots}))")
-    };
-    format!(
-        "(version 1) (allow default) {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn sensitive_read_roots() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-    else {
-        return Vec::new();
-    };
-    sensitive_home_roots(&home)
 }
 
 /// Handles a Linux sandbox-helper invocation and replaces the current process
@@ -850,7 +833,22 @@ where
     S: Into<OsString>,
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    if args.get(1).and_then(|value| value.to_str()) != Some(HELPER_ARG) {
+    let entry = args.get(1).and_then(|value| value.to_str());
+    #[cfg(target_os = "macos")]
+    if entry == Some(macos::WORKER_ARG) {
+        let program = args
+            .get(2)
+            .filter(|program| !program.is_empty())
+            .ok_or_else(|| SandboxError::Unavailable("missing macOS worker target".to_owned()))?;
+        return Err(SandboxError::Unavailable(
+            rw_macos_bootstrap::exec_worker(program, &args[3..]).to_string(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    if entry == Some(linux::process_creation::WORKER_ARG) {
+        return linux::process_creation::run_worker(&args).map(|never| match never {});
+    }
+    if entry != Some(HELPER_ARG) {
         return Ok(false);
     }
     #[cfg(target_os = "linux")]
@@ -867,618 +865,7 @@ where
 }
 
 #[cfg(target_os = "linux")]
-mod linux {
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::convert::TryInto as _;
-    use std::io;
-    use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-    use std::os::fd::AsFd as _;
-    use std::os::unix::net::UnixStream;
-    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
-    use std::thread;
-    use std::time::Duration;
-
-    use landlock::{
-        ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-        RulesetStatus,
-    };
-    use seccompiler::{
-        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
-        SeccompRule,
-    };
-
-    use super::{
-        NetworkPolicy, OsString, RootKind, SandboxError, SandboxPolicy, audited_linux_tool,
-        sensitive_home_roots, serde_json,
-    };
-
-    /// Linux's default compatibility roots. These are deliberately explicit:
-    /// Landlock cannot subtract a credential directory after granting `/`.
-    /// Optional multilib and virtual-filesystem entries are skipped when the
-    /// host does not provide them.
-    const SYSTEM_READ_ROOTS: &[&str] = &[
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/lib",
-        "/lib32",
-        "/lib64",
-        "/libx32",
-        "/etc",
-        "/proc/self",
-        "/sys/devices/system/cpu",
-        "/sys/fs/cgroup",
-        "/tmp",
-        "/dev/null",
-        "/dev/zero",
-        "/dev/random",
-        "/dev/urandom",
-        "/dev/tty",
-    ];
-
-    pub(super) fn run_helper(args: &[OsString]) -> Result<std::convert::Infallible, SandboxError> {
-        if args.len() < 4 {
-            return Err(SandboxError::MalformedHelper);
-        }
-        let policy: SandboxPolicy = serde_json::from_os_str(&args[2])?;
-        let helper_pin = inherited_helper_pin(args)?;
-        if let NetworkPolicy::PolicyProxy {
-            port,
-            relay_path: Some(relay_path),
-        } = &policy.network
-        {
-            return run_proxy_helper(&policy, *port, relay_path, &args[3], &args[4..], helper_pin);
-        }
-        if policy.network != NetworkPolicy::Deny {
-            return Err(SandboxError::MalformedHelper);
-        }
-        install_landlock(&policy, &args[3])?;
-        install_network_floor(false)?;
-        let error = command_without_helper_pin(&args[3], &args[4..], helper_pin)?.exec();
-        Err(SandboxError::Exec(error))
-    }
-
-    fn inherited_helper_pin(args: &[OsString]) -> Result<Option<u32>, SandboxError> {
-        let Some(executable) = args.first().and_then(|argument| argument.to_str()) else {
-            return Err(SandboxError::MalformedHelper);
-        };
-        let Some(descriptor) = executable.strip_prefix("/proc/self/fd/") else {
-            return Ok(None);
-        };
-        descriptor
-            .parse::<u32>()
-            .ok()
-            .filter(|descriptor| *descriptor >= 3)
-            .map(Some)
-            .ok_or(SandboxError::MalformedHelper)
-    }
-
-    fn command_without_helper_pin(
-        program: &OsString,
-        args: &[OsString],
-        helper_pin: Option<u32>,
-    ) -> Result<Command, SandboxError> {
-        if let Some(helper_pin) = helper_pin {
-            struct InheritedHelperPin(i32);
-
-            impl std::os::fd::IntoRawFd for InheritedHelperPin {
-                fn into_raw_fd(self) -> i32 {
-                    self.0
-                }
-            }
-
-            let helper_pin: i32 = helper_pin
-                .try_into()
-                .map_err(|_| SandboxError::MalformedHelper)?;
-            // The descriptor was validated from /proc/self/fd and was needed
-            // only to pin the helper across the unshare exec. Transfer its
-            // ownership to nix 0.31 and close it before launching the target.
-            nix::unistd::close(InheritedHelperPin(helper_pin)).map_err(sandbox_backend)?;
-        }
-        let mut command = Command::new(program);
-        command.args(args);
-        Ok(command)
-    }
-
-    fn run_proxy_helper(
-        policy: &SandboxPolicy,
-        port: u16,
-        relay_path: &Path,
-        program: &OsString,
-        args: &[OsString],
-        helper_pin: Option<u32>,
-    ) -> Result<std::convert::Infallible, SandboxError> {
-        if port == 0 || !relay_path.is_absolute() {
-            return Err(SandboxError::MalformedHelper);
-        }
-        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
-            .map_err(sandbox_backend)?;
-        raise_loopback()?;
-        let listener =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(SandboxError::Proxy)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(SandboxError::Proxy)?;
-        let running = Arc::new(AtomicBool::new(true));
-        let relay_running = Arc::clone(&running);
-        let relay_path = relay_path.to_path_buf();
-        let relay = thread::Builder::new()
-            .name("rottweiler-egress-netns-relay".to_owned())
-            .spawn(move || serve_namespace_relay(&listener, &relay_path, &relay_running))
-            .map_err(SandboxError::Proxy)?;
-
-        install_landlock(policy, program)?;
-        install_network_floor(true)?;
-        let status = command_without_helper_pin(program, args, helper_pin)?
-            .status()
-            .map_err(SandboxError::Exec)?;
-        running.store(false, Ordering::Release);
-        let _ = TcpStream::connect_timeout(
-            &(Ipv4Addr::LOCALHOST, port).into(),
-            Duration::from_millis(100),
-        );
-        let _ = relay.join();
-        if let Some(code) = status.code() {
-            std::process::exit(code);
-        }
-        std::process::exit(128 + status.signal().unwrap_or(1));
-    }
-
-    fn raise_loopback() -> Result<(), SandboxError> {
-        let ip =
-            audited_linux_tool(&["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"]).ok_or_else(|| {
-                SandboxError::Unavailable(
-                    "Linux policy egress requires a trusted iproute2 executable".to_owned(),
-                )
-            })?;
-        let status = Command::new(ip)
-            .args(["link", "set", "dev", "lo", "up"])
-            .env_clear()
-            .status()
-            .map_err(SandboxError::Exec)?;
-        if !status.success() {
-            return Err(SandboxError::Unavailable(
-                "Linux network namespace loopback setup failed".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn serve_namespace_relay(listener: &TcpListener, relay_path: &Path, running: &Arc<AtomicBool>) {
-        let active = Arc::new(AtomicUsize::new(0));
-        while running.load(Ordering::Acquire) {
-            match listener.accept() {
-                Ok((client, _)) => {
-                    if active
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                            (count < 64).then_some(count + 1)
-                        })
-                        .is_err()
-                    {
-                        continue;
-                    }
-                    let path = relay_path.to_path_buf();
-                    let active = Arc::clone(&active);
-                    let _ = thread::Builder::new()
-                        .name("rottweiler-egress-netns-connection".to_owned())
-                        .spawn(move || {
-                            if let Ok(upstream) = UnixStream::connect(path) {
-                                let _ = tunnel_tcp_to_unix(client, upstream);
-                            }
-                            active.fetch_sub(1, Ordering::AcqRel);
-                        });
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
-    fn tunnel_tcp_to_unix(mut client: TcpStream, mut upstream: UnixStream) -> io::Result<()> {
-        let mut client_read = client.try_clone()?;
-        let mut upstream_write = upstream.try_clone()?;
-        let forward = thread::spawn(move || {
-            let result = io::copy(&mut client_read, &mut upstream_write);
-            let _ = upstream_write.shutdown(Shutdown::Write);
-            result
-        });
-        let reverse = io::copy(&mut upstream, &mut client);
-        let _ = client.shutdown(Shutdown::Write);
-        let _ = forward.join();
-        reverse.map(|_| ())
-    }
-
-    fn install_landlock(policy: &SandboxPolicy, program: &OsString) -> Result<(), SandboxError> {
-        // V3 includes REFER and TRUNCATE.  Requiring full enforcement prevents
-        // older kernels from silently leaving path-based truncate unrestricted.
-        let abi = ABI::V3;
-        let all = AccessFs::from_all(abi);
-        let read = AccessFs::from_read(abi);
-        let mut ruleset = Ruleset::default()
-            .handle_access(all)
-            .map_err(sandbox_backend)?
-            .create()
-            .map_err(sandbox_backend)?;
-        let homes = linux_homes();
-        let sensitive = homes
-            .iter()
-            .flat_map(|home| sensitive_linux_roots(home))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut read_grants = BTreeMap::new();
-        for root in SYSTEM_READ_ROOTS {
-            collect_system_read_root(Path::new(root), &homes, &mut read_grants)?;
-        }
-        match (&policy.read_roots, &policy.read_root_kinds) {
-            (Some(read_roots), Some(read_root_kinds))
-                if read_roots.len() == read_root_kinds.len() =>
-            {
-                for (root, kind) in read_roots.iter().zip(read_root_kinds) {
-                    collect_authorized_read_root(root, *kind, &sensitive, &mut read_grants)?;
-                }
-            }
-            (None, None) => {
-                if let Some(program) = absolute_existing_root(Path::new(program))? {
-                    collect_authorized_read_root(
-                        &program.0,
-                        program.1,
-                        &sensitive,
-                        &mut read_grants,
-                    )?;
-                }
-            }
-            _ => return Err(SandboxError::MalformedHelper),
-        }
-        if policy.write_roots.len() != policy.write_root_kinds.len() {
-            return Err(SandboxError::MalformedHelper);
-        }
-        for (root, kind) in policy.write_roots.iter().zip(&policy.write_root_kinds) {
-            collect_authorized_read_root(root, *kind, &sensitive, &mut read_grants)?;
-        }
-        for (root, kind) in read_grants {
-            let root = open_landlock_root(&root, kind)?;
-            let access = if kind == RootKind::Directory {
-                read
-            } else {
-                read & AccessFs::from_file(abi)
-            };
-            ruleset = ruleset
-                .add_rule(PathBeneath::new(root, access))
-                .map_err(sandbox_backend)?;
-        }
-        for (root_path, kind) in policy.write_roots.iter().zip(&policy.write_root_kinds) {
-            // A write root containing a sensitive home path cannot receive an
-            // `all` rule: Landlock rules are additive, so that would restore
-            // READ_FILE below the excluded path. Grant write authority at the
-            // parent and add read authority only on the safe sibling snapshot.
-            let root_contains_sensitive = sensitive
-                .iter()
-                .any(|secret| secret.starts_with(root_path) || root_path.starts_with(secret));
-            let write_access = if root_contains_sensitive {
-                all & !read
-            } else {
-                all
-            };
-            let root = open_landlock_root(root_path, *kind)?;
-            let access = if *kind == RootKind::Directory {
-                write_access
-            } else {
-                write_access & AccessFs::from_file(abi)
-            };
-            ruleset = ruleset
-                .add_rule(PathBeneath::new(root, access))
-                .map_err(sandbox_backend)?;
-        }
-        let status = ruleset.restrict_self().map_err(sandbox_backend)?;
-        if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
-            return Err(SandboxError::Unavailable(format!(
-                "Landlock V3 is not fully enforced ({:?}); refusing unsandboxed execution",
-                status.ruleset
-            )));
-        }
-        Ok(())
-    }
-
-    fn linux_homes() -> Vec<PathBuf> {
-        let mut homes = BTreeSet::new();
-        if let Some(home) = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .and_then(|path| path.canonicalize().ok())
-            .filter(|path| path.is_dir())
-        {
-            homes.insert(home);
-        }
-        // HOME is caller-controlled process state. Also consult the local
-        // account database so overriding HOME cannot expose the real account's
-        // credential stores. Hosts using a remote identity database still get
-        // the environment-derived path and the explicit allowlist floor.
-        let uid = rustix::process::getuid().as_raw().to_string();
-        if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
-            for fields in passwd
-                .lines()
-                .map(|line| line.split(':').collect::<Vec<_>>())
-            {
-                if fields.get(2) == Some(&uid.as_str())
-                    && let Some(home) = fields
-                        .get(5)
-                        .map(PathBuf::from)
-                        .filter(|path| path.is_absolute())
-                        .and_then(|path| path.canonicalize().ok())
-                        .filter(|path| path.is_dir())
-                {
-                    homes.insert(home);
-                }
-            }
-        }
-        homes.into_iter().collect()
-    }
-
-    fn sensitive_linux_roots(home: &Path) -> Vec<PathBuf> {
-        let mut roots = BTreeSet::new();
-        for lexical in sensitive_home_roots(home) {
-            roots.insert(lexical.clone());
-            if let Ok(canonical) = lexical.canonicalize() {
-                roots.insert(canonical);
-            }
-        }
-        roots.into_iter().collect()
-    }
-
-    fn collect_system_read_root(
-        root: &Path,
-        homes: &[PathBuf],
-        grants: &mut BTreeMap<PathBuf, RootKind>,
-    ) -> Result<(), SandboxError> {
-        let Some((root, kind)) = absolute_existing_root(root)? else {
-            return Ok(());
-        };
-        if homes.iter().any(|home| root.starts_with(home)) {
-            return Ok(());
-        }
-        let excluded = homes
-            .iter()
-            .filter(|home| home.starts_with(&root))
-            .cloned()
-            .collect::<Vec<_>>();
-        if kind == RootKind::Directory && !excluded.is_empty() {
-            return collect_directory_except(&root, &excluded, grants);
-        }
-        grants.insert(root, kind);
-        Ok(())
-    }
-
-    /// Adds an explicitly authorized root while carving credential paths out
-    /// of any parent grant. Landlock has no deny rule, so a home-directory
-    /// workspace is represented by rules for its existing safe siblings. This
-    /// preserves reads of existing workspace content, but the home directory
-    /// itself cannot be listed and new top-level entries are not readable until
-    /// a future sandbox invocation rebuilds the snapshot.
-    fn collect_authorized_read_root(
-        root: &Path,
-        kind: RootKind,
-        sensitive: &[PathBuf],
-        grants: &mut BTreeMap<PathBuf, RootKind>,
-    ) -> Result<(), SandboxError> {
-        if sensitive.iter().any(|secret| root.starts_with(secret)) {
-            return Ok(());
-        }
-        let excluded = sensitive
-            .iter()
-            .filter(|secret| secret.starts_with(root))
-            .cloned()
-            .collect::<Vec<_>>();
-        if kind == RootKind::Directory && !excluded.is_empty() {
-            collect_directory_except(root, &excluded, grants)
-        } else {
-            grants.insert(root.to_path_buf(), kind);
-            Ok(())
-        }
-    }
-
-    fn collect_directory_except(
-        root: &Path,
-        excluded: &[PathBuf],
-        grants: &mut BTreeMap<PathBuf, RootKind>,
-    ) -> Result<(), SandboxError> {
-        for entry in std::fs::read_dir(root).map_err(sandbox_backend)? {
-            let entry = entry.map_err(sandbox_backend)?;
-            let path = entry.path();
-            let link_metadata = path.symlink_metadata().map_err(sandbox_backend)?;
-            // A PathBeneath rule is attached to the resolved inode. Following
-            // a sibling symlink here could accidentally grant an object outside
-            // the authorized root, so snapshot carving deliberately omits it.
-            if link_metadata.file_type().is_symlink() {
-                continue;
-            }
-            let canonical = match path.canonicalize() {
-                Ok(path) => path,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(sandbox_backend(error)),
-            };
-            if !canonical.starts_with(root) {
-                continue;
-            }
-            let is_excluded = excluded
-                .iter()
-                .any(|secret| path == *secret || canonical == *secret);
-            if is_excluded {
-                continue;
-            }
-            let nested = excluded
-                .iter()
-                .filter(|secret| secret.starts_with(&path) || secret.starts_with(&canonical))
-                .cloned()
-                .collect::<Vec<_>>();
-            let metadata = canonical.metadata().map_err(sandbox_backend)?;
-            let kind = RootKind::for_metadata(&metadata);
-            if kind == RootKind::Directory && !nested.is_empty() {
-                collect_directory_except(&path, &nested, grants)?;
-            } else {
-                grants.insert(canonical, kind);
-            }
-        }
-        Ok(())
-    }
-
-    fn absolute_existing_root(root: &Path) -> Result<Option<(PathBuf, RootKind)>, SandboxError> {
-        if !root.is_absolute() {
-            return Ok(None);
-        }
-        let canonical = match root.canonicalize() {
-            Ok(root) => root,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(sandbox_backend(error)),
-        };
-        let metadata = canonical.metadata().map_err(sandbox_backend)?;
-        Ok(Some((canonical, RootKind::for_metadata(&metadata))))
-    }
-
-    fn open_landlock_root(root: &Path, expected: RootKind) -> Result<PathFd, SandboxError> {
-        // Open first and classify the pinned descriptor.  The same descriptor
-        // becomes the Landlock rule parent, so a concurrent path swap cannot
-        // turn file-only authority into directory-wide authority.
-        let root = PathFd::new(root).map_err(sandbox_backend)?;
-        let metadata = rustix::fs::fstat(root.as_fd()).map_err(sandbox_backend)?;
-        let actual = if rustix::fs::FileType::from_raw_mode(metadata.st_mode).is_dir() {
-            RootKind::Directory
-        } else {
-            RootKind::NonDirectory
-        };
-        if actual != expected {
-            return Err(SandboxError::RootTypeChanged);
-        }
-        Ok(root)
-    }
-
-    fn install_network_floor(policy_proxy: bool) -> Result<(), SandboxError> {
-        let mut denied = [
-            libc::SYS_bind,
-            libc::SYS_accept,
-            libc::SYS_accept4,
-            libc::SYS_io_uring_setup,
-            libc::SYS_io_uring_enter,
-            libc::SYS_io_uring_register,
-        ]
-        .into_iter()
-        .map(|syscall| (syscall, Vec::new()))
-        .collect::<BTreeMap<_, _>>();
-        denied.insert(libc::SYS_socketpair, local_stream_pair_rules()?);
-        if policy_proxy {
-            let non_inet = SeccompRule::new(vec![
-                SeccompCondition::new(
-                    0,
-                    SeccompCmpArgLen::Dword,
-                    SeccompCmpOp::Ne,
-                    libc::AF_INET as u64,
-                )
-                .map_err(sandbox_backend)?,
-                SeccompCondition::new(
-                    0,
-                    SeccompCmpArgLen::Dword,
-                    SeccompCmpOp::Ne,
-                    libc::AF_INET6 as u64,
-                )
-                .map_err(sandbox_backend)?,
-            ])
-            .map_err(sandbox_backend)?;
-            denied.insert(libc::SYS_socket, vec![non_inet]);
-        } else {
-            // Deny socket creation outright. The empty network namespace is
-            // the authority boundary; these syscall rails additionally cover
-            // inherited descriptors and UDP/raw/async submission paths.
-            denied.insert(libc::SYS_socket, Vec::new());
-            denied.insert(libc::SYS_connect, Vec::new());
-            for syscall in [
-                libc::SYS_sendto,
-                libc::SYS_sendmsg,
-                libc::SYS_sendmmsg,
-                libc::SYS_recvmsg,
-                libc::SYS_recvmmsg,
-            ] {
-                denied.insert(syscall, Vec::new());
-            }
-        }
-        let filter: BpfProgram = SeccompFilter::new(
-            denied,
-            SeccompAction::Allow,
-            SeccompAction::Errno(libc::EPERM as u32),
-            std::env::consts::ARCH.try_into().map_err(sandbox_backend)?,
-        )
-        .map_err(sandbox_backend)?
-        .try_into()
-        .map_err(sandbox_backend)?;
-        seccompiler::apply_filter(&filter).map_err(sandbox_backend)
-    }
-
-    fn local_stream_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
-        // Local full-duplex stream pairs are process-local IPC used by Tokio
-        // and MCP transports; they cannot cross the empty network namespace.
-        // Datagram pairs are deliberately excluded because one endpoint can
-        // be reconnected to a pathname socket after creation. Exact type
-        // matching also rejects every flag except CLOEXEC and NONBLOCK.
-        let non_unix_pair = SeccompRule::new(vec![
-            SeccompCondition::new(
-                0,
-                SeccompCmpArgLen::Dword,
-                SeccompCmpOp::Ne,
-                libc::AF_UNIX as u64,
-            )
-            .map_err(sandbox_backend)?,
-        ])
-        .map_err(sandbox_backend)?;
-        let mut invalid_unix_stream_type = vec![
-            SeccompCondition::new(
-                0,
-                SeccompCmpArgLen::Dword,
-                SeccompCmpOp::Eq,
-                libc::AF_UNIX as u64,
-            )
-            .map_err(sandbox_backend)?,
-        ];
-        for allowed_type in [
-            libc::SOCK_STREAM,
-            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK,
-            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-        ] {
-            invalid_unix_stream_type.push(
-                SeccompCondition::new(
-                    1,
-                    SeccompCmpArgLen::Dword,
-                    SeccompCmpOp::Ne,
-                    u64::try_from(allowed_type).map_err(sandbox_backend)?,
-                )
-                .map_err(sandbox_backend)?,
-            );
-        }
-        let invalid_unix_stream_type =
-            SeccompRule::new(invalid_unix_stream_type).map_err(sandbox_backend)?;
-        let nonzero_pair_protocol = SeccompRule::new(vec![
-            SeccompCondition::new(2, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, 0)
-                .map_err(sandbox_backend)?,
-        ])
-        .map_err(sandbox_backend)?;
-        Ok(vec![
-            non_unix_pair,
-            invalid_unix_stream_type,
-            nonzero_pair_protocol,
-        ])
-    }
-
-    fn sandbox_backend(error: impl std::fmt::Display) -> SandboxError {
-        SandboxError::Backend(error.to_string())
-    }
-}
+mod linux;
 
 /// Sandbox policy or backend failure.  Messages never include command text or
 /// environment contents.
@@ -1601,8 +988,13 @@ mod tests {
         let executable = std::env::current_exe().expect("current executable");
         let writable_target = executable.parent().expect("target directory");
         let policy = SandboxPolicy::new([writable_target], NetworkPolicy::Deny).expect("policy");
-        let mut plan = shell_launch_plan(&policy, &executable, Path::new("/usr/bin/true"), &[])
-            .expect("self-hosted launch plan");
+        let mut plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&executable).expect("running helper"),
+            Path::new("/usr/bin/true"),
+            &[],
+        )
+        .expect("self-hosted launch plan");
         assert!(plan.take_helper_pin().is_some());
         assert!(plan.args.iter().any(|argument| {
             argument
@@ -1617,7 +1009,7 @@ mod tests {
         let injected = replacement_dir.path().join("injected-helper");
         fs::copy(&executable, &injected).expect("injected helper copy");
         assert!(matches!(
-            shell_launch_plan(&policy, &injected, Path::new("/usr/bin/true"), &[]),
+            SandboxHelper::from_running(&injected),
             Err(SandboxError::UntrustedHelper)
         ));
     }
@@ -1636,7 +1028,13 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert!(matches!(
-                shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+                shell_launch_plan(
+                    &policy,
+                    &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                        .expect("running helper"),
+                    Path::new("/bin/sh"),
+                    &[]
+                ),
                 Err(SandboxError::PolicyProxyUnavailable)
             ));
             let proxy = SupervisedEgressProxy::start(EgressPolicy::default()).expect("proxy");
@@ -1649,18 +1047,36 @@ mod tests {
             )
             .expect("owned policy");
             assert!(
-                shell_launch_plan(&owned_policy, Path::new("rw"), Path::new("/bin/sh"), &[])
-                    .is_ok()
+                shell_launch_plan(
+                    &owned_policy,
+                    &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                        .expect("running helper"),
+                    Path::new("/bin/sh"),
+                    &[]
+                )
+                .is_ok()
             );
             drop(proxy);
             assert!(matches!(
-                shell_launch_plan(&owned_policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+                shell_launch_plan(
+                    &owned_policy,
+                    &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                        .expect("running helper"),
+                    Path::new("/bin/sh"),
+                    &[]
+                ),
                 Err(SandboxError::PolicyProxyUnavailable)
             ));
         }
         #[cfg(not(target_os = "macos"))]
         assert!(matches!(
-            shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+            shell_launch_plan(
+                &policy,
+                &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                    .expect("running helper"),
+                Path::new("/bin/sh"),
+                &[]
+            ),
             Err(SandboxError::PolicyProxyUnavailable)
         ));
     }
@@ -1726,14 +1142,20 @@ mod tests {
     fn seatbelt_broad_read_mode_explicitly_denies_user_credential_roots() {
         let directory = tempdir().expect("temporary directory");
         let policy = SandboxPolicy::new([directory.path()], NetworkPolicy::Deny).expect("policy");
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/true"), &[])
-            .expect("launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("/bin/true"),
+            &[],
+        )
+        .expect("launch plan");
         let profile = plan
             .args
             .get(1)
             .and_then(|value| value.to_str())
             .expect("profile");
-        let sensitive = sensitive_read_roots();
+        let sensitive = macos::sensitive_read_roots();
         assert!(!sensitive.is_empty());
         for (index, root) in sensitive.iter().enumerate() {
             assert!(profile.contains(&format!("(subpath (param \"RW_SECRET_{index}\"))")));
@@ -1770,8 +1192,14 @@ sys.exit(92)'
             workspace.as_os_str().to_owned(),
             outside.as_os_str().to_owned(),
         ];
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &args)
-            .expect("launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("/bin/sh"),
+            &args,
+        )
+        .expect("launch plan");
         let status = Command::new(&plan.program)
             .args(&plan.args)
             .status()
@@ -1805,8 +1233,14 @@ sys.exit(92)'
             second.as_os_str().to_owned(),
             blocked.as_os_str().to_owned(),
         ];
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &args)
-            .expect("launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("/bin/sh"),
+            &args,
+        )
+        .expect("launch plan");
         assert!(
             Command::new(plan.program)
                 .args(plan.args)
@@ -1858,8 +1292,14 @@ for target in [('127.0.0.1', upstream_port), ('127.0.0.1', proxy_port + 1), ('1.
         .replace("PROXY_PORT", &proxy.address().port().to_string())
         .replace("UPSTREAM_PORT", &upstream_address.port().to_string());
         let args = [OsString::from("-c"), OsString::from(script)];
-        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("python3"), &args)
-            .expect("proxy-only launch plan");
+        let plan = shell_launch_plan(
+            &policy,
+            &SandboxHelper::from_running(&std::env::current_exe().expect("executable"))
+                .expect("running helper"),
+            Path::new("python3"),
+            &args,
+        )
+        .expect("proxy-only launch plan");
         let status = Command::new(plan.program)
             .args(plan.args)
             .status()

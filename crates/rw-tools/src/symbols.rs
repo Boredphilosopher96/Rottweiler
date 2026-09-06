@@ -1,10 +1,18 @@
+#[cfg(test)]
+mod acceptance;
+mod presentation;
+use presentation::SYMBOLS_PRESENTATION;
+
 use std::{
+    collections::BTreeMap,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, Weak},
 };
 
 use async_trait::async_trait;
-use rw_intel::{IndexLimits, IntelError, Language, Symbol, SymbolIndex, SymbolQuery, SymbolRole};
+use rw_intel::{
+    IndexBudget, IndexLimits, IntelError, Language, Symbol, SymbolIndex, SymbolQuery, SymbolRole,
+};
 use rw_types::ToolCapability;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -46,13 +54,67 @@ impl SymbolsTool {
     }
 }
 
+/// Runtime-owned index sharing. Canonical roots and trust scope partition data.
+pub struct WorkspaceIndexPool {
+    budget: Arc<IndexBudget>,
+    indexes: Mutex<BTreeMap<(PathBuf, bool), Weak<SymbolIndex>>>,
+}
+
+impl Default for WorkspaceIndexPool {
+    fn default() -> Self {
+        Self {
+            budget: Arc::new(IndexBudget::new(IndexLimits::default().max_retained_bytes)),
+            indexes: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl WorkspaceIndexPool {
+    /// Shares a root only within the same trust scope and canonical worktree.
+    ///
+    /// # Errors
+    /// Returns filesystem, lock or aggregate-capacity failures.
+    pub fn workspace(
+        &self,
+        roots: &[PathBuf],
+        trusted: &[bool],
+    ) -> Result<WorkspaceSymbolIndex, IntelError> {
+        if roots.len() != trusted.len() {
+            return Err(IntelError::Capacity);
+        }
+        let mut entries = self.indexes.lock().map_err(|_| IntelError::LockPoisoned)?;
+        entries.retain(|_, index| index.strong_count() > 0);
+        let mut indexes = Vec::with_capacity(roots.len());
+        for (root, trusted) in roots.iter().zip(trusted) {
+            let canonical = std::fs::canonicalize(root).map_err(|source| IntelError::Io {
+                path: root.clone(),
+                source,
+            })?;
+            let key = (canonical, *trusted);
+            let index = if let Some(index) = entries.get(&key).and_then(Weak::upgrade) {
+                index
+            } else {
+                if entries.len() >= 128 {
+                    return Err(IntelError::Capacity);
+                }
+                let index =
+                    Arc::new(SymbolIndex::new(&key.0)?.with_budget(Arc::clone(&self.budget)));
+                entries.insert(key, Arc::downgrade(&index));
+                index
+            };
+            indexes.push(index);
+        }
+        Ok(WorkspaceSymbolIndex { indexes })
+    }
+}
+
 /// Stable-index symbol aggregation across every workspace root.
 pub struct WorkspaceSymbolIndex {
     indexes: Vec<Arc<SymbolIndex>>,
 }
 
 impl WorkspaceSymbolIndex {
-    /// Creates one independent incremental index per ordered canonical root.
+    /// Creates bounded root indexes under one shared byte budget.
     ///
     /// # Errors
     ///
@@ -70,9 +132,14 @@ impl WorkspaceSymbolIndex {
         roots: impl IntoIterator<Item = impl AsRef<Path>>,
         limits: IndexLimits,
     ) -> Result<Self, IntelError> {
+        let budget = Arc::new(IndexBudget::new(limits.max_retained_bytes));
         let indexes = roots
             .into_iter()
-            .map(|root| SymbolIndex::new(root).map(|index| Arc::new(index.with_limits(limits))))
+            .map(|root| {
+                SymbolIndex::new(root).map(|index| {
+                    Arc::new(index.with_limits(limits).with_budget(Arc::clone(&budget)))
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { indexes })
     }
@@ -85,6 +152,17 @@ impl WorkspaceSymbolIndex {
     pub fn index_workspaces(&self) -> Result<(), IntelError> {
         for index in &self.indexes {
             index.index_workspace()?;
+        }
+        Ok(())
+    }
+
+    /// Reconciles externally changed files on the index owner's shared schedule.
+    ///
+    /// # Errors
+    /// Returns filesystem, parse or admission errors.
+    pub fn ensure_current(&self) -> Result<(), IntelError> {
+        for index in &self.indexes {
+            index.ensure_current()?;
         }
         Ok(())
     }
@@ -182,10 +260,14 @@ impl WorkspaceSymbolIndex {
 
 #[async_trait]
 impl Tool for SymbolsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "symbols".to_owned(),
-            description: "Search incremental tree-sitter definitions and references across Rust, Python, and TypeScript."
+            description: "Search cached tree-sitter definitions and references across Rust, Python, and TypeScript."
                 .to_owned(),
             input_schema: input_schema::<SymbolsInput>(),
             capabilities: CapabilityManifest::new([ToolCapability::ReadFilesystem]),
@@ -200,19 +282,27 @@ impl Tool for SymbolsTool {
                 "symbol pattern must not be empty".to_owned(),
             ));
         }
-        let matches = self
-            .index
-            .query(&SymbolQuery {
-                pattern: input.pattern,
-                roles: input.roles,
-                languages: input.languages,
-                limit: input.limit.min(self.limits.max_search_results),
-            })
-            .map_err(|error| ToolError::Intelligence(error.to_string()))?;
+        let index = Arc::clone(&self.index);
+        let query = SymbolQuery {
+            pattern: input.pattern,
+            roles: input.roles,
+            languages: input.languages,
+            limit: input.limit.min(self.limits.max_search_results),
+        };
+        let matches = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
+            index.query(&query)
+        })
+        .await
+        .map_err(|error| ToolError::Intelligence(error.to_string()))?
+        .map_err(|error| ToolError::Intelligence(error.to_string()))?;
         context.cancellation.check()?;
         let mut retained = Vec::new();
         let mut model_text = String::new();
-        let mut truncated = false;
+        let mut truncated = self
+            .index
+            .root_indexes()
+            .iter()
+            .any(|index| index.is_partial());
         for symbol in matches {
             let line = format!(
                 "{}:{}:{} {:?} {:?} {}",
@@ -242,7 +332,8 @@ impl Tool for SymbolsTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"matches": retained, "count": retained.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(SYMBOLS_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }
@@ -255,6 +346,40 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn runtime_pool_shares_matching_roots_and_partitions_trust_and_worktrees() {
+        let root = tempdir().expect("root");
+        let other = tempdir().expect("worktree");
+        let pool = WorkspaceIndexPool::default();
+        let roots = [root.path().to_path_buf()];
+        let first = pool.workspace(&roots, &[true]).expect("workspace");
+        let second = pool.workspace(&roots, &[true]).expect("same workspace");
+        let untrusted = pool
+            .workspace(&roots, &[false])
+            .expect("untrusted workspace");
+        let worktree = pool
+            .workspace(&[other.path().to_path_buf()], &[true])
+            .expect("worktree");
+        assert!(Arc::ptr_eq(&first.indexes[0], &second.indexes[0]));
+        assert!(!Arc::ptr_eq(&first.indexes[0], &untrusted.indexes[0]));
+        assert!(!Arc::ptr_eq(&first.indexes[0], &worktree.indexes[0]));
+        first
+            .update_source("one.rs", "struct Shared;")
+            .expect("source");
+        assert!(
+            !second
+                .symbols_for_file("one.rs")
+                .expect("symbols")
+                .is_empty()
+        );
+        assert!(
+            untrusted
+                .symbols_for_file("one.rs")
+                .expect("symbols")
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn exposes_the_incremental_index_as_a_tool() {

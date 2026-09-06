@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -16,7 +18,7 @@ REPO = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = REPO / "contracts" / "release-contract.json"
 SCRIPT = REPO / "scripts" / "release_contract.py"
 GENERATED_RUST = REPO / "crates" / "rw-types" / "src" / "generated" / "release_contract.rs"
-GENERATED_TYPESCRIPT = REPO / "packages" / "tui" / "generated" / "release-contract.ts"
+GENERATED_TYPESCRIPT = REPO / "packages" / "js-host" / "generated" / "release-contract.ts"
 VERSION = "1.2.3"
 
 
@@ -30,7 +32,7 @@ def load_module():
     return module
 
 
-def make_archive(path: Path, contract, platform_id: str, *, extra: bool = False) -> None:
+def make_archive(path: Path, contract, platform_id: str, *, extra: bool | str = False, identity: bytes | None = None) -> None:
     platform_contract = contract.platform(platform_id)
     root = contract.archive_root(VERSION, platform_id)
     with tarfile.open(path, "w:gz") as archive:
@@ -44,13 +46,15 @@ def make_archive(path: Path, contract, platform_id: str, *, extra: bool = False)
         archive.addfile(bin_info)
         for member in platform_contract.archive_members:
             content = b"#!/bin/sh\n" if member.mode == 0o755 else b"native\n"
+            if member.id == "wasm_host_identity":
+                content = identity if identity is not None else json.dumps({"bytes": 10, "sha256": hashlib.sha256(b"#!/bin/sh\n").hexdigest()}).encode()
             info = tarfile.TarInfo(f"{root}/{member.path}")
             info.mode = member.mode
             info.size = len(content)
             archive.addfile(info, io.BytesIO(content))
         if extra:
             content = b"unexpected\n"
-            info = tarfile.TarInfo(f"{root}/extra")
+            info = tarfile.TarInfo(f"{root}/{extra if isinstance(extra, str) else 'extra'}")
             info.mode = 0o644
             info.size = len(content)
             archive.addfile(info, io.BytesIO(content))
@@ -60,6 +64,21 @@ class ReleaseContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_module()
+
+    def test_archive_rejects_invalid_helper_identity(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        valid = {"bytes": 10, "sha256": hashlib.sha256(b"#!/bin/sh\n").hexdigest()}
+        cases = [b"{}", b"not json", b'{"bytes":1,"bytes":2,"sha256":"x"}', json.dumps({**valid, "bytes": True}).encode(),
+                 json.dumps({**valid, "bytes": 11}).encode(),
+                 json.dumps({**valid, "sha256": "0" * 64}).encode(),
+                 json.dumps({**valid, "unknown": 1}).encode()]
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / f"{contract.archive_root(VERSION, 'linux-aarch64')}.tar.gz"
+            for identity in cases:
+                with self.subTest(identity=identity):
+                    make_archive(archive, contract, "linux-aarch64", identity=identity)
+                    with self.assertRaisesRegex(ValueError, "WASM helper identity"):
+                        self.module.verify_archive(contract, archive, VERSION, "linux-aarch64")
 
     def test_contract_resolves_canonical_platforms_and_product_budgets(self) -> None:
         contract = self.module.load_contract(CONTRACT_PATH)
@@ -74,6 +93,27 @@ class ReleaseContractTests(unittest.TestCase):
             28_000_000,
         )
         self.assertEqual(contract.platform("linux-aarch64").native_library, "libopentui.so")
+
+    def test_archive_rejects_separate_role_executables(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / f"{contract.archive_root(VERSION, 'linux-aarch64')}.tar.gz"
+            for path in ("bin/rottweiler-tui", "bin/rottweiler-plugin-host"):
+                make_archive(archive, contract, "linux-aarch64", extra=path)
+                with self.assertRaises(ValueError):
+                    self.module.verify_archive(contract, archive, VERSION, "linux-aarch64")
+
+    def test_shared_host_has_one_member_and_preserves_bundle_ceilings(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        self.assertEqual(contract.js_host_roles, {"tui": "tui", "source_plugin": "source-plugin"})
+        for platform in contract.platforms:
+            self.assertEqual({member.id for member in platform.archive_members},
+                             {"installer", "engine", "js_host", "wasm_host", "wasm_host_identity", "opentui_native", "opentui_licenses"})
+            host = next(member for member in platform.archive_members if member.id == "js_host")
+            self.assertEqual(host.path, "bin/rottweiler-js-host")
+            self.assertEqual(host.max_bytes, 150_000_000)
+            expected = 100_000_000 if platform.system == "Darwin" else 150_000_000
+            self.assertEqual(platform.product_budgets.js_bundle_less_than_bytes, expected)
 
     def test_contract_rejects_unknown_fields_and_duplicate_platform_ids(self) -> None:
         document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
@@ -109,6 +149,29 @@ class ReleaseContractTests(unittest.TestCase):
             path.write_text(json.dumps(member), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "engine product budget exceeds"):
                 self.module.load_contract(path)
+
+            member = copy.deepcopy(document)
+            host = next(value for value in member["archive"]["members"] if value["id"] == "js_host")
+            host["max_bytes"] = 104_857_600
+            path.write_text(json.dumps(member), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "JavaScript bundle product budget exceeds its host"):
+                self.module.load_contract(path)
+
+    def test_large_linux_host_obeys_combined_platform_budget(self) -> None:
+        contract = self.module.load_contract(CONTRACT_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("engine", "wasm", "js", "native")]
+            (Path(directory) / "opentui-licenses.txt").write_text("license fixture")
+            for path, size in zip(paths, (1, 1, 115_480_704, 5_500_000), strict=True):
+                with path.open("wb") as output:
+                    output.truncate(size)
+            self.module.validate_build(contract, "linux-x86_64", *paths)
+            with self.assertRaisesRegex(ValueError, "product budget is <100000000"):
+                self.module.validate_build(contract, "darwin-arm64", *paths)
+            with paths[2].open("wb") as output:
+                output.truncate(144_500_000)
+            with self.assertRaisesRegex(ValueError, "product budget is <150000000"):
+                self.module.validate_build(contract, "linux-x86_64", *paths)
 
     def test_generated_rust_is_deterministic_and_current(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -179,18 +242,17 @@ class ReleaseContractTests(unittest.TestCase):
                 output.truncate(30_000_000)
             wasm_host = root / "rottweiler-wasm-host"
             wasm_host.write_bytes(b"wasm")
-            plugin_host = root / "rottweiler-plugin-host"
-            plugin_host.write_bytes(b"plugin")
-            tui = root / "rottweiler-tui"
+            tui = root / "rottweiler-js-host"
             tui.write_bytes(b"tui")
             native = root / "libopentui.dylib"
             native.write_bytes(b"native")
+            (root / "opentui-licenses.txt").write_text("license fixture")
             self.module.validate_build(
-                contract, "darwin-arm64", engine, wasm_host, plugin_host, tui, native
+                contract, "darwin-arm64", engine, wasm_host, tui, native
             )
             with self.assertRaisesRegex(ValueError, "product budget is <28000000"):
                 self.module.validate_build(
-                    contract, "linux-x86_64", engine, wasm_host, plugin_host, tui, native
+                    contract, "linux-x86_64", engine, wasm_host, tui, native
                 )
 
     def test_stage_release_projects_exact_archive_shape_and_modes(self) -> None:
@@ -199,10 +261,14 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sources: dict[str, Path] = {}
-            for member_id in ("engine", "wasm_host", "plugin_host", "tui", "opentui_native"):
+            for member_id in ("engine", "wasm_host", "js_host", "opentui_native"):
                 source = root / member_id
                 source.write_bytes(member_id.encode("ascii"))
                 sources[member_id] = source
+            (root / "opentui-licenses.txt").write_text("license fixture")
+            # Cargo's public executable is hard-linked to its deps artifact.
+            cargo_peer = root / "cargo-deps-engine"
+            os.link(sources["engine"], cargo_peer)
             stage = root / contract.archive_root(VERSION, platform_id)
             self.module.stage_release(
                 contract,
@@ -212,11 +278,17 @@ class ReleaseContractTests(unittest.TestCase):
                 platform_id,
                 sources["engine"],
                 sources["wasm_host"],
-                sources["plugin_host"],
-                sources["tui"],
+                sources["js_host"],
                 sources["opentui_native"],
             )
             platform_contract = contract.platform(platform_id)
+            engine_path = next(member.path for member in platform_contract.archive_members
+                               if member.id == "engine")
+            staged_engine = stage / engine_path
+            self.assertEqual(staged_engine.stat().st_nlink, 1)
+            self.assertNotEqual(staged_engine.stat().st_ino, cargo_peer.stat().st_ino)
+            cargo_peer.write_bytes(b"another-build")
+            self.assertEqual(staged_engine.read_bytes(), b"engine")
             observed = {
                 path.relative_to(stage).as_posix()
                 for path in stage.rglob("*")

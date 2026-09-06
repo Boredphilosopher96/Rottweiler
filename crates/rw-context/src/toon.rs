@@ -16,6 +16,8 @@ pub const TOON_FORMAT_NOTE: &str =
 /// Safe TOON wrapper errors with no provider or secret material.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ToonError {
+    #[error("TOON transformation exceeds its allocation allowance")]
+    Allocation,
     #[error("TOON is reserved for structured object/array payloads, not prose or primitives")]
     RequiresStructuredRoot,
     #[error("TOON encode failed: {0}")]
@@ -60,6 +62,21 @@ impl ToonPromptEncoder {
             prompt_text,
             emitted_format_note,
         })
+    }
+
+    /// Encode only after the complete transient allocation profile is admitted.
+    /// # Errors
+    /// Rejects an insufficient allowance, unsupported nesting or encoder failure.
+    pub fn encode_bounded(
+        &mut self,
+        value: &Value,
+        working_bytes: usize,
+    ) -> Result<EncodedToon, ToonError> {
+        let plan = crate::ToonAllocation::for_value(value).ok_or(ToonError::Allocation)?;
+        if plan.working_bytes > working_bytes {
+            return Err(ToonError::Allocation);
+        }
+        self.encode(value)
     }
 
     /// Resets the note state, intended for a new provider conversation.

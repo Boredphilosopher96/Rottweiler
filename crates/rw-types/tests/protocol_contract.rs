@@ -88,35 +88,48 @@ fn fixture_exercises_every_ir_variant_shape() {
 }
 
 #[test]
-fn additive_event_fields_are_tolerated() {
-    let fixture_text =
-        fs::read_to_string(fixture_path()).expect("generated protocol fixture should be present");
-    let fixture_json: Value =
-        serde_json::from_str(&fixture_text).expect("fixture should be valid JSON");
-    let mut event = fixture_json["engine_events"][0].clone();
-    event
-        .as_object_mut()
-        .expect("fixture event should be an object")
-        .insert("future_additive_field".to_owned(), Value::Bool(true));
-
-    let decoded = serde_json::from_value::<EngineEvent>(event);
-    assert!(decoded.is_ok());
+fn event_variants_reject_unknown_fields() {
+    let fixture: Value =
+        serde_json::from_str(&fs::read_to_string(fixture_path()).expect("generated fixture"))
+            .expect("fixture JSON");
+    for event in fixture["engine_events"].as_array().expect("event fixtures") {
+        let mut invalid = event.clone();
+        invalid
+            .as_object_mut()
+            .expect("event object")
+            .insert("unrecognized_field".to_owned(), Value::Bool(true));
+        assert!(
+            serde_json::from_value::<EngineEvent>(invalid).is_err(),
+            "event {} must reject fields outside its contract",
+            event["type"]
+        );
+    }
 }
 
 #[test]
-fn generated_schemas_do_not_forbid_additive_fields() {
-    for name in [
-        "block.schema.json",
-        "tool-output.schema.json",
-        "client-command.schema.json",
-        "engine-event.schema.json",
-    ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../protocol/schema")
-            .join(name);
-        let schema = fs::read_to_string(path).expect("generated schema should be present");
-        assert!(!schema.contains("\"additionalProperties\": false"));
+fn generated_operation_values_reject_unknown_fields_at_their_owner() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../protocol/schema/engine-event.schema.json");
+    let schema: Value =
+        serde_json::from_slice(&fs::read(path).expect("generated schema")).expect("schema JSON");
+    for name in ["ToolProgress", "ProgressAmount"] {
+        assert_eq!(
+            schema["$defs"][name]["additionalProperties"],
+            Value::Bool(false)
+        );
     }
+    assert!(
+        serde_json::from_value::<rw_types::ToolProgress>(serde_json::json!({
+            "message": "working", "surprise": true,
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<rw_types::ProgressAmount>(serde_json::json!({
+            "completed": 1, "total": 2, "surprise": true,
+        }))
+        .is_err()
+    );
 }
 
 #[test]

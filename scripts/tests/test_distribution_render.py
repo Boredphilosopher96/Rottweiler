@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import platform
@@ -41,6 +42,8 @@ def make_archive(root: Path, release_platform: str) -> Path:
         platform_contract = RELEASE_CONTRACT.platform(release_platform)
         for member in platform_contract.archive_members:
             content = installer if member.id == "installer" else member.id.encode("ascii")
+            if member.id == "wasm_host_identity":
+                content = json.dumps({"bytes": len(b"wasm_host"), "sha256": hashlib.sha256(b"wasm_host").hexdigest()}).encode()
             info = tarfile.TarInfo(f"{release_root}/{member.path}")
             info.mode = member.mode
             info.size = len(content)
@@ -130,10 +133,10 @@ class DistributionRenderTests(unittest.TestCase):
                 'bin.install_symlink libexec/"rw"',
                 formula_text,
             )
-            self.assertNotIn('bin.install "rottweiler-tui"', formula_text)
-            self.assertIn('refute_path_exists bin/"rottweiler-tui"', formula_text)
+            self.assertNotIn('bin.install "rottweiler-js-host"', formula_text)
+            self.assertIn('refute_path_exists bin/"rottweiler-js-host"', formula_text)
             self.assertIn('libexec/"rottweiler-wasm-host"', formula_text)
-            self.assertIn('libexec/"rottweiler-plugin-host"', formula_text)
+            self.assertIn('libexec/"rottweiler-js-host"', formula_text)
             self.assertIn('license "Apache-2.0"', formula_text)
             self.assertIn("preserve_rpath", formula_text)
             self.assertIn("managed by Homebrew", formula_text)
@@ -265,32 +268,33 @@ class DistributionRenderTests(unittest.TestCase):
             self.assertIn("Linux-aarch64)", bootstrap_text)
             self.assertIn("rottweiler-1.2.3-linux-aarch64", bootstrap_text)
 
-    def test_head_formula_builds_both_components_but_exposes_only_rw(self) -> None:
+    def test_head_formula_installs_verified_candidate_but_exposes_only_rw(self) -> None:
         formula = REPO / "packaging/homebrew/rottweiler-head.rb"
         text = formula.read_text(encoding="utf-8")
         self.assertIn('head "https://github.com/Boredphilosopher96/Rottweiler.git"', text)
-        self.assertIn('depends_on "bun" => :build', text)
-        self.assertIn('depends_on "rust" => :build', text)
+        self.assertIn('depends_on "rustup" => :build', text)
+        self.assertNotIn('depends_on "bun" => :build', text)
+        self.assertNotIn('depends_on "rust" => :build', text)
         self.assertIn('depends_on "binutils" => :build', text)
         self.assertIn('ROTTWEILER_STRIP_BIN: formula_opt_bin("binutils")/"strip"', text)
         self.assertIn("preserve_rpath", text)
-        self.assertIn('"scripts/cargo-release.sh", "build", "--locked", "--release"', text)
-        self.assertIn('libexec.install "packages/tui/dist/rottweiler-tui"', text)
-        self.assertIn('libexec.install "#{release_dir}/rottweiler-wasm-host"', text)
-        self.assertIn('libexec.install "packages/plugin-host/dist/rottweiler-plugin-host"', text)
+        self.assertIn('"scripts/build-native-candidate.py"', text)
+        self.assertIn('"scripts/native_candidate.py", "path", candidate, "engine"', text)
+        self.assertIn('libexec.install Dir[(engine.dirname/"*").to_s]', text)
+        self.assertNotIn('"scripts/cargo-release.sh", "build"', text)
+        self.assertNotIn('"bun", "run"', text)
         self.assertIn(
             'bin.install_symlink libexec/"rw"',
             text,
         )
-        self.assertNotIn('bin.install "rottweiler-tui"', text)
-        self.assertIn('refute_path_exists bin/"rottweiler-tui"', text)
-        self.assertIn('refute_path_exists bin/"rottweiler-plugin-host"', text)
+        self.assertNotIn('bin.install "rottweiler-js-host"', text)
+        self.assertIn('refute_path_exists bin/"rottweiler-js-host"', text)
         self.assertIn("managed by Homebrew", text)
         self.assertIn("brew upgrade", text)
         if subprocess.run(["sh", "-c", "command -v ruby"], check=False).returncode == 0:
             subprocess.run(["ruby", "-c", str(formula)], check=True)
 
-        tui_build = (REPO / "packages/tui/build.ts").read_text(encoding="utf-8")
+        tui_build = (REPO / "packages/js-host/build.ts").read_text(encoding="utf-8")
         self.assertIn('process.env.ROTTWEILER_STRIP_BIN ?? "/usr/bin/strip"', tui_build)
         self.assertIn("isAbsolute(stripExecutable)", tui_build)
         self.assertIn('"/usr/bin/codesign"', tui_build)

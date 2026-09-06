@@ -1,9 +1,9 @@
+import { TextRenderable } from "./text"
 import {
   BoxRenderable,
   InputRenderable,
   InputRenderableEvents,
   StyledText,
-  TextRenderable,
   bold,
   fg,
   type KeyEvent,

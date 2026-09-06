@@ -1,5 +1,5 @@
 #[cfg(not(unix))]
-use std::fs;
+use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(not(unix))]
@@ -15,15 +15,140 @@ use rw_types::{SessionId, SubagentId};
 use serde::{Deserialize, Serialize};
 
 const VERSION: u16 = 1;
-const MAX_RECORD_BYTES: u64 = 1024 * 1024;
-const MAX_RECORDS: usize = 256;
+const MAX_RECORD_ALLOCATION: usize = 1024 * 1024;
+const MAX_RECORD_BYTES: u64 = MAX_RECORD_ALLOCATION as u64;
+const MAX_RECORDS: usize = rw_core::MAX_RETAINED_SUBAGENTS;
+const MAX_PAGE_RECORDS: usize = 16;
+const MAX_PAGE_ALLOCATION_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) struct MetadataPage {
+    pub(crate) records: Vec<(SubagentRecoveryRecord, usize)>,
+    pub(crate) next: Option<SubagentId>,
+}
+
 #[cfg(unix)]
 const METADATA_DIRECTORY: &str = "subagents-v1";
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Envelope {
     version: u16,
     record: SubagentRecoveryRecord,
+}
+
+// The closed record contains strings, paths, vectors of scalar identities, and
+// inline policy/lease structs. Two whole envelopes cover every vector element's
+// growth; the JSON preflight separately charges string data and serde scratch.
+impl rw_types::allocation::DecodeAllocation for Envelope {
+    fn decode_node_bytes() -> Option<usize> {
+        std::mem::size_of::<Self>().checked_mul(2)?.checked_add(64)
+    }
+}
+fn decode_charge(bytes: &[u8]) -> Result<usize, OrchestrationError> {
+    let shape = rw_types::json_structure::preflight_json(
+        bytes,
+        rw_types::json_structure::JsonStructureLimits {
+            max_encoded_bytes: MAX_RECORD_ALLOCATION,
+            max_nodes: 16_384,
+            max_string_bytes: MAX_RECORD_ALLOCATION,
+            max_depth: 32,
+        },
+    )
+    .map_err(|error| session_error(format!("subagent metadata JSON admission failed: {error}")))?;
+    let charge = shape
+        .decode_bytes::<Envelope>()
+        .and_then(|bytes_needed| bytes_needed.checked_add(bytes.len().checked_mul(2)?))
+        .ok_or_else(|| session_error("subagent metadata allocation overflow"))?;
+    if charge > MAX_PAGE_ALLOCATION_BYTES {
+        return Err(session_error(
+            "subagent metadata record exceeds decode admission",
+        ));
+    }
+    Ok(charge)
+}
+pub(crate) fn record_fingerprint(
+    record: &SubagentRecoveryRecord,
+) -> Result<[u8; 32], OrchestrationError> {
+    struct HashWriter(blake3::Hasher);
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(blake3::Hasher::new());
+    serde_json::to_writer(&mut writer, record).map_err(|error| {
+        session_error(format!("subagent metadata could not fingerprint: {error}"))
+    })?;
+    Ok(*writer.0.finalize().as_bytes())
+}
+
+fn validate_record(record: &SubagentRecoveryRecord) -> Result<(), OrchestrationError> {
+    validate_session_id(&record.parent_session_id)?;
+    validate_session_id(&record.handle.session_id)?;
+    validate_component(&record.handle.subagent_id.0)?;
+    if record.task.trim().is_empty()
+        || record.task.len() > 65_536
+        || record.agent.trim().is_empty()
+        || record.agent.len() > 256
+        || record.policy.model_alias.trim().is_empty()
+        || record.policy.model_alias.len() > 256
+        || record.depth == 0
+        || record.policy.max_turns == 0
+        || !record.workspace_root.is_absolute()
+        || record.workspace_root.as_os_str().len() > 4096
+        || record
+            .policy
+            .system_prompt
+            .as_ref()
+            .is_some_and(|text| text.len() > 512 * 1024)
+        || record.tool_names.len() > 1024
+        || record
+            .tool_names
+            .iter()
+            .any(|name| name.is_empty() || name.len() > 256)
+    {
+        return Err(session_error(
+            "subagent recovery record violates its required policy contract",
+        ));
+    }
+    Ok(())
+}
+fn encode_record(record: SubagentRecoveryRecord) -> Result<Vec<u8>, OrchestrationError> {
+    struct Bounded(Vec<u8>);
+    impl Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self
+                .0
+                .len()
+                .checked_add(bytes.len())
+                .is_none_or(|len| len > MAX_RECORD_ALLOCATION)
+            {
+                return Err(std::io::Error::other(
+                    "subagent metadata record is oversized",
+                ));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Bounded(Vec::new());
+    serde_json::to_writer(
+        &mut writer,
+        &Envelope {
+            version: VERSION,
+            record,
+        },
+    )
+    .map_err(|error| session_error(format!("subagent metadata could not encode: {error}")))?;
+    decode_charge(&writer.0)?;
+    Ok(writer.0)
 }
 
 #[derive(Debug)]
@@ -50,14 +175,64 @@ impl PrivateSubagentMetadataStore {
         }
     }
 
-    pub(crate) fn load_parent(
+    pub(crate) fn clone_for_read(&self) -> Result<Self, OrchestrationError> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                storage_root: self
+                    .storage_root
+                    .try_clone()
+                    .map_err(|error| io_error("retain metadata storage descriptor", error))?,
+                root: self
+                    .root
+                    .try_clone()
+                    .map_err(|error| io_error("retain metadata descriptor", error))?,
+                root_identity: self.root_identity,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                root: self.root.clone(),
+            })
+        }
+    }
+
+    pub(crate) fn load_parent_page(
         &self,
         parent: &SessionId,
-    ) -> Result<Vec<SubagentRecoveryRecord>, OrchestrationError> {
+        after: Option<&SubagentId>,
+    ) -> Result<MetadataPage, OrchestrationError> {
+        self.load_records(parent, after, None)
+    }
+
+    pub(crate) fn load_record(
+        &self,
+        parent: &SessionId,
+        child: &SubagentId,
+    ) -> Result<SubagentRecoveryRecord, OrchestrationError> {
+        validate_component(&child.0)?;
+        self.load_records(parent, None, Some(child))?
+            .records
+            .into_iter()
+            .next()
+            .map(|(record, _)| record)
+            .ok_or_else(|| session_error("subagent recovery record disappeared"))
+    }
+
+    fn load_records(
+        &self,
+        parent: &SessionId,
+        after: Option<&SubagentId>,
+        only: Option<&SubagentId>,
+    ) -> Result<MetadataPage, OrchestrationError> {
+        if let Some(after) = after {
+            validate_component(&after.0)?;
+        }
         #[cfg(unix)]
         {
             self.validate_root_namespace()?;
-            load_parent_unix(&self.root, parent)
+            load_parent_unix(&self.root, parent, after, only)
         }
         #[cfg(not(unix))]
         {
@@ -70,60 +245,85 @@ impl PrivateSubagentMetadataStore {
                         "subagent metadata parent path is not a directory",
                     ));
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(MetadataPage {
+                        records: Vec::new(),
+                        next: None,
+                    });
+                }
                 Err(error) => return Err(io_error("inspect subagent metadata directory", error)),
             }
-            let mut paths = fs::read_dir(&directory)
+            let mut paths = Vec::new();
+            for entry in fs::read_dir(&directory)
                 .map_err(|error| io_error("read subagent metadata directory", error))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| io_error("read subagent metadata entry", error))?;
+            {
+                if paths.len() == MAX_RECORDS {
+                    return Err(session_error("subagent metadata record limit exceeded"));
+                }
+                paths.push(entry.map_err(|error| io_error("read subagent metadata entry", error))?);
+            }
             paths.sort_by_key(std::fs::DirEntry::file_name);
             if paths.len() > MAX_RECORDS {
                 return Err(session_error("subagent metadata record limit exceeded"));
             }
-            let mut records = Vec::with_capacity(paths.len());
+            let mut records = Vec::new();
+            let mut next = None;
+            let mut allocated = 0usize;
+            let after = after.map(|id| format!("{}.json", id.0));
             for entry in paths {
+                if only.is_some_and(|only| {
+                    entry.path().file_stem().and_then(|name| name.to_str()) != Some(only.0.as_str())
+                }) {
+                    continue;
+                }
+                if after.as_ref().is_some_and(|after| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name <= after.as_str())
+                }) {
+                    continue;
+                }
+                if records.len() == MAX_PAGE_RECORDS {
+                    next = records
+                        .last()
+                        .map(|(record, _): &(SubagentRecoveryRecord, usize)| {
+                            record.handle.subagent_id.clone()
+                        });
+                    break;
+                }
                 let path = entry.path();
                 if path.extension().and_then(|value| value.to_str()) != Some("json") {
                     return Err(session_error(
                         "unexpected file in subagent metadata directory",
                     ));
                 }
-                let metadata = fs::symlink_metadata(&path)
-                    .map_err(|error| io_error("inspect subagent metadata record", error))?;
-                if !metadata.file_type().is_file() || metadata.len() > MAX_RECORD_BYTES {
-                    return Err(session_error(
-                        "subagent metadata record is unsafe or oversized",
-                    ));
+                let bytes = read_record_portable(&path)?;
+                let charge = decode_charge(&bytes)?;
+                if allocated
+                    .checked_add(charge)
+                    .is_none_or(|sum| sum > MAX_PAGE_ALLOCATION_BYTES)
+                {
+                    if records.is_empty() {
+                        return Err(session_error(
+                            "subagent metadata record exceeds decode admission",
+                        ));
+                    }
+                    next = records
+                        .last()
+                        .map(|(record, _): &(SubagentRecoveryRecord, usize)| {
+                            record.handle.subagent_id.clone()
+                        });
+                    break;
                 }
-                let mut bytes = Vec::with_capacity(metadata.len() as usize);
-                OpenOptions::new()
-                    .read(true)
-                    .open(&path)
-                    .and_then(|mut file| file.take(MAX_RECORD_BYTES + 1).read_to_end(&mut bytes))
-                    .map_err(|error| io_error("read subagent metadata record", error))?;
-                if bytes.len() as u64 > MAX_RECORD_BYTES {
-                    return Err(session_error("subagent metadata record is oversized"));
-                }
-                let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|error| {
-                    session_error(format!("subagent metadata is corrupt: {error}"))
-                })?;
-                if envelope.version != VERSION || &envelope.record.parent_session_id != parent {
-                    return Err(session_error(
-                        "subagent metadata identity or version mismatch",
-                    ));
-                }
-                validate_component(&envelope.record.handle.subagent_id.0)?;
-                validate_session_id(&envelope.record.handle.session_id)?;
-                let expected = format!("{}.json", envelope.record.handle.subagent_id.0);
-                if path.file_name().and_then(|value| value.to_str()) != Some(expected.as_str()) {
-                    return Err(session_error(
-                        "subagent metadata filename does not match its identity",
-                    ));
-                }
-                records.push(envelope.record);
+                allocated += charge;
+                let name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| session_error("subagent metadata filename is not UTF-8"))?;
+                records.push((decode_record(&bytes, parent, name)?, charge));
             }
-            Ok(records)
+            Ok(MetadataPage { records, next })
         }
     }
 
@@ -139,6 +339,7 @@ impl PrivateSubagentMetadataStore {
 #[async_trait]
 impl SubagentMetadataStore for PrivateSubagentMetadataStore {
     async fn save(&self, record: SubagentRecoveryRecord) -> Result<(), OrchestrationError> {
+        validate_record(&record)?;
         #[cfg(unix)]
         {
             self.validate_root_namespace()?;
@@ -155,16 +356,7 @@ impl SubagentMetadataStore for PrivateSubagentMetadataStore {
                 record.handle.subagent_id.0,
                 std::process::id()
             ));
-            let bytes = serde_json::to_vec(&Envelope {
-                version: VERSION,
-                record,
-            })
-            .map_err(|error| {
-                session_error(format!("subagent metadata could not encode: {error}"))
-            })?;
-            if bytes.len() as u64 > MAX_RECORD_BYTES {
-                return Err(session_error("subagent metadata record is oversized"));
-            }
+            let bytes = encode_record(record)?;
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
@@ -387,14 +579,113 @@ fn validate_private_directory(
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn read_record_portable(path: &Path) -> Result<Vec<u8>, OrchestrationError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| io_error("inspect subagent metadata record", error))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_RECORD_BYTES {
+        return Err(session_error(
+            "subagent metadata record is unsafe or oversized",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .map_err(|_| session_error("subagent metadata size cannot be represented"))?,
+    );
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .and_then(|file| file.take(MAX_RECORD_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| io_error("read subagent metadata record", error))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(session_error("subagent metadata record is oversized"));
+    }
+    Ok(bytes)
+}
+
+fn decode_record(
+    bytes: &[u8],
+    parent: &SessionId,
+    name: &str,
+) -> Result<SubagentRecoveryRecord, OrchestrationError> {
+    let envelope: Envelope = serde_json::from_slice(bytes)
+        .map_err(|error| session_error(format!("subagent metadata is corrupt: {error}")))?;
+    validate_record(&envelope.record)?;
+    if envelope.version != VERSION || &envelope.record.parent_session_id != parent {
+        return Err(session_error(
+            "subagent metadata identity or version mismatch",
+        ));
+    }
+    validate_component(&envelope.record.handle.subagent_id.0)?;
+    validate_session_id(&envelope.record.handle.session_id)?;
+    if name != format!("{}.json", envelope.record.handle.subagent_id.0) {
+        return Err(session_error(
+            "subagent metadata filename does not match its identity",
+        ));
+    }
+    Ok(envelope.record)
+}
+
+#[cfg(unix)]
+fn read_record_unix(directory: &OwnedFd, name: &str) -> Result<Vec<u8>, OrchestrationError> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    let stat = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| io_error("inspect subagent metadata record", error.into()))?;
+    let stat_size = u64::try_from(stat.st_size)
+        .map_err(|_| session_error("subagent metadata record has invalid size"))?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file() || stat_size > MAX_RECORD_BYTES {
+        return Err(session_error(
+            "subagent metadata record is unsafe or oversized",
+        ));
+    }
+    let descriptor = rustix::fs::openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| io_error("open subagent metadata record", error.into()))?;
+    let opened = rustix::fs::fstat(&descriptor)
+        .map_err(|error| io_error("inspect opened subagent metadata record", error.into()))?;
+    let opened_size = u64::try_from(opened.st_size)
+        .map_err(|_| session_error("opened subagent metadata record has invalid size"))?;
+    if !FileType::from_raw_mode(opened.st_mode).is_file()
+        || opened_size > MAX_RECORD_BYTES
+        || opened.st_dev != stat.st_dev
+        || opened.st_ino != stat.st_ino
+        || opened.st_uid != rustix::process::geteuid().as_raw()
+        || opened.st_nlink != 1
+        || (Mode::from_raw_mode(opened.st_mode).as_raw_mode() & 0o777) != 0o600
+    {
+        return Err(session_error(
+            "subagent metadata record changed while opening",
+        ));
+    }
+    let capacity = usize::try_from(opened_size)
+        .map_err(|_| session_error("subagent metadata record size cannot be represented"))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    std::fs::File::from(descriptor)
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_error("read subagent metadata record", error))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(session_error("subagent metadata record is oversized"));
+    }
+    Ok(bytes)
+}
+
 #[cfg(unix)]
 fn load_parent_unix(
     root: &OwnedFd,
     parent: &SessionId,
-) -> Result<Vec<SubagentRecoveryRecord>, OrchestrationError> {
-    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    after: Option<&SubagentId>,
+    only: Option<&SubagentId>,
+) -> Result<MetadataPage, OrchestrationError> {
     let Some(directory) = open_parent(root, parent, false)? else {
-        return Ok(Vec::new());
+        return Ok(MetadataPage {
+            records: Vec::new(),
+            next: None,
+        });
     };
     let mut entries = rustix::fs::Dir::read_from(&directory)
         .map_err(|error| io_error("read subagent metadata directory", error.into()))?;
@@ -414,73 +705,60 @@ fn load_parent_unix(
                 "unexpected file in subagent metadata directory",
             ));
         }
+        if names.len() == MAX_RECORDS {
+            return Err(session_error("subagent metadata record limit exceeded"));
+        }
+        validate_component(
+            name.strip_suffix(".json")
+                .ok_or_else(|| session_error("invalid metadata filename"))?,
+        )?;
         names.push(name.to_owned());
     }
     names.sort();
     if names.len() > MAX_RECORDS {
         return Err(session_error("subagent metadata record limit exceeded"));
     }
-    let mut records = Vec::with_capacity(names.len());
-    for name in names {
-        let stat = rustix::fs::statat(&directory, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|error| io_error("inspect subagent metadata record", error.into()))?;
-        let stat_size = u64::try_from(stat.st_size)
-            .map_err(|_| session_error("subagent metadata record has invalid size"))?;
-        if !FileType::from_raw_mode(stat.st_mode).is_file() || stat_size > MAX_RECORD_BYTES {
-            return Err(session_error(
-                "subagent metadata record is unsafe or oversized",
-            ));
+    let mut records = Vec::new();
+    let mut allocated = 0usize;
+    let mut next = None;
+    let after = after.map(|id| format!("{}.json", id.0));
+    for name in names
+        .into_iter()
+        .filter(|name| after.as_ref().is_none_or(|after| name > after))
+    {
+        if only.is_some_and(|only| name.strip_suffix(".json") != Some(only.0.as_str())) {
+            continue;
         }
-        let descriptor = rustix::fs::openat(
-            &directory,
-            name.as_str(),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| io_error("open subagent metadata record", error.into()))?;
-        let opened = rustix::fs::fstat(&descriptor)
-            .map_err(|error| io_error("inspect opened subagent metadata record", error.into()))?;
-        let opened_size = u64::try_from(opened.st_size)
-            .map_err(|_| session_error("opened subagent metadata record has invalid size"))?;
-        if !FileType::from_raw_mode(opened.st_mode).is_file()
-            || opened_size > MAX_RECORD_BYTES
-            || opened.st_dev != stat.st_dev
-            || opened.st_ino != stat.st_ino
-            || opened.st_uid != rustix::process::geteuid().as_raw()
-            || opened.st_nlink != 1
-            || (Mode::from_raw_mode(opened.st_mode).as_raw_mode() & 0o777) != 0o600
+        if records.len() == MAX_PAGE_RECORDS {
+            next = records
+                .last()
+                .map(|(record, _): &(SubagentRecoveryRecord, usize)| {
+                    record.handle.subagent_id.clone()
+                });
+            break;
+        }
+        let bytes = read_record_unix(&directory, &name)?;
+        let charge = decode_charge(&bytes)?;
+        if allocated
+            .checked_add(charge)
+            .is_none_or(|sum| sum > MAX_PAGE_ALLOCATION_BYTES)
         {
-            return Err(session_error(
-                "subagent metadata record changed while opening",
-            ));
+            if records.is_empty() {
+                return Err(session_error(
+                    "subagent metadata record exceeds decode admission",
+                ));
+            }
+            next = records
+                .last()
+                .map(|(record, _): &(SubagentRecoveryRecord, usize)| {
+                    record.handle.subagent_id.clone()
+                });
+            break;
         }
-        let capacity = usize::try_from(opened_size)
-            .map_err(|_| session_error("subagent metadata record size cannot be represented"))?;
-        let mut bytes = Vec::with_capacity(capacity);
-        std::fs::File::from(descriptor)
-            .take(MAX_RECORD_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| io_error("read subagent metadata record", error))?;
-        if bytes.len() as u64 > MAX_RECORD_BYTES {
-            return Err(session_error("subagent metadata record is oversized"));
-        }
-        let envelope: Envelope = serde_json::from_slice(&bytes)
-            .map_err(|error| session_error(format!("subagent metadata is corrupt: {error}")))?;
-        if envelope.version != VERSION || &envelope.record.parent_session_id != parent {
-            return Err(session_error(
-                "subagent metadata identity or version mismatch",
-            ));
-        }
-        validate_component(&envelope.record.handle.subagent_id.0)?;
-        validate_session_id(&envelope.record.handle.session_id)?;
-        if name != format!("{}.json", envelope.record.handle.subagent_id.0) {
-            return Err(session_error(
-                "subagent metadata filename does not match its identity",
-            ));
-        }
-        records.push(envelope.record);
+        allocated += charge;
+        records.push((decode_record(&bytes, parent, &name)?, charge));
     }
-    Ok(records)
+    Ok(MetadataPage { records, next })
 }
 
 #[cfg(unix)]
@@ -491,14 +769,7 @@ fn save_unix(root: &OwnedFd, record: SubagentRecoveryRecord) -> Result<(), Orche
     let directory = open_parent(root, &record.parent_session_id, true)?
         .ok_or_else(|| session_error("subagent metadata parent disappeared"))?;
     let destination = format!("{}.json", record.handle.subagent_id.0);
-    let bytes = serde_json::to_vec(&Envelope {
-        version: VERSION,
-        record,
-    })
-    .map_err(|error| session_error(format!("subagent metadata could not encode: {error}")))?;
-    if bytes.len() as u64 > MAX_RECORD_BYTES {
-        return Err(session_error("subagent metadata record is oversized"));
-    }
+    let bytes = encode_record(record)?;
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random)
         .map_err(|_| session_error("subagent metadata temp-name entropy failed"))?;
@@ -633,9 +904,88 @@ mod tests {
         )
         .expect("stale temp");
         let loaded = store
-            .load_parent(&rw_types::SessionId("parent".to_owned()))
-            .expect("load");
+            .load_parent_page(&rw_types::SessionId("parent".to_owned()), None)
+            .expect("load")
+            .records
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect::<Vec<_>>();
         assert_eq!(loaded, vec![record()]);
+    }
+
+    #[tokio::test]
+    async fn metadata_pages_admit_decode_memory_and_visit_every_identity_once() {
+        let root = TempDir::new().expect("root");
+        let store = PrivateSubagentMetadataStore::open(root.path()).expect("store");
+        for index in 0..40 {
+            let mut item = record();
+            item.handle.subagent_id = SubagentId(format!("child-{index:03}"));
+            item.handle.session_id = rw_types::SessionId(format!("session-{index:03}"));
+            item.policy.system_prompt = Some("x".repeat(400 * 1024));
+            store.save(item).await.expect("bounded record");
+        }
+        let parent = rw_types::SessionId("parent".into());
+        let mut after = None;
+        let mut identities = Vec::new();
+        loop {
+            let page = store
+                .load_parent_page(&parent, after.as_ref())
+                .expect("page");
+            assert!(page.records.len() <= super::MAX_PAGE_RECORDS);
+            assert!(
+                page.records.iter().map(|(_, charge)| charge).sum::<usize>()
+                    <= super::MAX_PAGE_ALLOCATION_BYTES
+            );
+            identities.extend(
+                page.records
+                    .into_iter()
+                    .map(|(record, _)| record.handle.subagent_id.0),
+            );
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            identities,
+            (0..40)
+                .map(|index| format!("child-{index:03}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_metadata_requires_explicit_fields_and_rejects_invalid_policy() {
+        let root = TempDir::new().expect("root");
+        let store = PrivateSubagentMetadataStore::open(root.path()).expect("store");
+        let value = serde_json::to_value(record()).expect("record wire");
+        for field in ["task", "agent", "phase", "worktree"] {
+            let mut incomplete = value.clone();
+            incomplete.as_object_mut().expect("object").remove(field);
+            assert!(
+                serde_json::from_value::<SubagentRecoveryRecord>(incomplete).is_err(),
+                "required {field}"
+            );
+        }
+        let mut incomplete = value.clone();
+        incomplete["policy"]
+            .as_object_mut()
+            .expect("policy")
+            .remove("system_prompt");
+        assert!(serde_json::from_value::<SubagentRecoveryRecord>(incomplete).is_err());
+        let mut extra = value;
+        extra["unknown"] = true.into();
+        assert!(serde_json::from_value::<SubagentRecoveryRecord>(extra).is_err());
+        let mut invalid = record();
+        invalid.task.clear();
+        assert!(store.save(invalid).await.is_err());
+        assert!(
+            store
+                .load_parent_page(&rw_types::SessionId("parent".into()), None)
+                .expect("no writes")
+                .records
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]
@@ -649,7 +999,7 @@ mod tests {
         symlink(outside.path(), root.path().join("subagents-v1/parent")).expect("symlink");
         assert!(
             store
-                .load_parent(&rw_types::SessionId("parent".to_owned()))
+                .load_parent_page(&rw_types::SessionId("parent".to_owned()), None)
                 .is_err()
         );
     }
@@ -668,7 +1018,7 @@ mod tests {
         symlink(outside.path().join("record"), directory.join("child.json")).expect("symlink");
         assert!(
             store
-                .load_parent(&rw_types::SessionId("parent".to_owned()))
+                .load_parent_page(&rw_types::SessionId("parent".to_owned()), None)
                 .is_err()
         );
     }
@@ -685,7 +1035,7 @@ mod tests {
         std::fs::hard_link(&record_path, root.path().join("leaked-record")).expect("hard link");
         assert!(
             store
-                .load_parent(&rw_types::SessionId("parent".to_owned()))
+                .load_parent_page(&rw_types::SessionId("parent".to_owned()), None)
                 .is_err()
         );
         std::fs::remove_file(root.path().join("leaked-record")).expect("remove hard link");
@@ -693,7 +1043,7 @@ mod tests {
             .expect("public mode");
         assert!(
             store
-                .load_parent(&rw_types::SessionId("parent".to_owned()))
+                .load_parent_page(&rw_types::SessionId("parent".to_owned()), None)
                 .is_err()
         );
     }
@@ -732,7 +1082,7 @@ mod tests {
             .expect("replacement mode");
         assert!(
             store
-                .load_parent(&rw_types::SessionId("parent".to_owned()))
+                .load_parent_page(&rw_types::SessionId("parent".to_owned()), None)
                 .is_err(),
             "same-owner same-mode replacement must fail identity validation"
         );
@@ -778,8 +1128,12 @@ mod tests {
         store.save(record()).await.expect("save");
         assert_eq!(
             store
-                .load_parent(&rw_types::SessionId("parent".to_owned()))
-                .expect("load"),
+                .load_parent_page(&rw_types::SessionId("parent".to_owned()), None)
+                .expect("load")
+                .records
+                .into_iter()
+                .map(|(record, _)| record)
+                .collect::<Vec<_>>(),
             vec![record()]
         );
     }

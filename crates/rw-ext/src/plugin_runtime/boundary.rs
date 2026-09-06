@@ -1,0 +1,347 @@
+use super::*;
+
+/// Immutable sandbox input. Launchers translate this into their platform profile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginSandboxProfile {
+    pub mode: PluginSandboxMode,
+    pub capabilities: PluginCapabilities,
+    pub approved_roots: Vec<PathBuf>,
+    pub allowed_domains: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PluginSandboxMode {
+    /// Initialization-only launch: deny network/writes and expose only runtime/entrypoint reads.
+    #[cfg(test)]
+    ManifestProbe,
+    /// Release-owned source graph discovery and sealed-bundle preparation.
+    Preparation {
+        #[cfg(target_os = "linux")]
+        filesystem: Box<rw_tools::PreparationFilesystem>,
+    },
+    Approved,
+}
+
+/// A launched child with exclusive stdio ownership and a supervised process handle.
+pub struct LaunchedPluginProcess {
+    pub stdin: PluginStdin,
+    pub stdout: PluginStdout,
+    pub stderr: PluginStdout,
+    pub process: Arc<dyn SupervisedPluginProcess>,
+    /// Identity re-attested by the launcher at its final pre-spawn boundary.
+    pub executable_identity: ExecutableIdentity,
+}
+
+/// Mandatory host boundary for removing known secrets before any value reaches a plugin.
+pub trait PluginBoundaryRedactor: Send + Sync {
+    fn redact(&self, value: Value) -> Value;
+
+    /// Redact one reply string, admitting total temporary bytes before allocation.
+    /// The callback excludes the caller-owned original string.
+    /// # Errors
+    /// Rejects before a replacement would exceed its admitted allocation.
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> Result<String, PluginRpcError>;
+
+    /// Redacts known credential bytes before an HTTP response chunk is encoded
+    /// onto the plugin wire.
+    fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
+        value.to_vec()
+    }
+
+    /// Redacts the safely-emittable prefix while returning the original tail
+    /// needed to detect a credential completed by the next transport chunk.
+    fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+        if retain == 0 {
+            (self.redact_bytes(value), Vec::new())
+        } else {
+            (Vec::new(), value.to_vec())
+        }
+    }
+
+    /// Longest registered credential, used to retain an exact cross-chunk overlap.
+    fn maximum_secret_bytes(&self) -> usize {
+        0
+    }
+}
+
+/// Test-only identity boundary. Production composition must inject the shared redactor.
+#[cfg(test)]
+pub(crate) struct NoopPluginBoundaryRedactor;
+
+#[cfg(test)]
+impl PluginBoundaryRedactor for NoopPluginBoundaryRedactor {
+    fn redact(&self, value: Value) -> Value {
+        value
+    }
+
+    fn redact_reply_text(
+        &self,
+        text: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> Result<String, PluginRpcError> {
+        if text.len() > max_bytes {
+            return Err(rpc_error("reply_admission", "reply string too large"));
+        }
+        admit(text.len()).map_err(|error| rpc_error("reply_admission", &error.to_string()))?;
+        Ok(text.to_owned())
+    }
+
+    fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
+        value.to_vec()
+    }
+
+    fn maximum_secret_bytes(&self) -> usize {
+        0
+    }
+}
+
+pub type PluginHttpByteStream =
+    Pin<Box<dyn Stream<Item = Result<Vec<u8>, PluginRpcError>> + Send + 'static>>;
+
+/// Host-owned response to one authenticated plugin-provider HTTP request.
+pub struct PluginHttpStreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: PluginHttpByteStream,
+}
+
+/// Factory for inert, individually owned authenticated HTTP operations.
+/// Returning an error must not leave locally owned effects.
+pub trait PluginProviderHttpHandler: Send + Sync {
+    /// Validates and admits an inert operation without starting external work.
+    ///
+    /// # Errors
+    /// Rejects invalid authority, unsupported requests, or exhausted admission.
+    fn prepare(
+        &self,
+        params: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Arc<dyn PluginProviderHttpOperation>, PluginRpcError>;
+}
+
+/// One operation retains its socket, runtime and resource admission through proof.
+#[async_trait]
+pub trait PluginProviderHttpOperation: Send + Sync {
+    async fn response(&self) -> Result<PluginHttpStreamResponse, PluginRpcError>;
+    /// Called after the response future and body have been dropped. Cancellation
+    /// requests retirement; only this result proves locally owned effects ended.
+    async fn settle_effects(&self) -> Result<(), PluginRpcError>;
+}
+
+pub struct DenyPluginProviderHttpHandler;
+impl PluginProviderHttpHandler for DenyPluginProviderHttpHandler {
+    fn prepare(
+        &self,
+        _params: Value,
+        _cancellation: CancellationToken,
+    ) -> Result<Arc<dyn PluginProviderHttpOperation>, PluginRpcError> {
+        Err(rpc_error(
+            "provider_http_unavailable",
+            "host-mediated provider HTTP is unavailable on this host surface",
+        ))
+    }
+}
+
+/// Injected process launcher. Production launchers must sandbox before direct exec.
+/// A rejected launch has no remaining locally owned effects. An unproven
+/// launch must retain its native ownership and the caller's resource charge.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum PluginLaunchError {
+    #[error(transparent)]
+    Rejected(PluginProcessError),
+    #[error("plugin launch effects are unsettled: {message}")]
+    EffectsUnsettled { message: String },
+}
+
+#[async_trait]
+pub trait PluginLauncher: Send + Sync {
+    /// Launches by direct exec. Implementations must pin the exact approved executable and
+    /// attested code bytes through physical settlement, and return their approved identity.
+    /// A hash followed by execution of a mutable path does not satisfy this contract.
+    /// Implementations clear the environment, create a killable process
+    /// group, and enforce every absent profile effect at syscall level. Manifest probes may read
+    /// only their runtime/entrypoint; approved launches may read/write/network only when the
+    /// corresponding helper above permits it. Network must traverse the policy proxy and exact
+    /// public-domain allowlist.
+    async fn launch(
+        &self,
+        config: &PluginProcessConfig,
+        profile: &PluginSandboxProfile,
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError>;
+}
+
+/// Host-owned handler for declared plugin-to-host push requests.
+/// The returned future must await completion of admitted effects, including any
+/// delegated actor command. Teardown drains this future before releasing callers.
+#[async_trait]
+pub trait PushHandler: Send + Sync {
+    /// Declare the typed response ceiling before the host admits this callback.
+    /// # Errors
+    /// Rejects unsupported methods without constructing a response.
+    fn reply_limits(&self, method: &str) -> Result<PushReplyLimits, PluginRpcError>;
+    async fn handle_push(
+        &self,
+        method: &str,
+        params: Value,
+        reply: &mut PushReplySlot,
+    ) -> Result<PushReply, PluginRpcError>;
+}
+
+/// Rejects every push. Useful when a host surface has no interactive session attached.
+pub struct DenyPushHandler;
+
+#[async_trait]
+impl PushHandler for DenyPushHandler {
+    fn reply_limits(&self, _method: &str) -> Result<PushReplyLimits, PluginRpcError> {
+        Err(rpc_error(
+            "push_unavailable",
+            "plugin push is unavailable on this host surface",
+        ))
+    }
+    async fn handle_push(
+        &self,
+        _method: &str,
+        _params: Value,
+        _reply: &mut PushReplySlot,
+    ) -> Result<PushReply, PluginRpcError> {
+        Err(PluginRpcError {
+            code: "push_unavailable".to_owned(),
+            message: "plugin push is unavailable on this host surface".to_owned(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PluginApprovalIdentity {
+    pub plugin_name: String,
+    pub manifest_fingerprint: String,
+    pub executable: ExecutableIdentity,
+    pub config_fingerprint: String,
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::SourcePluginIdentity>,
+}
+
+impl PluginApprovalIdentity {
+    pub(super) fn fingerprint(&self) -> Result<String, PluginHostError> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
+        Ok(blake3::hash(&bytes).to_hex().to_string())
+    }
+}
+
+pub(super) fn approval_identity(
+    manifest: &PluginManifest,
+    config: &PluginProcessConfig,
+    origin: &str,
+) -> Result<PluginApprovalIdentity, PluginHostError> {
+    if origin.is_empty() || origin.len() > 4096 || origin.chars().any(char::is_control) {
+        return Err(PluginHostError::Approval(
+            "plugin origin is invalid".to_owned(),
+        ));
+    }
+    let mut config_value = json!({
+        "argv": config.argv().iter().map(|value| os_fingerprint_bytes(value)).collect::<Vec<_>>(),
+        "cwd": config.cwd(),
+        "environment": config.environment_allowlist().iter().map(|value| os_fingerprint_bytes(value)).collect::<Vec<_>>(),
+        "allowed_domains": config.allowed_domains(),
+        "attested_files": config.attested_files(),
+        "code_root": config.code_root(),
+    });
+    if let Some(source) = config.source_identity() {
+        config_value["source"] = serde_json::to_value(source)
+            .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
+    }
+    let config_bytes = serde_json::to_vec(&config_value)
+        .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
+    Ok(PluginApprovalIdentity {
+        plugin_name: manifest.name.clone(),
+        manifest_fingerprint: manifest.fingerprint().map_err(PluginApprovalError::from)?,
+        executable: config.executable_identity().clone(),
+        config_fingerprint: blake3::hash(&config_bytes).to_hex().to_string(),
+        origin: origin.to_owned(),
+        source: config.source_identity().cloned(),
+    })
+}
+
+#[cfg(unix)]
+fn os_fingerprint_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn os_fingerprint_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    value.to_string_lossy().as_bytes().to_vec()
+}
+
+/// Compares the exact executable/config/origin/manifest identity with durable approval.
+///
+/// # Errors
+///
+/// Returns an error if the identity cannot be validated, fingerprinted, or loaded.
+pub fn plugin_launch_approval_requirement(
+    store: &dyn ApprovalStore,
+    manifest: &PluginManifest,
+    config: &PluginProcessConfig,
+    origin: &str,
+) -> Result<ApprovalRequirement, PluginHostError> {
+    let identity = approval_identity(manifest, config, origin)?;
+    let current = identity.fingerprint()?;
+    match store.approved_fingerprint(&manifest.name)? {
+        None => Ok(ApprovalRequirement::FirstLoad {
+            fingerprint: current,
+        }),
+        Some(previous) if previous == current => Ok(ApprovalRequirement::Approved),
+        Some(previous) => Ok(ApprovalRequirement::ManifestChanged { previous, current }),
+    }
+}
+
+/// Records explicit approval for an exact executable/config/origin/manifest identity.
+///
+/// # Errors
+///
+/// Returns an error if the identity cannot be validated, fingerprinted, or persisted.
+pub fn approve_plugin_launch(
+    store: &dyn ApprovalStore,
+    manifest: &PluginManifest,
+    config: &PluginProcessConfig,
+    origin: &str,
+) -> Result<String, PluginHostError> {
+    let fingerprint = approval_identity(manifest, config, origin)?.fingerprint()?;
+    store.record_approval(&manifest.name, &fingerprint)?;
+    Ok(fingerprint)
+}
+
+#[derive(Debug, Error)]
+pub enum PluginHostError {
+    #[error("plugin effects are unsettled: {message}")]
+    EffectsUnsettled { message: String },
+    #[error(transparent)]
+    ApprovalStore(#[from] crate::plugin::ApprovalStoreError),
+    #[error(transparent)]
+    ApprovalDetails(#[from] PluginApprovalError),
+    #[error("plugin launch is not approved: {0}")]
+    Approval(String),
+    #[error(transparent)]
+    Process(#[from] PluginProcessError),
+    #[error("plugin protocol failed: {0}")]
+    Protocol(String),
+    #[error(transparent)]
+    Rpc(#[from] PluginRpcError),
+}
+
+impl From<PluginLaunchError> for PluginHostError {
+    fn from(error: PluginLaunchError) -> Self {
+        match error {
+            PluginLaunchError::Rejected(error) => Self::Process(error),
+            PluginLaunchError::EffectsUnsettled { message } => Self::EffectsUnsettled { message },
+        }
+    }
+}

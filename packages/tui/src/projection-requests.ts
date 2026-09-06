@@ -1,11 +1,15 @@
+import { commandReplyDomain, type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
+import type { ReplyAllocation } from "./transport/reply-allocation"
+import type { EngineEvent } from "./protocol"
 import {
   PROTOCOL_VERSION,
+  CLIENT_COMMAND_EXECUTION,
   type ClientCommand,
   type CommandOutcome,
   type PermissionDecision,
   type PermissionApprovalScope,
 } from "./protocol"
-import { isRecord, type WireEngineEvent } from "./transport"
+import { isRecord } from "./transport"
 
 export type ProjectionKind =
   | "commands"
@@ -69,11 +73,12 @@ export type ProjectionCommand =
 type RequestMeta = ClientCommand["meta"]
 
 interface ProjectionRequestBrokerOptions {
+  readonly allocations: ClientAllocationOwner
   readonly clientId: () => string
   readonly sessionId: () => string
   readonly requestId: () => string
   readonly replayActive: () => boolean
-  readonly emit: (command: ClientCommand) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
+  readonly emit: (command: ClientCommand, allocation: ReplyAllocation) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
   readonly onProjectionFailure: (
     kind: ProjectionKind,
     type: ClientCommand["type"],
@@ -265,10 +270,12 @@ export class ProjectionRequestBroker {
     return this.#modelSwitchRequests.delete(requestId)
   }
 
-  acceptsEvent(event: WireEngineEvent): boolean {
+  acceptsEvent(event: EngineEvent): boolean {
     const record = event as unknown as Record<string, unknown>
     const requestId = requestIdFrom(record)
     switch (event.type) {
+      case "todos_read":
+        return false // Direct task reads settle through their session capability.
       case "workspace_status_ready":
         return this.accepts("workspace_status", requestId)
       case "runtime_services_listed":
@@ -315,7 +322,7 @@ export class ProjectionRequestBroker {
     }
   }
 
-  completeEvent(event: WireEngineEvent): ProjectionKind | null {
+  completeEvent(event: EngineEvent): ProjectionKind | null {
     switch (event.type) {
       case "command_descriptors_listed":
         this.clear("commands")
@@ -359,8 +366,7 @@ export class ProjectionRequestBroker {
   command(command: ProjectionCommand): string | null {
     if (
       this.#options.replayActive() &&
-      command.type !== "list_sessions" &&
-      command.type !== "search_sessions"
+      CLIENT_COMMAND_EXECUTION[command.type] !== "read"
     ) return null
 
     const meta = this.meta()
@@ -370,8 +376,21 @@ export class ProjectionRequestBroker {
     return meta.request_id
   }
 
-  async emit(command: ClientCommand): Promise<void | CommandOutcome | null> {
-    return this.#options.emit(command)
+  allocate(): ClientAllocationLease { return this.#options.allocations.reserve("decoding", 0) }
+
+  async emit(command: ClientCommand, allocation: ClientAllocationLease): Promise<void | CommandOutcome | null> {
+    allocation.moveTo(commandReplyDomain(command.type))
+    return this.#options.emit(command, allocation)
+  }
+
+  /** Input handlers that ignore results still own decoding through rejection projection. */
+  dispatch(command: ClientCommand): void {
+    void this.#emitProjectionCommand(command.type, command, command.meta.request_id)
+  }
+
+  async consume(command: ClientCommand, consume: (outcome: void | CommandOutcome | null) => void | Promise<void>): Promise<void> {
+    using allocation = this.allocate()
+    await consume(await this.emit(command, allocation))
   }
 
   #trackCommand(command: ProjectionCommand, requestId: string): void {
@@ -467,8 +486,9 @@ export class ProjectionRequestBroker {
     command: ClientCommand,
     requestId: string,
   ): Promise<void> {
+    using allocation = this.allocate()
     try {
-      const outcome = await this.emit(command)
+      const outcome = await this.emit(command, allocation)
       if (outcome?.type === "rejected") {
         this.#handleFailure(type, requestId, outcome, outcome.error.message, "rejected")
       } else if (outcome === null) {

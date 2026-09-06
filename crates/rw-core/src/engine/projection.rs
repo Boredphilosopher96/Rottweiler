@@ -1,6 +1,10 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+mod events;
+pub(in crate::engine) mod repair;
+pub(super) use events::recovered_pending_event;
+
 /// Persisted actor state supplied when resuming a session from its event log.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionRecoveredState {
@@ -19,7 +23,8 @@ pub struct SessionRecoveredState {
     pub pending_questions: BTreeMap<String, RecoveredQuestion>,
     pub context_surgery: Vec<ContextSurgeryAction>,
     pub pruned_tool_outputs: BTreeMap<String, u64>,
-    pub accounting: Vec<TurnAccounting>,
+    pub accounting: crate::engine::SessionAccountingState,
+    pub latest_budget: Option<rw_types::session_state::SessionBudgetState>,
     pub budgeter: Budgeter,
     pub interrupted_compaction: bool,
     pub model_alias: Option<String>,
@@ -57,7 +62,7 @@ pub struct ContextSurgeryAction {
 pub struct RecoveredQuestion {
     pub agent_turn: u64,
     pub question_id: QuestionId,
-    pub questions: Vec<Question>,
+    pub question: Question,
 }
 
 /// Deterministic durable repair for a tool call that was committed by the
@@ -67,12 +72,36 @@ pub struct InterruptedToolRepair {
     pub agent_turn: u64,
     pub call_index: usize,
     pub tool_call_id: ToolCallId,
+    pub invocation_id: rw_types::ToolInvocationId,
+    pub missing_start: Option<InterruptedToolStart>,
     pub output: ToolOutput,
+}
+
+/// Authoritative display fields needed only when a committed call never started.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InterruptedToolStart {
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveToolStart {
+    id: ToolCallId,
+    invocation_id: rw_types::ToolInvocationId,
+    index: usize,
 }
 
 /// A persisted event log cannot be projected safely.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SessionProjectionError {
+    #[error("invalid durable attachment: {0}")]
+    InvalidAttachment(String),
+    #[error("invalid accepted input selector: {0}")]
+    InvalidInput(&'static str),
+    #[error("invalid plan: {0}")]
+    InvalidPlan(&'static str),
+    #[error("invalid durable question payload: {0}")]
+    InvalidQuestion(&'static str),
     #[error("unsupported session event version {0}")]
     UnsupportedVersion(u16),
     #[error("session event sequence is not contiguous at {found}; expected {expected}")]
@@ -119,463 +148,10 @@ pub(super) fn review_path_is_valid(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-#[allow(clippy::match_same_arms, clippy::too_many_lines)]
-pub(super) fn recovered_pending_event(
-    event: &EngineEvent,
-) -> Result<Option<PendingEvent>, SessionProjectionError> {
-    if event.delivery() != rw_types::EngineEventDelivery::Durable {
-        return Err(SessionProjectionError::NonDurableEvent);
-    }
-    let pending = match event {
-        EngineEvent::TurnStarted { turn_id, .. } => PendingEvent::TurnStarted {
-            turn: parse_turn_id(turn_id)?,
-        },
-        EngineEvent::MessageQueued {
-            position,
-            content,
-            attachments,
-            ..
-        } => PendingEvent::MessageQueued {
-            position: *position,
-            content: content.clone(),
-            attachments: attachments.clone(),
-        },
-        EngineEvent::QueuedMessageRemoved { position, .. } => PendingEvent::QueuedMessageRemoved {
-            position: *position,
-        },
-        EngineEvent::QueuedMessagesCleared { .. } => PendingEvent::QueuedMessagesCleared,
-        EngineEvent::UserMessageAccepted {
-            agent_turn,
-            content,
-            attachments,
-            ..
-        } => PendingEvent::UserMessageAccepted {
-            turn: *agent_turn,
-            content: content.clone(),
-            attachments: attachments.clone(),
-        },
-        EngineEvent::SessionTitleUpdated {
-            title, usage, cost, ..
-        } => PendingEvent::SessionTitleUpdated {
-            title: title.clone(),
-            usage: usage.as_ref().map(|usage| SessionUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-                reasoning_tokens: usage.reasoning_tokens,
-            }),
-            cost: cost.clone(),
-        },
-        EngineEvent::PluginMessageInjected {
-            plugin_id,
-            content,
-            queued,
-            ..
-        } => PendingEvent::PluginMessageInjected {
-            plugin_id: plugin_id.clone(),
-            content: content.clone(),
-            queued: *queued,
-        },
-        EngineEvent::PluginStatusChanged {
-            plugin_id, status, ..
-        } => PendingEvent::PluginStatusChanged {
-            plugin_id: plugin_id.clone(),
-            status: status.clone(),
-        },
-        EngineEvent::UiNotification {
-            plugin_id,
-            title,
-            message,
-            ..
-        } => PendingEvent::UiNotification {
-            plugin_id: plugin_id.clone(),
-            title: title.clone(),
-            message: message.clone(),
-        },
-        EngineEvent::ConversationTurnCommitted {
-            agent_turn, turn, ..
-        } => PendingEvent::ConversationTurnCommitted {
-            agent_turn: *agent_turn,
-            turn: turn.clone(),
-        },
-        EngineEvent::ConversationRewound {
-            to_agent_turn,
-            operation_id,
-            unrestorable_paths,
-            ..
-        } => PendingEvent::ConversationRewound {
-            to_turn: *to_agent_turn,
-            operation_id: operation_id.clone(),
-            unrestorable_paths: unrestorable_paths.clone(),
-        },
-        EngineEvent::TextDelta { turn_id, text, .. } => PendingEvent::TextDelta {
-            turn: parse_turn_id(turn_id)?,
-            text: text.clone(),
-        },
-        EngineEvent::ThinkingDelta {
-            turn_id,
-            text,
-            signature,
-            ..
-        } => PendingEvent::ThinkingDelta {
-            turn: parse_turn_id(turn_id)?,
-            content: text.clone(),
-            signature: signature.clone(),
-        },
-        EngineEvent::CitationDelta {
-            turn_id,
-            uri,
-            title,
-            ..
-        } => PendingEvent::CitationDelta {
-            turn: parse_turn_id(turn_id)?,
-            uri: uri.clone(),
-            title: title.clone(),
-        },
-        EngineEvent::ToolCallStarted {
-            turn_id,
-            tool_call_id,
-            name,
-            args,
-            call_index,
-            ..
-        } => PendingEvent::ToolCallStarted {
-            turn: parse_turn_id(turn_id)?,
-            id: tool_call_id.0.clone(),
-            name: name.clone(),
-            arguments: args.clone(),
-            index: usize::try_from(*call_index).unwrap_or(usize::MAX),
-        },
-        EngineEvent::ToolOutputDelta {
-            turn_id,
-            tool_call_id,
-            stream,
-            chunk,
-            ..
-        } => PendingEvent::ToolOutput {
-            turn: parse_turn_id(turn_id)?,
-            id: tool_call_id.0.clone(),
-            stream: match stream {
-                ToolOutputStream::Stdout => "stdout",
-                ToolOutputStream::Stderr => "stderr",
-            }
-            .to_owned(),
-            chunk: chunk.clone(),
-        },
-        EngineEvent::ToolDiffReady {
-            turn_id,
-            tool_call_id,
-            diff,
-            ..
-        } => PendingEvent::ToolDiffReady {
-            turn: parse_turn_id(turn_id)?,
-            id: tool_call_id.0.clone(),
-            diff: diff.clone(),
-        },
-        EngineEvent::ToolCallFinished {
-            turn_id,
-            tool_call_id,
-            output,
-            is_error,
-            call_index,
-            ..
-        } => PendingEvent::ToolCallFinished {
-            turn: parse_turn_id(turn_id)?,
-            id: tool_call_id.0.clone(),
-            output: output.clone(),
-            is_error: *is_error,
-            index: usize::try_from(*call_index).unwrap_or(usize::MAX),
-        },
-        EngineEvent::ToolApprovalNeeded {
-            turn_id,
-            tool_call_id,
-            name,
-            args,
-            capabilities,
-            diff,
-            ..
-        } => PendingEvent::PermissionRequested {
-            turn: parse_turn_id(turn_id)?,
-            request: PermissionRequest {
-                id: tool_call_id.0.clone(),
-                tool_name: name.clone(),
-                arguments: args.clone(),
-                capabilities: capabilities.clone(),
-                approval_diff: diff.clone(),
-            },
-        },
-        EngineEvent::QuestionAnswered {
-            turn_id,
-            question_id,
-            answers,
-            ..
-        } => PendingEvent::QuestionAnswered {
-            turn: parse_turn_id(turn_id)?,
-            question_id: question_id.clone(),
-            answers: answers.clone(),
-        },
-        EngineEvent::HookFailed {
-            event,
-            hook_id,
-            fail_closed,
-            message,
-            ..
-        } => PendingEvent::HookFailure {
-            event: event.clone(),
-            hook_id: hook_id.clone(),
-            fail_closed: *fail_closed,
-            message: message.clone(),
-        },
-        EngineEvent::CommandFinished {
-            name,
-            message,
-            unrestorable_paths,
-            ..
-        } => PendingEvent::CommandFinished {
-            name: name.clone(),
-            message: message.clone(),
-            unrestorable_paths: unrestorable_paths.clone(),
-        },
-        EngineEvent::GuardTriggered {
-            turn_id,
-            guard,
-            message,
-            ..
-        } => PendingEvent::GuardTriggered {
-            turn: parse_turn_id(turn_id)?,
-            guard: guard.clone(),
-            message: message.clone(),
-        },
-        EngineEvent::TurnFinished {
-            turn_id,
-            status,
-            usage,
-            cost,
-            ..
-        } => PendingEvent::TurnFinished {
-            turn: parse_turn_id(turn_id)?,
-            status: match status {
-                TurnStatus::Completed => AgentTurnStatus::Completed,
-                TurnStatus::Interrupted => AgentTurnStatus::Interrupted,
-                TurnStatus::Failed => AgentTurnStatus::Failed,
-                TurnStatus::MaxTurns => AgentTurnStatus::MaxTurns,
-                TurnStatus::DoomLoop => AgentTurnStatus::DoomLoop,
-                TurnStatus::BudgetExceeded => AgentTurnStatus::BudgetExceeded,
-            },
-            usage: SessionUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-                reasoning_tokens: usage.reasoning_tokens,
-            },
-            cost: cost.clone(),
-        },
-        EngineEvent::ContextUsageUpdated {
-            turn_id,
-            used_tokens,
-            usable_tokens,
-            reserved_tokens,
-            context_window_known,
-            context_window_reason,
-            stable_prefix_hash,
-            cache_hit_basis_points,
-            estimated_input_tokens,
-            provider_input_tokens,
-            correction_millionths,
-            ..
-        } => PendingEvent::ContextUsage {
-            turn: parse_turn_id(turn_id)?,
-            used_tokens: *used_tokens,
-            usable_tokens: *usable_tokens,
-            reserved_tokens: *reserved_tokens,
-            context_window_known: *context_window_known,
-            context_window_reason: context_window_reason.clone(),
-            stable_prefix_hash: stable_prefix_hash.clone(),
-            cache_hit_basis_points: *cache_hit_basis_points,
-            estimated_input_tokens: *estimated_input_tokens,
-            provider_input_tokens: *provider_input_tokens,
-            correction_millionths: *correction_millionths,
-        },
-        EngineEvent::BudgetStatusChanged {
-            turn_id,
-            level,
-            scope,
-            unit,
-            current,
-            limit,
-            ..
-        } => PendingEvent::BudgetStatus {
-            turn: parse_turn_id(turn_id)?,
-            level: level.clone(),
-            scope: scope.clone(),
-            unit: unit.clone(),
-            current: *current,
-            limit: *limit,
-        },
-        EngineEvent::CompactionStarted { reason, .. } => PendingEvent::CompactionStarted {
-            reason: reason.clone(),
-        },
-        EngineEvent::CompactionAttemptFinished {
-            summary_turn_id,
-            usage,
-            cost,
-            ..
-        } => PendingEvent::CompactionAttemptFinished {
-            summary_turn: parse_turn_id(summary_turn_id)?,
-            usage: SessionUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-                reasoning_tokens: usage.reasoning_tokens,
-            },
-            cost: cost.clone(),
-        },
-        EngineEvent::CompactionFinished {
-            summary_turn_id,
-            reclaimed_tokens,
-            usage,
-            cost,
-            ..
-        } => PendingEvent::CompactionFinished {
-            summary_turn: parse_turn_id(summary_turn_id)?,
-            reclaimed_tokens: *reclaimed_tokens,
-            usage: usage.as_ref().map(|usage| SessionUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-                reasoning_tokens: usage.reasoning_tokens,
-            }),
-            cost: cost.clone(),
-        },
-        EngineEvent::CompactionFailed {
-            summary_turn_id, ..
-        } => PendingEvent::CompactionFailed {
-            summary_turn: parse_turn_id(summary_turn_id)?,
-        },
-        EngineEvent::ToolOutputPruned {
-            tool_call_id,
-            reclaimed_tokens,
-            ..
-        } => PendingEvent::ToolOutputPruned {
-            tool_call_id: tool_call_id.0.clone(),
-            reclaimed_tokens: *reclaimed_tokens,
-        },
-        EngineEvent::ContextItemPinned {
-            item_id,
-            effective_after_agent_turn,
-            ..
-        } => PendingEvent::ContextItemPinned {
-            item_id: item_id.clone(),
-            effective_after_agent_turn: *effective_after_agent_turn,
-        },
-        EngineEvent::ContextItemEvicted {
-            item_id,
-            effective_after_agent_turn,
-            ..
-        } => PendingEvent::ContextItemEvicted {
-            item_id: item_id.clone(),
-            effective_after_agent_turn: *effective_after_agent_turn,
-        },
-        EngineEvent::DriverChanged {
-            driver_client_id, ..
-        } => PendingEvent::DriverChanged {
-            driver_client_id: driver_client_id.clone(),
-        },
-        EngineEvent::SessionCreated {
-            driver_client_id, ..
-        } => PendingEvent::SessionCreated {
-            driver_client_id: driver_client_id.clone(),
-        },
-        EngineEvent::WorkspaceRootsChanged {
-            generation,
-            effective_from_turn,
-            roots,
-            ..
-        } => PendingEvent::WorkspaceRootsChanged {
-            generation: *generation,
-            effective_from_turn: *effective_from_turn,
-            roots: roots.clone(),
-        },
-        EngineEvent::ModelChanged {
-            model,
-            provider,
-            thinking,
-            ..
-        } => PendingEvent::ModelChanged {
-            model: model.clone(),
-            provider: provider.clone(),
-            thinking: thinking.unwrap_or_default(),
-        },
-        EngineEvent::ModelContextCleared { strategy, .. } => PendingEvent::ModelContextCleared {
-            strategy: *strategy,
-        },
-        EngineEvent::ModeChanged {
-            mode,
-            definition_fingerprint,
-            ..
-        } => PendingEvent::ModeChanged {
-            mode: mode.clone(),
-            definition_fingerprint: definition_fingerprint.clone(),
-        },
-        EngineEvent::PermissionModeChanged { mode, .. } => PendingEvent::PermissionModeChanged {
-            mode: mode.as_deref().map(parse_permission_mode).transpose()?,
-        },
-        EngineEvent::PlanSubmitted { artifact, .. } => PendingEvent::PlanSubmitted {
-            artifact: artifact.clone(),
-        },
-        EngineEvent::PlanReviewed {
-            artifact,
-            decision,
-            revisions,
-            ..
-        } => PendingEvent::PlanReviewed {
-            artifact: artifact.clone(),
-            decision: *decision,
-            revisions: revisions.clone(),
-        },
-        EngineEvent::UserShellStateChanged {
-            shell_id,
-            command,
-            active,
-            status,
-            captured_output,
-            ..
-        } => PendingEvent::UserShellStateChanged {
-            shell_id: shell_id.clone(),
-            command: command.clone().unwrap_or_default(),
-            active: *active,
-            status: *status,
-            captured_output: captured_output.clone(),
-        },
-        EngineEvent::QuestionAsked {
-            turn_id,
-            question_id,
-            questions,
-            ..
-        } => PendingEvent::QuestionAsked {
-            turn: parse_turn_id(turn_id)?,
-            question_id: question_id.clone(),
-            questions: questions.clone(),
-        },
-        EngineEvent::Error { error, .. } => PendingEvent::Error {
-            message: error.message.clone(),
-        },
-        EngineEvent::SubagentSpawned { .. } | EngineEvent::SubagentFinished { .. } => {
-            return Ok(None);
-        }
-        _ => unreachable!("non-durable events were rejected before projection"),
-    };
-    Ok(Some(pending))
-}
-
 /// Projects an ordered durable event log into actor resume state.
 ///
-/// Full conversation commit events are authoritative. Accepted user messages
-/// are retained as a fallback only when a crash occurred before their commit.
+/// User conversation resolves exact accepted-input or host-context selectors.
+/// Uncommitted accepted messages remain available to interrupted-input repair.
 ///
 /// # Errors
 ///
@@ -614,631 +190,933 @@ pub fn project_session_events_with_modes(
     })
 }
 
-#[allow(clippy::match_same_arms, clippy::too_many_lines)]
-fn project_session_events_resolving_mode(
-    events: &[EngineEvent],
-    mut resolve_mode: impl FnMut(&ModeId, &String) -> Result<SessionMode, SessionProjectionError>,
-) -> Result<SessionRecoveredState, SessionProjectionError> {
-    let mut conversation = Vec::new();
-    let mut title = None;
-    let mut conversation_agent_turns = Vec::new();
-    let mut queued = VecDeque::<(u64, String)>::new();
-    let mut uncommitted_users = BTreeMap::<u64, Vec<String>>::new();
-    let mut completed_turns = 0_u64;
-    let mut active_turn = None;
-    let mut turn_ends = BTreeMap::new();
-    let mut partial_assistant_blocks = Vec::<Block>::new();
-    let mut partial_tool_blocks = Vec::<Block>::new();
-    let mut next_turn = 1_u64;
-    let mut last_sequence = None;
-    let mut driver_client_id = None;
-    let mut session_id: Option<&SessionId> = None;
-    let mut interrupted_tool_repairs = Vec::new();
-    let mut interrupted_tool_turn = None;
-    let mut pending_questions = BTreeMap::new();
-    let mut context_surgery = Vec::new();
-    let mut pruned_tool_outputs = BTreeMap::new();
-    let mut accounting = Vec::new();
-    let mut model_alias = None;
-    let mut selected_provider = None;
-    let mut selected_thinking = None;
-    let mut mode = SessionMode::Execute;
-    let mut mode_id = None;
-    let mut permission_mode = None;
-    let mut pending_plan = None;
-    let mut approved_plan = None;
-    let mut plan_gate_active = false;
-    let mut turn_mode_states = BTreeMap::<
-        u64,
-        (
-            SessionMode,
-            Option<ModeId>,
-            Option<PlanArtifact>,
-            Option<PlanArtifact>,
-            bool,
-        ),
-    >::new();
-    let mut active_shell = None::<RecoveredUserShell>;
-    let mut workspace_generation = 0_u64;
-    let mut workspace_roots = Vec::new();
-    let mut compacted_conversation = None::<Vec<(u64, Turn)>>;
-    let mut compaction_surgery_start = None::<usize>;
-    let mut budgeter = Budgeter::default();
-    let mut rewind_archives = Vec::<(
-        BTreeMap<u64, usize>,
-        Vec<Turn>,
-        Vec<u64>,
-        Vec<ContextSurgeryAction>,
-        BTreeMap<String, u64>,
-        Budgeter,
-    )>::new();
-    for event in events {
-        let meta = event
-            .meta()
-            .ok_or(SessionProjectionError::NonDurableEvent)?;
-        if meta.protocol_version != SESSION_EVENT_VERSION {
-            return Err(SessionProjectionError::UnsupportedVersion(
-                meta.protocol_version,
-            ));
+type ProjectedTurnMode = (
+    SessionMode,
+    Option<ModeId>,
+    Option<PlanArtifact>,
+    Option<PlanArtifact>,
+    bool,
+);
+type ProjectedRewindArchive = (
+    BTreeMap<u64, usize>,
+    Vec<Turn>,
+    Vec<u64>,
+    Vec<ContextSurgeryAction>,
+    BTreeMap<String, u64>,
+    Budgeter,
+);
+
+/// Incremental core projection. Callers release each raw journal page after
+/// folding it; this state owns semantic recovery data, not raw events.
+#[derive(Clone, Debug)]
+struct SessionProjector {
+    input_claims: rw_types::input_claims::InputClaimState,
+    conversation: Vec<Turn>,
+    title: Option<String>,
+    conversation_agent_turns: Vec<u64>,
+    queued: VecDeque<(u64, String)>,
+    uncommitted_users: BTreeMap<u64, Vec<(SequenceId, PreparedUserMessage)>>,
+    completed_turns: u64,
+    active_turn: Option<u64>,
+    turn_ends: BTreeMap<u64, usize>,
+    partial_assistant_blocks: Vec<Block>,
+    partial_tool_blocks: Vec<Block>,
+    next_turn: u64,
+    last_sequence: Option<SequenceId>,
+    driver_client_id: Option<ClientId>,
+    session_id: Option<SessionId>,
+    interrupted_tool_repairs: Vec<InterruptedToolRepair>,
+    active_tool_starts: BTreeMap<rw_types::ToolInvocationId, ActiveToolStart>,
+    interrupted_tool_turn: Option<Turn>,
+    pending_questions: BTreeMap<String, RecoveredQuestion>,
+    context_surgery: Vec<ContextSurgeryAction>,
+    pruned_tool_outputs: BTreeMap<String, u64>,
+    accounting: crate::engine::SessionAccountingState,
+    latest_budget: Option<rw_types::session_state::SessionBudgetState>,
+    model_alias: Option<String>,
+    selected_provider: Option<String>,
+    selected_thinking: Option<ThinkingLevel>,
+    mode: SessionMode,
+    mode_id: Option<ModeId>,
+    permission_mode: Option<rw_types::PermissionModeDescriptor>,
+    pending_plan: Option<PlanArtifact>,
+    approved_plan: Option<PlanArtifact>,
+    plan_gate_active: bool,
+    turn_mode_states: BTreeMap<u64, ProjectedTurnMode>,
+    active_shell: Option<RecoveredUserShell>,
+    workspace_generation: u64,
+    workspace_roots: Vec<rw_types::WorkspaceRootDescriptor>,
+    compacted_conversation: Option<Vec<(u64, Turn)>>,
+    compaction_surgery_start: Option<usize>,
+    budgeter: Budgeter,
+    rewind_archives: Vec<ProjectedRewindArchive>,
+}
+
+impl Default for SessionProjector {
+    fn default() -> Self {
+        Self {
+            conversation: Vec::new(),
+            title: None,
+            conversation_agent_turns: Vec::new(),
+            queued: VecDeque::new(),
+            input_claims: rw_types::input_claims::InputClaimState::default(),
+            uncommitted_users: BTreeMap::new(),
+            completed_turns: 0,
+            active_turn: None,
+            turn_ends: BTreeMap::new(),
+            partial_assistant_blocks: Vec::new(),
+            partial_tool_blocks: Vec::new(),
+            next_turn: 1,
+            last_sequence: None,
+            driver_client_id: None,
+            session_id: None,
+            interrupted_tool_repairs: Vec::new(),
+            active_tool_starts: BTreeMap::new(),
+            interrupted_tool_turn: None,
+            pending_questions: BTreeMap::new(),
+            context_surgery: Vec::new(),
+            pruned_tool_outputs: BTreeMap::new(),
+            accounting: crate::engine::SessionAccountingState::default(),
+            latest_budget: None,
+            model_alias: None,
+            selected_provider: None,
+            selected_thinking: None,
+            mode: SessionMode::Execute,
+            mode_id: None,
+            permission_mode: None,
+            pending_plan: None,
+            approved_plan: None,
+            plan_gate_active: false,
+            turn_mode_states: BTreeMap::new(),
+            active_shell: None,
+            workspace_generation: 0,
+            workspace_roots: Vec::new(),
+            compacted_conversation: None,
+            compaction_surgery_start: None,
+            budgeter: Budgeter::default(),
+            rewind_archives: Vec::new(),
         }
-        if let Some(expected) = session_id {
-            if expected != &meta.session_id {
-                return Err(SessionProjectionError::SessionChanged {
-                    expected: expected.0.clone(),
-                    found: meta.session_id.0.clone(),
+    }
+}
+
+impl SessionProjector {
+    #[allow(clippy::match_same_arms, clippy::too_many_lines)]
+    fn push_resolving(
+        self,
+        event: &EngineEvent,
+        resolved: &EngineEvent,
+        mut resolve_mode: impl FnMut(&ModeId, &String) -> Result<SessionMode, SessionProjectionError>,
+    ) -> Result<Self, SessionProjectionError> {
+        let Self {
+            mut conversation,
+            mut title,
+            mut conversation_agent_turns,
+            mut queued,
+            mut input_claims,
+            mut uncommitted_users,
+            mut completed_turns,
+            mut active_turn,
+            mut turn_ends,
+            mut partial_assistant_blocks,
+            mut partial_tool_blocks,
+            mut next_turn,
+            mut last_sequence,
+            mut driver_client_id,
+            mut session_id,
+            interrupted_tool_repairs,
+            mut active_tool_starts,
+            interrupted_tool_turn,
+            mut pending_questions,
+            mut context_surgery,
+            mut pruned_tool_outputs,
+            mut accounting,
+            mut latest_budget,
+            mut model_alias,
+            mut selected_provider,
+            mut selected_thinking,
+            mut mode,
+            mut mode_id,
+            mut permission_mode,
+            mut pending_plan,
+            mut approved_plan,
+            mut plan_gate_active,
+            mut turn_mode_states,
+            mut active_shell,
+            mut workspace_generation,
+            mut workspace_roots,
+            mut compacted_conversation,
+            mut compaction_surgery_start,
+            mut budgeter,
+            mut rewind_archives,
+        } = self;
+        'event: {
+            let meta = event
+                .meta()
+                .ok_or(SessionProjectionError::NonDurableEvent)?;
+            if meta.protocol_version != SESSION_EVENT_VERSION {
+                return Err(SessionProjectionError::UnsupportedVersion(
+                    meta.protocol_version,
+                ));
+            }
+            if let Some(expected) = &session_id {
+                if expected != &meta.session_id {
+                    return Err(SessionProjectionError::SessionChanged {
+                        expected: expected.0.clone(),
+                        found: meta.session_id.0.clone(),
+                    });
+                }
+            } else {
+                session_id = Some(meta.session_id.clone());
+            }
+            let expected =
+                last_sequence.map_or(0, |sequence: SequenceId| sequence.0.saturating_add(1));
+            if meta.sequence_id.0 != expected {
+                return Err(SessionProjectionError::NonContiguousSequence {
+                    expected,
+                    found: meta.sequence_id.0,
                 });
             }
-        } else {
-            session_id = Some(&meta.session_id);
-        }
-        let expected = last_sequence.map_or(0, |sequence: SequenceId| sequence.0.saturating_add(1));
-        if meta.sequence_id.0 != expected {
-            return Err(SessionProjectionError::NonContiguousSequence {
-                expected,
-                found: meta.sequence_id.0,
-            });
-        }
-        last_sequence = Some(meta.sequence_id);
-        let Some(kind) = recovered_pending_event(event)? else {
-            continue;
-        };
-        match &kind {
-            PendingEvent::TurnStarted { turn } => {
-                active_turn = Some(*turn);
-                partial_assistant_blocks.clear();
-                partial_tool_blocks.clear();
-                next_turn = next_turn.max(turn.saturating_add(1));
-            }
-            PendingEvent::MessageQueued {
-                position, content, ..
-            } => queued.push_back((*position, content.clone())),
-            PendingEvent::QueuedMessageRemoved { position } => {
-                if let Some(index) = queued
-                    .iter()
-                    .position(|(queued_position, _)| queued_position == position)
-                {
-                    queued.remove(index);
+            last_sequence = Some(meta.sequence_id);
+            input_claims
+                .advance(event)
+                .map_err(SessionProjectionError::InvalidInput)?;
+            if matches!(
+                event,
+                EngineEvent::ConversationContextCommitted {
+                    selection: rw_types::conversation_input::ContextSelection::Continuation {}
+                        | rw_types::conversation_input::ContextSelection::Retained { .. },
+                    ..
                 }
+            ) && compacted_conversation.is_none()
+            {
+                return Err(SessionProjectionError::InvalidInput(
+                    "compaction context requires an active compaction",
+                ));
             }
-            PendingEvent::QueuedMessagesCleared => queued.clear(),
-            PendingEvent::UserMessageAccepted { turn, content, .. } => {
-                if let Some(position) = queued
-                    .iter()
-                    .position(|(_, queued_content)| queued_content == content)
-                {
-                    queued.remove(position);
+            let Some(kind) = recovered_pending_event(resolved)? else {
+                break 'event;
+            };
+            let input_source = if let EngineEvent::ConversationInputCommitted {
+                accepted_source,
+                ..
+            } = event
+            {
+                Some(*accepted_source)
+            } else {
+                None
+            };
+            match &kind {
+                PendingEvent::ConversationToolResultsCommitted { .. }
+                | PendingEvent::ConversationInputCommitted { .. }
+                | PendingEvent::ConversationContextCommitted { .. } => {
+                    return Err(SessionProjectionError::InvalidInput("unresolved input"));
                 }
-                uncommitted_users
-                    .entry(*turn)
-                    .or_default()
-                    .push(content.clone());
-            }
-            PendingEvent::SessionTitleUpdated {
-                title: updated,
-                usage,
-                cost,
-            } => {
-                title = Some(updated.clone());
-                if let (Some(usage), Some(cost)) = (usage, cost) {
-                    accounting.push(TurnAccounting {
-                        turn_id: TurnId("title".to_owned()),
-                        attribution: AccountingAttribution::Title,
+                PendingEvent::ProviderCallAccounted { .. } => {}
+                PendingEvent::TurnStarted { turn } => {
+                    active_tool_starts.clear();
+                    active_turn = Some(*turn);
+                    partial_assistant_blocks.clear();
+                    partial_tool_blocks.clear();
+                    next_turn = next_turn.max(turn.saturating_add(1));
+                }
+                PendingEvent::MessageQueued {
+                    position, content, ..
+                } => queued.push_back((*position, content.clone())),
+                PendingEvent::QueuedMessageRemoved { position } => {
+                    if let Some(index) = queued
+                        .iter()
+                        .position(|(queued_position, _)| queued_position == position)
+                    {
+                        queued.remove(index);
+                    }
+                }
+                PendingEvent::QueuedMessagesCleared => queued.clear(),
+                PendingEvent::UserMessageRetained { .. } => {}
+                PendingEvent::UserMessageAccepted {
+                    turn,
+                    content,
+                    attachments,
+                } => {
+                    let message =
+                        crate::engine::dispatch::recover_user_message(content, attachments)
+                            .map_err(SessionProjectionError::InvalidAttachment)?;
+                    if let Some(position) = queued
+                        .iter()
+                        .position(|(_, queued_content)| queued_content == content)
+                    {
+                        queued.remove(position);
+                    }
+                    uncommitted_users
+                        .entry(*turn)
+                        .or_default()
+                        .push((meta.sequence_id, message));
+                }
+                PendingEvent::SessionTitleUpdated {
+                    title: updated,
+                    usage,
+                    cost,
+                } => {
+                    title = Some(updated.clone());
+                    if let (Some(usage), Some(cost)) = (usage, cost) {
+                        accounting.record(&TurnAccounting {
+                            turn_id: TurnId("title".to_owned()),
+                            attribution: AccountingAttribution::Title,
+                            usage: (*usage).into(),
+                            cost: cost.clone(),
+                        });
+                    }
+                }
+                PendingEvent::PluginMessageInjected { .. }
+                | PendingEvent::PluginStatusChanged { .. }
+                | PendingEvent::ExtensionStateCommitted { .. }
+                | PendingEvent::TodoStateCommitted { .. }
+                | PendingEvent::UiNotification { .. } => {}
+                PendingEvent::ConversationTurnCommitted { agent_turn, turn } => {
+                    if let Some(compacted) = &mut compacted_conversation {
+                        compacted.push((*agent_turn, turn.clone()));
+                        break 'event;
+                    }
+                    if turn.role == Role::User {
+                        for pending in uncommitted_users.values_mut() {
+                            pending.retain(|(source, _)| input_source != Some(*source));
+                        }
+                    }
+                    conversation.push(turn.clone());
+                    conversation_agent_turns.push(*agent_turn);
+                    if turn.role == Role::Assistant {
+                        partial_assistant_blocks.clear();
+                    } else if turn.role == Role::Tool {
+                        partial_tool_blocks.clear();
+                    }
+                }
+                PendingEvent::ConversationRewound { to_turn, .. } => {
+                    if let Some((
+                        ends,
+                        restored,
+                        restored_turns,
+                        restored_surgery,
+                        restored_pruned,
+                        restored_budgeter,
+                    )) = rewind_archives
+                        .iter()
+                        .find(|(ends, ..)| ends.contains_key(to_turn))
+                        .cloned()
+                    {
+                        let retained = ends.get(to_turn).copied().unwrap_or_default();
+                        conversation = restored.into_iter().take(retained).collect();
+                        conversation_agent_turns =
+                            restored_turns.into_iter().take(retained).collect();
+                        context_surgery = restored_surgery
+                            .into_iter()
+                            .filter(|action| action.effective_after_agent_turn <= *to_turn)
+                            .collect();
+                        pruned_tool_outputs = restored_pruned;
+                        budgeter = restored_budgeter;
+                    } else {
+                        let retained = conversation_agent_turns
+                            .iter()
+                            .take_while(|turn| **turn <= *to_turn)
+                            .count();
+                        conversation.truncate(retained);
+                        conversation_agent_turns.truncate(retained);
+                    }
+                    turn_ends.retain(|turn, _| *turn <= *to_turn);
+                    queued.clear();
+                    uncommitted_users.clear();
+                    if active_turn.is_some_and(|turn| turn > *to_turn) {
+                        active_turn = None;
+                        partial_assistant_blocks.clear();
+                        partial_tool_blocks.clear();
+                    }
+                    completed_turns = u64::try_from(turn_ends.len()).unwrap_or(u64::MAX);
+                    if let Some((
+                        restored_mode,
+                        restored_mode_id,
+                        restored_pending_plan,
+                        restored_approved_plan,
+                        restored_plan_gate,
+                    )) = turn_mode_states.get(to_turn).cloned()
+                    {
+                        mode = restored_mode;
+                        mode_id = restored_mode_id;
+                        pending_plan = restored_pending_plan;
+                        approved_plan = restored_approved_plan;
+                        plan_gate_active = restored_plan_gate;
+                    }
+                    turn_mode_states.retain(|turn, _| *turn <= *to_turn);
+                    pending_questions.retain(|_, question: &mut RecoveredQuestion| {
+                        question.agent_turn <= *to_turn
+                    });
+                    context_surgery.retain(|action: &ContextSurgeryAction| {
+                        action.effective_after_agent_turn <= *to_turn
+                    });
+                }
+                PendingEvent::TurnFinished {
+                    turn, usage, cost, ..
+                } => {
+                    for messages in uncommitted_users.values_mut() {
+                        messages.retain(|(sequence, _)| {
+                            input_claims
+                                .pending()
+                                .iter()
+                                .any(|input| input.sequence == *sequence)
+                        });
+                    }
+                    if active_turn == Some(*turn) {
+                        active_tool_starts.clear();
+                        active_turn = None;
+                    }
+                    completed_turns = completed_turns.saturating_add(1);
+                    next_turn = next_turn.max(turn.saturating_add(1));
+                    turn_ends.insert(*turn, conversation.len());
+                    pending_questions
+                        .retain(|_, question: &mut RecoveredQuestion| question.agent_turn != *turn);
+                    accounting.record(&TurnAccounting {
+                        turn_id: wire_turn_id(*turn),
+                        attribution: AccountingAttribution::Main,
+                        usage: (*usage).into(),
+                        cost: cost.clone(),
+                    });
+                    turn_mode_states.insert(
+                        *turn,
+                        (
+                            mode,
+                            mode_id.clone(),
+                            pending_plan.clone(),
+                            approved_plan.clone(),
+                            plan_gate_active,
+                        ),
+                    );
+                }
+                PendingEvent::TextDelta { turn, text } if active_turn == Some(*turn) => {
+                    append_text(&mut partial_assistant_blocks, text);
+                }
+                PendingEvent::ThinkingDelta {
+                    turn,
+                    content,
+                    signature,
+                } if active_turn == Some(*turn) => {
+                    append_thinking(&mut partial_assistant_blocks, content, signature.clone());
+                }
+                PendingEvent::CitationDelta { turn, uri, title } if active_turn == Some(*turn) => {
+                    partial_assistant_blocks.push(Block::Citation {
+                        uri: uri.clone(),
+                        title: title.clone(),
+                        excerpt: None,
+                    });
+                }
+                PendingEvent::ToolCallStarted {
+                    turn,
+                    id,
+                    invocation_id,
+                    index,
+                    ..
+                } if active_turn == Some(*turn) => {
+                    active_tool_starts.insert(
+                        invocation_id.clone(),
+                        ActiveToolStart {
+                            id: ToolCallId(id.clone()),
+                            invocation_id: invocation_id.clone(),
+                            index: *index,
+                        },
+                    );
+                }
+                PendingEvent::ToolCallFinished {
+                    turn,
+                    id,
+                    invocation_id,
+                    output,
+                    is_error,
+                    ..
+                } if active_turn == Some(*turn) => {
+                    active_tool_starts.remove(invocation_id);
+                    partial_tool_blocks.push(Block::ToolResult {
+                        id: ToolCallId(id.clone()),
+                        output: output.clone(),
+                        is_error: *is_error,
+                    });
+                }
+                PendingEvent::TextDelta { .. }
+                | PendingEvent::ThinkingDelta { .. }
+                | PendingEvent::CitationDelta { .. }
+                | PendingEvent::ToolCallStarted { .. }
+                | PendingEvent::PermissionRequested { .. }
+                | PendingEvent::ToolDiffReady { .. }
+                | PendingEvent::ToolOutput { .. }
+                | PendingEvent::ToolCallFinished { .. }
+                | PendingEvent::SubagentSpawned { .. }
+                | PendingEvent::SubagentFinished { .. }
+                | PendingEvent::HookFailure { .. }
+                | PendingEvent::CommandFinished { .. }
+                | PendingEvent::GuardTriggered { .. } => {}
+                PendingEvent::BudgetStatus {
+                    turn,
+                    level,
+                    scope,
+                    unit,
+                    current,
+                    limit,
+                } => {
+                    latest_budget = Some(rw_types::session_state::SessionBudgetState {
+                        turn_id: wire_turn_id(*turn),
+                        level: level.clone(),
+                        scope: scope.clone(),
+                        unit: unit.clone(),
+                        current: *current,
+                        limit: *limit,
+                    });
+                }
+                PendingEvent::Error { .. } | PendingEvent::CompactionFailed { .. } => {
+                    compacted_conversation = None;
+                    if let Some(start) = compaction_surgery_start.take() {
+                        context_surgery.truncate(start);
+                    }
+                }
+                PendingEvent::ContextUsage {
+                    estimated_input_tokens,
+                    provider_input_tokens,
+                    ..
+                } if *estimated_input_tokens > 0 && *provider_input_tokens > 0 => {
+                    budgeter.reconcile(
+                        *estimated_input_tokens,
+                        TokenUsage {
+                            input_tokens: *provider_input_tokens,
+                            ..TokenUsage::default()
+                        },
+                    );
+                }
+                PendingEvent::ContextUsage { .. } => {}
+                PendingEvent::CompactionStarted { .. } => {
+                    rewind_archives.push((
+                        turn_ends.clone(),
+                        conversation.clone(),
+                        conversation_agent_turns.clone(),
+                        context_surgery.clone(),
+                        pruned_tool_outputs.clone(),
+                        budgeter,
+                    ));
+                    compacted_conversation = Some(Vec::new());
+                    compaction_surgery_start = Some(context_surgery.len());
+                }
+                PendingEvent::CompactionAttemptFinished {
+                    summary_turn,
+                    usage,
+                    cost,
+                } => {
+                    accounting.record(&TurnAccounting {
+                        turn_id: wire_turn_id(*summary_turn),
+                        attribution: AccountingAttribution::Compaction,
                         usage: (*usage).into(),
                         cost: cost.clone(),
                     });
                 }
-            }
-            PendingEvent::PluginMessageInjected { .. }
-            | PendingEvent::PluginStatusChanged { .. }
-            | PendingEvent::UiNotification { .. } => {}
-            PendingEvent::ConversationTurnCommitted { agent_turn, turn } => {
-                if let Some(compacted) = &mut compacted_conversation {
-                    compacted.push((*agent_turn, turn.clone()));
-                    continue;
-                }
-                if turn.role == Role::User
-                    && let Some(pending) = uncommitted_users.get_mut(agent_turn)
-                    && !pending.is_empty()
-                {
-                    pending.remove(0);
-                }
-                conversation.push(turn.clone());
-                conversation_agent_turns.push(*agent_turn);
-                if turn.role == Role::Assistant {
-                    partial_assistant_blocks.clear();
-                } else if turn.role == Role::Tool {
-                    partial_tool_blocks.clear();
-                }
-            }
-            PendingEvent::ConversationRewound { to_turn, .. } => {
-                if let Some((
-                    ends,
-                    restored,
-                    restored_turns,
-                    restored_surgery,
-                    restored_pruned,
-                    restored_budgeter,
-                )) = rewind_archives
-                    .iter()
-                    .find(|(ends, ..)| ends.contains_key(to_turn))
-                    .cloned()
-                {
-                    let retained = ends.get(to_turn).copied().unwrap_or_default();
-                    conversation = restored.into_iter().take(retained).collect();
-                    conversation_agent_turns = restored_turns.into_iter().take(retained).collect();
-                    context_surgery = restored_surgery
-                        .into_iter()
-                        .filter(|action| action.effective_after_agent_turn <= *to_turn)
-                        .collect();
-                    pruned_tool_outputs = restored_pruned;
-                    budgeter = restored_budgeter;
-                } else {
-                    let retained = conversation_agent_turns
-                        .iter()
-                        .take_while(|turn| **turn <= *to_turn)
-                        .count();
-                    conversation.truncate(retained);
-                    conversation_agent_turns.truncate(retained);
-                }
-                turn_ends.retain(|turn, _| *turn <= *to_turn);
-                queued.clear();
-                uncommitted_users.retain(|turn, _| *turn <= *to_turn);
-                if active_turn.is_some_and(|turn| turn > *to_turn) {
-                    active_turn = None;
-                    partial_assistant_blocks.clear();
-                    partial_tool_blocks.clear();
-                }
-                completed_turns = u64::try_from(turn_ends.len()).unwrap_or(u64::MAX);
-                if let Some((
-                    restored_mode,
-                    restored_mode_id,
-                    restored_pending_plan,
-                    restored_approved_plan,
-                    restored_plan_gate,
-                )) = turn_mode_states.get(to_turn).cloned()
-                {
-                    mode = restored_mode;
-                    mode_id = restored_mode_id;
-                    pending_plan = restored_pending_plan;
-                    approved_plan = restored_approved_plan;
-                    plan_gate_active = restored_plan_gate;
-                }
-                turn_mode_states.retain(|turn, _| *turn <= *to_turn);
-                pending_questions
-                    .retain(|_, question: &mut RecoveredQuestion| question.agent_turn <= *to_turn);
-                context_surgery.retain(|action: &ContextSurgeryAction| {
-                    action.effective_after_agent_turn <= *to_turn
-                });
-            }
-            PendingEvent::TurnFinished {
-                turn, usage, cost, ..
-            } => {
-                if active_turn == Some(*turn) {
-                    active_turn = None;
-                }
-                completed_turns = completed_turns.saturating_add(1);
-                next_turn = next_turn.max(turn.saturating_add(1));
-                turn_ends.insert(*turn, conversation.len());
-                pending_questions
-                    .retain(|_, question: &mut RecoveredQuestion| question.agent_turn != *turn);
-                accounting.push(TurnAccounting {
-                    turn_id: wire_turn_id(*turn),
-                    attribution: AccountingAttribution::Main,
-                    usage: (*usage).into(),
-                    cost: cost.clone(),
-                });
-                turn_mode_states.insert(
-                    *turn,
-                    (
-                        mode,
-                        mode_id.clone(),
-                        pending_plan.clone(),
-                        approved_plan.clone(),
-                        plan_gate_active,
-                    ),
-                );
-            }
-            PendingEvent::TextDelta { turn, text } if active_turn == Some(*turn) => {
-                append_text(&mut partial_assistant_blocks, text);
-            }
-            PendingEvent::ThinkingDelta {
-                turn,
-                content,
-                signature,
-            } if active_turn == Some(*turn) => {
-                append_thinking(&mut partial_assistant_blocks, content, signature.clone());
-            }
-            PendingEvent::CitationDelta { turn, uri, title } if active_turn == Some(*turn) => {
-                partial_assistant_blocks.push(Block::Citation {
-                    uri: uri.clone(),
-                    title: title.clone(),
-                    excerpt: None,
-                });
-            }
-            PendingEvent::ToolCallFinished {
-                turn,
-                id,
-                output,
-                is_error,
-                ..
-            } if active_turn == Some(*turn) => {
-                partial_tool_blocks.push(Block::ToolResult {
-                    id: ToolCallId(id.clone()),
-                    output: output.clone(),
-                    is_error: *is_error,
-                });
-            }
-            PendingEvent::TextDelta { .. }
-            | PendingEvent::ThinkingDelta { .. }
-            | PendingEvent::CitationDelta { .. }
-            | PendingEvent::ToolCallStarted { .. }
-            | PendingEvent::PermissionRequested { .. }
-            | PendingEvent::ToolDiffReady { .. }
-            | PendingEvent::ToolOutput { .. }
-            | PendingEvent::ToolCallFinished { .. }
-            | PendingEvent::SubagentSpawned { .. }
-            | PendingEvent::SubagentFinished { .. }
-            | PendingEvent::HookFailure { .. }
-            | PendingEvent::CommandFinished { .. }
-            | PendingEvent::GuardTriggered { .. }
-            | PendingEvent::BudgetStatus { .. } => {}
-            PendingEvent::Error { .. } | PendingEvent::CompactionFailed { .. } => {
-                compacted_conversation = None;
-                if let Some(start) = compaction_surgery_start.take() {
-                    context_surgery.truncate(start);
-                }
-            }
-            PendingEvent::ContextUsage {
-                estimated_input_tokens,
-                provider_input_tokens,
-                ..
-            } if *estimated_input_tokens > 0 && *provider_input_tokens > 0 => {
-                budgeter.reconcile(
-                    *estimated_input_tokens,
-                    TokenUsage {
-                        input_tokens: *provider_input_tokens,
-                        ..TokenUsage::default()
-                    },
-                );
-            }
-            PendingEvent::ContextUsage { .. } => {}
-            PendingEvent::CompactionStarted { .. } => {
-                rewind_archives.push((
-                    turn_ends.clone(),
-                    conversation.clone(),
-                    conversation_agent_turns.clone(),
-                    context_surgery.clone(),
-                    pruned_tool_outputs.clone(),
-                    budgeter,
-                ));
-                compacted_conversation = Some(Vec::new());
-                compaction_surgery_start = Some(context_surgery.len());
-            }
-            PendingEvent::CompactionAttemptFinished {
-                summary_turn,
-                usage,
-                cost,
-            } => {
-                accounting.push(TurnAccounting {
-                    turn_id: wire_turn_id(*summary_turn),
-                    attribution: AccountingAttribution::Compaction,
-                    usage: (*usage).into(),
-                    cost: cost.clone(),
-                });
-            }
-            PendingEvent::CompactionFinished {
-                summary_turn,
-                usage: Some(usage),
-                cost: Some(cost),
-                ..
-            } => {
-                if let Some(compacted) = compacted_conversation.take() {
-                    conversation = compacted.iter().map(|(_, turn)| turn.clone()).collect();
-                    conversation_agent_turns = compacted
-                        .iter()
-                        .map(|(agent_turn, _)| *agent_turn)
-                        .collect();
-                }
-                if let Some(start) = compaction_surgery_start.take() {
-                    context_surgery.drain(..start);
-                }
-                accounting.push(TurnAccounting {
-                    turn_id: wire_turn_id(*summary_turn),
-                    attribution: AccountingAttribution::Compaction,
-                    usage: (*usage).into(),
-                    cost: cost.clone(),
-                });
-            }
-            PendingEvent::CompactionFinished { .. } => {
-                if let Some(compacted) = compacted_conversation.take() {
-                    conversation = compacted.iter().map(|(_, turn)| turn.clone()).collect();
-                    conversation_agent_turns = compacted
-                        .iter()
-                        .map(|(agent_turn, _)| *agent_turn)
-                        .collect();
-                }
-                if let Some(start) = compaction_surgery_start.take() {
-                    context_surgery.drain(..start);
-                }
-            }
-            PendingEvent::ToolOutputPruned {
-                tool_call_id,
-                reclaimed_tokens,
-            } => {
-                pruned_tool_outputs.insert(tool_call_id.clone(), *reclaimed_tokens);
-            }
-            PendingEvent::ContextItemPinned {
-                item_id,
-                effective_after_agent_turn,
-            } => context_surgery.push(ContextSurgeryAction {
-                item_id: item_id.clone(),
-                pinned: true,
-                effective_after_agent_turn: *effective_after_agent_turn,
-            }),
-            PendingEvent::ContextItemEvicted {
-                item_id,
-                effective_after_agent_turn,
-            } => context_surgery.push(ContextSurgeryAction {
-                item_id: item_id.clone(),
-                pinned: false,
-                effective_after_agent_turn: *effective_after_agent_turn,
-            }),
-            PendingEvent::QuestionAsked {
-                turn,
-                question_id,
-                questions,
-            } => {
-                pending_questions.insert(
-                    question_id.0.clone(),
-                    RecoveredQuestion {
-                        agent_turn: *turn,
-                        question_id: question_id.clone(),
-                        questions: questions.clone(),
-                    },
-                );
-            }
-            PendingEvent::QuestionAnswered { question_id, .. } => {
-                pending_questions.remove(&question_id.0);
-            }
-            PendingEvent::WorkspaceRootsChanged {
-                generation, roots, ..
-            } => {
-                if *generation != workspace_generation.saturating_add(1)
-                    || roots.is_empty()
-                    || roots.iter().enumerate().any(|(index, root)| {
-                        root.index != u32::try_from(index).unwrap_or(u32::MAX)
-                            || root.machine_local
-                            || root.path != format!("@root/{index}")
-                    })
-                    || (!workspace_roots.is_empty()
-                        && roots
+                PendingEvent::CompactionFinished {
+                    summary_turn,
+                    usage: Some(usage),
+                    cost: Some(cost),
+                    ..
+                } => {
+                    if let Some(compacted) = compacted_conversation.take() {
+                        conversation = compacted.iter().map(|(_, turn)| turn.clone()).collect();
+                        conversation_agent_turns = compacted
                             .iter()
-                            .take(workspace_roots.len())
-                            .ne(workspace_roots.iter()))
-                    || (!workspace_roots.is_empty() && roots.len() != workspace_roots.len() + 1)
-                {
-                    return Err(SessionProjectionError::InvalidWorkspaceGeneration);
+                            .map(|(agent_turn, _)| *agent_turn)
+                            .collect();
+                    }
+                    if let Some(start) = compaction_surgery_start.take() {
+                        context_surgery.drain(..start);
+                    }
+                    accounting.record(&TurnAccounting {
+                        turn_id: wire_turn_id(*summary_turn),
+                        attribution: AccountingAttribution::Compaction,
+                        usage: (*usage).into(),
+                        cost: cost.clone(),
+                    });
                 }
-                workspace_generation = *generation;
-                workspace_roots.clone_from(roots);
-            }
-            PendingEvent::SessionCreated {
-                driver_client_id: driver,
-            }
-            | PendingEvent::DriverChanged {
-                driver_client_id: driver,
-            } => {
-                driver_client_id = Some(driver.clone());
-            }
-            PendingEvent::ModelChanged {
-                model,
-                provider,
-                thinking,
-            } => {
-                model_alias = Some(model.0.clone());
-                selected_provider.clone_from(provider);
-                selected_thinking = Some(*thinking);
-            }
-            PendingEvent::ModelContextCleared { .. } => {
-                let retained = conversation
-                    .iter()
-                    .zip(conversation_agent_turns.iter().copied())
-                    .filter(|(turn, _)| turn.role == Role::System)
-                    .map(|(turn, agent_turn)| (turn.clone(), agent_turn))
-                    .collect::<Vec<_>>();
-                conversation = retained.iter().map(|(turn, _)| turn.clone()).collect();
-                conversation_agent_turns =
-                    retained.iter().map(|(_, agent_turn)| *agent_turn).collect();
-                context_surgery.clear();
-                pruned_tool_outputs.clear();
-            }
-            PendingEvent::ModeChanged {
-                mode: changed,
-                definition_fingerprint,
-            } => {
-                mode_id = Some(changed.clone());
-                mode = resolve_mode(changed, definition_fingerprint)?;
-                if mode == SessionMode::Plan {
+                PendingEvent::CompactionFinished { .. } => {
+                    if let Some(compacted) = compacted_conversation.take() {
+                        conversation = compacted.iter().map(|(_, turn)| turn.clone()).collect();
+                        conversation_agent_turns = compacted
+                            .iter()
+                            .map(|(agent_turn, _)| *agent_turn)
+                            .collect();
+                    }
+                    if let Some(start) = compaction_surgery_start.take() {
+                        context_surgery.drain(..start);
+                    }
+                }
+                PendingEvent::ToolOutputPruned {
+                    source,
+                    reclaimed_tokens,
+                } => {
+                    pruned_tool_outputs.insert(source.key(), *reclaimed_tokens);
+                }
+                PendingEvent::ContextItemPinned {
+                    item_id,
+                    effective_after_agent_turn,
+                } => context_surgery.push(ContextSurgeryAction {
+                    item_id: item_id.clone(),
+                    pinned: true,
+                    effective_after_agent_turn: *effective_after_agent_turn,
+                }),
+                PendingEvent::ContextItemEvicted {
+                    item_id,
+                    effective_after_agent_turn,
+                } => context_surgery.push(ContextSurgeryAction {
+                    item_id: item_id.clone(),
+                    pinned: false,
+                    effective_after_agent_turn: *effective_after_agent_turn,
+                }),
+                PendingEvent::QuestionAsked {
+                    turn,
+                    question_id,
+                    question,
+                } => {
+                    if question.id != *question_id {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "question source identity mismatch",
+                        ));
+                    }
+                    rw_types::question_admission::validate_question(question)
+                        .map_err(SessionProjectionError::InvalidQuestion)?;
+                    if pending_questions.contains_key(&question_id.0) {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "pending question identity is already in use",
+                        ));
+                    }
+                    if pending_questions.len()
+                        >= rw_types::question_admission::MAX_PENDING_QUESTION_REQUESTS
+                    {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "pending request count exceeds admission",
+                        ));
+                    }
+                    pending_questions.insert(
+                        question_id.0.clone(),
+                        RecoveredQuestion {
+                            agent_turn: *turn,
+                            question_id: question_id.clone(),
+                            question: question.clone(),
+                        },
+                    );
+                }
+                PendingEvent::ToolApprovalResolved { .. } => {}
+                PendingEvent::QuestionAnswered {
+                    turn,
+                    question_id,
+                    answer,
+                } => {
+                    let pending = pending_questions.get(&question_id.0).ok_or(
+                        SessionProjectionError::InvalidQuestion("answer has no pending question"),
+                    )?;
+                    if pending.agent_turn != *turn {
+                        return Err(SessionProjectionError::InvalidQuestion(
+                            "answer turn mismatch",
+                        ));
+                    }
+                    rw_types::question_admission::validate_answer(&pending.question, answer)
+                        .map_err(SessionProjectionError::InvalidQuestion)?;
+                    pending_questions.remove(&question_id.0);
+                }
+                PendingEvent::WorkspaceRootsChanged {
+                    generation, roots, ..
+                } => {
+                    if *generation != workspace_generation.saturating_add(1)
+                        || roots.is_empty()
+                        || roots.iter().enumerate().any(|(index, root)| {
+                            root.index != u32::try_from(index).unwrap_or(u32::MAX)
+                                || root.machine_local
+                                || root.path != format!("@root/{index}")
+                        })
+                        || (!workspace_roots.is_empty()
+                            && roots
+                                .iter()
+                                .take(workspace_roots.len())
+                                .ne(workspace_roots.iter()))
+                        || (!workspace_roots.is_empty() && roots.len() != workspace_roots.len() + 1)
+                    {
+                        return Err(SessionProjectionError::InvalidWorkspaceGeneration);
+                    }
+                    workspace_generation = *generation;
+                    workspace_roots.clone_from(roots);
+                }
+                PendingEvent::SessionCreated {
+                    driver_client_id: driver,
+                }
+                | PendingEvent::DriverChanged {
+                    driver_client_id: driver,
+                } => {
+                    driver_client_id = Some(driver.clone());
+                }
+                PendingEvent::ModelChanged {
+                    model,
+                    provider,
+                    thinking,
+                } => {
+                    model_alias = Some(model.0.clone());
+                    selected_provider.clone_from(provider);
+                    selected_thinking = Some(*thinking);
+                }
+                PendingEvent::ModelContextCleared { .. } => {
+                    let retained = conversation
+                        .iter()
+                        .zip(conversation_agent_turns.iter().copied())
+                        .filter(|(turn, _)| turn.role == Role::System)
+                        .map(|(turn, agent_turn)| (turn.clone(), agent_turn))
+                        .collect::<Vec<_>>();
+                    conversation = retained.iter().map(|(turn, _)| turn.clone()).collect();
+                    conversation_agent_turns =
+                        retained.iter().map(|(_, agent_turn)| *agent_turn).collect();
+                    context_surgery.clear();
+                    pruned_tool_outputs.clear();
+                }
+                PendingEvent::ModeChanged {
+                    mode: changed,
+                    definition_fingerprint,
+                } => {
+                    mode_id = Some(changed.clone());
+                    mode = resolve_mode(changed, definition_fingerprint)?;
+                    if mode == SessionMode::Plan {
+                        pending_plan = None;
+                        approved_plan = None;
+                        plan_gate_active = true;
+                    }
+                }
+                PendingEvent::PermissionModeChanged { mode: changed } => {
+                    permission_mode = *changed;
+                }
+                PendingEvent::PlanSubmitted { artifact } => {
+                    rw_types::session_controls::validate_plan(artifact)
+                        .map_err(SessionProjectionError::InvalidPlan)?;
+                    pending_plan = Some(artifact.clone());
+                }
+                PendingEvent::PlanReviewed {
+                    artifact, decision, ..
+                } => {
                     pending_plan = None;
-                    approved_plan = None;
-                    plan_gate_active = true;
+                    if *decision == PlanDecision::Approve {
+                        approved_plan = Some(artifact.clone());
+                        plan_gate_active = false;
+                    }
                 }
-            }
-            PendingEvent::PermissionModeChanged { mode: changed } => {
-                permission_mode = *changed;
-            }
-            PendingEvent::PlanSubmitted { artifact } => {
-                pending_plan = Some(artifact.clone());
-            }
-            PendingEvent::PlanReviewed {
-                artifact, decision, ..
-            } => {
-                pending_plan = None;
-                if *decision == PlanDecision::Approve {
-                    approved_plan = Some(artifact.clone());
-                    plan_gate_active = false;
-                }
-            }
-            PendingEvent::UserShellStateChanged {
-                shell_id,
-                command,
-                active: true,
-                status: None,
-                captured_output: None,
-            } => {
-                if active_shell.is_some() {
-                    return Err(SessionProjectionError::InvalidShellTransition(
-                        "a second shell started while one was already active".to_owned(),
-                    ));
-                }
-                active_shell = Some(RecoveredUserShell {
-                    shell_id: shell_id.clone(),
-                    command: command.clone(),
-                });
-            }
-            PendingEvent::UserShellStateChanged {
-                shell_id,
-                command,
-                active: false,
-                status: Some(status),
-                captured_output,
-            } => {
-                if active_shell.as_ref().map(|shell| &shell.shell_id) != Some(shell_id) {
-                    return Err(SessionProjectionError::InvalidShellTransition(
-                        "shell end did not match the active shell id".to_owned(),
-                    ));
-                }
-                conversation.push(shell_context_turn(
+                PendingEvent::UserShellStateChanged {
+                    shell_id,
                     command,
-                    *status,
-                    captured_output.as_deref(),
-                ));
-                active_shell = None;
-            }
-            PendingEvent::UserShellStateChanged { .. } => {
-                return Err(SessionProjectionError::InvalidShellTransition(
-                    "shell start must not carry terminal fields".to_owned(),
-                ));
-            }
-        }
-    }
-    for messages in uncommitted_users.into_values() {
-        for content in messages {
-            conversation.push(Turn {
-                role: Role::User,
-                blocks: vec![Block::Text { text: content }],
-                meta: TurnMeta::default(),
-            });
-        }
-    }
-    if let Some(interrupted_turn) = active_turn {
-        let mut requested = Vec::<ToolCallId>::new();
-        let mut finished = Vec::<ToolCallId>::new();
-        for (turn, conversation_turn) in conversation_agent_turns.iter().zip(&conversation) {
-            if *turn != interrupted_turn {
-                continue;
-            }
-            for block in &conversation_turn.blocks {
-                match block {
-                    Block::ToolCall { id, .. } => requested.push(id.clone()),
-                    Block::ToolResult { id, .. } => finished.push(id.clone()),
-                    _ => {}
+                    active: true,
+                    status: None,
+                    captured_output: None,
+                } => {
+                    if active_shell.is_some() {
+                        return Err(SessionProjectionError::InvalidShellTransition(
+                            "a second shell started while one was already active".to_owned(),
+                        ));
+                    }
+                    active_shell = Some(RecoveredUserShell {
+                        shell_id: shell_id.clone(),
+                        command: command.clone(),
+                    });
+                }
+                PendingEvent::UserShellStateChanged {
+                    shell_id,
+                    command,
+                    active: false,
+                    status: Some(status),
+                    captured_output,
+                } => {
+                    if active_shell.as_ref().map(|shell| &shell.shell_id) != Some(shell_id) {
+                        return Err(SessionProjectionError::InvalidShellTransition(
+                            "shell end did not match the active shell id".to_owned(),
+                        ));
+                    }
+                    conversation.push(shell_context_turn(
+                        command,
+                        *status,
+                        captured_output.as_deref(),
+                    ));
+                    active_shell = None;
+                }
+                PendingEvent::UserShellStateChanged { .. } => {
+                    return Err(SessionProjectionError::InvalidShellTransition(
+                        "shell start must not carry terminal fields".to_owned(),
+                    ));
                 }
             }
         }
-        for block in &partial_tool_blocks {
-            if let Block::ToolResult { id, .. } = block {
-                finished.push(id.clone());
+        Ok(Self {
+            input_claims,
+            conversation,
+            title,
+            conversation_agent_turns,
+            queued,
+            uncommitted_users,
+            completed_turns,
+            active_turn,
+            turn_ends,
+            partial_assistant_blocks,
+            partial_tool_blocks,
+            next_turn,
+            last_sequence,
+            driver_client_id,
+            session_id,
+            interrupted_tool_repairs,
+            active_tool_starts,
+            interrupted_tool_turn,
+            pending_questions,
+            context_surgery,
+            pruned_tool_outputs,
+            accounting,
+            latest_budget,
+            model_alias,
+            selected_provider,
+            selected_thinking,
+            mode,
+            mode_id,
+            permission_mode,
+            pending_plan,
+            approved_plan,
+            plan_gate_active,
+            turn_mode_states,
+            active_shell,
+            workspace_generation,
+            workspace_roots,
+            compacted_conversation,
+            compaction_surgery_start,
+            budgeter,
+            rewind_archives,
+        })
+    }
+
+    /// Finishes recovery, including deterministic repair of interrupted work.
+    ///
+    /// # Errors
+    /// Returns a projection failure when terminal repair cannot be represented.
+    #[allow(clippy::too_many_lines)]
+    pub fn finish(self) -> SessionRecoveredState {
+        let Self {
+            mut conversation,
+            title,
+            conversation_agent_turns,
+            queued,
+            input_claims: _,
+            uncommitted_users,
+            completed_turns,
+            active_turn,
+            turn_ends,
+            partial_assistant_blocks,
+            partial_tool_blocks,
+            next_turn,
+            last_sequence,
+            driver_client_id,
+            session_id: _,
+            mut interrupted_tool_repairs,
+            active_tool_starts,
+            mut interrupted_tool_turn,
+            pending_questions,
+            context_surgery,
+            pruned_tool_outputs,
+            accounting,
+            latest_budget,
+            model_alias,
+            selected_provider,
+            selected_thinking,
+            mode,
+            mode_id,
+            permission_mode,
+            pending_plan,
+            approved_plan,
+            plan_gate_active,
+            turn_mode_states: _,
+            active_shell,
+            workspace_generation,
+            workspace_roots,
+            compacted_conversation,
+            compaction_surgery_start: _,
+            budgeter,
+            rewind_archives: _,
+        } = self;
+        for messages in uncommitted_users.into_values() {
+            for (_, message) in messages {
+                conversation.push(message.turn(message.content.clone()));
             }
         }
-        for (call_index, id) in requested.into_iter().enumerate() {
-            if !finished.contains(&id) {
-                let output = ToolOutput::Text {
-                    text: "tool call was interrupted before a result was persisted".to_owned(),
-                };
-                interrupted_tool_repairs.push(InterruptedToolRepair {
-                    agent_turn: interrupted_turn,
-                    call_index,
-                    tool_call_id: id.clone(),
-                    output: output.clone(),
-                });
-                partial_tool_blocks.push(Block::ToolResult {
-                    id,
-                    output,
-                    is_error: true,
+        if let Some(interrupted_turn) = active_turn {
+            let repair = repair::repair_tools(
+                interrupted_turn,
+                conversation_agent_turns
+                    .iter()
+                    .zip(&conversation)
+                    .filter_map(|(turn, value)| (*turn == interrupted_turn).then_some(value)),
+                active_tool_starts
+                    .into_values()
+                    .map(|start| crate::engine::recovery::ToolStartIdentity {
+                        invocation_id: start.invocation_id,
+                        tool_call_id: start.id,
+                        index: start.index,
+                    })
+                    .collect(),
+                partial_tool_blocks,
+            );
+            interrupted_tool_repairs.extend(repair.tools);
+            if let Some(tool_turn) = repair.tool_turn {
+                conversation.push(tool_turn.clone());
+                interrupted_tool_turn = Some(tool_turn);
+            }
+            if !partial_assistant_blocks.is_empty() {
+                conversation.push(Turn {
+                    role: Role::Assistant,
+                    blocks: partial_assistant_blocks,
+                    meta: TurnMeta::default(),
                 });
             }
         }
-        if !partial_tool_blocks.is_empty() {
-            let tool_turn = Turn {
-                role: Role::Tool,
-                blocks: partial_tool_blocks,
-                meta: TurnMeta::default(),
-            };
-            conversation.push(tool_turn.clone());
-            interrupted_tool_turn = Some(tool_turn);
-        }
-        if !partial_assistant_blocks.is_empty() {
-            conversation.push(Turn {
-                role: Role::Assistant,
-                blocks: partial_assistant_blocks,
-                meta: TurnMeta::default(),
-            });
+        let interrupted_compaction = compacted_conversation.is_some();
+        SessionRecoveredState {
+            title,
+            conversation,
+            queued_messages: queued.iter().map(|(_, content)| content.clone()).collect(),
+            queued_message_positions: queued.iter().map(|(position, _)| *position).collect(),
+            completed_turns,
+            next_turn,
+            last_sequence,
+            interrupted_turn: active_turn,
+            turn_ends,
+            driver_client_id,
+            interrupted_tool_repairs,
+            interrupted_tool_turn,
+            pending_questions,
+            context_surgery,
+            pruned_tool_outputs,
+            accounting,
+            latest_budget,
+            budgeter,
+            interrupted_compaction,
+            model_alias,
+            provider: selected_provider,
+            thinking: selected_thinking,
+            mode,
+            mode_id,
+            permission_mode,
+            pending_plan,
+            approved_plan,
+            plan_gate_active,
+            active_shell,
+            workspace_generation,
+            workspace_roots,
         }
     }
-    let interrupted_compaction = compacted_conversation.is_some();
-    Ok(SessionRecoveredState {
-        title,
-        conversation,
-        queued_messages: queued.iter().map(|(_, content)| content.clone()).collect(),
-        queued_message_positions: queued.iter().map(|(position, _)| *position).collect(),
-        completed_turns,
-        next_turn,
-        last_sequence,
-        interrupted_turn: active_turn,
-        turn_ends,
-        driver_client_id,
-        interrupted_tool_repairs,
-        interrupted_tool_turn,
-        pending_questions,
-        context_surgery,
-        pruned_tool_outputs,
-        accounting,
-        budgeter,
-        interrupted_compaction,
-        model_alias,
-        provider: selected_provider,
-        thinking: selected_thinking,
-        mode,
-        mode_id,
-        permission_mode,
-        pending_plan,
-        approved_plan,
-        plan_gate_active,
-        active_shell,
-        workspace_generation,
-        workspace_roots,
-    })
+}
+
+fn project_session_events_resolving_mode(
+    events: &[EngineEvent],
+    mut resolve_mode: impl FnMut(&ModeId, &String) -> Result<SessionMode, SessionProjectionError>,
+) -> Result<SessionRecoveredState, SessionProjectionError> {
+    let mut projector = SessionProjector::default();
+    for event in events {
+        let resolved = crate::engine::recovery::input::materialize_audit_event(events, event)
+            .map_err(|_| SessionProjectionError::InvalidInput("conversation source"))?;
+        projector = projector.push_resolving(event, &resolved, &mut resolve_mode)?;
+    }
+    Ok(projector.finish())
 }
 
 pub(super) fn shell_context_turn(

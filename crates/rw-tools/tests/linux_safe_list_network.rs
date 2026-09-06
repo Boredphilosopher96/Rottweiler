@@ -33,9 +33,9 @@ fn main() {
     runtime.block_on(async {
         let root = tempfile::tempdir().expect("temporary directory");
         let workspace = root.path().join("workspace");
-        let scratch = root.path().join("scratch");
+        let scratch_owner = rw_tools::CommandScratch::create("fixture").expect("scratch owner");
+        let scratch = scratch_owner.path().to_path_buf();
         std::fs::create_dir(&workspace).expect("workspace");
-        std::fs::create_dir(&scratch).expect("scratch");
         let probe = workspace.join("network-denial-probe.py");
         std::fs::write(
             &probe,
@@ -62,7 +62,14 @@ sys.exit(92)
                 .expect("sandbox policy"),
         );
         let executor = TokioCommandExecutor::default()
-            .sandboxed(policy)
+            .sandboxed(
+                policy,
+                rw_sandbox::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("native driver"),
+                )
+                .expect("running helper"),
+                scratch_owner,
+            )
             .with_command_safety(classifier)
             .with_policy_egress(true);
         let outcome = executor

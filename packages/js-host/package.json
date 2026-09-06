@@ -1,0 +1,23 @@
+{
+  "name": "@rottweiler/js-host",
+  "version": "0.1.4",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rottweiler/tui": "file:../tui",
+    "@rottweiler/plugin-host": "file:../plugin-host"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "bun": "1.3.14"
+  }
+}

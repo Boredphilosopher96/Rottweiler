@@ -1,1 +1,5 @@
-{"frame":"Replay · session-m9-replay-golden · read-only · complete through event 8\n▌ you\n▌ Inspect the persisted project plan and summarize the replay contract.\n\n● rottweiler  USD 0.0024\n  ## Persisted replay verified\n\n  The historical event log reached the retained OpenTUI renderer through the authenticated observer transport.\n  ▸ read  PROJECT.md                                                                                   ✓ 1 line\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  REPLAY   fast    ctx —  $—  —\n","styledDigest":"9e442a61","styledSpanCount":19}
+{
+  "frame": "Replay · session-m9-replay-golden · read-only · history available\n▌ you\n▌ Inspect the persisted project plan and summarize the replay contract.\n\n▸ read · done\nOpen content →\n\n● rottweiler\n  ## Persisted replay verified\n\n  The historical event log reached the retained OpenTUI renderer through the authenticated observer transport.\n\ncompleted · USD 0.0024\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  REPLAY   model not selected · Alt+M    ctx —  $—  —\n",
+  "styledDigest": "a8b64c20",
+  "styledSpanCount": 17
+}

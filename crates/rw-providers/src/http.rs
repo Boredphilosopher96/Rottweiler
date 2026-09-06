@@ -1,3 +1,5 @@
+mod resolver;
+
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     pin::Pin,
@@ -201,6 +203,7 @@ pub async fn provider_reachability_probe(
         ));
     }
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(request.timeout)
@@ -241,6 +244,7 @@ pub async fn provider_reachability_probe(
         })?;
         headers.append(name, value);
     }
+    let _network_lease = network_admission()?;
     client
         .head(request.url)
         .headers(headers)
@@ -295,6 +299,7 @@ pub async fn guarded_http_request(
         .into());
     }
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
@@ -336,6 +341,7 @@ pub async fn guarded_http_request(
         })?;
         headers.append(name, value);
     }
+    let network_lease = crate::http::network_admission()?;
     let response = client
         .request(method, request.url)
         .headers(headers)
@@ -419,7 +425,10 @@ pub async fn guarded_http_request(
         status,
         final_url,
         headers: response_headers,
-        body: Box::pin(stream),
+        body: Box::pin(stream.map(move |item| {
+            let _ = &network_lease;
+            item
+        })),
     })
 }
 
@@ -616,6 +625,7 @@ pub async fn guarded_http_fetch(
         .into());
     }
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(request.timeout.min(Duration::from_secs(15)))
@@ -652,6 +662,7 @@ pub async fn guarded_http_fetch(
         })?;
         headers.insert(name, value);
     }
+    let _network_lease = crate::http::network_admission()?;
     let response = client
         .get(request.url)
         .headers(headers)
@@ -668,16 +679,8 @@ pub async fn guarded_http_fetch(
     }
     let status = response.status().as_u16();
     let final_url = response.url().clone();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let location = response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let content_type = response_header(&response, reqwest::header::CONTENT_TYPE);
+    let location = response_header(&response, reqwest::header::LOCATION);
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -696,6 +699,15 @@ pub async fn guarded_http_fetch(
         body,
         location,
     })
+}
+
+fn response_header(response: &Response, name: reqwest::header::HeaderName) -> Option<String> {
+    response
+        .headers()
+        .get(name)?
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 fn validate_fetch_timeout(timeout: Duration) -> Result<(), GuardedHttpFetchError> {
@@ -766,6 +778,7 @@ pub(crate) fn build_client_with_proxy_auth(
     // Never let reqwest's ambient system-proxy discovery create an undocumented
     // precedence path. ProxySettings has already resolved explicit/env/NO_PROXY.
     let mut builder = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(resolver::OwnedResolver))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
@@ -844,7 +857,9 @@ pub(crate) fn response_error(response: &Response) -> Option<ProviderError> {
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn transport_error(error: reqwest::Error) -> ProviderError {
-    let kind = if error.is_timeout() {
+    let kind = if resolver::admission_failed(&error) {
+        ProviderErrorKind::ResourceExhausted
+    } else if error.is_timeout() {
         ProviderErrorKind::Timeout
     } else if error.is_builder() {
         ProviderErrorKind::InvalidRequest
@@ -852,6 +867,13 @@ pub(crate) fn transport_error(error: reqwest::Error) -> ProviderError {
         ProviderErrorKind::Network
     };
     ProviderError::new(kind, format!("provider request failed: {error}"))
+}
+
+/// Local capacity rejection is distinct from provider failure and never authorizes failover.
+pub(crate) fn network_admission() -> Result<rw_resources::ResourceLease, ProviderError> {
+    rw_resources::try_acquire(rw_resources::ResourceClass::Network).map_err(|error| {
+        ProviderError::new(ProviderErrorKind::ResourceExhausted, error.to_string())
+    })
 }
 
 #[cfg(test)]

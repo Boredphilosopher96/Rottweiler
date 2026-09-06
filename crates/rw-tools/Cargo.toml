@@ -7,8 +7,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rw-resources.workspace = true
+rw-operation-contract.workspace = true
 async-trait = "0.1.89"
 blake3.workspace = true
+futures-util = "0.3.31"
 globset = "0.4.16"
 grep-matcher = "0.1.8"
 grep-regex = "0.1.14"
@@ -25,11 +28,13 @@ serde_json.workspace = true
 shell-words.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+ts-rs.workspace = true
 tempfile = "3.23"
-tokio = { workspace = true, features = ["fs", "io-util", "process", "test-util", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "process", "time"] }
 url.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.23"
 
 [[test]]

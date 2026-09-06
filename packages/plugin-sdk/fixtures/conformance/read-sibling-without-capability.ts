@@ -13,7 +13,7 @@ for await (const line of console) {
       result: {
         name: "read-sibling-without-capability",
         version: "1.0.0",
-        protocol: 2,
+        protocol: 3,
         capabilities: { tools: [{
           name: "read_sibling_probe",
           description: "Verify sibling workspace reads are denied",

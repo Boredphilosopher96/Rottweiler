@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import hashlib
 from pathlib import Path
 import platform
 import subprocess
@@ -35,19 +37,20 @@ class ReleaseInstallTests(unittest.TestCase):
             "esac\n",
             encoding="utf-8",
         )
-        tui = binary_dir / "rottweiler-tui"
+        tui = binary_dir / "rottweiler-js-host"
         tui.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         wasm_host = binary_dir / "rottweiler-wasm-host"
         wasm_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        plugin_host = binary_dir / "rottweiler-plugin-host"
-        plugin_host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        identity = binary_dir / "rottweiler-wasm-host.identity.json"
+        identity.write_text(json.dumps({"bytes": wasm_host.stat().st_size, "sha256": hashlib.sha256(wasm_host.read_bytes()).hexdigest()}) + "\n")
         native = binary_dir / PLATFORM_CONTRACT.native_library
         native.write_bytes(b"native fixture\n")
+        licenses = next(member for member in PLATFORM_CONTRACT.archive_members if member.id == "opentui_licenses")
+        (release / licenses.path).write_text("native license fixture\n")
         (release / "install.sh").chmod(0o755)
         rw.chmod(0o755)
         tui.chmod(0o755)
         wasm_host.chmod(0o755)
-        plugin_host.chmod(0o755)
         return release
 
     def install(self, release: Path, prefix: Path) -> subprocess.CompletedProcess[bytes]:
@@ -73,6 +76,8 @@ class ReleaseInstallTests(unittest.TestCase):
             self.assertEqual(os.readlink(prefix / "current"), f"versions/{VERSION}")
             self.assertEqual(os.readlink(prefix / "bin" / "rw"), "../current/bin/rw")
             self.assertTrue((prefix / "versions" / VERSION / "install.sh").is_file())
+            relative = Path("bin/rottweiler-wasm-host.identity.json")
+            self.assertEqual((prefix / "versions" / VERSION / relative).read_bytes(), (release / relative).read_bytes())
             sync_log = (root / "install-sync.log").read_text(encoding="utf-8")
             self.assertIn("__install-sync", sync_log)
             self.assertIn(str(prefix / "versions"), sync_log)

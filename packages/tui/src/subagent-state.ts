@@ -1,5 +1,5 @@
 import {
-  MAX_ATTACHMENTS_PER_MESSAGE,
+  ENGINE_EVENT_DELIVERY,
   type Attachment,
   type EngineEvent,
 } from "./protocol"
@@ -7,16 +7,12 @@ import {
   createInitialState,
   type RottweilerState,
 } from "./state"
-import { MAX_BUFFERED_SUBAGENT_LIVE_BYTES } from "./subagent-replay"
-import {
-  isRecord,
-  isWireEngineEvent,
-  type WireEngineEvent,
-} from "./transport"
+import { isWireEngineEvent } from "./transport"
+import { MAX_CHILD_TASK_PREVIEW_BYTES } from "../../../protocol/types"
+import { utf8Prefix } from "./state/display-buffer"
 import { boundedUiText } from "./ui-presentation"
 
 const MAX_SUBAGENT_ID_LENGTH = 256
-const MAX_CHILD_TRANSCRIPT_ENTRIES = 256
 const MAX_CHILD_PROJECTION_ENTRIES = 512
 
 export interface ComposerDraft {
@@ -47,12 +43,13 @@ export function sanitizeSubagentDescriptor(
     !safeSubagentIdentifier(descriptor.subagent_id) ||
     !safeSubagentIdentifier(descriptor.child_session_id)
   ) return null
-  const task = boundedUiText(descriptor.task, 512)
+  const task = boundedUiText(utf8Prefix(descriptor.task, MAX_CHILD_TASK_PREVIEW_BYTES), 512)
   return {
-    ...descriptor,
+    subagent_id: descriptor.subagent_id, child_session_id: descriptor.child_session_id,
+    isolation: descriptor.isolation, activity: descriptor.activity,
     task: task.length === 0 ? "Untitled child agent" : task,
-    agent: boundedUiText(descriptor.agent, 128),
-    model: boundedUiText(descriptor.model, 256),
+    agent: boundedUiText(utf8Prefix(descriptor.agent, MAX_CHILD_TASK_PREVIEW_BYTES), 128),
+    model: boundedUiText(utf8Prefix(descriptor.model, MAX_CHILD_TASK_PREVIEW_BYTES), 256),
   }
 }
 
@@ -65,47 +62,20 @@ function safeSubagentIdentifier(value: string): boolean {
 export function childEngineEvent(
   value: unknown,
   expectedSessionId: string,
-): WireEngineEvent | null {
+): EngineEvent | null {
   if (!isWireEngineEvent(value)) return null
-  const record = value as unknown as Record<string, unknown>
-  if (!isRecord(record.meta) || record.meta.session_id !== expectedSessionId) return null
-  return value
-}
-
-export function wireEventBytes(event: WireEngineEvent): number {
-  try {
-    return Buffer.byteLength(JSON.stringify(event))
-  } catch {
-    return MAX_BUFFERED_SUBAGENT_LIVE_BYTES + 1
-  }
-}
-
-export function mergeComposerDraft(
-  draft: ComposerDraft,
-  rejectedContent: string,
-  rejectedAttachments: readonly Attachment[],
-): ComposerDraft {
-  const content = draft.content.length === 0
-    ? rejectedContent
-    : `${rejectedContent}\n${draft.content}`
-  const attachments: Attachment[] = [...draft.attachments]
-  const identities = new Set(attachments.map((attachment) => JSON.stringify(attachment)))
-  for (const attachment of rejectedAttachments) {
-    const identity = JSON.stringify(attachment)
-    if (identities.has(identity) || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) continue
-    identities.add(identity)
-    attachments.push(attachment)
-  }
-  return { content, attachments }
+  const delivery: Readonly<Record<string, string>> = ENGINE_EVENT_DELIVERY
+  const session = delivery[value.type] === "transient" && "session_id" in value ? value.session_id
+    : "meta" in value && "session_id" in value.meta ? value.meta.session_id : undefined
+  return session === expectedSessionId ? value : null
 }
 
 export function boundSubagentState(state: RottweilerState): RottweilerState {
   return {
     ...state,
-    transcript: state.transcript.slice(-MAX_CHILD_TRANSCRIPT_ENTRIES),
+    latestShell: null,
     turns: boundProjectionRecord(state.turns),
     tools: boundProjectionRecord(state.tools),
-    questions: boundProjectionRecord(state.questions),
     commandAcks: boundProjectionRecord(state.commandAcks),
   }
 }

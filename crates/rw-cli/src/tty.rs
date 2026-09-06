@@ -20,7 +20,10 @@ use nix::{
         time::{TimeVal, TimeValLike as _},
     },
 };
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{MasterPty, PtySize};
+
+mod ownership;
+mod spawn;
 use rw_core::ShellId;
 
 const MAX_CAPTURED_TAIL_BYTES: usize = 1024 * 1024;
@@ -196,6 +199,9 @@ where
     let mut child = match spawner.spawn_tty(argv).await {
         Ok(child) => child,
         Err(error) => {
+            if ownership::is_unsettled(&error) {
+                return Err(TtyError::Spawn(error));
+            }
             let captured = bounded_redacted_tail(redactor, &error.to_string());
             completion
                 .shell_ended(shell_id, 127, Some(captured))
@@ -225,6 +231,9 @@ where
     let exit = match exit {
         Ok(exit) => exit,
         Err(error) => {
+            if ownership::is_unsettled(&error) {
+                return Err(TtyError::Wait(error));
+            }
             let captured = bounded_redacted_tail(redactor, &error.to_string());
             completion
                 .shell_ended(shell_id, 1, Some(captured))
@@ -349,37 +358,34 @@ impl TokioTerminalSpawner {
 }
 
 pub struct TokioTerminalChild {
-    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    process: ownership::ProcessOwner,
     target: PtySignalTarget,
-    cancelled: Arc<AtomicBool>,
-    input_thread: Option<thread::JoinHandle<io::Result<()>>>,
-    output_thread: Option<thread::JoinHandle<io::Result<()>>>,
-    idle_writer: Option<Box<dyn io::Write + Send>>,
     captured_tail: Arc<Mutex<CapturedTail>>,
-    terminal_mode: Option<TerminalModeGuard>,
+    terminal_mode: Arc<Mutex<Option<TerminalModeGuard>>>,
 }
-
 impl Drop for TokioTerminalChild {
     fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Release);
-        drop(self.idle_writer.take());
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-        }
-        // `TerminalModeGuard` restores the real terminal as this structure is
-        // dropped. The bounded polling input thread then observes cancellation
-        // without retaining ownership of the user's terminal.
+        self.process.cancel();
+        let _ = ownership::restore_terminal(&self.terminal_mode);
     }
 }
 
 #[derive(Clone)]
 pub struct PtySignalTarget {
+    active: Arc<Mutex<bool>>,
     process_group: rustix::process::Pid,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
 }
 
 impl SignalTarget for PtySignalTarget {
     fn forward(&self, signal: TerminalSignal) -> io::Result<()> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| io::Error::other("PTY signal owner poisoned"))?;
+        if !*active {
+            return Ok(());
+        }
         match signal {
             TerminalSignal::Interrupt => {
                 let foreground_group = self
@@ -531,158 +537,15 @@ impl TerminalChild for TokioTerminalChild {
     }
 
     async fn wait(&mut self) -> io::Result<TerminalExit> {
-        let mut child = self
-            .child
-            .take()
-            .ok_or_else(|| io::Error::other("foreground child was already awaited"))?;
-        let status = tokio::task::spawn_blocking(move || child.wait())
-            .await
-            .map_err(|error| io::Error::other(format!("PTY wait task failed: {error}")))
-            .and_then(|status| status);
-        self.cancelled.store(true, Ordering::Release);
-        let input_result = join_io_thread(&mut self.input_thread, "PTY input").await;
-        drop(self.idle_writer.take());
-        // A login shell can leave helpers from shell startup files holding the
-        // slave PTY after the requested foreground command exits. Reap that
-        // foreground session before joining the reader; otherwise one inherited
-        // descriptor can hang app shutdown forever. Foreground shell mode owns
-        // this process group, so detached work must use the background-process
-        // tools instead of escaping this lifecycle.
-        match rustix::process::kill_process_group(
-            self.target.process_group,
-            rustix::process::Signal::HUP,
-        ) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
-            Err(error) => return Err(error.into()),
-        }
-        let restore_result = if let Some(mut terminal_mode) = self.terminal_mode.take() {
-            terminal_mode.restore()
-        } else {
-            Ok(())
-        };
-        // Restore the user's real terminal before waiting for the PTY reader
-        // to observe EOF. A descendant that inherited the slave cannot leave
-        // the controlling terminal in raw mode after the direct child exits.
-        let output_result = join_io_thread(&mut self.output_thread, "PTY output").await;
-        let status = status?;
-        input_result?;
-        output_result?;
-        restore_result?;
+        let status = self.process.wait().await?;
         let captured_tail = self
             .captured_tail
             .lock()
             .map_err(|_| io::Error::other("captured output lock was poisoned"))?
             .as_string();
         Ok(TerminalExit {
-            status: i32::try_from(status.exit_code()).unwrap_or(i32::MAX),
+            status,
             captured_tail: (!captured_tail.is_empty()).then_some(captured_tail),
-        })
-    }
-}
-
-#[async_trait]
-impl TerminalSpawner for TokioTerminalSpawner {
-    type Child = TokioTerminalChild;
-
-    async fn spawn_tty(&self, argv: &[OsString]) -> io::Result<Self::Child> {
-        if argv.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
-        }
-        let pair = native_pty_system()
-            .openpty(real_terminal_size())
-            .map_err(io::Error::other)?;
-        let mut command = CommandBuilder::from_argv(argv.to_vec());
-        command.set_controlling_tty(true);
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(io::Error::other)?;
-        drop(pair.slave);
-        let setup = (|| {
-            let process_group = pair
-                .master
-                .process_group_leader()
-                .or_else(|| child.process_id().and_then(|pid| i32::try_from(pid).ok()))
-                .and_then(rustix::process::Pid::from_raw)
-                .ok_or_else(|| io::Error::other("PTY child has no process group"))?;
-            let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-            let writer = pair.master.take_writer().map_err(io::Error::other)?;
-            let master = Arc::new(Mutex::new(pair.master));
-            let captured_tail = Arc::new(Mutex::new(CapturedTail::default()));
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let terminal_mode = TerminalModeGuard::enter()?;
-
-            let (input_thread, idle_writer) = if self.pump_terminal_input {
-                let input_cancelled = Arc::clone(&cancelled);
-                let intercept_interrupt_input = self.intercept_interrupt_input;
-                let input_target = PtySignalTarget {
-                    process_group,
-                    master: Arc::clone(&master),
-                };
-                let input_thread = spawn_terminal_input_thread(
-                    writer,
-                    input_cancelled,
-                    input_target,
-                    intercept_interrupt_input,
-                )?;
-                (Some(input_thread), None)
-            } else {
-                (None, Some(writer))
-            };
-            let output_tail = Arc::clone(&captured_tail);
-            let output_thread = match thread::Builder::new()
-                .name("rw-pty-output".to_owned())
-                .spawn(move || pump_terminal_output(&mut reader, &output_tail))
-            {
-                Ok(thread) => thread,
-                Err(error) => {
-                    cancelled.store(true, Ordering::Release);
-                    if let Some(input_thread) = input_thread {
-                        let _ = input_thread.join();
-                    }
-                    return Err(error);
-                }
-            };
-            Ok((
-                process_group,
-                master,
-                captured_tail,
-                cancelled,
-                terminal_mode,
-                input_thread,
-                output_thread,
-                idle_writer,
-            ))
-        })();
-        let (
-            process_group,
-            master,
-            captured_tail,
-            cancelled,
-            terminal_mode,
-            input_thread,
-            output_thread,
-            idle_writer,
-        ) = match setup {
-            Ok(setup) => setup,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        Ok(TokioTerminalChild {
-            child: Some(child),
-            target: PtySignalTarget {
-                process_group,
-                master,
-            },
-            cancelled,
-            input_thread,
-            output_thread: Some(output_thread),
-            idle_writer,
-            captured_tail,
-            terminal_mode,
         })
     }
 }
@@ -868,19 +731,6 @@ fn pump_terminal_output(
         stdout.flush()?;
     }
     Ok(())
-}
-
-async fn join_io_thread(
-    handle: &mut Option<thread::JoinHandle<io::Result<()>>>,
-    name: &str,
-) -> io::Result<()> {
-    let Some(handle) = handle.take() else {
-        return Ok(());
-    };
-    tokio::task::spawn_blocking(move || handle.join())
-        .await
-        .map_err(|error| io::Error::other(format!("{name} join task failed: {error}")))?
-        .map_err(|_| io::Error::other(format!("{name} thread panicked")))?
 }
 
 #[cfg(unix)]

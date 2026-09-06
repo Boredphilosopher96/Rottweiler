@@ -1,7 +1,7 @@
 {
   "name": "__ROTTWEILER_PLUGIN_NAME__",
   "version": "0.1.0",
-  "protocol": 2,
+  "protocol": 3,
   "capabilities": {
     "tools": [
       {
@@ -22,7 +22,7 @@
     ],
     "hooks": [
       {
-        "name": "pre_tool",
+        "name": "pre_tool", "class": "policy",
         "failure_policy": "fail-closed"
       }
     ]

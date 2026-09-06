@@ -11,11 +11,14 @@ default = []
 wasm-runtime = ["dep:wasmtime"]
 
 [dependencies]
+rw-resources.workspace = true
+rw-operation-contract.workspace = true
 async-trait = "0.1.89"
 base64.workspace = true
 blake3.workspace = true
 ed25519-dalek.workspace = true
 futures-util = "0.3.31"
+getrandom.workspace = true
 rw-providers.workspace = true
 rw-plugin-protocol.workspace = true
 rw-tools.workspace = true
@@ -32,6 +35,8 @@ wasmtime = { workspace = true, optional = true }
 url.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.27.0"
 wat = "1.251.0"
 

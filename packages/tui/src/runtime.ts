@@ -1,7 +1,20 @@
+import { sessionReader } from "./session-reader-factory"
+import { familyControlsReader } from "./family-controls-reader"
+import { ClientAllocationOwner, commandReplyDomain } from "./client-allocation"
+import { collectSessionBootstrap, type SessionBootstrap } from "./runtime-bootstrap"
+import { TailChanged } from "./history/live-tail"
+import type { ClientCache } from "./history/cache"
+import type { HistoryCacheValue } from "./history/controller"
+import { SessionSnapshotReader } from "./runtime-snapshots"
+import { MAX_SESSION_STATE_PREPARED_BYTES, MAX_SESSION_CHILDREN_PREPARED_BYTES } from "../../../protocol/types"
+import type { ReplyAllocation } from "./transport/reply-allocation"
+import type { EngineEvent } from "./protocol"
+import type { ClientDiagnostics } from "./client-diagnostics"
+import { CLIENT_COMMAND_EXECUTION } from "./protocol"
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join } from "node:path"
 
-import type { ClientCommand, CommandOutcome } from "./protocol"
+import type { ClientCommand, CommandOutcome, CommandReply } from "./protocol"
 import { PROTOCOL_VERSION } from "./protocol"
 import {
   createInitialState,
@@ -15,16 +28,7 @@ import {
   type RottweilerAction,
   type RottweilerState,
 } from "./state"
-import {
-  EngineHttpSseClient,
-  durableSequenceId,
-  isSessionForkedEvent,
-  isRecord,
-  type EngineSubscriptionOptions,
-  type EngineStreamRestartMode,
-  type TransportConnectionUpdate,
-  type WireEngineEvent,
-} from "./transport"
+import { EngineHttpSseClient, durableSequenceId, isRecord, type EngineSubscriptionOptions, type EngineStreamRestartMode, type TransportConnectionUpdate } from "./transport"
 
 const TOKEN_FILE_LIMIT = 64 * 1024
 const CURSOR_FILE_LIMIT = 128
@@ -55,8 +59,10 @@ export interface EngineRuntimeConfig {
 }
 
 export interface RuntimeApp {
+  readonly historyCache: ClientCache<HistoryCacheValue>
+  installBootstrap(value: SessionBootstrap): void
   readonly state: RottweilerState
-  handleEvent(event: WireEngineEvent): void
+  handleEvent(event: EngineEvent): void
   setState(state: RottweilerState): void
   setSessionId(sessionId: string): void
   beginInitialReplayBatch?(): void
@@ -65,23 +71,27 @@ export interface RuntimeApp {
 }
 
 export interface RuntimeEngineClient {
-  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome | null>
+  readonly allocations?: ClientAllocationOwner
+  postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply>
   submitProviderApiKey?(
     sessionId: string,
     provider: string,
     apiKey: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    allocation: ReplyAllocation,
   ): Promise<{
     readonly stored: true
     readonly activated: boolean
     readonly warnings: readonly string[]
   }>
-  activateProvider?(sessionId: string, provider: string, signal?: AbortSignal): Promise<void>
+  activateProvider?(sessionId: string, provider: string, signal: AbortSignal | undefined, allocation: ReplyAllocation): Promise<void>
   restartStream(mode?: EngineStreamRestartMode): boolean
   subscribe(options: EngineSubscriptionOptions): Promise<void>
 }
 
 export interface CreateEngineRuntimeOptions {
+  readonly allocations?: ClientAllocationOwner
+  readonly diagnostics?: ClientDiagnostics | undefined
   readonly environment?: EngineRuntimeEnvironment
   readonly files?: RuntimeFileSystem
   readonly fetch?: typeof fetch
@@ -153,6 +163,71 @@ export class EngineRuntimeError extends Error {
  * synchronous; durable cursor persistence is coalesced in the background.
  */
 export class TuiEngineRuntime {
+  #allocations = new ClientAllocationOwner()
+  readonly #fixedAllocations: boolean
+  get allocations(): ClientAllocationOwner { return this.#allocations }
+  readonly #metadata = new SessionSnapshotReader(
+    () => this.#allocations,
+    MAX_SESSION_STATE_PREPARED_BYTES,
+    async (sessionId, signal, allocation) => {
+      const generation = this.#sessionGeneration
+      const reply = await this.#client.postCommand({ type: "get_session_state", meta: this.#meta(), session_id: sessionId }, signal, allocation)
+      signal.throwIfAborted()
+      if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
+      const event = reply.type === "read" ? reply.events[0] : undefined
+      if (reply.outcome.type === "rejected" || reply.type !== "read" || reply.events.length !== 1
+        || event?.type !== "session_state_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("session metadata reply is missing its session-bound result")
+      }
+      return event
+    },
+    event => {
+      const app = this.#requiredApp(), before = app.state.recovery
+      app.handleEvent(event)
+      return app.state.recovery !== before && app.state.recovery.compaction?.stale !== true
+    },
+    (error, sessionId) => {
+      if (sessionId !== this.#sessionId) return
+      const app = this.#requiredApp()
+      app.setState({ ...app.state, errors: [...app.state.errors.slice(-63), {
+        category: "protocol", code: "session_metadata_unavailable", message: safeErrorMessage(error), retryable: true,
+      }] })
+    },
+  )
+
+  readonly #children = new SessionSnapshotReader(
+    () => this.#allocations,
+    MAX_SESSION_CHILDREN_PREPARED_BYTES,
+    async (sessionId, signal, allocation) => {
+      const generation = this.#sessionGeneration
+      const reply = await this.#client.postCommand({ type: "read_session_children", meta: this.#meta(), session_id: sessionId, scope: { type: "session" } }, signal, allocation)
+      signal.throwIfAborted()
+      if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
+      const event = reply.type === "read" ? reply.events[0] : undefined
+      if (reply.outcome.type === "rejected" || reply.type !== "read" || reply.events.length !== 1
+        || event?.type !== "session_children_ready" || event.session_id !== sessionId) {
+        throw new EngineRuntimeError("children reply is missing its session-bound result")
+      }
+      return event
+    },
+    event => {
+      const app = this.#requiredApp(), before = app.state.recovery.children
+      app.handleEvent(event)
+      return app.state.recovery.children !== before
+    },
+    (error, sessionId) => {
+      if (sessionId !== this.#sessionId) return
+      const app = this.#requiredApp()
+      app.setState({ ...app.state, errors: [...app.state.errors.slice(-63), {
+        category: "protocol", code: "session_children_unavailable", message: safeErrorMessage(error), retryable: true,
+      }] })
+    },
+  )
+
+  readonly familyControls = familyControlsReader((command, signal, allocation) => this.#readSession(command, signal, allocation), () => this.#meta())
+
+  readonly sessionReader = sessionReader((command, signal, allocation) => this.#readSession(command, signal, allocation), () => this.#meta())
+
   readonly #config: EngineRuntimeConfig
   readonly #client: RuntimeEngineClient
   readonly #requestId: () => string
@@ -172,6 +247,7 @@ export class TuiEngineRuntime {
   #transitionController: AbortController | null = null
   #subscriptionController: AbortController | null = null
   #subscription: Promise<void> | null = null
+  #bootstrapPending: Promise<void> | null = null
   #recoveringSequenceGap = false
   readonly #forkRequests = new Map<string, string>()
 
@@ -182,7 +258,11 @@ export class TuiEngineRuntime {
     requestId: () => string = () => crypto.randomUUID(),
     sleep: RuntimeSleep = abortableSleep,
     onDriverReady?: (sessionId: string) => void,
+    allocations?: ClientAllocationOwner,
   ) {
+    if (allocations !== undefined && client.allocations !== undefined && allocations !== client.allocations) throw new EngineRuntimeError("runtime and transport require one allocation owner")
+    this.#fixedAllocations = allocations !== undefined || client.allocations !== undefined
+    this.#allocations = allocations ?? client.allocations ?? this.#allocations
     this.#config = config
     this.#sessionId = config.sessionId
     this.#client = client
@@ -216,11 +296,12 @@ export class TuiEngineRuntime {
     if (this.#app !== null && this.#app !== app) {
       throw new EngineRuntimeError("engine runtime is already bound to an application")
     }
+    if (this.#fixedAllocations && this.#allocations !== app.historyCache.allocations) throw new EngineRuntimeError("runtime and application require one allocation owner")
+    if (this.#allocations !== app.historyCache.allocations && this.#allocations.usage.bytes !== 0) throw new EngineRuntimeError("cannot bind an application while unbound decoding is active")
+    this.#allocations = app.historyCache.allocations
     this.#app = app
-    // A cursor is meaningful only together with the reducer projection that
-    // produced it. A freshly spawned TUI has an empty projection, so importing
-    // the supervisor's cursor here would permanently omit earlier transcript
-    // events. Reconnects in this process still use app.state.lastSequence.
+    // Source snapshots establish a fresh projection and its own replay cursor.
+    // A bare supervisor cursor cannot authorize omitting historical state.
   }
 
   async start(): Promise<void> {
@@ -243,10 +324,11 @@ export class TuiEngineRuntime {
       }
     } finally {
       await this.#handoff?.close()
+    await Promise.all([this.#metadata.settle(), this.#children.settle(), this.#bootstrapPending?.catch(() => {})])
     }
   }
 
-  async sendCommand(command: ClientCommand): Promise<CommandOutcome | null> {
+  async sendCommand(command: ClientCommand, allocation: ReplyAllocation): Promise<CommandOutcome | null> {
     try {
       await this.#ready
       if (!this.#driverReady || this.#subscriptionController === null) {
@@ -271,9 +353,10 @@ export class TuiEngineRuntime {
         dispatched = command
         this.#forkRequests.set(command.meta.request_id, command.session_id)
       }
-      const outcome = await this.#client.postCommand(
+      const outcome = await this.#postCommand(
         dispatched,
         fork ? this.#controller.signal : this.#subscriptionController.signal,
+        allocation,
       )
       if (fork) {
         if (
@@ -307,6 +390,7 @@ export class TuiEngineRuntime {
   async submitProviderApiKey(
     provider: string,
     apiKey: string,
+    allocation: ReplyAllocation,
   ): Promise<{
     readonly stored: true
     readonly activated: boolean
@@ -324,10 +408,12 @@ export class TuiEngineRuntime {
       provider,
       apiKey,
       this.#subscriptionController.signal,
+      allocation,
     )
   }
 
   async activateProvider(provider: string): Promise<void> {
+    using allocation = this.#allocations.reserve("decoding", 0)
     await this.#ready
     if (
       !this.#driverReady ||
@@ -341,6 +427,7 @@ export class TuiEngineRuntime {
       this.#sessionId,
       provider,
       this.#subscriptionController.signal,
+      allocation,
     )
   }
 
@@ -352,6 +439,7 @@ export class TuiEngineRuntime {
     this.#transitionController?.abort(this.#controller.signal.reason)
     this.#subscriptionController?.abort(this.#controller.signal.reason)
     await this.#handoff?.close()
+    await Promise.all([this.#metadata.settle(), this.#children.settle(), this.#bootstrapPending?.catch(() => {})])
   }
 
   /**
@@ -362,6 +450,7 @@ export class TuiEngineRuntime {
    * fallback when the transport is unavailable.
    */
   async shutdownHost(timeoutMs = HOST_SHUTDOWN_TIMEOUT_MS): Promise<boolean> {
+    using shutdownAllocation = this.#allocations.reserve(commandReplyDomain("shutdown_host"), 0)
     if (this.#config.replayMode || this.#controller.signal.aborted) return false
     const controller = new AbortController()
     const timer = setTimeout(
@@ -369,9 +458,9 @@ export class TuiEngineRuntime {
       timeoutMs,
     )
     try {
-      const outcome = await this.#client.postCommand(
+      const outcome = await this.#postCommand(
         { type: "shutdown_host", meta: this.#meta() },
-        controller.signal,
+        controller.signal, shutdownAllocation,
       )
       return outcome?.type === "accepted"
     } catch {
@@ -455,6 +544,8 @@ export class TuiEngineRuntime {
         )
       }
 
+      if (!this.#config.replayMode) await this.#bootstrapSession(sessionId, transition.signal)
+
       const subscriptionController = new AbortController()
       const abortSubscription = () => subscriptionController.abort(this.#controller.signal.reason)
       this.#controller.signal.addEventListener("abort", abortSubscription, {
@@ -495,35 +586,39 @@ export class TuiEngineRuntime {
         once: true,
       })
 
+      const streamAllocation = this.#allocations.reserve("decoding", 0)
       const subscription = this.#client
         .subscribe({
+          allocation: { admit: bytes => streamAllocation.resize(bytes) },
           attach: {
             type: "attach_session",
             meta: this.#meta(),
             session_id: sessionId,
-            last_seen_sequence: null,
+            last_seen_sequence: this.#requiredApp().state.lastSequence,
             role: this.#config.replayMode ? "observer" : "driver",
           },
           signal: subscriptionController.signal,
           getLastSeenSequence: () => this.#requiredApp().state.lastSequence,
           requestId: this.#requestId,
           onReconnect: async () => {
+            using reconnectAllocation = this.#allocations.reserve(commandReplyDomain("take_driver"), 0)
             if (this.#config.replayMode) {
               return
             }
-            const takeover = await this.#client.postCommand(
+            const takeover = await this.#postCommand(
               {
                 type: "take_driver",
                 meta: this.#meta(),
                 session_id: sessionId,
               },
-              subscriptionController.signal,
+              subscriptionController.signal, reconnectAllocation,
             )
             if (takeover?.type === "rejected") {
               throw new EngineRuntimeError(
                 `engine rejected reconnect driver takeover: ${takeover.error.message}`,
               )
             }
+            await this.#bootstrapSession(sessionId, subscriptionController.signal)
           },
           onConnection: (update) => {
             if (generation === this.#sessionGeneration) {
@@ -541,11 +636,16 @@ export class TuiEngineRuntime {
               }
             }
           },
-          onReplayCursorAhead: () => {
+          onReplayCursorAhead: async () => {
             if (generation !== this.#sessionGeneration) return
             const bound = this.#requiredApp()
             restartInitialReplayBatch()
             bound.resetConnectionProjections?.()
+            if (!this.#config.replayMode) {
+              await this.#bootstrapSession(sessionId, subscriptionController.signal)
+              this.#recoveringSequenceGap = false
+              return
+            }
             const initial = this.#config.replayMode
               ? enterReplayMode(createInitialState(), sessionId)
               : createInitialState()
@@ -566,7 +666,7 @@ export class TuiEngineRuntime {
             }
             const bound = this.#requiredApp()
             if (
-              isSessionForkedEvent(event) &&
+              event.type === "session_forked" &&
               this.#forkRequests.get(event.meta.request_id) === event.parent_session_id
             ) {
               this.#forkRequests.delete(event.meta.request_id)
@@ -578,7 +678,11 @@ export class TuiEngineRuntime {
             const previousGap = bound.state.connection.gap
             const previousSequence = bound.state.lastSequence
             bound.handleEvent(event)
-            if (event.type === "session_replay_completed") finishInitialReplayBatch()
+            if (event.type === "conversation_rewound") void this.#children.refresh(sessionId, subscriptionController.signal)
+            if (!this.#config.replayMode && bound.state.recovery.compaction?.stale === true) {
+              void this.#metadata.refresh(sessionId, subscriptionController.signal)
+            }
+            if (event.type === "session_replay_completed" || event.type === "session_history_ready") finishInitialReplayBatch()
             const nextGap = bound.state.connection.gap
             if (nextGap === null) {
               this.#recoveringSequenceGap = false
@@ -608,6 +712,7 @@ export class TuiEngineRuntime {
           }
         })
         .finally(() => {
+          streamAllocation.release()
           finishInitialReplayBatch()
           if (!subscriptionReady && !subscriptionController.signal.aborted) {
             rejectSubscriptionReady(
@@ -647,10 +752,12 @@ export class TuiEngineRuntime {
   }
 
   async #prepareSession(sessionId: string, signal: AbortSignal): Promise<void> {
+    using resumeAllocation = this.#allocations.reserve(commandReplyDomain("resume_session"), 0)
+    using takeoverAllocation = this.#allocations.reserve(commandReplyDomain("take_driver"), 0)
     let delay = SESSION_PREPARE_INITIAL_DELAY_MS
     let attempt = 0
     while (!signal.aborted) {
-      const resume = await this.#client.postCommand(
+      const resume = await this.#postCommand(
         {
           type: "resume_session",
           meta: this.#meta(),
@@ -658,21 +765,21 @@ export class TuiEngineRuntime {
           last_seen_sequence: null,
           role: "observer",
         },
-        signal,
+        signal, resumeAllocation,
       )
-      if (resume?.type === "accepted" || resume === null) {
+      if (resume.type === "accepted") {
         if (this.#config.replayMode) {
           return
         }
-        const takeover = await this.#client.postCommand(
+        const takeover = await this.#postCommand(
           {
             type: "take_driver",
             meta: this.#meta(),
             session_id: sessionId,
           },
-          signal,
+          signal, takeoverAllocation,
         )
-        if (takeover?.type === "accepted" || takeover === null) {
+        if (takeover.type === "accepted") {
           return
         }
         if (!isTransientSessionPreparationRejection(takeover)) {
@@ -690,7 +797,34 @@ export class TuiEngineRuntime {
     throw signal.reason ?? new DOMException("session preparation aborted", "AbortError")
   }
 
+  async #bootstrapSession(sessionId: string, signal: AbortSignal): Promise<void> {
+    await this.#bootstrapPending?.catch(() => {})
+    signal.throwIfAborted()
+    const pending = this.#collectBootstrapSession(sessionId, signal)
+    this.#bootstrapPending = pending
+    try { await pending } finally { if (this.#bootstrapPending === pending) this.#bootstrapPending = null }
+  }
+
+  async #collectBootstrapSession(sessionId: string, signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        const bootstrap = await collectSessionBootstrap(
+          (command, signal, allocation) => this.#client.postCommand(command, signal, allocation),
+          () => this.#meta(), this.#requiredApp().historyCache, sessionId, signal,
+        )
+        if (signal.aborted) { bootstrap.release(); signal.throwIfAborted() }
+        this.#requiredApp().installBootstrap(bootstrap)
+        return
+      } catch (error) {
+        if (!(error instanceof TailChanged)) throw error
+        await this.#sleep(250, signal)
+      }
+    }
+    signal.throwIfAborted()
+  }
+
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
+    using projectionAllocation = this.#allocations.reserve("decoding", 0)
     const commands: ClientCommand[] = [
       { type: "list_models", refresh: false, meta: this.#meta(), session_id: sessionId },
       { type: "list_modes", meta: this.#meta(), session_id: sessionId },
@@ -713,7 +847,7 @@ export class TuiEngineRuntime {
         return
       }
       try {
-        await this.#client.postCommand(command, signal)
+        await this.#postCommand(command, signal, projectionAllocation)
       } catch (error) {
         if (signal.aborted || isAbortError(error)) {
           return
@@ -723,6 +857,37 @@ export class TuiEngineRuntime {
         // a missing panel must not discard the composer draft or driver lease.
       }
     }
+  }
+
+  async #postCommand(command: ClientCommand, signal: AbortSignal | undefined, allocation: ReplyAllocation): Promise<CommandOutcome> {
+    const generation = this.#sessionGeneration
+    const lifetime = signal === undefined ? this.#controller.signal : AbortSignal.any([signal, this.#controller.signal])
+    lifetime.throwIfAborted()
+    const reply = await this.#client.postCommand(command, lifetime, allocation)
+    if (reply.type === "read" && generation === this.#sessionGeneration && !lifetime.aborted) {
+      for (const event of reply.events) this.#requiredApp().handleEvent(event)
+    }
+    return reply.outcome
+  }
+
+  async #readSession(
+    command: Extract<ClientCommand, { type: "read_family_controls" | "read_child_controls" | "read_child_state" | "resolve_child_read_scope" | "read_session_children" | "read_transcript_tail" | "read_transcript" | "read_transcript_content" | "get_todos" | "get_ui_catalog" | "get_ui_panels" }>,
+    signal: AbortSignal,
+    allocation: ReplyAllocation,
+  ): Promise<Extract<CommandReply, { type: "read" }>> {
+    await this.#ready
+    if (!this.#driverReady || this.#subscriptionController === null) {
+      throw new EngineRuntimeError("session read connection is unavailable")
+    }
+    const generation = this.#sessionGeneration
+    const lifetime = AbortSignal.any([signal, this.#subscriptionController.signal])
+    lifetime.throwIfAborted()
+    const reply = await this.#client.postCommand(command, lifetime, allocation)
+    lifetime.throwIfAborted()
+    if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
+    if (reply.type !== "read") throw new EngineRuntimeError("session read has no typed reply")
+    if (reply.outcome.type === "rejected") throw new EngineRuntimeError(reply.outcome.error.message)
+    return reply
   }
 
   #meta() {
@@ -779,9 +944,12 @@ export async function createEngineRuntimeFromEnvironment(
   if (config === null) {
     return null
   }
+  const allocations = options.allocations ?? new ClientAllocationOwner()
   const client =
     options.client ??
     new EngineHttpSseClient({
+      allocations,
+      diagnostics: options.diagnostics,
       socketPath: config.socketPath,
       bootstrapToken: async () => {
         const tokenFile = nonEmpty(environment.ROTTWEILER_ENGINE_TOKEN_FILE)
@@ -799,6 +967,7 @@ export async function createEngineRuntimeFromEnvironment(
     options.requestId,
     options.sleep,
     options.onDriverReady,
+    allocations,
   )
 }
 
@@ -1099,12 +1268,11 @@ function commandSessionId(command: ClientCommand): string | null {
 }
 
 function isReplayReadOnlyCommand(command: ClientCommand): boolean {
-  const type: string = command.type
-  return type === "list_sessions" || type === "search_sessions"
+  return CLIENT_COMMAND_EXECUTION[command.type] === "read"
 }
 
-function eventBelongsToSession(event: WireEngineEvent, sessionId: string): boolean {
-  if ("meta" in event && isRecord(event.meta) && typeof event.meta.session_id === "string") {
+function eventBelongsToSession(event: EngineEvent, sessionId: string): boolean {
+  if ("meta" in event && isRecord(event.meta) && "session_id" in event.meta && typeof event.meta.session_id === "string") {
     return event.meta.session_id === sessionId
   }
   if (event.type === "subagent_progress") {

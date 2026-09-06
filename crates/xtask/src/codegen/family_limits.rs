@@ -1,0 +1,31 @@
+//! Source-owned live family admission constants.
+pub(super) const VALUES: [(&str, usize); 7] = [
+    (
+        "MAX_FAMILY_CONTROL_WAITS",
+        rw_types::family_controls::MAX_FAMILY_CONTROL_WAITS,
+    ),
+    (
+        "MAX_CLIENT_FAMILY_CONTROL_WAITS",
+        rw_types::family_controls::MAX_CLIENT_FAMILY_CONTROL_WAITS,
+    ),
+    (
+        "FAMILY_CONTROL_WAIT_MILLIS",
+        rw_types::family_controls::FAMILY_CONTROL_WAIT_MILLIS,
+    ),
+    (
+        "MAX_FAMILY_CONTROL_DEPTH",
+        rw_types::family_controls::MAX_FAMILY_CONTROL_DEPTH,
+    ),
+    (
+        "MAX_FAMILY_CONTROL_ROWS",
+        rw_types::family_controls::MAX_FAMILY_CONTROL_ROWS,
+    ),
+    (
+        "MAX_FAMILY_CONTROLS_BYTES",
+        rw_types::family_controls::MAX_FAMILY_CONTROLS_BYTES,
+    ),
+    (
+        "MAX_FAMILY_CONTROLS_PREPARED_BYTES",
+        rw_types::family_controls::MAX_FAMILY_CONTROLS_PREPARED_BYTES,
+    ),
+];

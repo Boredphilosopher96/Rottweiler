@@ -1,3 +1,7 @@
+mod closure;
+mod inbound;
+pub use inbound::McpInboundRouter;
+
 use std::{
     collections::BTreeMap,
     io,
@@ -27,12 +31,9 @@ use rw_tools::{
 };
 use rw_types::McpServerId;
 use serde_json::Value;
+use tokio::io::{AsyncRead, ReadBuf};
 #[cfg(feature = "test-support")]
 use tokio::process::Command;
-use tokio::{
-    io::{AsyncRead, ReadBuf},
-    sync::Mutex,
-};
 
 use crate::McpTransportConfig;
 use crate::{McpError, McpServerConfig};
@@ -50,6 +51,9 @@ pub trait McpConnectionApprovalPolicy: Send + Sync {
 
 #[async_trait]
 pub trait McpClient: Send + Sync {
+    /// Whether the connected catalog snapshot remains authoritative.
+    /// A notification that revokes it requires explicit reconnection and review.
+    fn catalog_valid(&self) -> bool;
     async fn list_tools(&self) -> Result<Vec<Value>, McpError>;
     async fn list_resources(&self) -> Result<Vec<Value>, McpError>;
     async fn list_prompts(&self) -> Result<Vec<Value>, McpError>;
@@ -135,7 +139,10 @@ where
         }
         let transport =
             StreamableHttpClientTransport::with_client(self.client.clone(), transport_config);
-        let service = ().serve(transport).await.map_err(protocol)?;
+        let service = McpInboundRouter::default()
+            .serve(transport)
+            .await
+            .map_err(protocol)?;
         Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
     }
 }
@@ -192,9 +199,9 @@ where
             stdout,
             mut handle,
         } = spawned;
-        if let Ok(service) =
-            ().serve((BoundedLineReader::new(stdout, MAX_STDIO_FRAME_BYTES), stdin))
-                .await
+        if let Ok(service) = McpInboundRouter::default()
+            .serve((BoundedLineReader::new(stdout, MAX_STDIO_FRAME_BYTES), stdin))
+            .await
         {
             Ok(Arc::new(RmcpClient::new(
                 config.id.clone(),
@@ -211,7 +218,13 @@ where
                 .await
                 .ok()
                 .flatten();
-            let _ = handle.terminate_and_reap(Duration::from_secs(3)).await;
+            closure::retire_process(handle, Duration::from_secs(3))
+                .await
+                .map_err(|_| McpError::EffectsUnsettled {
+                    server: config.id.clone(),
+                    message: "MCP initialization failed without native process settlement"
+                        .to_owned(),
+                })?;
             early_exit.map_or_else(
                 || Err(protocol_failure()),
                 |status| {
@@ -241,30 +254,31 @@ impl TestOnlyUnsandboxedStdioConnector {
 
 struct RmcpClient {
     server: McpServerId,
-    service: Mutex<Option<RunningService<RoleClient, ()>>>,
-    child: Mutex<Option<Box<dyn ProtocolProcessHandle>>>,
+    peer: rmcp::Peer<RoleClient>,
+    inbound: McpInboundRouter,
+    closure: closure::ConnectionClosure,
 }
 
 impl RmcpClient {
     fn new(
         server: McpServerId,
-        service: RunningService<RoleClient, ()>,
+        service: RunningService<RoleClient, McpInboundRouter>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
     ) -> Self {
         Self {
             server,
-            service: Mutex::new(Some(service)),
-            child: Mutex::new(child),
+            peer: service.peer().clone(),
+            inbound: service.service().clone(),
+            closure: closure::ConnectionClosure::new(service, child),
         }
     }
 
-    async fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
-        self.service
-            .lock()
-            .await
-            .as_ref()
-            .map(|service| service.peer().clone())
-            .ok_or_else(|| McpError::NotConnected(self.server.clone()))
+    fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
+        if self.closure.is_closed() || !self.catalog_valid() {
+            Err(McpError::NotConnected(self.server.clone()))
+        } else {
+            Ok(self.peer.clone())
+        }
     }
 }
 
@@ -274,7 +288,7 @@ impl RmcpClient {
 #[must_use]
 pub fn boxed_running_http_client(
     server: McpServerId,
-    service: RunningService<RoleClient, ()>,
+    service: RunningService<RoleClient, McpInboundRouter>,
 ) -> Arc<dyn McpClient> {
     Arc::new(RmcpClient::new(server, service, None))
 }
@@ -304,7 +318,10 @@ impl McpConnector for TestOnlyUnsandboxedStdioConnector {
                 }
                 let transport = TokioChildProcess::new(command)
                     .map_err(|error| McpError::Protocol(error.to_string()))?;
-                let service = ().serve(transport).await.map_err(|_| protocol_failure())?;
+                let service = McpInboundRouter::default()
+                    .serve(transport)
+                    .await
+                    .map_err(|_| protocol_failure())?;
                 Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
             }
             McpTransportConfig::StreamableHttp { .. } => Err(McpError::Policy(
@@ -410,8 +427,18 @@ impl<R: AsyncRead + Unpin> AsyncRead for BoundedLineReader<R> {
 
 #[async_trait]
 impl McpClient for RmcpClient {
+    fn catalog_valid(&self) -> bool {
+        self.inbound.catalog_valid() && !self.peer.is_transport_closed()
+    }
+
     async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
+        let peer = self.peer()?;
+        if peer
+            .peer_info()
+            .is_none_or(|info| info.capabilities.tools.is_none())
+        {
+            return Ok(Vec::new());
+        }
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -439,7 +466,13 @@ impl McpClient for RmcpClient {
     }
 
     async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
+        let peer = self.peer()?;
+        if peer
+            .peer_info()
+            .is_none_or(|info| info.capabilities.resources.is_none())
+        {
+            return Ok(Vec::new());
+        }
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -467,7 +500,13 @@ impl McpClient for RmcpClient {
     }
 
     async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
+        let peer = self.peer()?;
+        if peer
+            .peer_info()
+            .is_none_or(|info| info.capabilities.prompts.is_none())
+        {
+            return Ok(Vec::new());
+        }
         let mut cursor = None;
         let mut values = Vec::new();
         loop {
@@ -497,19 +536,13 @@ impl McpClient for RmcpClient {
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
         let request =
             CallToolRequestParams::new(name.to_owned()).with_arguments(json_object(&arguments)?);
-        let result = self
-            .peer()
-            .await?
-            .call_tool(request)
-            .await
-            .map_err(protocol)?;
+        let result = self.peer()?.call_tool(request).await.map_err(protocol)?;
         serde_json::to_value(result).map_err(protocol)
     }
 
     async fn read_resource(&self, uri: &str) -> Result<Value, McpError> {
         let result = self
-            .peer()
-            .await?
+            .peer()?
             .read_resource(ReadResourceRequestParams::new(uri))
             .await
             .map_err(protocol)?;
@@ -518,37 +551,18 @@ impl McpClient for RmcpClient {
 
     async fn get_prompt(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
         let request = GetPromptRequestParams::new(name).with_arguments(json_object(&arguments)?);
-        let result = self
-            .peer()
-            .await?
-            .get_prompt(request)
-            .await
-            .map_err(protocol)?;
+        let result = self.peer()?.get_prompt(request).await.map_err(protocol)?;
         serde_json::to_value(result).map_err(protocol)
     }
 
     async fn close(&self, timeout: Duration) -> Result<(), McpError> {
-        let service_result = if let Some(mut service) = self.service.lock().await.take() {
-            match service.close_with_timeout(timeout).await {
-                Ok(Some(_)) => Ok(()),
-                Ok(None) => Err(McpError::ShutdownTimeout(self.server.clone())),
-                Err(_) => Err(protocol_failure()),
-            }
-        } else {
-            Ok(())
-        };
-        let child_result = if let Some(mut child) = self.child.lock().await.take() {
-            child
-                .terminate_and_reap(timeout)
-                .await
-                .map_err(|_| protocol_failure())
-        } else {
-            Ok(())
-        };
-        match (service_result, child_result) {
-            (Err(error), _) | (_, Err(error)) => Err(error),
-            _ => Ok(()),
-        }
+        self.closure
+            .close(timeout)
+            .await
+            .map_err(|message| McpError::EffectsUnsettled {
+                server: self.server.clone(),
+                message: message.to_string(),
+            })
     }
 }
 
@@ -676,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn stdio_connector_keeps_live_transport_failure_generic() {
         let connector = SandboxedStdioConnector::new(
-            ShellLauncher("exec 1>&-; sleep 10"),
+            ShellLauncher("exec 1>&-; exec sleep 10"),
             Arc::new(AllowConnection),
         );
         let error = connector

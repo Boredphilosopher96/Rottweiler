@@ -8,20 +8,24 @@ pub mod estimate;
 pub mod prune;
 pub mod spend;
 pub mod toon;
+mod toon_admission;
+pub use toon_admission::ToonAllocation;
 
 pub use assembly::{
     AssembledContext, AssemblyError, AssemblyInput, CacheBreakpoint, CacheBreakpointKind,
     ContextAssembler, ContextItem, ContextItemBreakdown, ContextItemId, ContextItemKind,
-    ContextProvenance, PromptDump, TokenTotals,
+    ContextItemProperties, ContextProvenance, PreparedContextItem, PreparedPrefix, PreparedTurn,
+    PromptDump, TokenTotals,
 };
 pub use budget::{
-    BudgetEstimate, BudgetSnapshot, Budgeter, OverflowDecision, OverflowPolicy,
-    OverflowPolicyError, Reconciliation,
+    BudgetEstimate, BudgetSnapshot, Budgeter, InvalidBudgetSnapshot, OverflowDecision,
+    OverflowPolicy, OverflowPolicyError, Reconciliation,
 };
 pub use cache::{CacheObservation, CacheRuleProfile, CacheSimulation, CacheSimulator};
 pub use compaction::{
     AUTO_CONTINUE_TEXT, CompactionError, CompactionInput, CompactionPlan, CompactionReason,
-    Compactor, ConversationPin, DEFAULT_COMPACTION_PROMPT, PreCompactHook, summary_turn,
+    Compactor, ConversationPin, DEFAULT_COMPACTION_PROMPT, PreCompactHook, auto_continue_turn,
+    summary_turn,
 };
 pub use estimate::{LocalTokenEstimator, canonicalize_json};
 pub use prune::{

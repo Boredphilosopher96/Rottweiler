@@ -1,11 +1,13 @@
+import { ClientAllocationOwner } from "../src/client-allocation"
+import type { EngineEvent } from "../src/protocol"
 import { describe, expect, test } from "bun:test"
 
 import { ProjectionRequestBroker } from "../src/projection-requests"
 import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome } from "../src/protocol"
-import type { WireEngineEvent } from "../src/transport"
 
-function modelCatalog(requestId: string): WireEngineEvent {
-  return {
+
+function modelCatalog(requestId: string): EngineEvent {
+  return { aliases: [], providers: [], cached: false, truncated: false,
     type: "models_listed",
     meta: {
       protocol_version: PROTOCOL_VERSION,
@@ -17,7 +19,7 @@ function modelCatalog(requestId: string): WireEngineEvent {
   }
 }
 
-function settingsCatalog(requestId: string): WireEngineEvent {
+function settingsCatalog(requestId: string): EngineEvent {
   return {
     type: "settings_listed",
     meta: {
@@ -35,7 +37,7 @@ function mcpApprovalReview(
   requestId: string,
   sessionId: string,
   server: string,
-): WireEngineEvent {
+): EngineEvent {
   return {
     type: "mcp_server_approval_reviewed",
     meta: {
@@ -57,7 +59,7 @@ function mcpApprovalReview(
   }
 }
 
-function mcpCatalog(requestId: string, sessionId = "session-test"): WireEngineEvent {
+function mcpCatalog(requestId: string, sessionId = "session-test"): EngineEvent {
   return {
     type: "mcp_servers_listed",
     meta: {
@@ -75,6 +77,7 @@ describe("projection request correlation", () => {
   test("rejects an older reply after the newer request has completed", () => {
     let nextRequest = 0
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => `request-${++nextRequest}`,
@@ -97,6 +100,7 @@ describe("projection request correlation", () => {
   test("reports the latest list-settings failure through its pending slot", async () => {
     const failures: string[] = []
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => "settings-list",
@@ -123,6 +127,7 @@ describe("projection request correlation", () => {
     })
     const failures: string[] = []
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => `settings-${++nextRequest}`,
@@ -146,6 +151,7 @@ describe("projection request correlation", () => {
   test("restores the prior authoritative settings request when a newer write is rejected", async () => {
     let nextRequest = 0
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => `settings-${++nextRequest}`,
@@ -176,6 +182,7 @@ describe("projection request correlation", () => {
   test("rejects an older MCP approval review after a newer review completes", () => {
     let nextRequest = 0
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => `mcp-review-${++nextRequest}`,
@@ -197,6 +204,7 @@ describe("projection request correlation", () => {
 
   test("rejects an MCP approval review from another session", () => {
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => "mcp-review",
@@ -216,6 +224,7 @@ describe("projection request correlation", () => {
 
   test("rejects an MCP approval review after its command was rejected", async () => {
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => "mcp-review",
@@ -239,6 +248,7 @@ describe("projection request correlation", () => {
 
   test("rejects an MCP inventory reply after its list command was rejected", async () => {
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => "mcp-list",
@@ -260,6 +270,7 @@ describe("projection request correlation", () => {
 
   test("rejects an MCP inventory reply after its mutation command was rejected", async () => {
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => "mcp-enable",
@@ -285,6 +296,7 @@ describe("projection request correlation", () => {
 
   test("rejects an MCP inventory reply from another session", () => {
     const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(),
       clientId: () => "projection-test",
       sessionId: () => "session-test",
       requestId: () => "mcp-list",

@@ -9,6 +9,392 @@
         "meta": {
           "$ref": "#/$defs/CommandMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_session_state"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_session_controls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "after_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "read_family_controls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "after_revision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "type": {
+          "type": "string",
+          "const": "resolve_child_read_scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_child_state"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_child_controls"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/ChildControlTarget"
+        },
+        "expected_revision": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "response": {
+          "$ref": "#/$defs/ChildControlResponse"
+        },
+        "type": {
+          "type": "string",
+          "const": "resolve_child_control"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target",
+        "expected_revision",
+        "response"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_ui_catalog"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_ui_panels"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "request": {
+          "$ref": "#/$defs/UiActionRequest"
+        },
+        "type": {
+          "type": "string",
+          "const": "invoke_ui_action"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "request"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_session_children"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "scope"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_todos"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "scope"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
+        "read": {
+          "$ref": "#/$defs/TranscriptTailRead"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_transcript_tail"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "scope",
+        "read"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
+        "read": {
+          "$ref": "#/$defs/TranscriptRead"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_transcript"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "scope",
+        "read"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/SessionReadScope"
+        },
+        "read": {
+          "$ref": "#/$defs/TranscriptContentRead"
+        },
+        "type": {
+          "type": "string",
+          "const": "read_transcript_content"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "scope",
+        "read"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
         "cwd": {
           "type": "string"
         },
@@ -27,6 +413,7 @@
           "const": "create_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -60,6 +447,7 @@
           "const": "resume_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -94,6 +482,7 @@
           "const": "attach_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -124,6 +513,7 @@
           "const": "send_message"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -146,6 +536,7 @@
           "const": "interrupt"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -163,6 +554,9 @@
         },
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
         },
         "decision": {
           "$ref": "#/$defs/ApprovalDecision"
@@ -183,11 +577,13 @@
           "const": "approve_tool"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "session_id",
         "tool_call_id",
+        "invocation_id",
         "decision"
       ]
     },
@@ -214,6 +610,7 @@
           "const": "approve_plan"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -233,23 +630,21 @@
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
-        "answers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Answer"
-          }
+        "answer": {
+          "$ref": "#/$defs/Answer"
         },
         "type": {
           "type": "string",
           "const": "answer_question"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "session_id",
         "question_id",
-        "answers"
+        "answer"
       ]
     },
     {
@@ -269,6 +664,7 @@
           "const": "switch_mode"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -301,6 +697,7 @@
           "const": "switch_model"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -328,6 +725,7 @@
           "const": "compact"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -362,6 +760,7 @@
           "const": "fork"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -386,6 +785,7 @@
           "const": "rewind"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -407,6 +807,7 @@
           "const": "take_driver"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -430,6 +831,7 @@
           "const": "user_shell_started"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -464,6 +866,7 @@
           "const": "user_shell_ended"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -489,6 +892,7 @@
           "const": "attach_development_plugin"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -510,6 +914,7 @@
           "const": "detach_development_plugin"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -533,6 +938,7 @@
           "const": "pin_context"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -557,6 +963,7 @@
           "const": "evict_context"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -578,6 +985,7 @@
           "const": "get_context"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -598,6 +1006,7 @@
           "const": "get_cost"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -618,6 +1027,7 @@
           "const": "get_session_review"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -647,6 +1057,7 @@
           "const": "review_file"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -680,6 +1091,7 @@
           "const": "dump_prompt"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -697,6 +1109,7 @@
           "const": "list_sessions"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta"
@@ -721,6 +1134,7 @@
           "const": "search_sessions"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -742,6 +1156,7 @@
           "const": "list_commands"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -762,6 +1177,7 @@
           "const": "list_modes"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -785,17 +1201,18 @@
           ]
         },
         "refresh": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "type": {
           "type": "string",
           "const": "list_models"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
-        "meta"
+        "meta",
+        "refresh"
       ]
     },
     {
@@ -812,6 +1229,7 @@
           "const": "list_settings"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -838,6 +1256,7 @@
           "const": "set_setting"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -860,6 +1279,7 @@
           "const": "list_mcp_servers"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -880,6 +1300,7 @@
           "const": "list_runtime_services"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -906,6 +1327,7 @@
           "const": "add_mcp_http_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -946,6 +1368,7 @@
           "const": "add_mcp_stdio_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -973,6 +1396,7 @@
           "const": "remove_mcp_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -997,6 +1421,7 @@
           "const": "review_mcp_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1024,6 +1449,7 @@
           "const": "approve_mcp_server"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1052,6 +1478,7 @@
           "const": "set_mcp_server_enabled"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1074,6 +1501,7 @@
           "const": "list_permissions"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1100,6 +1528,7 @@
           "const": "add_session_permission_rule"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1125,6 +1554,7 @@
           "const": "remove_session_permission_rule"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1149,6 +1579,7 @@
           "const": "remove_queued_message"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1170,6 +1601,7 @@
           "const": "clear_queued_messages"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1193,6 +1625,7 @@
           "const": "rename_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1223,6 +1656,7 @@
           "const": "export_session"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1252,6 +1686,7 @@
           "const": "revoke_permission_approval"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1277,6 +1712,7 @@
           "const": "begin_provider_auth"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1301,6 +1737,7 @@
           "const": "configure_builtin_provider"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1328,6 +1765,7 @@
           "const": "complete_provider_auth"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1356,6 +1794,7 @@
           "const": "cancel_provider_auth"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1386,6 +1825,7 @@
           "const": "search_workspace_files"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1416,6 +1856,7 @@
           "const": "preview_workspace_file"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1438,6 +1879,7 @@
           "const": "get_workspace_status"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1466,6 +1908,7 @@
           "const": "get_workspace_diff"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1488,44 +1931,11 @@
           "const": "list_subagents"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
         "session_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "after_sequence": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "replay_subagent"
-        }
-      },
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "subagent_id"
       ]
     },
     {
@@ -1548,6 +1958,7 @@
           "const": "continue_subagent"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1573,6 +1984,7 @@
           "const": "interrupt_subagent"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1597,6 +2009,7 @@
           "const": "close_subagent"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta",
@@ -1615,6 +2028,7 @@
           "const": "shutdown_host"
         }
       },
+      "additionalProperties": false,
       "required": [
         "type",
         "meta"
@@ -1639,6 +2053,7 @@
           "$ref": "#/$defs/RequestId"
         }
       },
+      "additionalProperties": false,
       "required": [
         "protocol_version",
         "client_id",
@@ -1653,16 +2068,944 @@
       "description": "Client-generated identifier used to correlate a command.",
       "type": "string"
     },
-    "ModelAlias": {
-      "description": "Provider-blind model alias resolved by the engine router.",
-      "type": "string"
-    },
     "SessionId": {
       "description": "Stable identifier of an engine session.",
       "type": "string"
     },
     "SequenceId": {
       "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "ChildControlTarget": {
+      "description": "An exact path through the live parent's owned child bindings.",
+      "type": "object",
+      "properties": {
+        "ancestry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChildControlHop"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ancestry",
+        "session_id"
+      ]
+    },
+    "ChildControlHop": {
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "ChildControlResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "question_id": {
+              "$ref": "#/$defs/QuestionId"
+            },
+            "answer": {
+              "$ref": "#/$defs/Answer"
+            },
+            "type": {
+              "type": "string",
+              "const": "question"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "question_id",
+            "answer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "decision": {
+              "$ref": "#/$defs/ApprovalDecision"
+            },
+            "binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalBinding"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "approval"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "tool_call_id",
+            "invocation_id",
+            "decision",
+            "binding"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "$ref": "#/$defs/PlanDecision"
+            },
+            "revisions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "plan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "decision",
+            "revisions"
+          ]
+        }
+      ]
+    },
+    "QuestionId": {
+      "description": "Stable identifier of an interactive question.",
+      "type": "string"
+    },
+    "Answer": {
+      "description": "One answer returned for a question entry.",
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "question_id",
+        "value"
+      ]
+    },
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ToolInvocationId": {
+      "description": "Host-owned identity of one tool execution, independent of provider call IDs.",
+      "type": "string"
+    },
+    "ApprovalDecision": {
+      "description": "A driver's decision at the permission chokepoint.",
+      "type": "string",
+      "enum": [
+        "allow_once",
+        "allow_session",
+        "allow_project",
+        "deny"
+      ]
+    },
+    "ApprovalBinding": {
+      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "arguments_hash": {
+          "type": "string"
+        },
+        "base_hash": {
+          "type": "string"
+        },
+        "diff_hash": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "proposal_id",
+        "arguments_hash",
+        "base_hash",
+        "diff_hash"
+      ]
+    },
+    "PlanDecision": {
+      "description": "Driver response to a submitted plan.",
+      "type": "string",
+      "enum": [
+        "approve",
+        "reject"
+      ]
+    },
+    "UiActionRequest": {
+      "description": "Action arguments and command selection remain in the approved host registry.",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/UiContributionOwner"
+        },
+        "contribution_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "action_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "target": {
+          "$ref": "#/$defs/UiActionTarget"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "contribution_id",
+        "action_id",
+        "target"
+      ]
+    },
+    "UiContributionOwner": {
+      "type": "object",
+      "properties": {
+        "extension": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "generation": {
+          "$ref": "#/$defs/UiGenerationId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "extension",
+        "generation"
+      ]
+    },
+    "UiGenerationId": {
+      "description": "An application-minted endpoint epoch; restarting the same artifact creates a\ndifferent generation. It is a correlation identifier, never permission.",
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "UiActionTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "surface": {
+              "type": "string",
+              "const": "tool"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface",
+            "invocation_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "surface": {
+              "type": "string",
+              "const": "panel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface",
+            "revision"
+          ]
+        }
+      ]
+    },
+    "SessionReadScope": {
+      "description": "Direct session authority or an explicit path from an independently authorized root.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "session"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "root_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "ancestry": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionReadAncestor"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "type": {
+              "type": "string",
+              "const": "descendant"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "root_session_id",
+            "ancestry"
+          ]
+        }
+      ]
+    },
+    "SessionReadAncestor": {
+      "description": "A hop is bound to its parent's canonical spawn source, never just a child name.",
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId",
+          "x-rw-max-utf8-bytes": 128
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source_sequence": {
+          "$ref": "#/$defs/SequenceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subagent_id",
+        "session_id",
+        "source_sequence"
+      ]
+    },
+    "TranscriptTailRead": {
+      "type": "object",
+      "properties": {
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptTailIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "part": {
+          "$ref": "#/$defs/TranscriptTailPart"
+        },
+        "max_items": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 524288,
+          "maximum": 1048576
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "part",
+        "max_items",
+        "max_bytes"
+      ]
+    },
+    "TranscriptTailIdentity": {
+      "description": "Structural and response identity; pages can advance their source cut within this identity.",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "turn_started": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "turn_started",
+        "response_epoch",
+        "tools_epoch"
+      ]
+    },
+    "TranscriptGeneration": {
+      "description": "Current semantic ordering generation, changed by rewind.",
+      "type": "string"
+    },
+    "TranscriptTailPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "thinking"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "citations"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "type": {
+              "type": "string",
+              "const": "tools"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "offset"
+          ]
+        }
+      ]
+    },
+    "TranscriptRead": {
+      "type": "object",
+      "properties": {
+        "known_view": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position": {
+          "$ref": "#/$defs/TranscriptPosition"
+        },
+        "max_items": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "known_view",
+        "position",
+        "max_items",
+        "max_bytes"
+      ]
+    },
+    "TranscriptView": {
+      "description": "Exact canonical prefix interpreted by a complete semantic view.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "projection_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "generation": {
+          "$ref": "#/$defs/TranscriptGeneration"
+        },
+        "through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "minItems": 32,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "projection_version",
+        "generation",
+        "through",
+        "digest"
+      ]
+    },
+    "TranscriptPosition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "first"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "latest"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "before"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "after"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/TranscriptItemId"
+            },
+            "type": {
+              "type": "string",
+              "const": "around"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ordinal": {
+              "$ref": "#/$defs/TranscriptOrdinal"
+            },
+            "generation": {
+              "$ref": "#/$defs/TranscriptGeneration"
+            },
+            "type": {
+              "type": "string",
+              "const": "at_ordinal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "ordinal",
+            "generation"
+          ]
+        }
+      ]
+    },
+    "TranscriptItemId": {
+      "description": "Stable item identity, independent of its current logical ordinal.",
+      "$ref": "#/$defs/SequenceId"
+    },
+    "TranscriptOrdinal": {
+      "description": "Logical row position, distinct from a canonical event sequence.",
+      "type": "string"
+    },
+    "TranscriptContentRead": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "$ref": "#/$defs/TranscriptView"
+        },
+        "source": {
+          "$ref": "#/$defs/TranscriptContentSource"
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view",
+        "source",
+        "offset",
+        "max_bytes"
+      ]
+    },
+    "TranscriptContentSource": {
+      "description": "Body location within the exact journal prefix carried by its enclosing view.",
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "selector": {
+          "$ref": "#/$defs/TranscriptContentSelector"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "selector"
+      ]
+    },
+    "TranscriptContentSelector": {
+      "description": "A closed selector into one canonical event. It never names a filesystem path.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "conversation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_block"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_arguments"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_output"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "tool_diff"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_presentation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "invocation_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "command_message"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_command"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shell_output"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_task"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_result"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "subagent_diff"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
       "type": "string"
     },
     "ClientRole": {
@@ -1694,6 +3037,7 @@
           "$ref": "#/$defs/AttachmentData"
         }
       },
+      "additionalProperties": false,
       "required": [
         "name",
         "media_type",
@@ -1714,6 +3058,7 @@
               "const": "text"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "content"
@@ -1730,80 +3075,12 @@
               "const": "inline_base64"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "data"
           ]
         }
-      ]
-    },
-    "ToolCallId": {
-      "description": "Stable identifier assigned to a model tool call.",
-      "type": "string"
-    },
-    "ApprovalDecision": {
-      "description": "A driver's decision at the permission chokepoint.",
-      "type": "string",
-      "enum": [
-        "allow_once",
-        "allow_session",
-        "allow_project",
-        "deny"
-      ]
-    },
-    "ApprovalBinding": {
-      "description": "Optional structured unified diff attached to a mutating-tool approval.",
-      "type": "object",
-      "properties": {
-        "proposal_id": {
-          "type": "string"
-        },
-        "arguments_hash": {
-          "type": "string"
-        },
-        "base_hash": {
-          "type": "string"
-        },
-        "diff_hash": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "proposal_id",
-        "arguments_hash",
-        "base_hash",
-        "diff_hash"
-      ]
-    },
-    "PlanDecision": {
-      "description": "Driver response to a submitted plan.",
-      "type": "string",
-      "enum": [
-        "approve",
-        "reject"
-      ]
-    },
-    "QuestionId": {
-      "description": "Stable identifier of an interactive question.",
-      "type": "string"
-    },
-    "Answer": {
-      "description": "One answer returned for a question entry.",
-      "type": "object",
-      "properties": {
-        "question_id": {
-          "$ref": "#/$defs/QuestionId"
-        },
-        "values": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "question_id",
-        "values"
       ]
     },
     "ModeId": {
@@ -1828,6 +3105,7 @@
               "const": "turn"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
             "turn_id"
@@ -1836,19 +3114,40 @@
         {
           "type": "object",
           "properties": {
-            "checkpoint_id": {
-              "type": "string"
+            "expected_through": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "position": {
+              "$ref": "#/$defs/RewindSourcePosition"
             },
             "type": {
               "type": "string",
-              "const": "checkpoint"
+              "const": "source"
             }
           },
+          "additionalProperties": false,
           "required": [
             "type",
-            "checkpoint_id"
+            "expected_through",
+            "source",
+            "turn_id",
+            "position"
           ]
         }
+      ]
+    },
+    "RewindSourcePosition": {
+      "description": "Completed boundary relative to an effective committed user source.",
+      "type": "string",
+      "enum": [
+        "before",
+        "through"
       ]
     },
     "ShellId": {
@@ -1878,6 +3177,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "key",
         "value"
@@ -1922,10 +3222,6 @@
     },
     "ProviderAuthAttemptId": {
       "description": "Connection-scoped identifier of one provider authentication attempt.",
-      "type": "string"
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
       "type": "string"
     }
   }

@@ -217,6 +217,7 @@ impl CancellationToken {
 
 /// One live output fragment, normally emitted by an executing shell command.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolOutputChunk {
     pub stream: ToolOutputStream,
     pub content: String,
@@ -273,6 +274,21 @@ impl ToolOutputSink for NoopOutputSink {
     }
 }
 
+/// Replaceable operational status. It is never tool output or a durable record.
+pub trait ToolProgressSink: Send + Sync {
+    /// # Errors
+    /// Rejects progress after the invocation's admission has closed.
+    fn report(&self, progress: rw_operation_contract::ToolProgress) -> Result<(), ToolError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopProgressSink;
+impl ToolProgressSink for NoopProgressSink {
+    fn report(&self, _progress: rw_operation_contract::ToolProgress) -> Result<(), ToolError> {
+        Ok(())
+    }
+}
+
 /// Per-invocation context supplied by core after permission approval.
 #[derive(Clone)]
 pub struct ToolContext {
@@ -281,9 +297,15 @@ pub struct ToolContext {
     workspace_fds: Arc<Vec<OwnedFd>>,
     session_id: Option<SessionId>,
     model_alias: Option<String>,
+    native_searcher: Option<Arc<dyn crate::WebSearcher>>,
+    effect_domains: Option<Arc<[String]>>,
+    effect_paths: Option<Arc<[PathBuf]>>,
+    effect_host: Option<Arc<dyn crate::ToolEffectHost>>,
+    todo_store: Option<Arc<dyn crate::TodoStateStore>>,
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
     pub output: Arc<dyn ToolOutputSink>,
+    pub progress: Arc<dyn ToolProgressSink>,
     question_asker: Option<Arc<dyn QuestionAsker>>,
     subagent_events: Option<Arc<dyn SubagentEventSink>>,
     mcp_tool_policy: McpToolPolicy,
@@ -360,9 +382,15 @@ impl ToolContext {
             workspace_fds: Arc::new(workspace_fds),
             session_id: None,
             model_alias: None,
+            native_searcher: None,
+            effect_domains: None,
+            effect_paths: None,
+            effect_host: None,
+            todo_store: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
             output: Arc::new(NoopOutputSink),
+            progress: Arc::new(NoopProgressSink),
             question_asker: None,
             subagent_events: None,
             mcp_tool_policy: McpToolPolicy::Unrestricted,
@@ -406,6 +434,60 @@ impl ToolContext {
     }
 
     #[must_use]
+    pub fn with_todo_store(mut self, store: Arc<dyn crate::TodoStateStore>) -> Self {
+        self.todo_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn todo_store(&self) -> Option<&Arc<dyn crate::TodoStateStore>> {
+        self.todo_store.as_ref()
+    }
+
+    /// Bind the exact approved outer invocation's host effect lane.
+    #[must_use]
+    pub fn with_effect_host(mut self, host: Arc<dyn crate::ToolEffectHost>) -> Self {
+        self.effect_host = Some(host);
+        self
+    }
+
+    #[must_use]
+    pub fn effect_host(&self) -> Option<Arc<dyn crate::ToolEffectHost>> {
+        self.effect_host.clone()
+    }
+
+    pub(crate) fn without_effect_host(mut self) -> Self {
+        self.effect_host = None;
+        self
+    }
+
+    pub(crate) fn with_effect_paths(mut self, paths: Arc<[PathBuf]>) -> Self {
+        self.effect_paths = Some(paths);
+        self
+    }
+
+    pub(crate) fn with_effect_domains(mut self, domains: Arc<[String]>) -> Self {
+        self.effect_domains = Some(domains);
+        self
+    }
+
+    pub(crate) fn effect_domains(&self) -> Option<Arc<[String]>> {
+        self.effect_domains.clone()
+    }
+
+    /// Bind the admitted native backend for this turn; callbacks never enter tool JSON.
+    #[must_use]
+    pub fn with_native_searcher(mut self, searcher: Option<Arc<dyn crate::WebSearcher>>) -> Self {
+        self.native_searcher = searcher;
+        self
+    }
+
+    #[must_use]
+    pub fn native_searcher(&self) -> Option<&Arc<dyn crate::WebSearcher>> {
+        self.native_searcher.as_ref()
+    }
+
+    #[must_use]
     pub fn with_mcp_tool_policy(mut self, policy: McpToolPolicy) -> Self {
         self.mcp_tool_policy = policy;
         self
@@ -436,6 +518,12 @@ impl ToolContext {
     #[must_use]
     pub fn with_output(mut self, output: Arc<dyn ToolOutputSink>) -> Self {
         self.output = output;
+        self
+    }
+
+    #[must_use]
+    pub fn with_progress(mut self, progress: Arc<dyn ToolProgressSink>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -475,7 +563,21 @@ impl ToolContext {
         if self.root_index_for(&canonical).is_none() {
             return Err(ToolError::PathEscape(path.to_path_buf()));
         }
+        self.check_effect_path(&canonical)?;
         Ok(canonical)
+    }
+
+    fn check_effect_path(&self, path: &Path) -> Result<(), ToolError> {
+        if self
+            .effect_paths
+            .as_ref()
+            .is_some_and(|paths| !paths.iter().any(|allowed| allowed == path))
+        {
+            return Err(ToolError::DelegationDenied(
+                "file IO exceeds the captured checkpoint paths".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn resolve_writable(&self, path: &Path) -> Result<PathBuf, ToolError> {
@@ -506,7 +608,9 @@ impl ToolContext {
         let file_name = candidate
             .file_name()
             .ok_or_else(|| ToolError::InvalidInput("path must name a file".to_owned()))?;
-        Ok(canonical_parent.join(file_name))
+        let resolved = canonical_parent.join(file_name);
+        self.check_effect_path(&resolved)?;
+        Ok(resolved)
     }
 
     pub(crate) fn relative_display(&self, path: &Path) -> PathBuf {
@@ -579,6 +683,7 @@ impl ToolContext {
     /// This closes the symlink-swap window for direct read/write/edit operations on Unix.
     #[cfg(unix)]
     pub(crate) fn secure_parent(&self, path: &Path) -> Result<(OwnedFd, OsString), ToolError> {
+        self.check_effect_path(path)?;
         let root_index = self
             .root_index_for(path)
             .ok_or_else(|| ToolError::PathEscape(path.to_path_buf()))?;
@@ -626,11 +731,14 @@ impl ToolContext {
 }
 
 /// Structured result passed back to the model and UI.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, schemars::JsonSchema, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+#[ts(rename = "ToolResponse")]
 pub struct ToolResult {
+    #[serde(skip)]
+    presentation: Option<crate::ToolPresentationPlan>,
     pub content: String,
     pub data: Value,
-    #[serde(default)]
     pub truncated: bool,
     #[serde(skip)]
     protected_framing: Option<ProtectedFraming>,
@@ -644,12 +752,22 @@ struct ProtectedFraming {
 
 impl ToolResult {
     #[must_use]
+    pub fn with_presentation(mut self, presentation: crate::ToolPresentationPlan) -> Self {
+        self.presentation = Some(presentation);
+        self
+    }
+    pub fn take_presentation(&mut self) -> Option<crate::ToolPresentationPlan> {
+        self.presentation.take()
+    }
+
+    #[must_use]
     pub fn new(content: impl Into<String>, data: Value) -> Self {
         Self {
             content: content.into(),
             data,
             truncated: false,
             protected_framing: None,
+            presentation: None,
         }
     }
 
@@ -754,6 +872,10 @@ pub struct CandidateLocation {
 /// Stable errors suitable for model-visible tool failures.
 #[derive(Debug, Error)]
 pub enum ToolError {
+    #[error("tool effect settlement is unproven: {0}")]
+    EffectsUnsettled(String),
+    #[error("delegated effect denied: {0}")]
+    DelegationDenied(String),
     #[error("invalid tool input: {0}")]
     InvalidInput(String),
     #[error("path escapes the workspace: {0}")]
@@ -866,6 +988,20 @@ pub trait Tool: Send + Sync {
         ToolBehavior::Standard
     }
 
+    /// Whether this implementation uses a host-owned nested effect lane.
+    fn delegates_effects(&self) -> bool {
+        false
+    }
+
+    /// Source-owned support for calls made under another tool's approval.
+    /// Unspecified tools cannot acquire nested effects from capability flags.
+    ///
+    /// # Errors
+    /// Returns malformed typed input before delegated execution.
+    fn delegated_effect(&self, _input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        Ok(crate::DelegatedEffect::Denied)
+    }
+
     /// Returns workspace paths explicitly carried by this invocation.
     ///
     /// Implementations should parse their typed input here exactly as they do
@@ -975,8 +1111,8 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError>;
 
     /// Waits for externally owned effects after an execution future is dropped.
-    /// A supervisor must keep this pending if termination cannot be proven.
-    async fn settle_effects(&self) {}
+    /// A failed proof is an error; it cannot authorize releasing owned mutation resources.
+    async fn settle_effects(&self) -> Result<(), ToolError>;
 }
 
 #[derive(Clone)]
@@ -996,8 +1132,8 @@ struct GuardedTool {
 
 #[async_trait]
 impl Tool for GuardedTool {
-    async fn settle_effects(&self) {
-        self.inner.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.inner.settle_effects().await
     }
     fn descriptor(&self) -> ToolDescriptor {
         self.descriptor.clone()
@@ -1013,6 +1149,14 @@ impl Tool for GuardedTool {
 
     fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
         self.inner.workspace_paths(input)
+    }
+
+    fn delegated_effect(&self, input: &Value) -> Result<crate::DelegatedEffect, ToolError> {
+        self.inner.delegated_effect(input)
+    }
+
+    fn delegates_effects(&self) -> bool {
+        self.inner.delegates_effects()
     }
 
     fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {
@@ -1208,6 +1352,11 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Inspect immutable declarations without first cloning their JSON schemas.
+    pub fn descriptor_refs(&self) -> impl Iterator<Item = &ToolDescriptor> {
+        self.tools.values().map(|registered| &registered.descriptor)
+    }
+
     #[must_use]
     pub fn descriptors(&self) -> Vec<ToolDescriptor> {
         self.tools
@@ -1306,345 +1455,4 @@ pub(crate) fn parse_input<T: serde::de::DeserializeOwned>(input: Value) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used)]
-
-    use super::*;
-
-    #[test]
-    fn registry_rejects_duplicates_and_sorts_descriptors() {
-        struct Stub(&'static str);
-
-        #[async_trait]
-        impl Tool for Stub {
-            fn descriptor(&self) -> ToolDescriptor {
-                ToolDescriptor {
-                    name: self.0.to_owned(),
-                    description: String::new(),
-                    input_schema: Value::Null,
-                    capabilities: CapabilityManifest::default(),
-                }
-            }
-
-            async fn execute(
-                &self,
-                _context: &ToolContext,
-                _input: Value,
-            ) -> Result<ToolResult, ToolError> {
-                Ok(ToolResult::new("", Value::Null))
-            }
-        }
-
-        let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(Stub("z"))).expect("first tool");
-        registry.register(Arc::new(Stub("a"))).expect("second tool");
-        assert!(matches!(
-            registry.register(Arc::new(Stub("a"))),
-            Err(ToolError::DuplicateTool(_))
-        ));
-        assert_eq!(
-            registry
-                .descriptors()
-                .into_iter()
-                .map(|descriptor| descriptor.name)
-                .collect::<Vec<_>>(),
-            vec!["a", "z"]
-        );
-        let subset = registry.subset(["a"]).expect("known subset");
-        assert_eq!(subset.len(), 1);
-        assert!(subset.resolve("a").is_some());
-        assert!(subset.resolve("z").is_none());
-        assert!(matches!(
-            registry.subset(["missing"]),
-            Err(ToolError::InvalidInput(_))
-        ));
-    }
-
-    #[test]
-    fn mcp_policy_accepts_only_exact_canonical_grants() {
-        let policy = McpToolPolicy::restricted([
-            "mcp:github/get_issue".to_owned(),
-            "mcp:github/search/code".to_owned(),
-        ])
-        .expect("exact grants");
-        assert!(policy.allows("github", "get_issue"));
-        assert!(policy.allows("github", "search/code"));
-        assert!(!policy.allows("github", "delete_issue"));
-        assert!(!policy.allows("other", "get_issue"));
-
-        for invalid in [
-            "mcp:github/*",
-            "mcp:*/get_issue",
-            "mcp:github/",
-            "mcp:/get_issue",
-            "MCP:github/get_issue",
-            "mcp:github/get issue",
-        ] {
-            assert!(
-                McpToolPolicy::restricted([invalid.to_owned()]).is_err(),
-                "{invalid} must fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn lifecycle_mode_is_immutable_after_registration() {
-        struct FlippingLifecycleTool(Arc<std::sync::atomic::AtomicBool>);
-
-        #[async_trait]
-        impl Tool for FlippingLifecycleTool {
-            fn descriptor(&self) -> ToolDescriptor {
-                ToolDescriptor {
-                    name: "flipping_lifecycle".to_owned(),
-                    description: String::new(),
-                    input_schema: Value::Null,
-                    capabilities: CapabilityManifest::default(),
-                }
-            }
-
-            fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {
-                if self.0.load(std::sync::atomic::Ordering::Acquire) {
-                    SubagentLifecycleMode::MultipleOrdered
-                } else {
-                    SubagentLifecycleMode::Single
-                }
-            }
-
-            async fn execute(
-                &self,
-                _context: &ToolContext,
-                _input: Value,
-            ) -> Result<ToolResult, ToolError> {
-                Ok(ToolResult::new("", Value::Null))
-            }
-        }
-
-        let flipped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut registry = ToolRegistry::new();
-        registry
-            .register(Arc::new(FlippingLifecycleTool(Arc::clone(&flipped))))
-            .expect("register");
-        flipped.store(true, std::sync::atomic::Ordering::Release);
-
-        assert_eq!(
-            registry.subagent_lifecycle_mode("flipping_lifecycle"),
-            Some(SubagentLifecycleMode::Single)
-        );
-        assert_eq!(
-            registry
-                .resolve("flipping_lifecycle")
-                .expect("guarded tool")
-                .subagent_lifecycle_mode(),
-            SubagentLifecycleMode::Single
-        );
-        assert_eq!(
-            registry
-                .subset(["flipping_lifecycle"])
-                .expect("subset")
-                .subagent_lifecycle_mode("flipping_lifecycle"),
-            Some(SubagentLifecycleMode::Single)
-        );
-    }
-
-    #[test]
-    fn cancellation_is_sticky() {
-        let token = CancellationToken::default();
-        assert!(!token.is_cancelled());
-        token.cancel();
-        assert!(token.is_cancelled());
-        assert!(matches!(token.check(), Err(ToolError::Cancelled)));
-    }
-
-    #[test]
-    fn registry_fails_safe_when_a_write_tool_understates_mutation() {
-        struct UnderstatedWrite;
-
-        #[async_trait]
-        impl Tool for UnderstatedWrite {
-            fn descriptor(&self) -> ToolDescriptor {
-                ToolDescriptor {
-                    name: "understated".to_owned(),
-                    description: String::new(),
-                    input_schema: Value::Null,
-                    capabilities: CapabilityManifest::new([ToolCapability::WriteFilesystem]),
-                }
-            }
-
-            fn mutation_scope(&self, _input: &Value) -> MutationScope {
-                MutationScope::None
-            }
-
-            async fn execute(
-                &self,
-                _context: &ToolContext,
-                _input: Value,
-            ) -> Result<ToolResult, ToolError> {
-                Ok(ToolResult::new("", Value::Null))
-            }
-        }
-
-        let mut registry = ToolRegistry::new();
-        registry
-            .register(Arc::new(UnderstatedWrite))
-            .expect("register tool");
-        assert_eq!(
-            registry.mutation_scope("understated", &Value::Null),
-            Some(MutationScope::OpaqueWorkspace)
-        );
-    }
-
-    #[test]
-    fn registry_is_the_fail_closed_invocation_semantics_boundary() {
-        struct FileMutation;
-
-        #[async_trait]
-        impl Tool for FileMutation {
-            fn descriptor(&self) -> ToolDescriptor {
-                ToolDescriptor {
-                    name: "file_mutation".to_owned(),
-                    description: String::new(),
-                    input_schema: Value::Null,
-                    capabilities: CapabilityManifest::new([ToolCapability::WriteFilesystem]),
-                }
-            }
-
-            fn behavior(&self) -> ToolBehavior {
-                ToolBehavior::FileMutation
-            }
-
-            fn workspace_paths(&self, input: &Value) -> Result<Vec<PathBuf>, ToolError> {
-                input
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(|path| vec![PathBuf::from(path)])
-                    .ok_or_else(|| ToolError::InvalidInput("path is required".to_owned()))
-            }
-
-            async fn execute(
-                &self,
-                _context: &ToolContext,
-                _input: Value,
-            ) -> Result<ToolResult, ToolError> {
-                Ok(ToolResult::new("", Value::Null))
-            }
-        }
-
-        let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(FileMutation)).expect("register");
-        assert_eq!(
-            registry
-                .invocation_semantics("file_mutation", &serde_json::json!({"path": "src/lib.rs"}))
-                .expect("classified")
-                .expect("registered"),
-            ToolInvocationSemantics {
-                behavior: ToolBehavior::FileMutation,
-                mutation_scope: MutationScope::Paths(vec![PathBuf::from("src/lib.rs")]),
-                workspace_paths: vec![PathBuf::from("src/lib.rs")],
-            }
-        );
-        assert!(
-            registry
-                .invocation_semantics("missing", &Value::Null)
-                .expect("unknown is not an input error")
-                .is_none()
-        );
-        assert!(
-            registry
-                .invocation_semantics("file_mutation", &Value::Null)
-                .is_err()
-        );
-        assert_eq!(
-            registry.names_with_behavior(ToolBehavior::FileMutation),
-            vec!["file_mutation"]
-        );
-    }
-
-    #[tokio::test]
-    async fn registry_enforces_a_final_serialized_result_cap() {
-        struct Verbose;
-
-        #[async_trait]
-        impl Tool for Verbose {
-            fn descriptor(&self) -> ToolDescriptor {
-                ToolDescriptor {
-                    name: "verbose".to_owned(),
-                    description: String::new(),
-                    input_schema: Value::Null,
-                    capabilities: CapabilityManifest::default(),
-                }
-            }
-
-            async fn execute(
-                &self,
-                _context: &ToolContext,
-                _input: Value,
-            ) -> Result<ToolResult, ToolError> {
-                Ok(ToolResult::new(
-                    "0123456789".repeat(100),
-                    serde_json::json!({"duplicate": "0123456789".repeat(100)}),
-                ))
-            }
-        }
-
-        let root = tempfile::tempdir().expect("temp directory");
-        let context = ToolContext::new(root.path())
-            .expect("context")
-            .with_result_limit(160);
-        let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(Verbose)).expect("register");
-        let result = registry
-            .resolve("verbose")
-            .expect("resolve")
-            .execute(&context, Value::Null)
-            .await
-            .expect("execute");
-        let encoded = serde_json::to_vec(&result).expect("serialize result");
-        assert!(encoded.len() <= 160, "{} bytes", encoded.len());
-        assert!(result.truncated);
-        assert!(result.content.ends_with("789"));
-    }
-
-    #[test]
-    fn registration_snapshots_extension_descriptors() {
-        struct DynamicDescriptor(Arc<AtomicBool>);
-
-        #[async_trait]
-        impl Tool for DynamicDescriptor {
-            fn descriptor(&self) -> ToolDescriptor {
-                let changed = self.0.load(Ordering::Acquire);
-                ToolDescriptor {
-                    name: "dynamic".to_owned(),
-                    description: if changed { "changed" } else { "initial" }.to_owned(),
-                    input_schema: Value::Null,
-                    capabilities: if changed {
-                        CapabilityManifest::new([ToolCapability::WriteFilesystem])
-                    } else {
-                        CapabilityManifest::default()
-                    },
-                }
-            }
-
-            async fn execute(
-                &self,
-                _context: &ToolContext,
-                _input: Value,
-            ) -> Result<ToolResult, ToolError> {
-                Ok(ToolResult::new("", Value::Null))
-            }
-        }
-
-        let changed = Arc::new(AtomicBool::new(false));
-        let mut registry = ToolRegistry::new();
-        registry
-            .register(Arc::new(DynamicDescriptor(Arc::clone(&changed))))
-            .expect("register");
-        changed.store(true, Ordering::Release);
-        let descriptor = registry.descriptor("dynamic").expect("snapshot");
-        assert_eq!(descriptor.description, "initial");
-        assert!(
-            !descriptor
-                .capabilities
-                .contains(&ToolCapability::WriteFilesystem)
-        );
-    }
-}
+mod tests;

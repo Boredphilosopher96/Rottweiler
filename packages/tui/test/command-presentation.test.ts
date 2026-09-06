@@ -1,53 +1,11 @@
 import { describe, expect, test } from "bun:test"
 
 import { commandResultMarkdown } from "../src/render"
-import type { CommandResultProjection } from "../src/state"
+import type { CommandResultProjection } from "../src/render/command-types"
 
 describe("command result presentation", () => {
-  test("renders every structured projection variant with legacy Markdown parity", () => {
+  test("renders every structured projection variant as Markdown", () => {
     const fixtures: readonly [CommandResultProjection, string][] = [
-      [{
-        kind: "context",
-        usedTokens: "63552",
-        usableTokens: "380000",
-        reservedTokens: "20000",
-        contextWindowKnown: true,
-        itemCount: 2,
-        groups: [
-          { kind: "system", itemCount: 1, estimatedTokens: "152" },
-          { kind: "conversation", itemCount: 1, estimatedTokens: "63400" },
-        ],
-      }, [
-        "**63.5k / 380k tokens** · 20k reserved",
-        "`███░░░░░░░░░░░░░░░░░` 16%",
-        "**2 items** in the active context",
-        "",
-        "| Source | Items | Tokens |",
-        "| --- | ---: | ---: |",
-        "| Conversation | 1 | 63.4k |",
-        "| System | 1 | 152 |",
-      ].join("\n")],
-      [{
-        kind: "cost",
-        inputTokens: "189823",
-        outputTokens: "2771",
-        reasoningTokens: "430",
-        cacheReadTokens: "380096",
-        cacheHitBasisPoints: 6700,
-        subscriptionQuotaEntries: "1",
-        costUnavailableEntries: "0",
-        monetaryAccountingComplete: false,
-        costMicrosUsd: "0",
-        accountedTurnCount: 0,
-        utcDay: "2026-01-01",
-      }, [
-        "**Covered by subscription quota**",
-        "| Input | Output | Reasoning | Cache read | Cache hit |",
-        "| ---: | ---: | ---: | ---: | ---: |",
-        "| 189.8k | 2.7k | 430 | 380k | 67% |",
-        "",
-        "0 accounted turns · 2026-01-01 UTC",
-      ].join("\n")],
       [{
         kind: "help",
         commands: [{ usage: "/status", description: "Show agent status" }],

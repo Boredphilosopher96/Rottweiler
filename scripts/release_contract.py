@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -19,7 +21,7 @@ from typing import NoReturn
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT_PATH = REPO / "contracts" / "release-contract.json"
 DEFAULT_RUST_OUTPUT = REPO / "crates" / "rw-types" / "src" / "generated" / "release_contract.rs"
-DEFAULT_TYPESCRIPT_OUTPUT = REPO / "packages" / "tui" / "generated" / "release-contract.ts"
+DEFAULT_TYPESCRIPT_OUTPUT = REPO / "packages" / "js-host" / "generated" / "release-contract.ts"
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?")
 PLATFORM_PATTERN = re.compile(r"[a-z0-9]+-[a-z0-9_]+")
 SAFE_PATH_PATTERN = re.compile(r"[A-Za-z0-9_.{}/-]+")
@@ -27,10 +29,11 @@ SAFE_LIBRARY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 EXPECTED_MEMBER_IDS = {
     "installer",
     "engine",
-    "tui",
+    "js_host",
     "wasm_host",
-    "plugin_host",
+    "wasm_host_identity",
     "opentui_native",
+    "opentui_licenses",
 }
 
 
@@ -46,8 +49,7 @@ class ArchiveMember:
 class ProductBudgets:
     engine_less_than_bytes: int
     wasm_host_less_than_bytes: int
-    plugin_host_less_than_bytes: int
-    tui_bundle_less_than_bytes: int
+    js_bundle_less_than_bytes: int
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class ReleaseContract:
     schema_version: int
     root_format: str
     expanded_max_bytes: int
+    js_host_roles: dict[str, str]
     platforms: tuple[PlatformContract, ...]
 
     def platform(self, platform_id: str) -> PlatformContract:
@@ -172,8 +175,7 @@ def _parse_budgets(value: object, path: str) -> ProductBudgets:
     fields = {
         "engine_less_than_bytes",
         "wasm_host_less_than_bytes",
-        "plugin_host_less_than_bytes",
-        "tui_bundle_less_than_bytes",
+        "js_bundle_less_than_bytes",
     }
     _expect_keys(document, path, fields)
     return ProductBudgets(
@@ -183,11 +185,8 @@ def _parse_budgets(value: object, path: str) -> ProductBudgets:
         wasm_host_less_than_bytes=_positive_integer(
             document["wasm_host_less_than_bytes"], f"{path}.wasm_host_less_than_bytes"
         ),
-        plugin_host_less_than_bytes=_positive_integer(
-            document["plugin_host_less_than_bytes"], f"{path}.plugin_host_less_than_bytes"
-        ),
-        tui_bundle_less_than_bytes=_positive_integer(
-            document["tui_bundle_less_than_bytes"], f"{path}.tui_bundle_less_than_bytes"
+        js_bundle_less_than_bytes=_positive_integer(
+            document["js_bundle_less_than_bytes"], f"{path}.js_bundle_less_than_bytes"
         ),
     )
 
@@ -213,9 +212,17 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"could not read release contract {path}: {error}") from error
     document = _object(raw, "contract")
-    _expect_keys(document, "contract", {"schema_version", "archive", "platforms"})
+    _expect_keys(document, "contract", {"schema_version", "archive", "platforms", "js_host_roles"})
     if isinstance(document["schema_version"], bool) or document["schema_version"] != 1:
         _fail("schema_version", "must be 1")
+
+    roles = _object(document["js_host_roles"], "js_host_roles")
+    _expect_keys(roles, "js_host_roles", {"tui", "source_plugin"})
+    for name, role in roles.items():
+        if not isinstance(role, str) or re.fullmatch(r"[a-z]+(?:-[a-z]+)*", role) is None:
+            _fail(f"js_host_roles.{name}", "must be an explicit role argument")
+    if len(set(roles.values())) != len(roles):
+        _fail("js_host_roles", "roles must be distinct")
 
     archive = _object(document["archive"], "archive")
     _expect_keys(archive, "archive", {"root_format", "expanded_max_bytes", "members"})
@@ -328,25 +335,21 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
                 f"platforms.{platform.id}.product_budgets.wasm_host_less_than_bytes",
                 "WASM host product budget exceeds its member extraction limit",
             )
-        if budgets.plugin_host_less_than_bytes > member_by_id["plugin_host"].max_bytes:
+        # The executable may own almost the entire combined JS/native budget.
+        # Adding two extraction ceilings hides an executable ceiling that
+        # prevents an otherwise valid platform bundle from being published.
+        if budgets.js_bundle_less_than_bytes > member_by_id["js_host"].max_bytes:
             _fail(
-                f"platforms.{platform.id}.product_budgets.plugin_host_less_than_bytes",
-                "plugin host product budget exceeds its member extraction limit",
-            )
-        tui_extraction_bytes = (
-            member_by_id["tui"].max_bytes + member_by_id["opentui_native"].max_bytes
-        )
-        if budgets.tui_bundle_less_than_bytes > tui_extraction_bytes:
-            _fail(
-                f"platforms.{platform.id}.product_budgets.tui_bundle_less_than_bytes",
-                "TUI bundle product budget exceeds its member extraction limits",
+                f"platforms.{platform.id}.product_budgets.js_bundle_less_than_bytes",
+                "JavaScript bundle product budget exceeds its host extraction limit",
             )
         maximum_allowed_product_bytes = (
             member_by_id["installer"].max_bytes
+            + member_by_id["wasm_host_identity"].max_bytes
+            + member_by_id["opentui_licenses"].max_bytes
             + budgets.engine_less_than_bytes
             + budgets.wasm_host_less_than_bytes
-            + budgets.plugin_host_less_than_bytes
-            + budgets.tui_bundle_less_than_bytes
+            + budgets.js_bundle_less_than_bytes
         )
         if maximum_allowed_product_bytes > expanded_max_bytes:
             _fail(
@@ -358,6 +361,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT_PATH) -> ReleaseContract:
         schema_version=1,
         root_format=root_format,
         expanded_max_bytes=expanded_max_bytes,
+        js_host_roles=roles,
         platforms=tuple(platforms),
     )
 
@@ -374,17 +378,16 @@ def validate_build(
     platform_id: str,
     engine: Path,
     wasm_host: Path,
-    plugin_host: Path,
-    tui: Path,
+    js_host: Path,
     opentui_native: Path,
 ) -> None:
     platform = contract.platform(platform_id)
     paths = {
         "engine": engine,
         "wasm_host": wasm_host,
-        "plugin_host": plugin_host,
-        "tui": tui,
+        "js_host": js_host,
         "opentui_native": opentui_native,
+        "opentui_licenses": opentui_native.parent / Path(_member_by_id(platform, "opentui_licenses").path).name,
     }
     sizes: dict[str, int] = {}
     for member_id, path in paths.items():
@@ -393,12 +396,10 @@ def validate_build(
         except OSError as error:
             raise ValueError(f"release {member_id} is unavailable: {path}: {error}") from error
         if (
-            path.is_symlink()
-            or not path.is_file()
-            or metadata.st_nlink != 1
+            not stat.S_ISREG(metadata.st_mode)
             or metadata.st_size == 0
         ):
-            raise ValueError(f"release {member_id} must be a single-link regular file: {path}")
+            raise ValueError(f"release {member_id} must be a nonempty regular file: {path}")
         sizes[member_id] = metadata.st_size
         extraction_limit = _member_by_id(platform, member_id).max_bytes
         if metadata.st_size > extraction_limit:
@@ -410,11 +411,10 @@ def validate_build(
     checks = (
         ("engine", sizes["engine"], budgets.engine_less_than_bytes),
         ("WASM helper", sizes["wasm_host"], budgets.wasm_host_less_than_bytes),
-        ("TypeScript plugin host", sizes["plugin_host"], budgets.plugin_host_less_than_bytes),
         (
-            "TUI bundle",
-            sizes["tui"] + sizes["opentui_native"],
-            budgets.tui_bundle_less_than_bytes,
+            "JavaScript bundle",
+            sizes["js_host"] + sizes["opentui_native"],
+            budgets.js_bundle_less_than_bytes,
         ),
     )
     for label, actual, exclusive_limit in checks:
@@ -481,6 +481,43 @@ def verify_archive(
             f"{contract.expanded_max_bytes}"
         )
 
+    verify_helper_receipt(archive, release_root, platform)
+
+
+def _unique_receipt_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("WASM helper identity has duplicate fields")
+    return fields
+
+
+def verify_helper_receipt(archive: Path, release_root: str, platform: PlatformContract) -> None:
+    """Require the installed helper identity to describe its exact archived bytes."""
+    receipt_member = _member_by_id(platform, "wasm_host_identity")
+    helper_member = _member_by_id(platform, "wasm_host")
+    with tarfile.open(archive, "r:gz") as bundle:
+        receipt_file = bundle.extractfile(f"{release_root}/{receipt_member.path}")
+        helper_file = bundle.extractfile(f"{release_root}/{helper_member.path}")
+        if receipt_file is None or helper_file is None:
+            raise ValueError("WASM helper identity requires regular archive files")
+        with receipt_file, helper_file:
+            encoded = receipt_file.read(receipt_member.max_bytes + 1)
+            if len(encoded) > receipt_member.max_bytes:
+                raise ValueError("WASM helper identity exceeds its size bound")
+            try:
+                receipt = json.loads(encoded, object_pairs_hook=_unique_receipt_fields)
+            except (ValueError, UnicodeError) as error:
+                raise ValueError("WASM helper identity must be valid JSON") from error
+            if (not isinstance(receipt, dict) or set(receipt) != {"bytes", "sha256"}
+                    or type(receipt["bytes"]) is not int or receipt["bytes"] <= 0
+                    or not isinstance(receipt["sha256"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"]) is None):
+                raise ValueError("WASM helper identity has invalid fields")
+            info = bundle.getmember(f"{release_root}/{helper_member.path}")
+            if (receipt["bytes"] != info.size
+                    or receipt["sha256"] != hashlib.file_digest(helper_file, "sha256").hexdigest()):
+                raise ValueError("WASM helper identity does not match archived bytes")
+
 
 def _rust_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
@@ -491,8 +528,12 @@ def _rust_integer(value: int) -> str:
 
 
 def render_rust(contract: ReleaseContract) -> str:
+    host_name = PurePosixPath(_member_by_id(contract.platforms[0], "js_host").path).name
     lines = [
         "// @generated by scripts/release_contract.py; do not edit.",
+        f"pub const JS_HOST_EXECUTABLE_NAME: &str = {_rust_string(host_name)};",
+        f"pub const JS_HOST_TUI_ROLE: &str = {_rust_string(contract.js_host_roles['tui'])};",
+        f"pub const JS_HOST_SOURCE_PLUGIN_ROLE: &str = {_rust_string(contract.js_host_roles['source_plugin'])};",
         "",
         "#[derive(Clone, Copy, Debug, Eq, PartialEq)]",
         "pub struct ReleaseArchiveMember {",
@@ -506,8 +547,7 @@ def render_rust(contract: ReleaseContract) -> str:
         "pub struct ReleaseProductBudgets {",
         "    pub engine_less_than_bytes: u64,",
         "    pub wasm_host_less_than_bytes: u64,",
-        "    pub plugin_host_less_than_bytes: u64,",
-        "    pub tui_bundle_less_than_bytes: u64,",
+        "    pub js_bundle_less_than_bytes: u64,",
         "}",
         "",
         "#[derive(Clone, Copy, Debug, Eq, PartialEq)]",
@@ -566,10 +606,8 @@ def render_rust(contract: ReleaseContract) -> str:
                 f"{_rust_integer(budgets.engine_less_than_bytes)},",
                 "            wasm_host_less_than_bytes: "
                 f"{_rust_integer(budgets.wasm_host_less_than_bytes)},",
-                "            plugin_host_less_than_bytes: "
-                f"{_rust_integer(budgets.plugin_host_less_than_bytes)},",
-                "            tui_bundle_less_than_bytes: "
-                f"{_rust_integer(budgets.tui_bundle_less_than_bytes)},",
+                "            js_bundle_less_than_bytes: "
+                f"{_rust_integer(budgets.js_bundle_less_than_bytes)},",
                 "        },",
                 f"        archive_members: {constant_name}_ARCHIVE_MEMBERS,",
                 "    },",
@@ -598,16 +636,19 @@ def render_rust(contract: ReleaseContract) -> str:
 
 
 def render_typescript(contract: ReleaseContract) -> str:
+    host_name = PurePosixPath(_member_by_id(contract.platforms[0], "js_host").path).name
     node_platforms = {"macos": "darwin", "linux": "linux"}
     node_arches = {"aarch64": "arm64", "x86_64": "x64"}
     lines = [
         "// @generated TypeScript projection by scripts/release_contract.py; do not edit.",
+        f"export const JS_HOST_EXECUTABLE_NAME = {json.dumps(host_name)} as const",
+        f"export const OPENTUI_LICENSES_NAME = {json.dumps(Path(_member_by_id(contract.platforms[0], 'opentui_licenses').path).name)} as const",
+        f"export const JS_HOST_ROLES = {json.dumps(contract.js_host_roles, sort_keys=True)} as const",
         "",
         "export interface ReleaseProductBudgets {",
         "  readonly engineLessThanBytes: number",
         "  readonly wasmHostLessThanBytes: number",
-        "  readonly pluginHostLessThanBytes: number",
-        "  readonly tuiBundleLessThanBytes: number",
+        "  readonly jsBundleLessThanBytes: number",
         "}",
         "",
         "export interface ReleasePlatform {",
@@ -639,8 +680,7 @@ def render_typescript(contract: ReleaseContract) -> str:
                 "    productBudgets: {",
                 f"      engineLessThanBytes: {budgets.engine_less_than_bytes},",
                 f"      wasmHostLessThanBytes: {budgets.wasm_host_less_than_bytes},",
-                f"      pluginHostLessThanBytes: {budgets.plugin_host_less_than_bytes},",
-                f"      tuiBundleLessThanBytes: {budgets.tui_bundle_less_than_bytes},",
+                f"      jsBundleLessThanBytes: {budgets.js_bundle_less_than_bytes},",
                 "    },",
                 "  },",
             ]
@@ -733,6 +773,32 @@ def render_installer(
     return rendered
 
 
+def _copy_build_artifact(source: Path, destination: Path, max_bytes: int) -> None:
+    # Cargo publishes its executable using a hard link into deps/. Staging owns
+    # a distinct inode and copies a bounded, stable descriptor before publication.
+    def identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (metadata.st_dev, metadata.st_ino, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as incoming:
+        before = os.fstat(incoming.fileno())
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= max_bytes:
+            raise ValueError(f"invalid build artifact: {source}")
+        with destination.open("xb") as outgoing:
+            remaining = before.st_size
+            while remaining:
+                chunk = incoming.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError(f"build artifact shortened during staging: {source}")
+                outgoing.write(chunk)
+                remaining -= len(chunk)
+            if incoming.read(1) or identity(os.fstat(incoming.fileno())) != identity(before):
+                raise ValueError(f"build artifact changed during staging: {source}")
+        if identity(source.lstat()) != identity(before):
+            raise ValueError(f"build artifact replaced during staging: {source}")
+
+
 def stage_release(
     contract: ReleaseContract,
     output: Path,
@@ -741,8 +807,7 @@ def stage_release(
     platform_id: str,
     engine: Path,
     wasm_host: Path,
-    plugin_host: Path,
-    tui: Path,
+    js_host: Path,
     opentui_native: Path,
 ) -> None:
     platform = contract.platform(platform_id)
@@ -751,13 +816,13 @@ def stage_release(
         raise ValueError(f"release stage must be named {expected_root}: {output}")
     if output.exists() or output.is_symlink():
         raise ValueError(f"release stage already exists: {output}")
-    validate_build(contract, platform_id, engine, wasm_host, plugin_host, tui, opentui_native)
+    validate_build(contract, platform_id, engine, wasm_host, js_host, opentui_native)
     sources = {
         "engine": engine,
         "wasm_host": wasm_host,
-        "plugin_host": plugin_host,
-        "tui": tui,
+        "js_host": js_host,
         "opentui_native": opentui_native,
+        "opentui_licenses": opentui_native.parent / Path(_member_by_id(platform, "opentui_licenses").path).name,
     }
     output.mkdir(parents=True, mode=0o755)
     for directory in _archive_directories(platform):
@@ -772,10 +837,17 @@ def stage_release(
                 render_installer(contract, template_path, version, platform_id),
                 member.mode,
             )
+        elif member.id == "wasm_host_identity":
+            continue
         else:
             source = sources[member.id]
-            shutil.copyfile(source, destination)
+            _copy_build_artifact(source, destination, member.max_bytes)
         destination.chmod(member.mode)
+    member = _member_by_id(platform, "wasm_host_identity")
+    with (output / _member_by_id(platform, "wasm_host").path).open("rb") as helper:
+        receipt = {"bytes": os.fstat(helper.fileno()).st_size,
+                   "sha256": hashlib.file_digest(helper, "sha256").hexdigest()}
+    _write_atomic(output / member.path, json.dumps(receipt, separators=(",", ":")) + "\n", member.mode)
 
 
 def parse_args() -> argparse.Namespace:
@@ -805,8 +877,7 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--platform", required=True)
     validate.add_argument("--engine", required=True, type=Path)
     validate.add_argument("--wasm-host", required=True, type=Path)
-    validate.add_argument("--plugin-host", required=True, type=Path)
-    validate.add_argument("--tui", required=True, type=Path)
+    validate.add_argument("--js-host", required=True, type=Path)
     validate.add_argument("--opentui-native", required=True, type=Path)
 
     installer = subparsers.add_parser("render-installer")
@@ -822,8 +893,7 @@ def parse_args() -> argparse.Namespace:
     stage.add_argument("--platform", required=True)
     stage.add_argument("--engine", required=True, type=Path)
     stage.add_argument("--wasm-host", required=True, type=Path)
-    stage.add_argument("--plugin-host", required=True, type=Path)
-    stage.add_argument("--tui", required=True, type=Path)
+    stage.add_argument("--js-host", required=True, type=Path)
     stage.add_argument("--opentui-native", required=True, type=Path)
 
     verify = subparsers.add_parser("verify-archive")
@@ -857,8 +927,7 @@ def run(args: argparse.Namespace) -> None:
             args.platform,
             args.engine,
             args.wasm_host,
-            args.plugin_host,
-            args.tui,
+            args.js_host,
             args.opentui_native,
         )
     elif args.command == "render-installer":
@@ -876,8 +945,7 @@ def run(args: argparse.Namespace) -> None:
             args.platform,
             args.engine,
             args.wasm_host,
-            args.plugin_host,
-            args.tui,
+            args.js_host,
             args.opentui_native,
         )
     elif args.command == "verify-archive":

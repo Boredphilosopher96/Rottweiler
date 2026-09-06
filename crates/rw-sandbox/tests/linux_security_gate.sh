@@ -32,6 +32,8 @@ docker run --name "$container" --rm --privileged \
     apt-get install -y -qq --no-install-recommends iproute2 python3 util-linux >/dev/null
     cargo test --locked -p rw-sandbox --test linux_egress
     cargo test --locked -p rw-sandbox --test linux_helper_driver
+    cargo test --locked -p rw-sandbox --test process_creation_driver
+    cargo test --locked -p rw-sandbox --test linux_preparation_driver
     cargo test --locked -p rw-tools --test linux_safe_list_network
     cargo test --locked -p rw-cli --test agent_runtime binary_records_then_replays_a_complete_offline_tool_turn -- --exact
     cargo test --locked -p rw-cli --test agent_runtime bash_replay_serves_recorded_output_without_spawning_or_opening_a_socket -- --exact

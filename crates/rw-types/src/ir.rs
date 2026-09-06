@@ -1,3 +1,4 @@
+use rw_memory_derive::PrepareAllocation as Allocation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,7 +7,9 @@ use ts_rs::TS;
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize, TS)]
+        #[derive(
+            Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize, TS, Allocation,
+        )]
         pub struct $name(pub String);
     };
 }
@@ -16,10 +19,28 @@ string_id!(
     "Stable identifier assigned to a model tool call."
 );
 
+/// Host-owned identity of one tool execution, independent of provider call IDs.
+#[derive(
+    Clone,
+    Debug,
+    Deserialize,
+    Eq,
+    Hash,
+    JsonSchema,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    TS,
+    Allocation,
+)]
+pub struct ToolInvocationId(pub String);
+
 /// A provider-neutral role in the conversation IR.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum Role {
     System,
     User,
@@ -31,6 +52,8 @@ pub enum Role {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum ImageRef {
     InlineBase64 { data: String },
     Url { url: String },
@@ -40,6 +63,8 @@ pub enum ImageRef {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum ToolOutputPart {
     Text { text: String },
     Structured { value: Value },
@@ -50,6 +75,8 @@ pub enum ToolOutputPart {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
+#[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum ToolOutput {
     Text { text: String },
     Structured { value: Value },
@@ -60,6 +87,8 @@ pub enum ToolOutput {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case", optional_fields = nullable)]
+#[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub enum Block {
     Text {
         text: String,
@@ -91,8 +120,9 @@ pub enum Block {
 
 /// Metadata whose meaning is independent of a provider adapter.
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
-#[serde(default)]
 #[ts(optional_fields = nullable)]
+#[derive(Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct TurnMeta {
     pub created_at: Option<String>,
     pub model: Option<String>,
@@ -101,7 +131,8 @@ pub struct TurnMeta {
 }
 
 /// One conversation turn in the internal message representation.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
 pub struct Turn {
     pub role: Role,
     pub blocks: Vec<Block>,

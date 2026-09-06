@@ -6,20 +6,26 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 
 
 ALLOWED = {
-    "rw-plugin-protocol": set(),
-    "rw-types": set(),
-    "rw-store": {"rw-types"},
-    "rw-providers": {"rw-types"},
+    "rw-operation-contract": set(),
+    "rw-resources": set(),
+    "rw-memory-derive": set(),
+    "rw-macos-bootstrap": set(),
+    "rw-plugin-protocol": {"rw-operation-contract", "rw-types"},
+    "rw-types": {"rw-operation-contract", "rw-memory-derive"},
+    "rw-store": {"rw-resources", "rw-types"},
+    "rw-providers": {"rw-resources", "rw-types"},
     "rw-context": {"rw-providers", "rw-types"},
-    "rw-sandbox": {"rw-types"},
+    "rw-sandbox": {"rw-types", "rw-macos-bootstrap"},
     "rw-intel": {"rw-types"},
-    "rw-tools": {"rw-intel", "rw-sandbox", "rw-types"},
+    "rw-tools": {"rw-resources", "rw-operation-contract", "rw-intel", "rw-sandbox", "rw-types"},
     "rw-mcp": {"rw-tools", "rw-types"},
-    "rw-ext": {"rw-plugin-protocol", "rw-providers", "rw-tools", "rw-types"},
+    "rw-ext": {"rw-resources", "rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-tools", "rw-types"},
     "rw-core": {
+        "rw-resources",
         "rw-context",
         "rw-ext",
         "rw-mcp",
@@ -32,6 +38,7 @@ ALLOWED = {
     # Owns concrete provider/tool/storage/extension assembly while keeping the
     # engine in rw-core independent from executable frontends.
     "rw-runtime": {
+        "rw-resources",
         "rw-core",
         "rw-ext",
         "rw-mcp",
@@ -44,8 +51,11 @@ ALLOWED = {
     # Private process boundary for the heavyweight WASM runtime. The public
     # `rw` binary talks to it through rw-ext's bounded wire protocol and does
     # not link Wasmtime itself.
-    "rw-wasm-host": {"rw-ext", "rw-plugin-protocol"},
+    # Protocol integration tests construct explicitly approved executable artifacts
+    # through the same tool/sandbox ownership API as the runtime caller.
+    "rw-wasm-host": {"rw-ext", "rw-plugin-protocol", "rw-tools", "rw-types"},
     "rw-cli": {
+        "rw-resources",
         "rw-core",
         "rw-ext",
         "rw-mcp",
@@ -56,7 +66,8 @@ ALLOWED = {
         "rw-tools",
         "rw-types",
     },
-    "xtask": {"rw-types"},
+    # Codegen imports each contract from its implementation owner.
+    "xtask": {"rw-types", "rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-store", "rw-tools"},
 }
 
 RUNTIME_COMPOSITION_FILES = {
@@ -92,6 +103,18 @@ def validate_source_layout(repo_root: Path) -> list[str]:
             failures.append("rw-runtime must not re-export lower-layer crate APIs")
     else:
         failures.append("rw-runtime/src/lib.rs is missing")
+
+    runtime_manifest = repo_root / "crates" / "rw-runtime" / "Cargo.toml"
+    if runtime_manifest.is_file():
+        dependencies = tomllib.loads(runtime_manifest.read_text()).get("dependencies", {})
+        terminal_dependencies = {"rustyline", "crossterm", "ratatui", "clap"} & dependencies.keys()
+        if terminal_dependencies:
+            failures.append(f"rw-runtime must not depend on terminal clients: {sorted(terminal_dependencies)}")
+    for path in runtime_source.rglob("*.rs"):
+        if "tests" in path.parts or path.name == "tests.rs":
+            continue
+        if re.search(r"\b(?:e?print(?:ln)?!|(?:std::)?io::std(?:in|out|err)\s*\()", path.read_text()):
+            failures.append(f"terminal I/O belongs to clients: {path.relative_to(repo_root)}")
 
     missing_runtime_files = sorted(
         name for name in RUNTIME_COMPOSITION_FILES if not (runtime_source / name).is_file()

@@ -6,9 +6,13 @@ members = [
     "crates/rw-ext",
     "crates/rw-intel",
     "crates/rw-mcp",
+    "crates/rw-memory-derive",
+    "crates/rw-macos-bootstrap",
+    "crates/rw-operation-contract",
     "crates/rw-plugin-protocol",
     "crates/rw-providers",
     "crates/rw-runtime",
+    "crates/rw-resources",
     "crates/rw-sandbox",
     "crates/rw-store",
     "crates/rw-tools",
@@ -57,6 +61,10 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
+rw-resources = { version = "0.1.4", path = "crates/rw-resources" }
+redb = "=4.2.0"
+memchr = "2.8.3"
+rw-operation-contract = { version = "0.1.4", path = "crates/rw-operation-contract" }
 base64 = "0.23.0"
 blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive"] }
@@ -77,7 +85,7 @@ rmcp = { version = "=3.1.2", default-features = false, features = ["client", "se
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 schemars = { version = "1.2.1", features = ["preserve_order"] }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 semver = "1.0.28"
 shell-words = "1.1.0"

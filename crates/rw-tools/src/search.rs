@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::{GLOB_PRESENTATION, GREP_PRESENTATION, LS_PRESENTATION};
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -47,6 +50,10 @@ struct GrepMatch {
 
 #[async_trait]
 impl Tool for GrepTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<GrepInput>(
             "grep",
@@ -146,7 +153,8 @@ impl Tool for GrepTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"matches": findings, "count": findings.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(GREP_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }
@@ -174,6 +182,10 @@ impl GlobTool {
 
 #[async_trait]
 impl Tool for GlobTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<GlobInput>("glob", "List non-ignored workspace paths matching a glob.")
     }
@@ -229,7 +241,8 @@ impl Tool for GlobTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"paths": paths, "count": paths.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(GLOB_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }
@@ -265,6 +278,10 @@ struct LsEntry {
 
 #[async_trait]
 impl Tool for LsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<LsInput>("ls", "List workspace directory entries and basic metadata.")
     }
@@ -342,7 +359,8 @@ impl Tool for LsTool {
         let mut result = ToolResult::new(
             model_text,
             json!({"entries": entries, "count": entries.len(), "truncated": truncated}),
-        );
+        )
+        .with_presentation(LS_PRESENTATION.plan()?);
         result.truncated = truncated;
         Ok(result)
     }

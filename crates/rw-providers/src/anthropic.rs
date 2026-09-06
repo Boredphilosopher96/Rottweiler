@@ -99,6 +99,7 @@ impl AnthropicProvider {
         material.apply_anthropic(&mut headers)?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        let network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(self.config.endpoint.clone())
@@ -116,6 +117,7 @@ impl AnthropicProvider {
         }
         let chunks = response.bytes_stream();
         let stream = async_stream::try_stream! {
+            let _network_owner = network_lease;
             let mut chunks = chunks;
             let mut decoder = SseDecoder::default();
             let mut state = AnthropicState::default();
@@ -167,6 +169,7 @@ impl AnthropicProvider {
                     query.append_pair("after_id", cursor);
                 }
             }
+            let _network_lease = crate::http::network_admission()?;
             let response = self
                 .client
                 .get(page_endpoint)
@@ -324,6 +327,20 @@ fn nonempty(value: &str) -> Option<&str> {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+        Ok(())
+    }
+
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        Ok(Some(crate::ContinuationProvenance::bind(&[
+            b"anthropic-messages",
+            self.config.endpoint.as_str().as_bytes(),
+            format!("{:?}", self.config.thinking_strategy).as_bytes(),
+        ])))
+    }
+
     fn name(&self) -> &str {
         &self.config.name
     }
@@ -366,7 +383,7 @@ fn build_request(
     if request.thinking != ThinkingLevel::Off
         && matches!(
             &request.tool_choice,
-            ToolChoice::Required | ToolChoice::Named { .. }
+            ToolChoice::Required {} | ToolChoice::Named { .. }
         )
     {
         return Err(ProviderError::new(
@@ -434,11 +451,11 @@ fn build_request(
     if !tools.is_empty() {
         object.insert("tools".to_owned(), Value::Array(tools));
     }
-    if !request.tools.is_empty() || request.tool_choice == ToolChoice::None {
+    if !request.tools.is_empty() || request.tool_choice == (ToolChoice::None {}) {
         let tool_choice = match &request.tool_choice {
-            ToolChoice::Auto => json!({ "type": "auto" }),
-            ToolChoice::Required => json!({ "type": "any" }),
-            ToolChoice::None => json!({ "type": "none" }),
+            ToolChoice::Auto {} => json!({ "type": "auto" }),
+            ToolChoice::Required {} => json!({ "type": "any" }),
+            ToolChoice::None {} => json!({ "type": "none" }),
             ToolChoice::Named { name } => json!({ "type": "tool", "name": name }),
         };
         object.insert("tool_choice".to_owned(), tool_choice);
@@ -774,6 +791,8 @@ fn anthropic_stream_error(value: &Value) -> ProviderError {
         }
     };
     let message = match kind {
+        ProviderErrorKind::ResourceExhausted => "local network capacity is exhausted",
+        ProviderErrorKind::EffectsUnsettled => "provider effects remain unsettled",
         ProviderErrorKind::ContextOverflow => "Anthropic context window exceeded",
         ProviderErrorKind::Authentication => "Anthropic authentication error",
         ProviderErrorKind::InvalidRequest => "Anthropic invalid request",
@@ -994,7 +1013,7 @@ mod tests {
 
     #[test]
     fn explicit_cache_hint_marks_stable_system_and_conversation_prefix() {
-        let mut request = tool_request(ToolChoice::Auto);
+        let mut request = tool_request(ToolChoice::Auto {});
         request.turns[0].blocks.push(Block::Text {
             text: "current user message".to_owned(),
         });
@@ -1040,7 +1059,7 @@ mod tests {
 
     #[test]
     fn explicit_cache_hint_marks_tool_when_no_stable_system_exists() {
-        let mut request = tool_request(ToolChoice::Auto);
+        let mut request = tool_request(ToolChoice::Auto {});
         request.cache_hint = Some(CacheHint {
             stable_prefix_turns: 0,
             tools_in_prefix: true,
@@ -1056,9 +1075,9 @@ mod tests {
     #[test]
     fn tool_choice_uses_anthropic_messages_shape() {
         let fixtures = [
-            (ToolChoice::Auto, json!({"type":"auto"})),
-            (ToolChoice::Required, json!({"type":"any"})),
-            (ToolChoice::None, json!({"type":"none"})),
+            (ToolChoice::Auto {}, json!({"type":"auto"})),
+            (ToolChoice::Required {}, json!({"type":"any"})),
+            (ToolChoice::None {}, json!({"type":"none"})),
             (
                 ToolChoice::Named {
                     name: "live_smoke_ping".to_owned(),
@@ -1075,7 +1094,7 @@ mod tests {
 
     #[test]
     fn thinking_rejects_anthropic_forced_tool_choice() {
-        let mut request = tool_request(ToolChoice::Required);
+        let mut request = tool_request(ToolChoice::Required {});
         request.thinking = ThinkingLevel::Low;
         let Err(error) = build_request(&request, Some(AnthropicThinkingStrategy::Adaptive)) else {
             panic!("Anthropic thinking cannot force a tool");

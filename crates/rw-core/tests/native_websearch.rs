@@ -1,13 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rw_core::ProviderNativeWebSearcher;
+use rw_core::ProviderNativeWebSearchFactory;
+#[path = "provider_factory/admission.rs"]
+mod admission;
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, FixtureRedactor,
     NativeWebSearchCapability, Provider, ProviderError, ProviderEvent, ProviderRequest, Recorder,
     ReplayProvider, WireMode, deny_outbound_network_for_process,
 };
-use rw_tools::{CancellationToken, WebSearchRequest, WebSearchSource, WebSearcher};
+use rw_tools::{CancellationToken, WebSearchRequest, WebSearchSource};
 
 struct NativeFixtureProvider {
     request: Mutex<Option<ProviderRequest>>,
@@ -25,6 +27,10 @@ fn fixture_request() -> WebSearchRequest {
 
 #[async_trait]
 impl Provider for NativeFixtureProvider {
+    async fn settle_effects(&self) -> Result<(), rw_providers::ProviderError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "native-fixture"
     }
@@ -79,8 +85,10 @@ async fn provider_native_search_uses_normal_stream_and_deduplicates_citations()
     let provider = Arc::new(NativeFixtureProvider {
         request: Mutex::new(None),
     });
-    let searcher = ProviderNativeWebSearcher::new(provider.clone(), "gpt-fixture".to_owned())
-        .ok_or_else(|| std::io::Error::other("fixture provider must support native search"))?;
+    let searcher =
+        ProviderNativeWebSearchFactory::single(provider.clone(), "gpt-fixture".to_owned())?
+            .ok_or_else(|| std::io::Error::other("fixture provider must support native search"))?
+            .bind(admission::invocation());
     let response = searcher
         .search(fixture_request(), CancellationToken::default())
         .await?;
@@ -116,8 +124,10 @@ async fn recorded_native_search_replays_with_process_network_denied()
         FixtureRedactor::default(),
     ));
     let recording_provider: Arc<dyn Provider> = recorder.clone();
-    let recording = ProviderNativeWebSearcher::new(recording_provider, "gpt-fixture".to_owned())
-        .ok_or_else(|| std::io::Error::other("recorder must retain native capability"))?;
+    let recording =
+        ProviderNativeWebSearchFactory::single(recording_provider, "gpt-fixture".to_owned())?
+            .ok_or_else(|| std::io::Error::other("recorder must retain native capability"))?
+            .bind(admission::invocation());
     let expected = recording
         .search(fixture_request(), CancellationToken::default())
         .await?;
@@ -125,8 +135,9 @@ async fn recorded_native_search_replays_with_process_network_denied()
 
     let replay: Arc<dyn Provider> =
         Arc::new(ReplayProvider::load("native-fixture", directory.path()).await?);
-    let replaying = ProviderNativeWebSearcher::new(replay, "gpt-fixture".to_owned())
-        .ok_or_else(|| std::io::Error::other("replay must advertise native capability"))?;
+    let replaying = ProviderNativeWebSearchFactory::single(replay, "gpt-fixture".to_owned())?
+        .ok_or_else(|| std::io::Error::other("replay must advertise native capability"))?
+        .bind(admission::invocation());
     let _network_denial = deny_outbound_network_for_process();
     let actual = replaying
         .search(fixture_request(), CancellationToken::default())

@@ -6,7 +6,9 @@
 //! the deterministic replay format.
 
 mod anthropic;
+mod attempt;
 mod auth;
+mod continuation;
 mod github_copilot;
 mod http;
 mod models_dev;
@@ -17,17 +19,20 @@ mod proxy;
 mod recording;
 mod retry;
 mod router;
+mod settlement;
 mod sse;
 mod token_response;
 mod types;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy};
+pub use attempt::{ProviderAttempt, ProviderAttemptGate, ProviderAttemptOutcome};
 pub use auth::{
     AuthMaterial, AuthProvider, DEFAULT_OAUTH_CALLBACK_TIMEOUT, KnownSecretRegistrar,
     OAuthAuthorizationCode, OAuthAuthorizationCodeConfig, OAuthEntropy, OAuthLoginSession,
     OAuthRefreshConfig, OAuthTokenSet, ProxyAuthentication, RefreshTokenSink, RefreshingOAuth,
     Secret, StaticAuth, SystemOAuthEntropy,
 };
+pub use continuation::ContinuationProvenance;
 pub use github_copilot::{
     DeviceFlowCancellation, GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT, GITHUB_COPILOT_API_VERSION,
     GITHUB_COPILOT_BASE_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_DEVICE_CODE_ENDPOINT,

@@ -18,6 +18,7 @@ async fn lsp_execute_capability_is_denied_in_plan_and_discuss_modes() {
         let outcome = gate
             .authorize_in_mode(
                 PermissionRequest {
+                    invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                     id: "lsp-call".to_owned(),
                     tool_name: "diagnostics".to_owned(),
                     arguments: serde_json::json!({"path":"lib.rs"}),

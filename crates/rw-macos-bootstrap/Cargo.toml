@@ -1,0 +1,24 @@
+[package]
+name = "rw-macos-bootstrap"
+description = "Audited Mach authority clearing for trusted Rottweiler worker entry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.6.0"
+libc = "0.2.189"
+
+# ADR-040 is the sole workspace exception. The crate root denies unsafe and only
+# the FFI owner module permits it; all other Rust lint policy remains unchanged.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+expect_used = "warn"
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "deny"

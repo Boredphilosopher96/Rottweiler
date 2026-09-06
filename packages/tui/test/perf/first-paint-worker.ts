@@ -1,3 +1,4 @@
+import { emptySessionReader } from "../fixtures/history"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../../src/app"
@@ -7,7 +8,7 @@ const setup = await createTestRenderer({
   height: 30,
   useThread: false,
 })
-const app = createRottweilerApp(setup.renderer)
+const app = createRottweilerApp(setup.renderer, { sessionReader: emptySessionReader })
 setup.renderer.root.add(app)
 await setup.renderOnce()
 

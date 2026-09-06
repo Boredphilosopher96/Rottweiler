@@ -6,10 +6,14 @@ mod agent;
 mod command;
 mod discovery;
 mod hook;
+pub mod invocation;
 mod mode;
 mod plugin;
+mod plugin_endpoint;
 mod plugin_runtime;
 mod registry;
+mod tool_effects;
+pub use tool_effects::PluginToolEffects;
 mod wasm;
 mod wasm_process;
 mod workflow;
@@ -20,34 +24,37 @@ pub use agent::{
 };
 
 pub use command::{
-    CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError,
+    BoundCommand, CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
+    CommandRegistry, CommandRegistryError,
 };
 pub use discovery::{
-    ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
-    CommandTemplate, DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill,
-    ExtensionCatalog, ExtensionDiagnostic, ExtensionDiscoveryConfig, ExtensionDiscoveryError,
-    InertProjectArtifact, LoadedSkillResource, SkillResource, TemplatePart,
-    UninventoriedProjectRoot,
+    ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope, CommandTemplate,
+    DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog,
+    ExtensionDiagnostic, ExtensionDiscoveryConfig, ExtensionDiscoveryError, InertProjectArtifact,
+    LoadedSkillResource, SkillResource, TemplatePart, UninventoriedProjectRoot,
 };
 pub use hook::{
-    HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookError,
-    HookEvent, HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
-    HookRegistrationError,
+    HookClass, HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect,
+    HookError, HookEvent, HookFailure, HookFailurePolicy, HookHandler, HookInput, HookInvocation,
+    HookPermissionDecision, HookRegistration, HookRegistrationError, HookTransform,
 };
 pub use mode::{
     ModeDefinition, ModeRegistry, ModeRegistryError, ModeSource, compose_mode_registry,
     parse_mode_toml,
 };
 pub use plugin::*;
+pub use plugin_endpoint::{
+    PluginConnection, PluginEndpoint, PluginEndpointMetadata, ReadyPluginEndpoint,
+};
 pub use plugin_runtime::*;
 pub use registry::*;
 pub use wasm::*;
 pub use wasm_process::*;
 pub use workflow::{
-    DiscoveredWorkflow, WorkflowCondition, WorkflowOnFail, WorkflowRunError, WorkflowRunReport,
-    WorkflowRunner, WorkflowStep, WorkflowStepArtifact, WorkflowStepExecutionError,
-    WorkflowStepExecutor, WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget,
+    DiscoveredWorkflow, WorkflowCondition, WorkflowJournal, WorkflowOnFail, WorkflowRunError,
+    WorkflowRunReport, WorkflowRunner, WorkflowStep, WorkflowStepArtifact,
+    WorkflowStepExecutionError, WorkflowStepExecutor, WorkflowStepReport, WorkflowStepRequest,
+    WorkflowStepTarget,
 };
 
 /// Identifies this workspace component in diagnostics.

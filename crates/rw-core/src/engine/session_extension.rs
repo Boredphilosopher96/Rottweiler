@@ -14,6 +14,10 @@ use super::{
 /// One immutable tool/hook/command boundary activated between turns.
 #[derive(Clone)]
 pub struct SessionExtensionSnapshot {
+    pub publication: super::RuntimePublication,
+    pub model: Arc<dyn super::ModelDriver>,
+    pub model_alias: String,
+    pub ui: Arc<dyn crate::ui::UiRegistry>,
     pub revision: u64,
     pub workspace_roots: Arc<[std::path::PathBuf]>,
     pub tools: Arc<ToolRegistry>,
@@ -39,9 +43,12 @@ pub trait SessionExtensionController: Send + Sync {
         current: SessionExtensionSnapshot,
     ) -> Result<SessionExtensionSnapshot, AgentLoopError>;
 
-    async fn detach(&self) -> Result<SessionExtensionSnapshot, AgentLoopError>;
+    async fn detach(
+        &self,
+        current: SessionExtensionSnapshot,
+    ) -> Result<SessionExtensionSnapshot, AgentLoopError>;
 
-    async fn rebase(&self, current: SessionExtensionSnapshot) -> (SessionExtensionSnapshot, bool);
+    async fn shutdown(&self) -> Result<(), AgentLoopError>;
 }
 
 #[derive(Debug, Default)]
@@ -59,13 +66,16 @@ impl SessionExtensionController for NoopSessionExtensionController {
         ))
     }
 
-    async fn detach(&self) -> Result<SessionExtensionSnapshot, AgentLoopError> {
+    async fn detach(
+        &self,
+        _current: SessionExtensionSnapshot,
+    ) -> Result<SessionExtensionSnapshot, AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(
             "no development plugin is attached".to_owned(),
         ))
     }
 
-    async fn rebase(&self, current: SessionExtensionSnapshot) -> (SessionExtensionSnapshot, bool) {
-        (current, false)
+    async fn shutdown(&self) -> Result<(), AgentLoopError> {
+        Ok(())
     }
 }

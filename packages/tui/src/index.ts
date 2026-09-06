@@ -1,6 +1,7 @@
 import { writeStartupSplash } from "./startup"
 import { enhancedKeyboardOptions } from "./keybindings"
 import { observedResidentBytes } from "./process-memory"
+import type { ClientStage } from "./client-diagnostics"
 import {
   registerTreeSitterParsersLazily,
   stabilizeTreeSitterClient,
@@ -26,6 +27,14 @@ function emitStartupMarker(markerVariable: string, epochVariable?: string): void
 }
 
 async function main(): Promise<void> {
+  const diagnostics = process.env.ROTTWEILER_CLIENT_TIMINGS === "1"
+    ? new (await import("./client-diagnostics")).ClientDiagnostics() : undefined
+  let startupStageStarted = diagnostics?.start() ?? 0
+  const finishStartupStage = (stage: ClientStage): void => {
+    if (diagnostics === undefined) return
+    diagnostics.finish(stage, startupStageStarted)
+    startupStageStarted = diagnostics.start()
+  }
   const expectedSupervisorPid = Number.parseInt(
     process.env.ROTTWEILER_SUPERVISOR_PID ?? "",
     10,
@@ -44,17 +53,42 @@ async function main(): Promise<void> {
   // apparent splash wait on the native backend it is meant to cover.
   const { loadOpenTui } = await import("./opentui")
   const openTui = await loadOpenTui()
+  finishStartupStage("startup_modules")
   const treeSitterSmokeReport = process.env.ROTTWEILER_TREE_SITTER_SMOKE_REPORT
   if (treeSitterSmokeReport !== undefined && treeSitterSmokeReport.length > 0) {
     const { runCompiledTreeSitterSmoke } = await import("./tree-sitter-smoke")
     await runCompiledTreeSitterSmoke(treeSitterSmokeReport)
     return
   }
+  const inputProbeReport = process.env.ROTTWEILER_CLIENT_INPUT_PROBE_REPORT
+  if (inputProbeReport !== undefined && inputProbeReport.length > 0) {
+    const directory = process.env.ROTTWEILER_CLIENT_INPUT_PROBE_DIRECTORY
+    if (directory === undefined) throw new Error("client input probe requires a private directory")
+    const { runClientInputProbe } = await import("./diagnostics/input-probe")
+    await runClientInputProbe(inputProbeReport, directory)
+    return
+  }
+  const memoryProbeReport = process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT
+  if (memoryProbeReport !== undefined && memoryProbeReport.length > 0) {
+    const directory = process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY
+    if (directory === undefined) throw new Error("client memory probe requires a private directory")
+    const heldView = process.env.ROTTWEILER_CLIENT_MEMORY_HELD_VIEW
+    if (heldView !== undefined) {
+      const { HELD_MEMORY_VIEWS, runHeldViewMemoryProbe } = await import("./diagnostics/memory-held")
+      const view = HELD_MEMORY_VIEWS.find(candidate => candidate === heldView)
+      if (view === undefined) throw new Error("invalid held memory view")
+      await runHeldViewMemoryProbe(memoryProbeReport, directory, Number(process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES ?? "200"), view)
+      return
+    }
+    const { runClientMemoryProbe } = await import("./diagnostics/memory-probe")
+    await runClientMemoryProbe(memoryProbeReport, directory, Number(process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES ?? "20"),
+      process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE === "1")
+    return
+  }
   let runtimeForShutdown: {
     shutdownHost(): Promise<boolean>
     stop(): Promise<void>
   } | null = null
-  let treeSitterRuntime: import("./tree-sitter-runtime").MaterializedTreeSitterRuntime | null = null
   let treeSitterParsers: ReturnType<
     typeof import("./tree-sitter-runtime").embeddedParserConfigurations
   > = []
@@ -67,6 +101,7 @@ async function main(): Promise<void> {
     // so terminal navigation can never masquerade as the external-editor key.
     useKittyKeyboard: enhancedKeyboardOptions,
     onDestroy: () => {
+      if (diagnostics !== undefined) process.stderr.write(`[rw-client-timings] ${JSON.stringify(diagnostics.snapshot())}\n`)
       if (rssRecycleTimer !== undefined) clearInterval(rssRecycleTimer)
       if (supervisorDeathTimer !== undefined) clearInterval(supervisorDeathTimer)
       // Closing the renderer must release the SSE/runtime handles so a normal
@@ -76,14 +111,13 @@ async function main(): Promise<void> {
       void runtimeForShutdown?.stop()
       void (async () => {
         await openTui.destroyTreeSitterClient()
-        await treeSitterRuntime?.cleanup()
-        treeSitterRuntime = null
         delete process.env.OTUI_ASSET_ROOT
         delete process.env.OTUI_TREE_SITTER_WORKER_PATH
       })()
     },
   })
 
+  finishStartupStage("startup_renderer")
   let resolveFirstFrame: (() => void) | undefined
   const firstFrame = new Promise<void>((resolve) => {
     resolveFirstFrame = resolve
@@ -101,10 +135,16 @@ async function main(): Promise<void> {
     if (!appMounted) return
     if (!transcriptPainted) {
       transcriptPainted = true
+      finishStartupStage("startup_paint")
       emitStartupMarker("ROTTWEILER_TRANSCRIPT_PAINTED_MARKER")
     }
     if (!composerAcceptedInput || interactiveMarked) return
     interactiveMarked = true
+    finishStartupStage("startup_input")
+    if (diagnostics !== undefined) {
+      const stages = diagnostics.snapshot().stages.filter(({ stage }) => stage.startsWith("startup_"))
+      process.stderr.write(`[rw-startup-timings] ${JSON.stringify(stages)}\n`)
+    }
     emitStartupMarker(
       "ROTTWEILER_INTERACTIVE_MARKER",
       "ROTTWEILER_INTERACTIVE_EPOCH",
@@ -118,6 +158,7 @@ async function main(): Promise<void> {
   })
   renderer.root.add(startupFrame)
   await firstFrame
+  finishStartupStage("startup_first_frame")
 
   const [appModule, platform, runtimeModule, stateModule] = await Promise.all([
     import("./app"),
@@ -125,6 +166,7 @@ async function main(): Promise<void> {
     import("./runtime"),
     import("./state"),
   ])
+  finishStartupStage("startup_app_modules")
   const {
     createDesktopNotificationAdapter,
     createExternalEditorAdapter,
@@ -136,7 +178,14 @@ async function main(): Promise<void> {
   const { createEngineRuntimeFromEnvironment } = runtimeModule
   const { reduceRottweilerState, transportDisconnected } = stateModule
 
-  const runtimeBootstrap: Promise<RuntimeBootstrap> = createEngineRuntimeFromEnvironment({
+  const { ClientAllocationOwner } = await import("./client-allocation")
+  const allocations = new ClientAllocationOwner()
+  const { readTuiRecycleState, recycleTuiIfNeeded } = await import("./recycle-state")
+  using recycleAllocation = allocations.reserve("decoding", 0)
+  let recycledState = readTuiRecycleState(recycleStatePath, recycleAllocation)
+  const handoffReady = Promise.withResolvers<void>()
+  const startRuntime = () => createEngineRuntimeFromEnvironment({
+    allocations, diagnostics,
     onDriverReady: () => {
       const marker = process.env.ROTTWEILER_DRIVER_READY_MARKER
       if (marker !== undefined && marker.length > 0) {
@@ -144,7 +193,8 @@ async function main(): Promise<void> {
         delete process.env.ROTTWEILER_DRIVER_READY_MARKER
       }
     },
-  }).then(
+  })
+  const runtimeBootstrap: Promise<RuntimeBootstrap> = (recycledState === null ? startRuntime() : handoffReady.promise.then(startRuntime)).then(
     (runtime) => ({ runtime, error: null }),
     (error: unknown) => ({ runtime: null, error }),
   )
@@ -168,12 +218,13 @@ async function main(): Promise<void> {
   const theme = configuredTheme === "system"
     ? systemThemeFor(terminalThemeMode)
     : themeByName(configuredTheme, terminalThemeMode) ?? themeByName("opencode", terminalThemeMode) ?? kennelTheme
+  finishStartupStage("startup_configuration")
   // OpenTUI workers require real filesystem paths. Bun embeds the selected
   // parser assets inside the executable; materialize a private, bounded runtime
-  // after first paint and remove it when the renderer shuts down.
+  // after first paint and reuse the private content-addressed cache.
   try {
     const { embeddedParserConfigurations, materializeTreeSitterRuntime } = await import("./tree-sitter-runtime")
-    treeSitterRuntime = await materializeTreeSitterRuntime()
+    const treeSitterRuntime = await materializeTreeSitterRuntime()
     const { assetsPath, root, workerPath } = treeSitterRuntime
     process.env.OTUI_ASSET_ROOT = root
     process.env.OTUI_TREE_SITTER_WORKER_PATH = workerPath
@@ -185,7 +236,7 @@ async function main(): Promise<void> {
     )
   } catch {
     // Markdown remains readable if a locked-down host cannot create the
-    // ephemeral parser runtime. Never fail application startup for highlighting.
+    // parser cache. Never fail application startup for highlighting.
   }
   const treeSitterClient = stabilizeTreeSitterClient(
     registerTreeSitterParsersLazily(
@@ -193,12 +244,15 @@ async function main(): Promise<void> {
       treeSitterParsers,
     ),
   )
+  finishStartupStage("startup_parser_assets")
   void treeSitterClient.initialize().catch(() => {
     // Markdown remains readable if a terminal cannot start a worker. OpenTUI
     // reports the parser failure; the application must stay usable.
   })
   const terminalHandover = createTerminalHandover(renderer)
   const app = appModule.createRottweilerApp(renderer, {
+    allocations,
+    diagnostics,
     ...(configuredSession === undefined || configuredSession.length === 0
       ? {}
       : { sessionId: configuredSession }),
@@ -212,14 +266,73 @@ async function main(): Promise<void> {
     onComposerInput: (value) => {
       if (transcriptPainted && value.length > 0) composerAcceptedInput = true
     },
-    onCommand: async (command) => {
-      const bootstrap = await runtimeBootstrap
-      return (await bootstrap.runtime?.sendCommand(command)) ?? null
+    familyControls: {
+      async state(root, target, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.state(root, target, signal, allocation)
+      },
+      async scope(root, target, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.scope(root, target, signal, allocation)
+      },
+      async watch(root, after, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.watch(root, after, signal, allocation)
+      },
+      async child(root, target, signal, allocation) {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.familyControls.child(root, target, signal, allocation)
+      },
     },
-    onProviderApiKey: async (provider, apiKey) => {
+    sessionReader: {
+      children: async (target, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.children(target, signal, allocation)
+      },
+      tail: async (target, read, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.tail(target, read, signal, allocation)
+      },
+      uiCatalog: async (sessionId, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.uiCatalog(sessionId, signal, allocation)
+      },
+      uiPanels: async (sessionId, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.uiPanels(sessionId, signal, allocation)
+      },
+      todos: async (target, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.todos(target, signal, allocation)
+      },
+      page: async (target, read, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.page(target, read, signal, allocation)
+      },
+      content: async (target, read, signal, allocation) => {
+        const { runtime } = await runtimeBootstrap
+        if (runtime === null) throw new Error("engine runtime is unavailable")
+        return runtime.sessionReader.content(target, read, signal, allocation)
+      },
+    },
+    onCommand: async (command, allocation) => {
+      const bootstrap = await runtimeBootstrap
+      return (await bootstrap.runtime?.sendCommand(command, allocation)) ?? null
+    },
+    onProviderApiKey: async (provider, apiKey, allocation) => {
       const bootstrap = await runtimeBootstrap
       if (bootstrap.runtime === null) throw new Error("engine runtime is unavailable")
-      return await bootstrap.runtime.submitProviderApiKey(provider, apiKey)
+      return await bootstrap.runtime.submitProviderApiKey(provider, apiKey, allocation)
     },
     onProviderActivate: async (provider) => {
       const bootstrap = await runtimeBootstrap
@@ -251,15 +364,18 @@ async function main(): Promise<void> {
       })
     },
   })
-  const { readTuiRecycleState, recycleTuiIfNeeded } = await import("./recycle-state")
-  const recycledState = readTuiRecycleState(recycleStatePath)
   if (recycledState !== null) {
-    app.restoreRecycleState(recycledState)
+    if (!app.restoreRecycleState(recycledState.state)) throw new Error("Saved editing state could not be admitted; its private handoff is retained.")
+    recycledState.consume()
     renderer.on(openTui.CliRenderEvents.FRAME, () => app.applyPendingRecycleScroll())
   }
+  recycledState = null
+  recycleAllocation.release()
+  handoffReady.resolve()
   startupFrame.destroy()
   renderer.root.add(app)
   appMounted = true
+  finishStartupStage("startup_app_mount")
   // OpenTUI's native allocator can retain released render graphs during very
   // long tool-heavy sessions. The host already supervises this private TUI and
   // replays durable state after an exit, so recycle before allocator residency
@@ -274,7 +390,7 @@ async function main(): Promise<void> {
     if (exitRequested || observedRss < tuiRssRecycleBytes) return
     if (Date.now() < nextRecycleAttemptAt) return
     nextRecycleAttemptAt = Date.now() + 10_000
-    recycleTuiIfNeeded({
+    recycleTuiIfNeeded({ allocations,
       observedBytes: observedRss,
       thresholdBytes: tuiRssRecycleBytes,
       path: recycleStatePath,
@@ -343,11 +459,8 @@ async function parseKeybindingsFromEnvironment(source: string | undefined) {
   return parseKeybindingToml(source)
 }
 
-writeStartupSplash(process.stdout)
-emitStartupMarker("ROTTWEILER_PROCESS_START_MARKER", "ROTTWEILER_PROCESS_START_EPOCH")
-void main().catch((error: unknown) => {
-  process.stderr.write(
-    `rottweiler TUI failed to start: ${error instanceof Error ? error.message : "unknown error"}\n`,
-  )
-  process.exitCode = 1
-})
+export async function runTui(): Promise<void> {
+  writeStartupSplash(process.stdout)
+  emitStartupMarker("ROTTWEILER_PROCESS_START_MARKER", "ROTTWEILER_PROCESS_START_EPOCH")
+  await main()
+}

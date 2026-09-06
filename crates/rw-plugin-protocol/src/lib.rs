@@ -1,6 +1,12 @@
-//! Dependency-leaf owner of the public Rottweiler plugin wire protocol.
+//! Runtime-independent owner of the public Rottweiler plugin wire protocol.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};
+pub use rw_types::extension_events::{
+    ExtensionEventChunk, ExtensionEventKind, ExtensionEventNotice, ExtensionEventOutcome,
+    ExtensionEventRead,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -8,9 +14,7 @@ use thiserror::Error;
 
 pub const JSON_RPC_VERSION: &str = "2.0";
 pub const PLUGIN_HOST_ID: &str = "rottweiler";
-pub const PROTOCOL_VERSION: u32 = 2;
-pub const MIN_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 1] = [PROTOCOL_VERSION];
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 pub const MAX_CAPABILITIES_PER_KIND: usize = 256;
@@ -24,6 +28,14 @@ pub const MAX_SCHEMA_DEPTH: usize = 32;
 pub const MAX_PLUGIN_MODEL_TOKENS: u64 = 16 * 1024 * 1024;
 pub const MAX_PLUGIN_PRICE_MICROS_USD: u64 = 1_000_000_000_000;
 pub const DEFAULT_HANDLER_TIMEOUT_MS: u64 = 5_000;
+pub const MAX_PROVIDER_STREAMS: usize = 4;
+pub const MAX_IN_FLIGHT_REQUESTS: u16 = 64;
+pub const CONTROL_QUEUE_FRAMES: usize = 64;
+pub const CONTROL_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+pub const DATA_QUEUE_BYTES: usize = MAX_PROVIDER_STREAMS * (MAX_FRAME_BYTES + 1);
+pub const PROVIDER_WINDOW_EVENTS: usize = 64;
+pub const PROVIDER_WINDOW_BYTES: usize = MAX_FRAME_BYTES;
+pub const MAX_OPERATION_DURATION_MS: u64 = rw_operation_contract::MAX_OPERATION_DURATION_MS as u64;
 
 /// Maximum wire length of a provider alias prefix, including its trailing slash.
 pub const MAX_PROVIDER_ALIAS_PREFIX_BYTES: usize = MAX_NAME_BYTES;
@@ -57,18 +69,28 @@ pub fn validate_provider_alias_prefix(prefix: &str) -> Result<(), ProviderAliasP
 
 pub const METHOD_INITIALIZE: &str = "initialize";
 pub const METHOD_TOOL_CALL: &str = "tool/call";
+pub const METHOD_TOOL_PROGRESS: &str = "tool/progress";
 pub const METHOD_COMMAND_EXECUTE: &str = "command/execute";
 pub const METHOD_HOOK_INVOKE: &str = "hook/invoke";
 pub const METHOD_PROVIDER_COMPLETE: &str = "provider/complete";
 pub const METHOD_PROVIDER_MODELS: &str = "provider/models";
 pub const METHOD_PROVIDER_EVENT: &str = "provider/event";
-pub const METHOD_PROVIDER_CANCEL: &str = "provider/cancel";
+pub const METHOD_PROVIDER_CREDIT: &str = "provider/credit";
 pub const METHOD_PROVIDER_HTTP: &str = "provider/http";
 pub const METHOD_PROVIDER_HTTP_EVENT: &str = "provider/http_event";
 pub const METHOD_PROVIDER_HTTP_CANCEL: &str = "provider/http_cancel";
 pub const METHOD_EVENT_PUBLISH: &str = "event/publish";
+pub const METHOD_EVENT_READ: &str = "event/read";
+pub const METHOD_SESSION_CONTEXT_READ: &str = "session/context_read";
+pub const METHOD_SESSION_CONTROL: &str = "session/control";
+pub const METHOD_SESSION_TOOL_CALL: &str = "session/tool_call";
+pub const METHOD_EFFECT_TOOL_CALL: &str = "effect/tool_call";
+pub const METHOD_SESSION_QUERY: &str = "session/query";
+pub const METHOD_EXTENSION_STATE_READ: &str = "extension/state_read";
+pub const METHOD_EXTENSION_STATE_COMMIT: &str = "extension/state_commit";
 pub const METHOD_SESSION_INJECT_MESSAGE: &str = "session/inject_message";
 pub const METHOD_SESSION_SET_STATUS: &str = "session/set_status";
+pub const METHOD_UI_PUBLISH_PANEL: &str = "ui/publish_panel";
 pub const METHOD_UI_NOTIFY: &str = "ui/notify";
 pub const METHOD_SHUTDOWN: &str = "shutdown";
 pub const METHOD_EXIT: &str = "exit";
@@ -103,7 +125,7 @@ pub struct RpcNotification {
 #[serde(deny_unknown_fields)]
 pub struct RpcSuccess {
     pub jsonrpc: String,
-    pub id: Option<RpcId>,
+    pub id: RpcId,
     pub result: Value,
 }
 
@@ -120,6 +142,7 @@ pub struct RpcErrorObject {
 #[serde(deny_unknown_fields)]
 pub struct RpcFailure {
     pub jsonrpc: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub id: Option<RpcId>,
     pub error: RpcErrorObject,
 }
@@ -134,11 +157,15 @@ pub enum RpcFrame {
 }
 
 impl RpcFrame {
-    fn validate(&self) -> Result<(), FrameError> {
+    /// Checks envelope, method, correlation ID, and error-message bounds.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid JSON-RPC envelope or bounded field.
+    pub fn validate(&self) -> Result<(), FrameError> {
         let (version, method, id) = match self {
             Self::Request(frame) => (&frame.jsonrpc, Some(frame.method.as_str()), Some(&frame.id)),
             Self::Notification(frame) => (&frame.jsonrpc, Some(frame.method.as_str()), None),
-            Self::Success(frame) => (&frame.jsonrpc, None, frame.id.as_ref()),
+            Self::Success(frame) => (&frame.jsonrpc, None, Some(&frame.id)),
             Self::Failure(frame) => (&frame.jsonrpc, None, frame.id.as_ref()),
         };
         if version != JSON_RPC_VERSION {
@@ -179,6 +206,13 @@ pub enum FrameError {
     InvalidMessage,
 }
 
+/// A validated frame and its original wire payload length, excluding LF.
+#[derive(Debug, PartialEq)]
+pub struct DecodedFrame {
+    pub frame: RpcFrame,
+    pub wire_bytes: usize,
+}
+
 /// Incremental newline-delimited JSON-RPC decoder with a hard memory bound.
 #[derive(Debug)]
 pub struct FrameDecoder {
@@ -210,7 +244,7 @@ impl FrameDecoder {
     /// # Errors
     ///
     /// Returns an error for an oversized, empty, malformed, or invalid JSON-RPC frame.
-    pub fn push(&mut self, input: &[u8]) -> Result<Vec<RpcFrame>, FrameError> {
+    pub fn push(&mut self, input: &[u8]) -> Result<Vec<DecodedFrame>, FrameError> {
         let mut frames = Vec::new();
         let mut remaining = input;
         while let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
@@ -222,6 +256,7 @@ impl FrameDecoder {
                 });
             }
             self.buffer.extend_from_slice(part);
+            let wire_bytes = self.buffer.len();
             if self.buffer.last() == Some(&b'\r') {
                 self.buffer.pop();
             }
@@ -231,7 +266,7 @@ impl FrameDecoder {
             let complete = std::mem::take(&mut self.buffer);
             let frame: RpcFrame = serde_json::from_slice(&complete)?;
             frame.validate()?;
-            frames.push(frame);
+            frames.push(DecodedFrame { frame, wire_bytes });
             remaining = &remaining[newline + 1..];
         }
         if self.buffer.len().saturating_add(remaining.len()) > self.max_frame_bytes {
@@ -280,6 +315,8 @@ pub struct PluginManifest {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCapabilities {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui: Vec<rw_types::extension_ui::UiContribution>,
     #[serde(default)]
     pub tools: Vec<PluginToolCapability>,
     #[serde(default)]
@@ -289,7 +326,7 @@ pub struct PluginCapabilities {
     #[serde(default)]
     pub providers: Vec<PluginProviderCapability>,
     #[serde(default)]
-    pub event_subscriptions: Vec<String>,
+    pub event_subscriptions: Vec<ExtensionEventKind>,
     #[serde(default)]
     pub push: Vec<PluginPush>,
 }
@@ -326,47 +363,17 @@ pub struct PluginCommandCapability {
     pub allowed_tools: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginHook {
-    SessionStart,
-    SessionEnd,
-    UserPromptSubmit,
-    PreTool,
-    PostTool,
-    PreCompact,
-    TurnEnd,
-    PermissionCheck,
-}
-
-impl PluginHook {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SessionStart => "session_start",
-            Self::SessionEnd => "session_end",
-            Self::UserPromptSubmit => "user_prompt_submit",
-            Self::PreTool => "pre_tool",
-            Self::PostTool => "post_tool",
-            Self::PreCompact => "pre_compact",
-            Self::TurnEnd => "turn_end",
-            Self::PermissionCheck => "permission_check",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PluginHookFailurePolicy {
-    FailOpen,
-    FailClosed,
-}
+pub use rw_types::hook_contract::{
+    HookClass, HookDirective, HookEvent, HookFailurePolicy, HookInput, HookPermissionDecision,
+    HookTransform,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginHookCapability {
-    pub name: PluginHook,
-    pub failure_policy: PluginHookFailurePolicy,
+    pub class: HookClass,
+    pub name: HookEvent,
+    pub failure_policy: HookFailurePolicy,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -389,21 +396,48 @@ pub struct PluginProviderCapability {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum PluginPush {
+    #[serde(rename = "event/read")]
+    EventRead,
+    #[serde(rename = "session/query")]
+    SessionQuery,
+    #[serde(rename = "session/context_read")]
+    SessionContextRead,
+    #[serde(rename = "session/control")]
+    SessionControl,
+    #[serde(rename = "session/tool_call")]
+    SessionToolCall,
+    #[serde(rename = "effect/tool_call")]
+    EffectToolCall,
+    #[serde(rename = "extension/state_read")]
+    ExtensionStateRead,
+    #[serde(rename = "extension/state_commit")]
+    ExtensionStateCommit,
     #[serde(rename = "session/inject_message")]
     SessionInjectMessage,
     #[serde(rename = "session/set_status")]
     SessionSetStatus,
     #[serde(rename = "ui/notify")]
     UiNotify,
+    #[serde(rename = "ui/publish_panel")]
+    UiPublishPanel,
 }
 
 impl PluginPush {
     #[must_use]
     pub const fn method(self) -> &'static str {
         match self {
+            Self::EventRead => METHOD_EVENT_READ,
+            Self::SessionQuery => METHOD_SESSION_QUERY,
+            Self::SessionContextRead => METHOD_SESSION_CONTEXT_READ,
+            Self::SessionControl => METHOD_SESSION_CONTROL,
+            Self::SessionToolCall => METHOD_SESSION_TOOL_CALL,
+            Self::EffectToolCall => METHOD_EFFECT_TOOL_CALL,
+            Self::ExtensionStateRead => METHOD_EXTENSION_STATE_READ,
+            Self::ExtensionStateCommit => METHOD_EXTENSION_STATE_COMMIT,
             Self::SessionInjectMessage => METHOD_SESSION_INJECT_MESSAGE,
             Self::SessionSetStatus => METHOD_SESSION_SET_STATUS,
             Self::UiNotify => METHOD_UI_NOTIFY,
+            Self::UiPublishPanel => METHOD_UI_PUBLISH_PANEL,
         }
     }
 }
@@ -414,12 +448,8 @@ pub enum ManifestError {
     TooLarge { limit: usize },
     #[error("manifest JSON is invalid: {message}")]
     Malformed { message: String },
-    #[error("protocol {protocol} is unsupported; expected {minimum}..={maximum}")]
-    UnsupportedProtocol {
-        protocol: u32,
-        minimum: u32,
-        maximum: u32,
-    },
+    #[error("protocol {protocol} is unsupported; expected {expected}")]
+    UnsupportedProtocol { protocol: u32, expected: u32 },
     #[error("manifest field `{field}` is invalid: {reason}")]
     InvalidField {
         field: &'static str,
@@ -451,17 +481,16 @@ impl PluginManifest {
         Ok(manifest)
     }
 
-    /// Validates protocol compatibility and every declared capability.
+    /// Validates protocol identity and every declared capability.
     ///
     /// # Errors
     ///
     /// Returns an error for any invalid or out-of-bounds manifest field.
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&self.protocol) {
+        if self.protocol != PROTOCOL_VERSION {
             return Err(ManifestError::UnsupportedProtocol {
                 protocol: self.protocol,
-                minimum: MIN_PROTOCOL_VERSION,
-                maximum: PROTOCOL_VERSION,
+                expected: PROTOCOL_VERSION,
             });
         }
         validate_name(&self.name, NameKind::Plugin, "name")?;
@@ -497,11 +526,68 @@ impl PluginManifest {
     }
 }
 
+impl PluginHookCapability {
+    fn validate(self) -> Result<(), ManifestError> {
+        if (self.class == HookClass::Transform && !self.name.accepts_transform())
+            || (self.class == HookClass::Policy
+                && self.failure_policy != HookFailurePolicy::FailClosed)
+        {
+            return Err(ManifestError::InvalidField {
+                field: "hooks",
+                reason: "invalid hook class, phase, or failure policy",
+            });
+        }
+        Ok(())
+    }
+}
+
 impl PluginCapabilities {
+    fn validate_hooks(&self) -> Result<(), ManifestError> {
+        validate_count("hooks", self.hooks.len())?;
+        validate_unique("hook", self.hooks.iter().map(|hook| hook.name.as_str()))?;
+        self.hooks
+            .iter()
+            .copied()
+            .try_for_each(PluginHookCapability::validate)
+    }
+
+    fn validate_ui(&self) -> Result<(), ManifestError> {
+        rw_types::extension_ui::validate_contributions(&self.ui).map_err(|_| {
+            ManifestError::InvalidField {
+                field: "ui",
+                reason: "invalid presentation declarations",
+            }
+        })?;
+        for contribution in &self.ui {
+            if let rw_types::extension_ui::UiContribution::Tool { tool_name, .. } = contribution
+                && !self.tools.iter().any(|tool| &tool.name == tool_name)
+            {
+                return Err(ManifestError::InvalidField {
+                    field: "ui.tool_name",
+                    reason: "tool presenter requires its declared tool",
+                });
+            }
+            for action in contribution.actions() {
+                if !self
+                    .commands
+                    .iter()
+                    .any(|command| command.name == action.command)
+                {
+                    return Err(ManifestError::InvalidField {
+                        field: "ui.actions",
+                        reason: "action requires its declared command",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), ManifestError> {
+        self.validate_ui()?;
         validate_count("tools", self.tools.len())?;
         validate_count("commands", self.commands.len())?;
-        validate_count("hooks", self.hooks.len())?;
+        self.validate_hooks()?;
         validate_count("providers", self.providers.len())?;
         validate_count("event_subscriptions", self.event_subscriptions.len())?;
         validate_count("push", self.push.len())?;
@@ -565,7 +651,6 @@ impl PluginCapabilities {
                 NameKind::Tool,
             )?;
         }
-        validate_unique("hook", self.hooks.iter().map(|hook| hook.name.as_str()))?;
 
         let mut prefixes = BTreeSet::new();
         for provider in &self.providers {
@@ -592,10 +677,9 @@ impl PluginCapabilities {
                 });
             }
         }
-        validate_unique_named(
+        validate_unique(
             "event subscription",
-            self.event_subscriptions.iter().map(String::as_str),
-            NameKind::Event,
+            self.event_subscriptions.iter().map(|kind| kind.as_str()),
         )?;
         validate_unique("push method", self.push.iter().map(|push| push.method()))?;
         Ok(())
@@ -607,7 +691,6 @@ enum NameKind {
     Plugin,
     Tool,
     Command,
-    Event,
 }
 
 fn validate_name(name: &str, kind: NameKind, field: &'static str) -> Result<(), ManifestError> {
@@ -618,14 +701,6 @@ fn validate_name(name: &str, kind: NameKind, field: &'static str) -> Result<(), 
         NameKind::Tool => name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
-        NameKind::Event => {
-            name.bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                && name
-                    .bytes()
-                    .next()
-                    .is_some_and(|byte| byte.is_ascii_uppercase())
-        }
     };
     if name.is_empty() || name.len() > MAX_NAME_BYTES || !valid_bytes {
         return Err(ManifestError::InvalidField {
@@ -750,6 +825,7 @@ fn normalize_capability_arrays(value: &mut Value) {
         "hooks",
         "providers",
         "event_subscriptions",
+        "ui",
         "push",
     ] {
         if let Some(values) = capabilities.get_mut(key).and_then(Value::as_array_mut) {
@@ -811,7 +887,6 @@ fn canonicalize(value: Value) -> Value {
 pub struct InitializeParams {
     pub host: String,
     pub protocol: u32,
-    pub min_protocol: u32,
     pub max_frame_bytes: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
@@ -836,20 +911,25 @@ pub struct InjectMessageResult {
 pub struct ToolCallParams {
     pub name: String,
     pub input: Value,
+    pub lifetime: OperationLifetime,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolProgressParams {
+    pub request_id: RpcId,
+    pub sequence: u32,
+    pub progress: ToolProgress,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandExecuteParams {
+    pub lifetime: OperationLifetime,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub invocation_id: Option<rw_types::extension_invocation::ExtensionInvocationId>,
     pub name: String,
     pub arguments: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookInvokeParams {
-    pub hook: PluginHook,
-    pub payload: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -859,18 +939,19 @@ pub struct ProviderCompleteParams {
     pub request: Value,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCreditParams {
+    pub request_id: RpcId,
+    pub events: u32,
+    pub bytes: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEventParams {
     pub request_id: RpcId,
     pub event: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct EventPublishParams {
-    pub event: String,
-    pub payload: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -954,6 +1035,8 @@ pub struct ProviderHttpRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderHttpCapabilityParams {
+    /// Exact host-owned provider or catalog invocation authorizing this request.
+    pub invocation_id: RpcId,
     pub alias: String,
     pub credential_reference: String,
     pub request: ProviderHttpRequest,
@@ -961,6 +1044,6 @@ pub struct ProviderHttpCapabilityParams {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderCancelParams {
+pub struct ProviderHttpCancelParams {
     pub request_id: RpcId,
 }

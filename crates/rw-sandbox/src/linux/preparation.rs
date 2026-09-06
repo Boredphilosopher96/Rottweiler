@@ -1,0 +1,279 @@
+//! Creates the source compiler view before dropping mount and network authority.
+
+use super::{command_without_helper_pin, install_landlock, install_network_floor, sandbox_backend};
+use crate::{NetworkPolicy, PreparationFilesystem, SandboxError, SandboxPolicy, preparation::Root};
+use rustix::mount::{MountFlags, mount, mount_bind, mount_remount};
+use std::{
+    ffi::{OsStr, OsString},
+    fs::{self, File, OpenOptions},
+    os::{
+        fd::AsRawFd as _,
+        unix::{fs::OpenOptionsExt as _, process::CommandExt as _},
+    },
+    path::{Path, PathBuf},
+};
+
+mod mounts;
+
+const MAX_VIEW_NODES: usize = 512;
+const MAX_VIEW_ENTRIES: usize = 8192;
+
+pub(super) fn run(
+    policy: &SandboxPolicy,
+    layout: &PreparationFilesystem,
+    program: &OsStr,
+    args: &[OsString],
+    helper_pin: Option<u32>,
+) -> Result<std::convert::Infallible, SandboxError> {
+    layout.validate()?;
+    if Path::new(program) != layout.executable.path() {
+        return Err(SandboxError::UntrustedHelper);
+    }
+    let executable = layout.executable.snapshot_approved()?;
+    if policy.network != NetworkPolicy::Deny || policy.read_roots.is_some() {
+        return Err(SandboxError::MalformedHelper);
+    }
+    let expected = std::iter::once(&layout.work.path)
+        .chain(layout.output.iter().map(|root| &root.path))
+        .collect::<Vec<_>>();
+    if policy
+        .write_roots
+        .iter()
+        .any(|root| !expected.contains(&root))
+    {
+        return Err(SandboxError::MalformedHelper);
+    }
+    let args = args
+        .iter()
+        .map(|arg| layout.project_argument(arg))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut view = View::new(&layout.mount)?;
+    view.bind_declared(&layout.code, "plugin", &layout.credentials, true)?;
+    view.bind_declared(&layout.work, "scratch", &[], false)?;
+    if let Some(output) = &layout.output {
+        view.bind_declared(output, "output", &[], false)?;
+    }
+    let runtime_exclusions = layout
+        .homes
+        .iter()
+        .chain(&layout.credentials)
+        .cloned()
+        .collect::<Vec<_>>();
+    for root in [
+        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32",
+    ] {
+        let path = Path::new(root);
+        if path.exists() {
+            view.bind_tree(
+                path,
+                Path::new(root.trim_start_matches('/')),
+                &runtime_exclusions,
+                true,
+            )?;
+        }
+    }
+    view.directory(Path::new("dev"))?;
+    for (name, readonly) in [("null", false), ("urandom", true), ("zero", true)] {
+        view.bind_tree(
+            &Path::new("/dev").join(name),
+            &Path::new("dev").join(name),
+            &[],
+            readonly,
+        )?;
+    }
+    view.directory(Path::new("proc"))?;
+    mount(
+        "proc",
+        view.target(Path::new("proc")),
+        "proc",
+        MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC | MountFlags::RDONLY,
+        None,
+    )
+    .map_err(sandbox_backend)?;
+    nix::unistd::fchdir(&view.root).map_err(sandbox_backend)?;
+    nix::unistd::chroot(".").map_err(sandbox_backend)?;
+    std::env::set_current_dir("/").map_err(sandbox_backend)?;
+    drop(view);
+    let mut writable = policy
+        .write_roots
+        .iter()
+        .map(|root| layout.project_argument(root.as_os_str()).map(PathBuf::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    writable.push(PathBuf::from("/dev/null"));
+    let projected =
+        SandboxPolicy::new(writable, NetworkPolicy::Deny)?.with_read_roots([Path::new("/")])?;
+    let executable_path = fd_path(&executable).into_os_string();
+    install_landlock(&projected, &executable_path)?;
+    install_network_floor(false)?;
+    super::process_creation::restrict_if_requested(policy)?;
+    super::authority::lock_setup_authority()?;
+    let mut command = command_without_helper_pin(&executable_path, &args, helper_pin)?;
+    command
+        .current_dir("/plugin")
+        .env("HOME", "/scratch")
+        .env("TMPDIR", "/scratch");
+    Err(SandboxError::Exec(command.exec()))
+}
+
+struct View {
+    root: File,
+    mounts: mounts::Mounts,
+    nodes: usize,
+    entries: usize,
+}
+impl View {
+    fn new(root: &Root) -> Result<Self, SandboxError> {
+        let pinned = open_root(root)?;
+        if fs::read_dir(fd_path(&pinned))
+            .map_err(sandbox_backend)?
+            .next()
+            .is_some()
+        {
+            return Err(SandboxError::MalformedHelper);
+        }
+        Ok(Self {
+            root: pinned,
+            mounts: mounts::Mounts::capture()?,
+            nodes: 0,
+            entries: 0,
+        })
+    }
+    fn target(&self, relative: &Path) -> PathBuf {
+        fd_path(&self.root).join(relative)
+    }
+    fn node(&mut self) -> Result<(), SandboxError> {
+        self.nodes += 1;
+        if self.nodes > MAX_VIEW_NODES {
+            return Err(SandboxError::Unavailable(
+                "source preparation view exceeds its mount-entry limit".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+    fn directory(&mut self, relative: &Path) -> Result<(), SandboxError> {
+        self.node()?;
+        fs::create_dir(self.target(relative)).map_err(sandbox_backend)
+    }
+    fn bind_declared(
+        &mut self,
+        root: &Root,
+        relative: &str,
+        excluded: &[PathBuf],
+        readonly: bool,
+    ) -> Result<(), SandboxError> {
+        let pinned = open_root(root)?;
+        self.bind_pinned(&pinned, &root.path, Path::new(relative), excluded, readonly)
+    }
+    fn bind_tree(
+        &mut self,
+        source: &Path,
+        relative: &Path,
+        excluded: &[PathBuf],
+        readonly: bool,
+    ) -> Result<(), SandboxError> {
+        let source = fs::canonicalize(source).map_err(sandbox_backend)?;
+        let pinned = open_path(&source)?;
+        self.bind_pinned(&pinned, &source, relative, excluded, readonly)
+    }
+    fn bind_pinned(
+        &mut self,
+        source: &File,
+        logical: &Path,
+        relative: &Path,
+        excluded: &[PathBuf],
+        readonly: bool,
+    ) -> Result<(), SandboxError> {
+        if excluded.iter().any(|path| logical.starts_with(path)) {
+            return Ok(());
+        }
+        let metadata = source.metadata().map_err(sandbox_backend)?;
+        // A nonrecursive bind cannot prune locked submounts inherited from
+        // the enclosing user namespace. Preserve their visible contents with
+        // separate read-only leaf binds, including every nested mount boundary.
+        if metadata.is_dir()
+            && (excluded.iter().any(|path| path.starts_with(logical))
+                || self.mounts.has_descendant(logical))
+        {
+            self.directory(relative)?;
+            for entry in fs::read_dir(fd_path(source)).map_err(sandbox_backend)? {
+                let entry = entry.map_err(sandbox_backend)?;
+                self.entries += 1;
+                if self.entries > MAX_VIEW_ENTRIES {
+                    return Err(SandboxError::Unavailable(
+                        "source preparation view exceeds its directory-entry limit".to_owned(),
+                    ));
+                }
+                let name = entry.file_name();
+                if excluded
+                    .iter()
+                    .any(|path| logical.join(&name).starts_with(path))
+                {
+                    continue;
+                }
+                let child = open_path(&entry.path())?;
+                if child
+                    .metadata()
+                    .map_err(sandbox_backend)?
+                    .file_type()
+                    .is_symlink()
+                {
+                    self.node()?;
+                    std::os::unix::fs::symlink(
+                        fs::read_link(entry.path()).map_err(sandbox_backend)?,
+                        self.target(&relative.join(name)),
+                    )
+                    .map_err(sandbox_backend)?;
+                } else {
+                    self.bind_pinned(
+                        &child,
+                        &logical.join(&name),
+                        &relative.join(name),
+                        excluded,
+                        readonly,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+        if metadata.is_dir() {
+            self.directory(relative)?;
+        } else {
+            self.node()?;
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.target(relative))
+                .map_err(sandbox_backend)?;
+        }
+        let target = self.target(relative);
+        mount_bind(fd_path(source), &target).map_err(|error| {
+            SandboxError::Backend(format!(
+                "source preparation bind mount for {}: {error}",
+                relative.display()
+            ))
+        })?;
+        if readonly {
+            mount_remount(target, mounts::readonly_flags(source)?, "").map_err(|error| {
+                SandboxError::Backend(format!("source preparation read-only remount: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+fn open_root(root: &Root) -> Result<File, SandboxError> {
+    let file = open_path(&root.path)?;
+    if !root.matches(&file.metadata().map_err(sandbox_backend)?) {
+        return Err(SandboxError::RootTypeChanged);
+    }
+    Ok(file)
+}
+fn open_path(path: &Path) -> Result<File, SandboxError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(sandbox_backend)
+}
+fn fd_path(file: &File) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}

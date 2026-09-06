@@ -575,6 +575,14 @@ async fn shutdown_authenticated_host_inner(
     let shutdown = Request::builder()
         .method(Method::POST)
         .uri("/v1/command")
+        .header(
+            crate::server::COMMAND_LANE_HEADER,
+            if command.is_urgent() {
+                "urgent"
+            } else {
+                "normal"
+            },
+        )
         .header(HOST, "localhost")
         .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
         .header(CLIENT_HEADER, &credentials.client_id.0)
@@ -586,8 +594,11 @@ async fn shutdown_authenticated_host_inner(
     if response.status() != StatusCode::ACCEPTED {
         return Err("remote engine rejected host shutdown".to_owned());
     }
-    match collect_control_json::<CommandOutcome>(response.into_body()).await? {
-        CommandOutcome::Accepted => Ok(()),
+    match collect_control_json::<rw_core::CommandReply>(response.into_body())
+        .await?
+        .outcome()
+    {
+        CommandOutcome::Accepted {} => Ok(()),
         CommandOutcome::Rejected { error } => Err(format!(
             "remote engine rejected host shutdown: {}",
             error.code

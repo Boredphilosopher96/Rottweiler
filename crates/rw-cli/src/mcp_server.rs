@@ -58,6 +58,7 @@ struct CliMcpBridge {
     bound: BoundClient,
     workspace: String,
     request_sequence: AtomicU64,
+    request_namespace: String,
 }
 
 impl CliMcpBridge {
@@ -66,7 +67,7 @@ impl CliMcpBridge {
         CommandMeta {
             protocol_version: PROTOCOL_VERSION,
             client_id: self.bound.client_id.clone(),
-            request_id: RequestId(format!("mcp-{sequence}")),
+            request_id: RequestId(format!("mcp-{}-{sequence}", self.request_namespace)),
         }
     }
 
@@ -80,24 +81,37 @@ impl CliMcpBridge {
             .subscribe(self.bound.clone(), None, None)
             .await
             .map_err(|_| BridgeError::safe("engine session query is unavailable"))?;
-        require_accepted(
-            &self.host.dispatch(self.bound.clone(), command).await,
-            "engine session request was rejected",
-        )?;
+        let response = self.host.dispatch(self.bound.clone(), command).await;
+        require_accepted(&response.outcome, "engine session request was rejected")?;
+        let reply: rw_core::CommandReply = serde_json::from_slice(&response.bytes)
+            .map_err(|_| BridgeError::safe("engine session reply is invalid"))?;
+        if let rw_core::CommandReply::Read { events, .. } = reply {
+            return events
+                .into_iter()
+                .find_map(|event| match event {
+                    EngineEvent::SessionsListed { meta, sessions }
+                        if meta.request_id == request_id =>
+                    {
+                        Some(sessions)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| BridgeError::safe("engine session reply has no session list"));
+        }
         tokio::time::timeout(HOST_RESULT_TIMEOUT, async {
             while let Some(event) = events.recv().await {
+                let event = event.map_err(|_| {
+                    BridgeError::safe("engine session result stream is unavailable")
+                })?;
+                let event: EngineEvent = serde_json::from_slice(&event.json)
+                    .map_err(|_| BridgeError::safe("engine session result JSON is invalid"))?;
                 match event {
-                    Ok(EngineEvent::SessionsListed { meta, sessions })
+                    EngineEvent::SessionsListed { meta, sessions }
                         if meta.request_id == request_id =>
                     {
                         return Ok(sessions);
                     }
-                    Ok(_) => {}
-                    Err(_) => {
-                        return Err(BridgeError::safe(
-                            "engine session result stream is unavailable",
-                        ));
-                    }
+                    _ => {}
                 }
             }
             Err(BridgeError::safe(
@@ -126,7 +140,7 @@ fn require_accepted(
     safe_message: &'static str,
 ) -> Result<(), BridgeError> {
     match outcome {
-        CommandOutcome::Accepted => Ok(()),
+        CommandOutcome::Accepted {} => Ok(()),
         CommandOutcome::Rejected { .. } => Err(BridgeError::safe(safe_message)),
     }
 }
@@ -155,8 +169,10 @@ impl EngineMcpBridge for CliMcpBridge {
         let capabilities = tool
             .invocation_capabilities(&arguments)
             .map_err(|_| BridgeError::safe("tool input could not be authorized"))?;
+        let request_id = self.next_meta().request_id.0;
         let request = PermissionRequest {
-            id: self.next_meta().request_id.0,
+            invocation_id: rw_types::ToolInvocationId(request_id.clone()),
+            id: request_id,
             tool_name: name.to_owned(),
             arguments: arguments.clone(),
             capabilities: capabilities.capabilities().to_vec(),
@@ -228,7 +244,7 @@ impl EngineMcpBridge for CliMcpBridge {
                 },
             )
             .await;
-        require_accepted(&outcome, "engine rejected the session message")?;
+        require_accepted(&outcome.outcome, "engine rejected the session message")?;
         Ok(json!({"accepted": true, "session_id": session_id}))
     }
 }
@@ -270,6 +286,7 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
     };
     let factory = Arc::new(
         RuntimeSessionFactory::new(host_options)
+            .await
             .map_err(|_| miette!("MCP engine host could not initialize"))?,
     );
     let host = rw_runtime::HeadlessRuntimeBuilder::new(factory)
@@ -286,6 +303,9 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         .map_err(|_| miette!("MCP workspace authority could not initialize"))?;
     let permissions = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe)
         .with_workspace_roots(&options.workspace_roots);
+    let mut request_entropy = [0_u8; 16];
+    getrandom::fill(&mut request_entropy)
+        .map_err(|_| miette!("MCP request identity entropy is unavailable"))?;
     let bridge = Arc::new(CliMcpBridge {
         host,
         registry,
@@ -296,6 +316,7 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         },
         workspace: workspace.to_string_lossy().into_owned(),
         request_sequence: AtomicU64::new(1),
+        request_namespace: format!("{:032x}", u128::from_le_bytes(request_entropy)),
     });
     let server = RottweilerMcpServerFactory::new(bridge.clone(), move || {
         McpServerAuthority::new(allowed_tools.clone(), std::iter::empty())

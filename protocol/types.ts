@@ -4,14 +4,205 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export const PROTOCOL_VERSION = 1 as const;
 
+export const TRANSCRIPT_PROJECTION_VERSION = 7 as const;
+
+export const TRANSCRIPT_TAIL_PAGE_BYTES = 1048576 as const;
+export const TRANSCRIPT_TAIL_MIN_PAGE_BYTES = 524288 as const;
+export const TRANSCRIPT_TAIL_PAGE_ITEMS = 32 as const;
+export const TRANSCRIPT_TAIL_TEXT_BYTES = 65536 as const;
+export const TRANSCRIPT_TAIL_TOOL_BYTES = 8192 as const;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 16 as const;
 export const MAX_TEXT_ATTACHMENT_BYTES = 1048576 as const;
 export const MAX_IMAGE_ATTACHMENT_BYTES = 5242880 as const;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 10485760 as const;
 export const MAX_MCP_SERVER_ID_BYTES = 96 as const;
+export const MAX_COMMAND_REPLY_BYTES = 8388608 as const;
+export const MAX_CLIENT_READS = 2 as const;
+export const MAX_SESSION_READ_ANCESTORS = 8 as const;
+export const MAX_CLIENT_CONTROLS = 8 as const;
+export const MAX_CLIENT_URGENT_CONTROLS = 2 as const;
+export const MAX_COMMAND_BODY_BYTES = 16777216 as const;
+export const MAX_CONTROL_RETAINED_BYTES = 16777216 as const;
+export const MAX_URGENT_CONTROL_RETAINED_BYTES = 65536 as const;
+export const MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES = 65536 as const;
+export const MAX_UI_CONTRIBUTIONS = 128 as const;
+export const MAX_UI_DESCRIPTOR_BYTES = 262144 as const;
+export const MAX_UI_FIELDS = 32 as const;
+export const MAX_UI_ACTIONS = 4 as const;
+export const MAX_UI_LABEL_BYTES = 128 as const;
+export const MAX_UI_VALUE_BYTES = 4096 as const;
+export const MAX_UI_LIST_ITEMS = 32 as const;
+export const MAX_UI_TABLE_ROWS = 32 as const;
+export const MAX_UI_TABLE_COLUMNS = 8 as const;
+export const MAX_UI_PANEL_SLOTS = 8 as const;
+export const MAX_UI_PANELS_BYTES = 524288 as const;
+export const MAX_UI_SURFACE_BYTES = 65536 as const;
+export const MAX_PENDING_TOOL_APPROVAL_BYTES = 4194304 as const;
+export const MAX_PENDING_TOOL_APPROVAL_PREPARED_BYTES = 16777216 as const;
+export const MAX_PENDING_TOOL_INVOCATIONS = 128 as const;
+export const MAX_PENDING_TOOL_ARGUMENT_BYTES = 1048576 as const;
+export const MAX_PENDING_TOOL_PREPARED_BYTES = 8388608 as const;
+export const MAX_TOOL_CALL_ID_BYTES = 1024 as const;
+export const MAX_TOOL_NAME_BYTES = 256 as const;
+export const MAX_PENDING_QUESTION_REQUESTS = 64 as const;
+export const MAX_QUESTION_BYTES = 65536 as const;
+export const MAX_QUESTION_PREPARED_BYTES = 262144 as const;
+export const MAX_PENDING_QUESTION_BYTES = 4194304 as const;
+export const MAX_PENDING_QUESTION_PREPARED_BYTES = 16777216 as const;
+export const MAX_ACTIVE_CHILDREN = 256 as const;
+export const MAX_CHILD_TASK_PREVIEW_BYTES = 1024 as const;
+export const MAX_SESSION_CHILDREN_BYTES = 2097152 as const;
+export const MAX_SESSION_CHILDREN_PREPARED_BYTES = 8388608 as const;
+export const MAX_SESSION_STATE_BYTES = 2097152 as const;
+export const MAX_SESSION_STATE_PREPARED_BYTES = 16777216 as const;
+export const MAX_SESSION_QUEUE_PREVIEW_BYTES = 1024 as const;
+export const MAX_SESSION_PLUGIN_STATUSES = 64 as const;
+export const MAX_PLUGIN_STATUS_BYTES = 1024 as const;
+export const MAX_SESSION_QUEUE_ITEMS = 128 as const;
+export const MAX_SESSION_CONTROLS_BYTES = 7340032 as const;
+export const MAX_SESSION_CONTROLS_PREPARED_BYTES = 67108864 as const;
+export const MAX_PENDING_PLAN_BYTES = 262144 as const;
+export const MAX_PENDING_PLAN_PREPARED_BYTES = 1048576 as const;
+export const MAX_TURN_CITATIONS = 256 as const;
+export const MAX_CITATION_TEXT_BYTES = 65536 as const;
+export const MAX_TURN_CITATION_TEXT_BYTES = 1048576 as const;
+export const MAX_TURN_CITATION_PREPARED_BYTES = 4194304 as const;
+export const MAX_TODO_ITEMS = 128 as const;
+export const MAX_TODO_ID_BYTES = 256 as const;
+export const MAX_TODO_CONTENT_BYTES = 4096 as const;
+export const MAX_TODO_TOTAL_BYTES = 65536 as const;
+export const MAX_FAMILY_CONTROL_WAITS = 64 as const;
+export const MAX_CLIENT_FAMILY_CONTROL_WAITS = 1 as const;
+export const FAMILY_CONTROL_WAIT_MILLIS = 10000 as const;
+export const MAX_FAMILY_CONTROL_DEPTH = 8 as const;
+export const MAX_FAMILY_CONTROL_ROWS = 256 as const;
+export const MAX_FAMILY_CONTROLS_BYTES = 524288 as const;
+export const MAX_FAMILY_CONTROLS_PREPARED_BYTES = 2097152 as const;
 export const MCP_SERVER_ID_PATTERN = "^[A-Za-z0-9._-]{1,96}$" as const;
 
 export type ToolCallId = string;
+
+export type ToolInvocationId = string;
+
+export type ToolProgress = { message: string, amount?: ProgressAmount | null, };
+
+export type ExtensionDeliveryCursor = { session_id: SessionId, sequence: SequenceId, };
+
+export type ExtensionStateMutation = { "action": "set", key: string, value: JsonValue, } | { "action": "delete", key: string, };
+
+export type ExtensionStateTransaction = { expected_revision: SequenceId | null, mutations: Array<ExtensionStateMutation>, acknowledged: ExtensionDeliveryCursor | null, };
+
+export type UiGenerationId = string;
+
+export type UiContributionOwner = { extension: string, generation: UiGenerationId, };
+
+export type UiDisplayField = { "kind": "text", id: string, label: string, } | { "kind": "badge", id: string, label: string, } | { "kind": "list", id: string, label: string, max_items: number, } | { "kind": "table", id: string, label: string, columns: Array<string>, max_rows: number, };
+
+export type UiDisplayAction = { id: string, label: string, };
+
+export type UiDisplaySurface = { "surface": "tool", tool_name: string, } | { "surface": "panel", };
+
+export type UiDisplayDescriptor = { id: string, title: string, surface: UiDisplaySurface, fields: Array<UiDisplayField>, actions: Array<UiDisplayAction>, };
+
+export type UiPresentation = { owner: UiContributionOwner, descriptor: UiDisplayDescriptor, projected: UiProjectedFields, };
+
+export type UiCatalogEntry = { owner: UiContributionOwner, descriptor: UiDisplayDescriptor, };
+
+export type UiCatalog = { entries: Array<UiCatalogEntry>, };
+
+export type UiActionTarget = { "surface": "tool", invocation_id: ToolInvocationId, } | { "surface": "panel", revision: number, };
+
+export type UiActionRequest = { owner: UiContributionOwner, contribution_id: string, action_id: string, target: UiActionTarget, };
+
+export type UiPanelSnapshot = { revision: number, presentation: UiPresentation, };
+
+export type UiPanels = { panels: Array<UiPanelSnapshot>, };
+
+export type UiAction = { id: string, label: string, command: string, arguments: JsonValue, };
+
+export type UiContribution = { "surface": "tool", id: string, tool_name: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, } | { "surface": "panel", id: string, title: string, fields: Array<UiField>, actions: Array<UiAction>, };
+
+export type UiField = { "kind": "text", id: string, label: string, path: Array<UiSelectorStep>, } | { "kind": "badge", id: string, label: string, path: Array<UiSelectorStep>, } | { "kind": "list", id: string, label: string, path: Array<UiSelectorStep>, max_items: number, } | { "kind": "table", id: string, label: string, path: Array<UiSelectorStep>, columns: Array<UiTableColumn>, max_rows: number, };
+
+export type UiProjectedField = { "kind": "text", id: string, value: string | null, } | { "kind": "badge", id: string, value: string | null, } | { "kind": "list", id: string, values: Array<string>, } | { "kind": "table", id: string, rows: Array<Array<string>>, };
+
+export type UiProjectedFields = { fields: Array<UiProjectedField>,
+/**
+ * At least one source value was truncated by a declared or aggregate bound.
+ */
+truncated: boolean, };
+
+export type UiSelectorStep = { "step": "field", name: string, } | { "step": "index", index: number, };
+
+export type UiTableColumn = { label: string, path: Array<UiSelectorStep>, };
+
+export type TodoItem = { id: string, content: string, status: TodoStatus, };
+
+export type TodoStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export type SessionControls = { questions: Array<SessionQuestion>, approvals: Array<SessionApproval>, pending_plan: PlanArtifact | null, };
+
+export type SessionControlsSnapshot = { through: SequenceId | null, controls: SessionControls, };
+
+export type ChildControlHop = { subagent_id: SubagentId, session_id: SessionId, };
+
+export type ChildControlTarget = { ancestry: Array<ChildControlHop>, session_id: SessionId, };
+
+export type ChildControlSummary = { revision: SequenceId, through: SequenceId | null, questions: number, approvals: number, pending_plan: boolean, available: boolean, };
+
+export type FamilyControlRow = { target: ChildControlTarget, controls: ChildControlSummary, };
+
+export type FamilyControlsSnapshot = {
+/**
+ * Reconnect starts with an unconditional read; this fence belongs to the live host.
+ */
+revision: SequenceId, children: Array<FamilyControlRow>, };
+
+export type InputSelection = { "type": "accepted", } | { "type": "transformed", text: string, };
+
+export type ContextSelection = { "type": "plan_review", source: SequenceId, } | { "type": "retained", selected_source: SequenceId, body_source: SequenceId, } | { "type": "continuation", };
+
+export type ToolResultReference = { invocation_id: ToolInvocationId, finished_source: SequenceId, };
+
+export type ToolResultAdmission = { encoded_bytes: string, nodes: number, string_bytes: string, depth: number, };
+
+export type ChildControlsSnapshot = { revision: SequenceId, snapshot: SessionControlsSnapshot, };
+
+export type ChildReadScopeResult = { "type": "ready", scope: SessionReadScope, } | { "type": "catching_up", session_id: SessionId, through: SequenceId | null, target: SequenceId | null, };
+
+export type ChildControlResponse = { "type": "question", question_id: QuestionId, answer: Answer, } | { "type": "approval", tool_call_id: ToolCallId, invocation_id: ToolInvocationId, decision: ApprovalDecision, binding: ApprovalBinding | null, } | { "type": "plan", decision: PlanDecision, revisions: string | null, };
+
+export type SessionStateSnapshot = { through: SequenceId | null, driver_client_id: ClientId | null, title: string | null, model_alias: ModelAlias, provider: string | null, thinking: ThinkingLevel, mode_id: ModeId, active_turn: SessionActiveTurn | null, completed_turns: string, shell: SessionShellState | null, compaction: SessionCompactionState | null, queued_messages: Array<SessionQueuedPreview>, plugin_statuses: Array<SessionPluginStatus>, budget: SessionBudgetState | null, };
+
+export type SessionPluginStatus = { plugin_id: string, status: string, source: SequenceId, };
+
+export type SessionChildState = { subagent_id: SubagentId, child_session_id: SessionId, spawned: SequenceId, spawned_turn: string, task_preview: string, task_truncated: boolean, };
+
+export type SessionChildrenResult = { "type": "ready", snapshot: SessionChildrenSnapshot, } | { "type": "catching_up", through: SequenceId | null, target: SequenceId | null, };
+
+export type SessionChildrenSnapshot = { through: SequenceId | null, children: Array<SessionChildState>, };
+
+export type SessionActiveTurn = { turn_id: TurnId, started: SequenceId | null, };
+
+export type SessionBudgetState = { turn_id: TurnId, level: BudgetLevel, scope: BudgetScope, unit: BudgetUnit, current: string, limit: string, };
+
+export type SessionCompactionState = { revision: string, text: TranscriptTailText, thinking: TranscriptTailText, summary_turn_id: TurnId, started: SequenceId, attempt: number | null, };
+
+export type SessionShellState = { shell_id: ShellId, command_preview: string, truncated: boolean, };
+
+export type SessionQueuedPreview = { position: string, preview: string, truncated: boolean, };
+
+export type SessionApproval = { invocation_id: ToolInvocationId, tool_call_id: ToolCallId, turn_id: TurnId, name: string, args: JsonValue, capabilities: Array<ToolCapability>, rationale: string, diff: UnifiedDiff | null, };
+
+export type SessionQuestion = { question_id: QuestionId, turn_id: TurnId, question: Question, };
+
+export type TodoSnapshot = { items: Array<TodoItem>, };
+
+export type TodoReadSnapshot = { through: SequenceId | null, snapshot: TodoSnapshot, };
+
+export type TodoReadResult = { "type": "ready", todos: TodoReadSnapshot, } | { "type": "catching_up", through: SequenceId | null, target: SequenceId | null, };
+
+export type ProgressAmount = { completed: number, total: number, };
 
 export type SessionId = string;
 
@@ -33,8 +224,6 @@ export type SubagentActivity = "running" | "idle";
 
 export type SubagentDescriptor = { subagent_id: SubagentId, child_session_id: SessionId, task: string, agent: string, model: string, isolation: SubagentIsolation, activity: SubagentActivity, };
 
-export type SubagentReplayItem = { child_sequence: SequenceId, event: JsonValue, };
-
 export type SubagentStatus = "completed" | "failed" | "cancelled" | "timed_out" | "max_turns";
 
 export type TouchedFileStatus = "added" | "modified" | "deleted" | "type_changed";
@@ -46,6 +235,8 @@ export type DiffArtifact = { id: string, base_commit: string, touched_files: Arr
 export type SubagentResult = { subagent_id: SubagentId, session_id: SessionId, status: SubagentStatus, final_text: string, touched_files: Array<string>, diff_artifact?: DiffArtifact | null, usage: Usage, cost: Cost, turns: string, duration_millis: string, };
 
 export type ContextItemId = string;
+
+export type ContextBlockId = { sequence: SequenceId, block_index: number, };
 
 export type ModelAlias = string;
 
@@ -83,13 +274,15 @@ export type Attachment = { name: string,
  */
 source_path?: string, media_type: string, data: AttachmentData, };
 
-export type StoredAttachment = { name: string, source_path?: string, media_type: string, content_hash: string, byte_len: string, };
+export type StoredAttachment = { data: AttachmentData, name: string, source_path?: string, media_type: string, content_hash: string, byte_len: string, };
 
 export type SessionDescriptor = { session_id: SessionId,
 /**
- * Human-facing session title. Empty only when reading an older peer.
+ * Human-facing session title.
  */
 title: string, workspace_name: string, model: ModelAlias, driver_client_id?: ClientId | null, shell_active: boolean, };
+
+export type SessionNavigationTarget = { "kind": "session", session_id: SessionId, } | { "kind": "transcript", sequence: SequenceId, };
 
 export type CommandDescriptor = { name: string, description: string, usage: string, source: CommandSource, };
 
@@ -130,7 +323,7 @@ export type ModelCatalogSnapshot = { aliases: Array<ModelAliasDescriptor>, model
 
 export type UserSettingDescriptor = { key: string, label: string, value: string, choices: Array<string>, provenance: string, applies_immediately: boolean, };
 
-export type McpServerState = { "type": "disabled" } | { "type": "connecting" } | { "type": "ready" } | { "type": "approval_required" } | { "type": "failed", message: string, } | { "type": "stopping" };
+export type McpServerState = { "type": "disabled", } | { "type": "connecting", } | { "type": "ready", } | { "type": "approval_required", } | { "type": "failed", message: string, } | { "type": "stopping", };
 
 export type McpServerDescriptor = { name: string, enabled: boolean, approved: boolean, state: McpServerState, tool_count: number, resource_count: number, prompt_count: number, };
 
@@ -168,7 +361,9 @@ export type PlanArtifact = { title: string, summary_md: string, steps: Array<Pla
 
 export type PlanDecision = "approve" | "reject";
 
-export type RewindTarget = { "type": "turn", turn_id: TurnId, } | { "type": "checkpoint", checkpoint_id: string, };
+export type RewindSourcePosition = "before" | "through";
+
+export type RewindTarget = { "type": "turn", turn_id: TurnId, } | { "type": "source", expected_through: SequenceId, source: SequenceId, turn_id: TurnId, position: RewindSourcePosition, };
 
 export type ReviewFileDecision = "accept" | "revert";
 
@@ -178,7 +373,7 @@ export type SessionReviewFile = { path: string, unified_diff: string, status: Re
 
 export type SessionReview = { session_id: SessionId, files: Array<SessionReviewFile>, };
 
-export type QuestionResponseKind = "text" | "select_one" | "select_many";
+export type QuestionResponseKind = "text" | "select_one";
 
 export type ModelContextTransfer = "pass_summary" | "pass_full_context" | "start_without_context";
 
@@ -196,7 +391,7 @@ export type Question = { id: QuestionId, prompt: string, response_kind: Question
  */
 model_switch?: ModelSwitchQuestion, };
 
-export type Answer = { question_id: QuestionId, values: Array<string>, };
+export type Answer = { question_id: QuestionId, value: string, };
 
 export type ContextItemKind = "system" | "tool_definitions" | "project_instructions" | "conversation" | "tool_result" | "pinned" | "queued_message";
 
@@ -210,7 +405,11 @@ machine_local_path: string | null, estimated_tokens: string, state: ContextItemS
 
 export type CacheBreakpoint = { after_item_id: ContextItemId | null, };
 
-export type ContextSnapshot = { turn_id: TurnId | null, stable_prefix_hash: string, used_tokens: string, usable_tokens: string, reserved_tokens: string,
+export type ContextSnapshot = {
+/**
+ * Exact canonical source prefix used to assemble this read.
+ */
+through: SequenceId | null, turn_id: TurnId | null, stable_prefix_hash: string, used_tokens: string, usable_tokens: string, reserved_tokens: string,
 /**
  * False when zero capacity means unknown rather than exhausted.
  */
@@ -222,13 +421,55 @@ context_window_reason?: string, cache_breakpoints: Array<CacheBreakpoint>, items
 
 export type AccountingAttribution = "main" | "compaction" | "subagent" | "title";
 
+export type ProviderCallIdentity = {
+/**
+ * Session which owns the provider request.
+ */
+session_id: SessionId,
+/**
+ * Immutable root session whose cap covers this session and its descendants.
+ */
+budget_session_id: SessionId,
+/**
+ * Durable agent turn which owns this request.
+ */
+turn_id: TurnId,
+/**
+ * Separates ordinary generation from compaction, title, and child usage.
+ */
+attribution: AccountingAttribution,
+/**
+ * Bounded host-generated identity, never a model-supplied tool identifier.
+ */
+call_id: string,
+/**
+ * Retries under a logical call must increment this value.
+ */
+attempt: number, };
+
+export type ProviderCallActuals = {
+/**
+ * Normalized input, output, cache and reasoning usage.
+ */
+usage: Usage,
+/**
+ * Normalized monetary, credit, subscription, or unavailable accounting.
+ */
+cost: Cost, };
+
 export type TurnAccounting = { turn_id: TurnId, attribution: AccountingAttribution, usage: Usage, cost: Cost, };
 
-export type CostSnapshot = { utc_day: string, turns: Array<TurnAccounting>, session_usage: Usage, session_cost_micros_usd: string, session_ai_credit_micros: string, daily_cost_micros_usd: string, daily_ai_credit_micros: string, trailing_minute_cost_micros_usd: string, trailing_minute_ai_credit_micros: string, session_subscription_tokens: string, daily_subscription_tokens: string, trailing_minute_subscription_tokens: string, cache_hit_basis_points: number, session_cost_cap_micros_usd: string | null, daily_cost_cap_micros_usd: string | null, session_ai_credit_cap_micros: string | null, daily_ai_credit_cap_micros: string | null, session_token_cap: string | null, daily_token_cap: string | null, spend_rate_alarm_micros_usd_per_minute: string | null, ai_credit_rate_alarm_micros_per_minute: string | null, token_rate_alarm_per_minute: string | null, hard_cap_reached: boolean, session_monetary_accounting_complete: boolean, daily_monetary_accounting_complete: boolean, session_subscription_quota_entries: string, session_cost_unavailable_entries: string, session_non_usd_monetary_entries: string, daily_subscription_quota_entries: string, daily_cost_unavailable_entries: string, daily_non_usd_monetary_entries: string, };
+export type CostSnapshot = { utc_day: string, subscription_quota: SubscriptionQuotaSummary | null, session_usage: Usage, session_cost_micros_usd: string, session_ai_credit_micros: string, daily_cost_micros_usd: string, daily_ai_credit_micros: string, trailing_minute_cost_micros_usd: string, trailing_minute_ai_credit_micros: string, session_subscription_tokens: string, daily_subscription_tokens: string, trailing_minute_subscription_tokens: string, cache_hit_basis_points: number, session_cost_cap_micros_usd: string | null, daily_cost_cap_micros_usd: string | null, session_ai_credit_cap_micros: string | null, daily_ai_credit_cap_micros: string | null, session_token_cap: string | null, daily_token_cap: string | null, spend_rate_alarm_micros_usd_per_minute: string | null, ai_credit_rate_alarm_micros_per_minute: string | null, token_rate_alarm_per_minute: string | null, hard_cap_reached: boolean, session_monetary_accounting_complete: boolean, daily_monetary_accounting_complete: boolean, session_subscription_quota_entries: string, session_cost_unavailable_entries: string, session_non_usd_monetary_entries: string, daily_subscription_quota_entries: string, daily_cost_unavailable_entries: string, daily_non_usd_monetary_entries: string, };
+
+export type SubscriptionQuotaSummary = { used: string, unit: string, };
 
 export type PromptTool = { name: string, description: string, input_schema: JsonValue, };
 
-export type PromptDump = { turn_id: TurnId | null, model_alias: ModelAlias, turns: Array<Turn>, tools: Array<PromptTool>, stable_prefix_hash: string, cache_breakpoints: Array<CacheBreakpoint>, estimated_tokens: string, };
+export type PromptDump = {
+/**
+ * Exact canonical source prefix used to assemble this read.
+ */
+through: SequenceId | null, turn_id: TurnId | null, model_alias: ModelAlias, turns: Array<Turn>, tools: Array<PromptTool>, stable_prefix_hash: string, cache_breakpoints: Array<CacheBreakpoint>, estimated_tokens: string, };
 
 export type PermissionDecision = "ask" | "allow" | "deny";
 
@@ -259,12 +500,12 @@ project_rules: Array<PermissionRuleDescriptor>,
  */
 session_rules: Array<PermissionRuleDescriptor>, approvals: Array<PermissionApprovalDescriptor>, truncated: boolean, };
 
-export type ClientCommand = { "type": "create_session", meta: CommandMeta, cwd: string, model?: ModelAlias | null, } | { "type": "resume_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "attach_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "send_message", meta: CommandMeta, session_id: SessionId, content: string, attachments: Array<Attachment>, } | { "type": "interrupt", meta: CommandMeta, session_id: SessionId, } | { "type": "approve_tool", meta: CommandMeta, session_id: SessionId, tool_call_id: ToolCallId, decision: ApprovalDecision,
+export type ClientCommand = { "type": "get_session_state", meta: CommandMeta, session_id: SessionId, } | { "type": "get_session_controls", meta: CommandMeta, session_id: SessionId, } | { "type": "read_family_controls", meta: CommandMeta, session_id: SessionId, after_revision: SequenceId | null, } | { "type": "resolve_child_read_scope", meta: CommandMeta, session_id: SessionId, target: ChildControlTarget, } | { "type": "read_child_state", meta: CommandMeta, session_id: SessionId, target: ChildControlTarget, } | { "type": "read_child_controls", meta: CommandMeta, session_id: SessionId, target: ChildControlTarget, } | { "type": "resolve_child_control", meta: CommandMeta, session_id: SessionId, target: ChildControlTarget, expected_revision: SequenceId, response: ChildControlResponse, } | { "type": "get_ui_catalog", meta: CommandMeta, session_id: SessionId, } | { "type": "get_ui_panels", meta: CommandMeta, session_id: SessionId, } | { "type": "invoke_ui_action", meta: CommandMeta, session_id: SessionId, request: UiActionRequest, } | { "type": "read_session_children", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, } | { "type": "get_todos", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, } | { "type": "read_transcript_tail", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, read: TranscriptTailRead, } | { "type": "read_transcript", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, read: TranscriptRead, } | { "type": "read_transcript_content", meta: CommandMeta, session_id: SessionId, scope: SessionReadScope, read: TranscriptContentRead, } | { "type": "create_session", meta: CommandMeta, cwd: string, model?: ModelAlias | null, } | { "type": "resume_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "attach_session", meta: CommandMeta, session_id: SessionId, last_seen_sequence?: SequenceId | null, role: ClientRole, } | { "type": "send_message", meta: CommandMeta, session_id: SessionId, content: string, attachments: Array<Attachment>, } | { "type": "interrupt", meta: CommandMeta, session_id: SessionId, } | { "type": "approve_tool", meta: CommandMeta, session_id: SessionId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, decision: ApprovalDecision,
 /**
  * Required when the pending approval displayed a unified diff. The
  * actor rejects missing or stale bindings without consuming the ask.
  */
-binding?: ApprovalBinding | null, } | { "type": "approve_plan", meta: CommandMeta, session_id: SessionId, decision: PlanDecision, revisions?: string | null, } | { "type": "answer_question", meta: CommandMeta, session_id: SessionId, question_id: QuestionId, answers: Array<Answer>, } | { "type": "switch_mode", meta: CommandMeta, session_id: SessionId, mode: ModeId, } | { "type": "switch_model", meta: CommandMeta, session_id: SessionId, model: ModelAlias,
+binding?: ApprovalBinding | null, } | { "type": "approve_plan", meta: CommandMeta, session_id: SessionId, decision: PlanDecision, revisions?: string | null, } | { "type": "answer_question", meta: CommandMeta, session_id: SessionId, question_id: QuestionId, answer: Answer, } | { "type": "switch_mode", meta: CommandMeta, session_id: SessionId, mode: ModeId, } | { "type": "switch_model", meta: CommandMeta, session_id: SessionId, model: ModelAlias,
 /**
  * When set, route only through this configured provider for the
  * selected alias instead of using the alias's automatic fallback chain.
@@ -273,7 +514,7 @@ provider?: string | null, } | { "type": "compact", meta: CommandMeta, session_id
 /**
  * Stable client-generated identity retained until the correlated fork completes.
  */
-operation_id: string, } | { "type": "rewind", meta: CommandMeta, session_id: SessionId, target: RewindTarget, } | { "type": "take_driver", meta: CommandMeta, session_id: SessionId, } | { "type": "user_shell_started", meta: CommandMeta, session_id: SessionId, command: string, } | { "type": "user_shell_ended", meta: CommandMeta, session_id: SessionId, shell_id: ShellId, status: number, captured_output?: string | null, } | { "type": "attach_development_plugin", meta: CommandMeta, session_id: SessionId, source: string, } | { "type": "detach_development_plugin", meta: CommandMeta, session_id: SessionId, } | { "type": "pin_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "evict_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "get_context", meta: CommandMeta, session_id: SessionId, } | { "type": "get_cost", meta: CommandMeta, session_id: SessionId, } | { "type": "get_session_review", meta: CommandMeta, session_id: SessionId, } | { "type": "review_file", meta: CommandMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, current_hash: string, } | { "type": "dump_prompt", meta: CommandMeta, session_id: SessionId, turn_id?: TurnId | null, } | { "type": "list_sessions", meta: CommandMeta, } | { "type": "search_sessions", meta: CommandMeta, query: string, limit: number, } | { "type": "list_commands", meta: CommandMeta, session_id: SessionId, } | { "type": "list_modes", meta: CommandMeta, session_id: SessionId, } | { "type": "list_models", meta: CommandMeta, session_id?: SessionId, refresh: boolean, } | { "type": "list_settings", meta: CommandMeta, session_id: SessionId, } | { "type": "set_setting", meta: CommandMeta, session_id: SessionId, key: string, value: string, } | { "type": "list_mcp_servers", meta: CommandMeta, session_id: SessionId, } | { "type": "list_runtime_services", meta: CommandMeta, session_id: SessionId, } | { "type": "add_mcp_http_server", meta: CommandMeta, session_id: SessionId, name: string, endpoint: string, } | { "type": "add_mcp_stdio_server", meta: CommandMeta, session_id: SessionId, name: string, executable: string, args: Array<string>, environment: Array<McpEnvironmentEntry>, } | { "type": "remove_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "review_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "approve_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, fingerprint: string, } | { "type": "set_mcp_server_enabled", meta: CommandMeta, session_id: SessionId, name: string, enabled: boolean, } | { "type": "list_permissions", meta: CommandMeta, session_id: SessionId, } | { "type": "add_session_permission_rule", meta: CommandMeta, session_id: SessionId, pattern: string, action: PermissionDecision, } | { "type": "remove_session_permission_rule", meta: CommandMeta, session_id: SessionId, rule_id: string, } | { "type": "remove_queued_message", meta: CommandMeta, session_id: SessionId, position: string, } | { "type": "clear_queued_messages", meta: CommandMeta, session_id: SessionId, } | { "type": "rename_session", meta: CommandMeta, session_id: SessionId, title: string, } | { "type": "export_session", meta: CommandMeta, session_id: SessionId, format: TranscriptFormat, output_path: string, force: boolean, } | { "type": "revoke_permission_approval", meta: CommandMeta, session_id: SessionId, approval_id: string, scope: PermissionApprovalScope, } | { "type": "begin_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "configure_builtin_provider", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "complete_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "cancel_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "search_workspace_files", meta: CommandMeta, session_id: SessionId, query: string, limit: number, } | { "type": "preview_workspace_file", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "get_workspace_status", meta: CommandMeta, session_id: SessionId, } | { "type": "get_workspace_diff", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "list_subagents", meta: CommandMeta, session_id: SessionId, } | { "type": "replay_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, after_sequence?: SequenceId | null, } | { "type": "continue_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, content: string, } | { "type": "interrupt_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "close_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "shutdown_host", meta: CommandMeta, };
+operation_id: string, } | { "type": "rewind", meta: CommandMeta, session_id: SessionId, target: RewindTarget, } | { "type": "take_driver", meta: CommandMeta, session_id: SessionId, } | { "type": "user_shell_started", meta: CommandMeta, session_id: SessionId, command: string, } | { "type": "user_shell_ended", meta: CommandMeta, session_id: SessionId, shell_id: ShellId, status: number, captured_output?: string | null, } | { "type": "attach_development_plugin", meta: CommandMeta, session_id: SessionId, source: string, } | { "type": "detach_development_plugin", meta: CommandMeta, session_id: SessionId, } | { "type": "pin_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "evict_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "get_context", meta: CommandMeta, session_id: SessionId, } | { "type": "get_cost", meta: CommandMeta, session_id: SessionId, } | { "type": "get_session_review", meta: CommandMeta, session_id: SessionId, } | { "type": "review_file", meta: CommandMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, current_hash: string, } | { "type": "dump_prompt", meta: CommandMeta, session_id: SessionId, turn_id?: TurnId | null, } | { "type": "list_sessions", meta: CommandMeta, } | { "type": "search_sessions", meta: CommandMeta, query: string, limit: number, } | { "type": "list_commands", meta: CommandMeta, session_id: SessionId, } | { "type": "list_modes", meta: CommandMeta, session_id: SessionId, } | { "type": "list_models", meta: CommandMeta, session_id?: SessionId, refresh: boolean, } | { "type": "list_settings", meta: CommandMeta, session_id: SessionId, } | { "type": "set_setting", meta: CommandMeta, session_id: SessionId, key: string, value: string, } | { "type": "list_mcp_servers", meta: CommandMeta, session_id: SessionId, } | { "type": "list_runtime_services", meta: CommandMeta, session_id: SessionId, } | { "type": "add_mcp_http_server", meta: CommandMeta, session_id: SessionId, name: string, endpoint: string, } | { "type": "add_mcp_stdio_server", meta: CommandMeta, session_id: SessionId, name: string, executable: string, args: Array<string>, environment: Array<McpEnvironmentEntry>, } | { "type": "remove_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "review_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "approve_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, fingerprint: string, } | { "type": "set_mcp_server_enabled", meta: CommandMeta, session_id: SessionId, name: string, enabled: boolean, } | { "type": "list_permissions", meta: CommandMeta, session_id: SessionId, } | { "type": "add_session_permission_rule", meta: CommandMeta, session_id: SessionId, pattern: string, action: PermissionDecision, } | { "type": "remove_session_permission_rule", meta: CommandMeta, session_id: SessionId, rule_id: string, } | { "type": "remove_queued_message", meta: CommandMeta, session_id: SessionId, position: string, } | { "type": "clear_queued_messages", meta: CommandMeta, session_id: SessionId, } | { "type": "rename_session", meta: CommandMeta, session_id: SessionId, title: string, } | { "type": "export_session", meta: CommandMeta, session_id: SessionId, format: TranscriptFormat, output_path: string, force: boolean, } | { "type": "revoke_permission_approval", meta: CommandMeta, session_id: SessionId, approval_id: string, scope: PermissionApprovalScope, } | { "type": "begin_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "configure_builtin_provider", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "complete_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "cancel_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "search_workspace_files", meta: CommandMeta, session_id: SessionId, query: string, limit: number, } | { "type": "preview_workspace_file", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "get_workspace_status", meta: CommandMeta, session_id: SessionId, } | { "type": "get_workspace_diff", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "list_subagents", meta: CommandMeta, session_id: SessionId, } | { "type": "continue_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, content: string, } | { "type": "interrupt_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "close_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "shutdown_host", meta: CommandMeta, };
 
 export type TranscriptFormat = "markdown" | "html" | "json";
 
@@ -303,37 +544,18 @@ export type EngineErrorCategory = "provider" | "tool" | "sandbox" | "config" | "
 
 export type EngineError = { category: EngineErrorCategory, code: string, message: string, retryable: boolean, details?: JsonValue | null, };
 
-export type CommandOutcome = { "type": "accepted" } | { "type": "rejected", error: EngineError, };
+export type CommandOutcome = { "type": "accepted", } | { "type": "rejected", error: EngineError, };
 
-export type EngineEvent = { "type": "command_acknowledged", meta: CommandAckMeta, session_id?: SessionId | null, outcome: CommandOutcome, } | { "type": "context_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: ContextSnapshot, } | { "type": "cost_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: CostSnapshot, } | { "type": "session_review_ready", meta: CommandAckMeta, session_id: SessionId, review: SessionReview, } | { "type": "session_review_updated", meta: CommandAckMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, review: SessionReview, } | { "type": "prompt_dump_ready", meta: CommandAckMeta, session_id: SessionId, dump: PromptDump, } | { "type": "session_replay_completed", meta: CommandAckMeta, session_id: SessionId, through_sequence?: SequenceId | null, } | { "type": "session_forked", meta: CommandAckMeta, parent_session_id: SessionId, child: SessionDescriptor, at_turn: TurnId, } | { "type": "session_exported", meta: CommandAckMeta, session_id: SessionId, output_path: string, } | { "type": "sessions_listed", meta: CommandAckMeta, sessions: Array<SessionDescriptor>, } | { "type": "subagents_listed", meta: CommandAckMeta, session_id: SessionId, subagents: Array<SubagentDescriptor>, } | { "type": "subagent_replay_batch", meta: CommandAckMeta, session_id: SessionId, subagent_id: SubagentId, child_session_id: SessionId, events: Array<SubagentReplayItem>, } | { "type": "subagent_replay_completed", meta: CommandAckMeta, session_id: SessionId, subagent_id: SubagentId,
-/**
- * Last child sequence included in this page, if the page is non-empty.
- */
-through_sequence?: SequenceId | null,
-/**
- * Cursor to pass as `after_sequence` for the next forward page.
- */
-next_cursor?: SequenceId | null,
-/**
- * Durable tail observed by the descriptor-stable page scan.
- */
-tail_sequence?: SequenceId | null,
-/**
- * Whether another forward page remains after `next_cursor`.
- */
-has_more: boolean,
-/**
- * Number of durable child events preceding the first event in this page.
- */
-events_before_page: string,
-/**
- * Whether the requested view omitted events before or after this page.
- */
-truncated: boolean, } | { "type": "sessions_search_ready", meta: CommandAckMeta, query: string, sessions: Array<SessionDescriptor>, truncated: boolean, } | { "type": "command_descriptors_listed", meta: CommandAckMeta, session_id: SessionId, commands: Array<CommandDescriptor>, truncated: boolean, } | { "type": "modes_listed", meta: CommandAckMeta, session_id: SessionId, modes: Array<ModeDescriptor>, truncated: boolean, } | { "type": "models_listed", meta: CommandAckMeta, session_id?: SessionId, models: Array<ModelDescriptor>, aliases: Array<ModelAliasDescriptor>, providers: Array<ProviderDescriptor>, cached: boolean, truncated: boolean, } | { "type": "settings_listed", meta: CommandAckMeta, session_id: SessionId, settings: Array<UserSettingDescriptor>, } | { "type": "mcp_servers_listed", meta: CommandAckMeta, session_id: SessionId, servers: Array<McpServerDescriptor>, } | { "type": "runtime_services_listed", meta: CommandAckMeta, session_id: SessionId, services: Array<RuntimeServiceDescriptor>, } | { "type": "mcp_server_approval_reviewed", meta: CommandAckMeta, session_id: SessionId, review: McpApprovalReview, } | { "type": "permissions_listed", meta: CommandAckMeta, session_id: SessionId, permissions: PermissionStateDescriptor, } | { "type": "provider_auth_started", meta: CommandAckMeta, session_id: SessionId, attempt_id: ProviderAuthAttemptId, provider: string, challenge: ProviderAuthChallenge, warnings: Array<string>, } | { "type": "provider_configured", meta: CommandAckMeta, session_id: SessionId, provider: string, auth_kind: ProviderAuthKind, } | { "type": "provider_auth_finished", meta: CommandAckMeta, session_id: SessionId, attempt_id: ProviderAuthAttemptId, provider: string, success: boolean, message: string, warnings: Array<string>, } | { "type": "provider_activation_finished", meta: CommandAckMeta, session_id: SessionId, provider: string, success: boolean, message: string, } | { "type": "workspace_files_found", meta: CommandAckMeta, session_id: SessionId, matches: Array<WorkspaceFileMatch>, truncated: boolean, } | { "type": "workspace_file_preview_ready", meta: CommandAckMeta, session_id: SessionId, preview: WorkspaceFilePreview, } | { "type": "workspace_status_ready", meta: CommandAckMeta, session_id: SessionId, status: WorkspaceStatus, } | { "type": "workspace_diff_ready", meta: CommandAckMeta, session_id: SessionId, diff: WorkspaceDiff, } | { "type": "host_shutdown", meta: CommandAckMeta, } | { "type": "session_created", meta: EventMeta, driver_client_id: ClientId, } | { "type": "workspace_roots_changed", meta: EventMeta, generation: string, effective_from_turn: string, roots: Array<WorkspaceRootDescriptor>, } | { "type": "driver_changed", meta: EventMeta, driver_client_id: ClientId, } | { "type": "message_queued", meta: EventMeta, position: string, content: string, attachments: Array<StoredAttachment>, } | { "type": "queued_message_removed", meta: EventMeta, position: string, } | { "type": "queued_messages_cleared", meta: EventMeta, } | { "type": "user_message_accepted", meta: EventMeta, agent_turn: string, content: string, attachments: Array<StoredAttachment>, } | { "type": "session_title_updated", meta: EventMeta, title: string, usage?: Usage, cost?: Cost, } | { "type": "plugin_message_injected", meta: EventMeta, plugin_id: string, content: string, queued: boolean, } | { "type": "plugin_status_changed", meta: EventMeta, plugin_id: string, status: string, } | { "type": "ui_notification", meta: EventMeta, plugin_id: string, title: string, message: string, } | { "type": "conversation_turn_committed", meta: EventMeta, agent_turn: string, turn: Turn, } | { "type": "conversation_rewound", meta: EventMeta, to_agent_turn: string, operation_id: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "turn_started", meta: EventMeta, turn_id: TurnId, } | { "type": "text_delta", meta: EventMeta, turn_id: TurnId, text: string, } | { "type": "thinking_delta", meta: EventMeta, turn_id: TurnId, text: string, signature?: string | null, } | { "type": "citation_delta", meta: EventMeta, turn_id: TurnId, uri: string, title?: string | null, } | { "type": "tool_call_started", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, name: string, args: JsonValue, call_index: number, } | { "type": "tool_approval_needed", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, name: string, args: JsonValue, capabilities: Array<ToolCapability>, rationale: string, diff?: UnifiedDiff | null, } | { "type": "tool_diff_ready", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, diff: UnifiedDiff, } | { "type": "tool_output_delta", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, stream: ToolOutputStream, chunk: string, } | { "type": "tool_call_finished", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, output: ToolOutput, is_error: boolean, call_index: number, } | { "type": "question_asked", meta: EventMeta, turn_id: TurnId, question_id: QuestionId, questions: Array<Question>, } | { "type": "question_answered", meta: EventMeta, turn_id: TurnId, question_id: QuestionId, answers: Array<Answer>, } | { "type": "turn_finished", meta: EventMeta, turn_id: TurnId, status: TurnStatus, usage: Usage, cost: Cost, } | { "type": "context_usage_updated", meta: EventMeta, turn_id: TurnId, used_tokens: string, usable_tokens: string, reserved_tokens: string,
+export type EngineEvent = { "type": "session_navigation_requested", meta: CommandAckMeta, session_id: SessionId, target: SessionNavigationTarget, } | { "type": "session_state_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: SessionStateSnapshot, } | { "type": "session_controls_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: SessionControlsSnapshot, } | { "type": "family_controls_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: FamilyControlsSnapshot, } | { "type": "child_read_scope_ready", meta: CommandAckMeta, session_id: SessionId, target: ChildControlTarget, result: ChildReadScopeResult, } | { "type": "child_state_ready", meta: CommandAckMeta, session_id: SessionId, target: ChildControlTarget, snapshot: SessionStateSnapshot, } | { "type": "child_controls_ready", meta: CommandAckMeta, session_id: SessionId, target: ChildControlTarget, snapshot: ChildControlsSnapshot, } | { "type": "ui_catalog_ready", meta: CommandAckMeta, session_id: SessionId, catalog: UiCatalog, } | { "type": "ui_panels_ready", meta: CommandAckMeta, session_id: SessionId, panels: UiPanels, } | { "type": "todo_state_committed", meta: EventMeta, snapshot: TodoSnapshot, } | { "type": "session_children_ready", meta: CommandAckMeta, session_id: SessionId, result: SessionChildrenResult, } | { "type": "todos_read", meta: CommandAckMeta, session_id: SessionId, result: TodoReadResult, } | { "type": "transcript_tail_ready", meta: CommandAckMeta, session_id: SessionId, result: TranscriptTailResult, } | { "type": "transcript_page_ready", meta: CommandAckMeta, session_id: SessionId, result: TranscriptReadResult, } | { "type": "transcript_content_ready", meta: CommandAckMeta, session_id: SessionId, page: TranscriptContentPage, } | { "type": "command_acknowledged", meta: CommandAckMeta, session_id?: SessionId | null, outcome: CommandOutcome, } | { "type": "context_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: ContextSnapshot, } | { "type": "cost_snapshot_ready", meta: CommandAckMeta, session_id: SessionId, snapshot: CostSnapshot, } | { "type": "session_review_ready", meta: CommandAckMeta, session_id: SessionId, review: SessionReview, } | { "type": "session_review_updated", meta: CommandAckMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, review: SessionReview, } | { "type": "prompt_dump_ready", meta: CommandAckMeta, session_id: SessionId, dump: PromptDump, } | { "type": "session_history_ready", meta: CommandAckMeta, session_id: SessionId, through_sequence?: SequenceId | null, } | { "type": "session_replay_completed", meta: CommandAckMeta, session_id: SessionId, through_sequence?: SequenceId | null, } | { "type": "session_forked", meta: CommandAckMeta, parent_session_id: SessionId, child: SessionDescriptor, at_turn: TurnId, } | { "type": "session_exported", meta: CommandAckMeta, session_id: SessionId, output_path: string, } | { "type": "sessions_listed", meta: CommandAckMeta, sessions: Array<SessionDescriptor>, } | { "type": "subagents_listed", meta: CommandAckMeta, session_id: SessionId, subagents: Array<SubagentDescriptor>, } | { "type": "sessions_search_ready", meta: CommandAckMeta, query: string, sessions: Array<SessionDescriptor>, truncated: boolean, } | { "type": "command_descriptors_listed", meta: CommandAckMeta, session_id: SessionId, commands: Array<CommandDescriptor>, truncated: boolean, } | { "type": "modes_listed", meta: CommandAckMeta, session_id: SessionId, modes: Array<ModeDescriptor>, truncated: boolean, } | { "type": "models_listed", meta: CommandAckMeta, session_id?: SessionId, models: Array<ModelDescriptor>, aliases: Array<ModelAliasDescriptor>, providers: Array<ProviderDescriptor>, cached: boolean, truncated: boolean, } | { "type": "settings_listed", meta: CommandAckMeta, session_id: SessionId, settings: Array<UserSettingDescriptor>, } | { "type": "mcp_servers_listed", meta: CommandAckMeta, session_id: SessionId, servers: Array<McpServerDescriptor>, } | { "type": "runtime_services_listed", meta: CommandAckMeta, session_id: SessionId, services: Array<RuntimeServiceDescriptor>, } | { "type": "mcp_server_approval_reviewed", meta: CommandAckMeta, session_id: SessionId, review: McpApprovalReview, } | { "type": "permissions_listed", meta: CommandAckMeta, session_id: SessionId, permissions: PermissionStateDescriptor, } | { "type": "provider_auth_started", meta: CommandAckMeta, session_id: SessionId, attempt_id: ProviderAuthAttemptId, provider: string, challenge: ProviderAuthChallenge, warnings: Array<string>, } | { "type": "provider_configured", meta: CommandAckMeta, session_id: SessionId, provider: string, auth_kind: ProviderAuthKind, } | { "type": "provider_auth_finished", meta: CommandAckMeta, session_id: SessionId, attempt_id: ProviderAuthAttemptId, provider: string, success: boolean, message: string, warnings: Array<string>, } | { "type": "provider_activation_finished", meta: CommandAckMeta, session_id: SessionId, provider: string, success: boolean, message: string, } | { "type": "workspace_files_found", meta: CommandAckMeta, session_id: SessionId, matches: Array<WorkspaceFileMatch>, truncated: boolean, } | { "type": "workspace_file_preview_ready", meta: CommandAckMeta, session_id: SessionId, preview: WorkspaceFilePreview, } | { "type": "workspace_status_ready", meta: CommandAckMeta, session_id: SessionId, status: WorkspaceStatus, } | { "type": "workspace_diff_ready", meta: CommandAckMeta, session_id: SessionId, diff: WorkspaceDiff, } | { "type": "host_shutdown", meta: CommandAckMeta, } | { "type": "session_created", meta: EventMeta, driver_client_id: ClientId, } | { "type": "workspace_roots_changed", meta: EventMeta, generation: string, effective_from_turn: string, roots: Array<WorkspaceRootDescriptor>, } | { "type": "driver_changed", meta: EventMeta, driver_client_id: ClientId, } | { "type": "message_queued", meta: EventMeta, position: string, content: string, attachments: Array<StoredAttachment>, } | { "type": "queued_message_removed", meta: EventMeta, position: string, } | { "type": "queued_messages_cleared", meta: EventMeta, } | { "type": "user_message_retained", meta: EventMeta, accepted_source: SequenceId, } | { "type": "user_message_accepted", meta: EventMeta, agent_turn: string, content: string, attachments: Array<StoredAttachment>, } | { "type": "session_title_updated", meta: EventMeta, title: string, usage?: Usage, cost?: Cost, } | { "type": "plugin_message_injected", meta: EventMeta, plugin_id: string, content: string, queued: boolean, } | { "type": "plugin_status_changed", meta: EventMeta, plugin_id: string, status: string, } | { "type": "extension_state_committed", meta: EventMeta, plugin_id: string, transaction: ExtensionStateTransaction, } | { "type": "ui_notification", meta: EventMeta, plugin_id: string, title: string, message: string, } | { "type": "conversation_context_committed", meta: EventMeta, agent_turn: string, selection: ContextSelection, } | { "type": "conversation_input_committed", meta: EventMeta, agent_turn: string, accepted_source: SequenceId, selection: InputSelection, } | { "type": "conversation_tool_results_committed", meta: EventMeta, agent_turn: string, results: Array<ToolResultReference>, logical: ToolResultAdmission, } | { "type": "conversation_turn_committed", meta: EventMeta, agent_turn: string, turn: Turn, } | { "type": "conversation_rewound", meta: EventMeta, to_agent_turn: string, operation_id: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "turn_started", meta: EventMeta, turn_id: TurnId, } | { "type": "text_delta", meta: EventMeta, turn_id: TurnId, text: string, } | { "type": "thinking_delta", meta: EventMeta, turn_id: TurnId, text: string, signature?: string | null, } | { "type": "citation_delta", meta: EventMeta, turn_id: TurnId, uri: string, title?: string | null, } | { "type": "tool_progress", session_id: SessionId, turn_id: TurnId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, progress: ToolProgress, } | { "type": "tool_call_started", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, name: string, args: JsonValue, call_index: number, } | { "type": "tool_approval_resolved", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, decision: ApprovalDecision, } | { "type": "tool_approval_needed", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, name: string, args: JsonValue, capabilities: Array<ToolCapability>, rationale: string, diff?: UnifiedDiff | null, } | { "type": "tool_diff_ready", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, diff: UnifiedDiff, } | { "type": "tool_output_delta", meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, stream: ToolOutputStream, chunk: string, } | { "type": "tool_call_finished", presentation: UiPresentation | null, meta: EventMeta, turn_id: TurnId, tool_call_id: ToolCallId, invocation_id: ToolInvocationId, output: ToolOutput, is_error: boolean, call_index: number, } | { "type": "question_asked", meta: EventMeta, turn_id: TurnId, question_id: QuestionId, question: Question, } | { "type": "question_answered", meta: EventMeta, turn_id: TurnId, question_id: QuestionId, answer: Answer, } | { "type": "provider_call_accounted", meta: EventMeta, call: ProviderCallIdentity, actuals: ProviderCallActuals, } | { "type": "turn_finished", meta: EventMeta, turn_id: TurnId, status: TurnStatus, usage: Usage, cost: Cost, } | { "type": "context_usage_updated", meta: EventMeta, turn_id: TurnId, used_tokens: string, usable_tokens: string, reserved_tokens: string,
 /**
  * False when zero capacity means unknown rather than exhausted.
  */
-context_window_known: boolean, context_window_reason?: string, stable_prefix_hash: string, cache_hit_basis_points: number, estimated_input_tokens: string, provider_input_tokens: string, correction_millionths: string, } | { "type": "budget_status_changed", meta: EventMeta, turn_id: TurnId, level: BudgetLevel, scope: BudgetScope, unit: BudgetUnit, current: string, limit: string, } | { "type": "compaction_started", meta: EventMeta, reason: CompactionReason, } | { "type": "compaction_attempt_started", session_id: SessionId, summary_turn_id: TurnId, attempt: number, } | { "type": "compaction_text_delta", session_id: SessionId, summary_turn_id: TurnId, attempt: number, text: string, } | { "type": "compaction_thinking_delta", session_id: SessionId, summary_turn_id: TurnId, attempt: number, text: string, } | { "type": "compaction_attempt_finished", meta: EventMeta, summary_turn_id: TurnId, usage: Usage, cost: Cost, } | { "type": "compaction_finished", meta: EventMeta, summary_turn_id: TurnId, reclaimed_tokens: string, usage?: Usage | null, cost?: Cost | null, } | { "type": "compaction_failed", meta: EventMeta, summary_turn_id: TurnId, } | { "type": "subagent_spawned", meta: EventMeta, subagent_id: SubagentId, child_session_id: SessionId, task: string, } | { "type": "subagent_finished", meta: EventMeta, subagent_id: SubagentId, result: SubagentResult, } | { "type": "subagent_progress", parent_session_id: SessionId, subagent_id: SubagentId, child_session_id: SessionId, child_sequence?: SequenceId | null, event: JsonValue, } | { "type": "tool_output_pruned", meta: EventMeta, tool_call_id: ToolCallId, reclaimed_tokens: string, } | { "type": "mode_changed", meta: EventMeta, mode: ModeId,
+context_window_known: boolean, context_window_reason?: string, stable_prefix_hash: string, cache_hit_basis_points: number, estimated_input_tokens: string, provider_input_tokens: string, correction_millionths: string, } | { "type": "budget_status_changed", meta: EventMeta, turn_id: TurnId, level: BudgetLevel, scope: BudgetScope, unit: BudgetUnit, current: string, limit: string, } | { "type": "compaction_started", meta: EventMeta, reason: CompactionReason, } | { "type": "compaction_attempt_started", started: SequenceId, revision: string, session_id: SessionId, summary_turn_id: TurnId, attempt: number, } | { "type": "compaction_text_delta", started: SequenceId, revision: string, session_id: SessionId, summary_turn_id: TurnId, attempt: number, text: string, } | { "type": "compaction_thinking_delta", started: SequenceId, revision: string, session_id: SessionId, summary_turn_id: TurnId, attempt: number, text: string, } | { "type": "compaction_attempt_finished", meta: EventMeta, summary_turn_id: TurnId, usage: Usage, cost: Cost, } | { "type": "compaction_finished", meta: EventMeta, summary_turn_id: TurnId, reclaimed_tokens: string, usage?: Usage | null, cost?: Cost | null, } | { "type": "compaction_failed", meta: EventMeta, summary_turn_id: TurnId, } | { "type": "subagent_spawned", meta: EventMeta, subagent_id: SubagentId, child_session_id: SessionId, task: string, } | { "type": "subagent_finished", meta: EventMeta, subagent_id: SubagentId, result: SubagentResult, } | { "type": "subagent_progress", parent_session_id: SessionId, subagent_id: SubagentId, child_session_id: SessionId, child_sequence?: SequenceId | null,
+/**
+ * Null invalidates child history at the required canonical `child_sequence`.
+ * A non-null value is a bounded preview; complete content remains in the child log.
+ */
+event: JsonValue, } | { "type": "tool_output_pruned", meta: EventMeta, source: ContextBlockId, reclaimed_tokens: string, } | { "type": "mode_changed", meta: EventMeta, mode: ModeId,
 /**
  * BLAKE3 hash of the canonical mode semantics.
  */
@@ -353,10 +575,81 @@ provider?: string | null,
  */
 thinking?: ThinkingLevel, } | { "type": "model_context_cleared", meta: EventMeta, strategy: ModelContextTransfer, } | { "type": "context_item_pinned", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "context_item_evicted", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "user_shell_state_changed", meta: EventMeta, shell_id: ShellId, command?: string | null, active: boolean, status?: number | null, captured_output?: string | null, } | { "type": "hook_failed", meta: EventMeta, event: string, hook_id: string, fail_closed: boolean, message: string, } | { "type": "command_finished", meta: EventMeta, name: string, message: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "guard_triggered", meta: EventMeta, turn_id: TurnId, guard: string, message: string, } | { "type": "error", meta: EventMeta, error: EngineError, };
 
+export type CommandReply = { "type": "command", outcome: CommandOutcome, } | { "type": "read", outcome: CommandOutcome, events: Array<EngineEvent>, };
+
+export type SessionReadAncestor = { subagent_id: SubagentId, session_id: SessionId, source_sequence: SequenceId, };
+
+export type SessionReadScope = { "type": "session", } | { "type": "descendant", root_session_id: SessionId, ancestry: Array<SessionReadAncestor>, };
+
+export type TranscriptTailIdentity = { generation: TranscriptGeneration, turn_started: SequenceId | null, response_epoch: SequenceId | null, tools_epoch: SequenceId | null, };
+
+export type TranscriptTailPart = { "type": "text", } | { "type": "thinking", } | { "type": "citations", offset: number, } | { "type": "tools", offset: number, };
+
+export type TranscriptTailRead = { expected: TranscriptTailIdentity | null, part: TranscriptTailPart, max_items: number, max_bytes: number, };
+
+export type TranscriptTailText = { text: string, truncated: boolean, };
+
+export type TranscriptTailCitation = { source: SequenceId, uri: string, title: string | null, };
+
+export type TranscriptTailTool = { source: SequenceId, turn_id: TurnId, invocation_id: ToolInvocationId, name: string, call_index: number, arguments: TranscriptBodyPreview, diff: TranscriptBodyPreview | null, output: TranscriptTailText, };
+
+export type TranscriptTailContent = { "type": "text", preview: TranscriptTailText, } | { "type": "thinking", preview: TranscriptTailText, } | { "type": "citations", offset: number, items: Array<TranscriptTailCitation>, next_offset: number | null, } | { "type": "tools", offset: number, items: Array<TranscriptTailTool>, next_offset: number | null, };
+
+export type TranscriptTailPage = { view: TranscriptView, identity: TranscriptTailIdentity, content: TranscriptTailContent, };
+
+export type TranscriptTailResult = { "type": "ready", page: TranscriptTailPage, } | { "type": "changed", view: TranscriptView, identity: TranscriptTailIdentity, } | { "type": "catching_up", through: SequenceId | null, target: SequenceId | null, };
+
+export type TranscriptOrdinal = string;
+
+export type TranscriptGeneration = string;
+
+export type TranscriptView = { session_id: SessionId, projection_version: number, generation: TranscriptGeneration, through: SequenceId | null, digest: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], };
+
+export type TranscriptPosition = { "type": "first", } | { "type": "latest", } | { "type": "before", item: TranscriptItemId, } | { "type": "after", item: TranscriptItemId, } | { "type": "around", item: TranscriptItemId, } | { "type": "at_ordinal", ordinal: TranscriptOrdinal, generation: TranscriptGeneration, };
+
+export type TranscriptRead = { known_view: TranscriptView | null, position: TranscriptPosition, max_items: number, max_bytes: number, };
+
+export type TranscriptItem = { id: TranscriptItemId, ordinal: TranscriptOrdinal, revision: SequenceId, agent_turn: TurnId | null, content: TranscriptContent, };
+
+export type TranscriptInvalidation = { "type": "none", } | { "type": "all", } | { "type": "items", items: Array<TranscriptItemId>, };
+
+export type TranscriptAnchor = { "type": "unspecified", } | { "type": "exact", item: TranscriptItemId, } | { "type": "replaced", requested: TranscriptItemId, replacement: TranscriptItemId | null, };
+
+export type TranscriptPage = { view: TranscriptView, first_ordinal: TranscriptOrdinal, total_items: TranscriptOrdinal, items: Array<TranscriptItem>, anchor: TranscriptAnchor, invalidation: TranscriptInvalidation, };
+
+export type TranscriptReadResult = { "type": "ready", page: TranscriptPage, } | { "type": "catching_up", through: SequenceId | null, target: SequenceId | null, } | { "type": "ordering_changed", view: TranscriptView, };
+
+export type TranscriptContentRead = { view: TranscriptView, source: TranscriptContentSource, offset: number, max_bytes: number, };
+
+export type TranscriptContentPage = { view: TranscriptView, source: TranscriptContentSource, offset: number, next_offset: number | null, total_bytes: number, format: TranscriptPreviewFormat, text: string, };
+
+export type TranscriptItemId = SequenceId;
+
+export type TranscriptContentSelector = { "type": "conversation", } | { "type": "conversation_block", index: number, } | { "type": "tool_arguments", } | { "type": "tool_output", } | { "type": "tool_diff", } | { "type": "tool_presentation", invocation_id: ToolInvocationId, } | { "type": "command_message", } | { "type": "shell_command", } | { "type": "shell_output", } | { "type": "subagent_task", } | { "type": "subagent_result", } | { "type": "subagent_diff", };
+
+export type TranscriptContentSource = { sequence: SequenceId, selector: TranscriptContentSelector, };
+
+export type TranscriptPreviewFormat = "text" | "json";
+
+export type TranscriptBodyPreview = { text: string, format: TranscriptPreviewFormat, complete: boolean, source: TranscriptContentSource, };
+
+export type TranscriptConversationBlock = { "type": "text", body: TranscriptBodyPreview, } | { "type": "reasoning", body: TranscriptBodyPreview, } | { "type": "image", source: TranscriptContentSource, } | { "type": "citation", body: TranscriptBodyPreview, };
+
+export type TranscriptToolStatus = { "type": "running", } | { "type": "finished", is_error: boolean, output: TranscriptBodyPreview, presentation: TranscriptToolPresentation | null, };
+
+export type TranscriptToolPresentation = { title: string, source: TranscriptContentSource, };
+
+export type TranscriptSubagentStatus = { "type": "running", } | { "type": "finished", status: SubagentStatus, result: TranscriptBodyPreview, touched_file_count: number, diff: TranscriptContentSource | null, };
+
+export type TranscriptContent = { "type": "turn_summary", turn_id: TurnId, status: TurnStatus, usage: Usage, cost: Cost, } | { "type": "conversation", role: Role, blocks: Array<TranscriptConversationBlock>, omitted_blocks: boolean, source: TranscriptContentSource, } | { "type": "tool", invocation_id: ToolInvocationId, name: string, call_index: number, arguments: TranscriptBodyPreview, diff: TranscriptBodyPreview | null, status: TranscriptToolStatus, } | { "type": "command", name: string, message: TranscriptBodyPreview, } | { "type": "shell", command: TranscriptBodyPreview | null, output: TranscriptBodyPreview | null, active: boolean, status: number | null, } | { "type": "subagent", subagent_id: SubagentId, session_id: SessionId, task: TranscriptBodyPreview, status: TranscriptSubagentStatus, };
+
 export type EngineEventDelivery = "connection" | "durable" | "transient";
 
 export const ENGINE_EVENT_DELIVERY = {
   budget_status_changed: "durable",
+  child_controls_ready: "connection",
+  child_read_scope_ready: "connection",
+  child_state_ready: "connection",
   citation_delta: "durable",
   command_acknowledged: "connection",
   command_descriptors_listed: "connection",
@@ -372,11 +665,16 @@ export const ENGINE_EVENT_DELIVERY = {
   context_item_pinned: "durable",
   context_snapshot_ready: "connection",
   context_usage_updated: "durable",
+  conversation_context_committed: "durable",
+  conversation_input_committed: "durable",
   conversation_rewound: "durable",
+  conversation_tool_results_committed: "durable",
   conversation_turn_committed: "durable",
   cost_snapshot_ready: "connection",
   driver_changed: "durable",
   error: "durable",
+  extension_state_committed: "durable",
+  family_controls_ready: "connection",
   guard_triggered: "durable",
   hook_failed: "durable",
   host_shutdown: "connection",
@@ -398,40 +696,54 @@ export const ENGINE_EVENT_DELIVERY = {
   provider_activation_finished: "connection",
   provider_auth_finished: "connection",
   provider_auth_started: "connection",
+  provider_call_accounted: "durable",
   provider_configured: "connection",
   question_answered: "durable",
   question_asked: "durable",
   queued_message_removed: "durable",
   queued_messages_cleared: "durable",
   runtime_services_listed: "connection",
+  session_children_ready: "connection",
+  session_controls_ready: "connection",
   session_created: "durable",
   session_exported: "connection",
   session_forked: "connection",
+  session_history_ready: "connection",
+  session_navigation_requested: "connection",
   session_replay_completed: "connection",
   session_review_ready: "connection",
   session_review_updated: "connection",
+  session_state_ready: "connection",
   session_title_updated: "durable",
   sessions_listed: "connection",
   sessions_search_ready: "connection",
   settings_listed: "connection",
   subagent_finished: "durable",
   subagent_progress: "transient",
-  subagent_replay_batch: "connection",
-  subagent_replay_completed: "connection",
   subagent_spawned: "durable",
   subagents_listed: "connection",
   text_delta: "durable",
   thinking_delta: "durable",
+  todo_state_committed: "durable",
+  todos_read: "connection",
   tool_approval_needed: "durable",
+  tool_approval_resolved: "durable",
   tool_call_finished: "durable",
   tool_call_started: "durable",
   tool_diff_ready: "durable",
   tool_output_delta: "durable",
   tool_output_pruned: "durable",
+  tool_progress: "transient",
+  transcript_content_ready: "connection",
+  transcript_page_ready: "connection",
+  transcript_tail_ready: "connection",
   turn_finished: "durable",
   turn_started: "durable",
+  ui_catalog_ready: "connection",
   ui_notification: "durable",
+  ui_panels_ready: "connection",
   user_message_accepted: "durable",
+  user_message_retained: "durable",
   user_shell_state_changed: "durable",
   workspace_diff_ready: "connection",
   workspace_file_preview_ready: "connection",
@@ -439,3 +751,240 @@ export const ENGINE_EVENT_DELIVERY = {
   workspace_roots_changed: "durable",
   workspace_status_ready: "connection",
 } as const satisfies Record<EngineEvent["type"], EngineEventDelivery>;
+
+export const CLIENT_COMMAND_EXECUTION = {
+  add_mcp_http_server: "control",
+  add_mcp_stdio_server: "control",
+  add_session_permission_rule: "control",
+  answer_question: "control",
+  approve_mcp_server: "control",
+  approve_plan: "control",
+  approve_tool: "control",
+  attach_development_plugin: "control",
+  attach_session: "control",
+  begin_provider_auth: "control",
+  cancel_provider_auth: "control",
+  clear_queued_messages: "control",
+  close_subagent: "control",
+  compact: "control",
+  complete_provider_auth: "control",
+  configure_builtin_provider: "control",
+  continue_subagent: "control",
+  create_session: "control",
+  detach_development_plugin: "control",
+  dump_prompt: "read",
+  evict_context: "control",
+  export_session: "control",
+  fork: "control",
+  get_context: "read",
+  get_cost: "read",
+  get_session_controls: "read",
+  get_session_review: "control",
+  get_session_state: "read",
+  get_todos: "read",
+  get_ui_catalog: "read",
+  get_ui_panels: "read",
+  get_workspace_diff: "read",
+  get_workspace_status: "read",
+  interrupt: "control",
+  interrupt_subagent: "control",
+  invoke_ui_action: "control",
+  list_commands: "read",
+  list_mcp_servers: "read",
+  list_models: "read",
+  list_modes: "read",
+  list_permissions: "control",
+  list_runtime_services: "read",
+  list_sessions: "read",
+  list_settings: "read",
+  list_subagents: "read",
+  pin_context: "control",
+  preview_workspace_file: "read",
+  read_child_controls: "read",
+  read_child_state: "read",
+  read_family_controls: "read",
+  read_session_children: "read",
+  read_transcript: "read",
+  read_transcript_content: "read",
+  read_transcript_tail: "read",
+  remove_mcp_server: "control",
+  remove_queued_message: "control",
+  remove_session_permission_rule: "control",
+  rename_session: "control",
+  resolve_child_control: "control",
+  resolve_child_read_scope: "read",
+  resume_session: "control",
+  review_file: "control",
+  review_mcp_server: "control",
+  revoke_permission_approval: "control",
+  rewind: "control",
+  search_sessions: "read",
+  search_workspace_files: "read",
+  send_message: "control",
+  set_mcp_server_enabled: "control",
+  set_setting: "control",
+  shutdown_host: "control",
+  switch_mode: "control",
+  switch_model: "control",
+  take_driver: "control",
+  user_shell_ended: "control",
+  user_shell_started: "control",
+} as const satisfies Record<ClientCommand["type"], "read" | "control">;
+
+export const CLIENT_COMMAND_LANE = {
+  add_mcp_http_server: "normal",
+  add_mcp_stdio_server: "normal",
+  add_session_permission_rule: "normal",
+  answer_question: "urgent",
+  approve_mcp_server: "normal",
+  approve_plan: "urgent",
+  approve_tool: "urgent",
+  attach_development_plugin: "normal",
+  attach_session: "normal",
+  begin_provider_auth: "normal",
+  cancel_provider_auth: "urgent",
+  clear_queued_messages: "normal",
+  close_subagent: "normal",
+  compact: "normal",
+  complete_provider_auth: "normal",
+  configure_builtin_provider: "normal",
+  continue_subagent: "normal",
+  create_session: "normal",
+  detach_development_plugin: "normal",
+  dump_prompt: "normal",
+  evict_context: "normal",
+  export_session: "normal",
+  fork: "normal",
+  get_context: "normal",
+  get_cost: "normal",
+  get_session_controls: "normal",
+  get_session_review: "normal",
+  get_session_state: "normal",
+  get_todos: "normal",
+  get_ui_catalog: "normal",
+  get_ui_panels: "normal",
+  get_workspace_diff: "normal",
+  get_workspace_status: "normal",
+  interrupt: "urgent",
+  interrupt_subagent: "urgent",
+  invoke_ui_action: "normal",
+  list_commands: "normal",
+  list_mcp_servers: "normal",
+  list_models: "normal",
+  list_modes: "normal",
+  list_permissions: "normal",
+  list_runtime_services: "normal",
+  list_sessions: "normal",
+  list_settings: "normal",
+  list_subagents: "normal",
+  pin_context: "normal",
+  preview_workspace_file: "normal",
+  read_child_controls: "normal",
+  read_child_state: "normal",
+  read_family_controls: "normal",
+  read_session_children: "normal",
+  read_transcript: "normal",
+  read_transcript_content: "normal",
+  read_transcript_tail: "normal",
+  remove_mcp_server: "normal",
+  remove_queued_message: "normal",
+  remove_session_permission_rule: "normal",
+  rename_session: "normal",
+  resolve_child_control: "urgent",
+  resolve_child_read_scope: "normal",
+  resume_session: "normal",
+  review_file: "normal",
+  review_mcp_server: "normal",
+  revoke_permission_approval: "normal",
+  rewind: "normal",
+  search_sessions: "normal",
+  search_workspace_files: "normal",
+  send_message: "normal",
+  set_mcp_server_enabled: "normal",
+  set_setting: "normal",
+  shutdown_host: "urgent",
+  switch_mode: "normal",
+  switch_model: "normal",
+  take_driver: "normal",
+  user_shell_ended: "normal",
+  user_shell_started: "normal",
+} as const satisfies Record<ClientCommand["type"], "normal" | "urgent">;
+
+export const CLIENT_COMMAND_READ_WATCH = {
+  add_mcp_http_server: false,
+  add_mcp_stdio_server: false,
+  add_session_permission_rule: false,
+  answer_question: false,
+  approve_mcp_server: false,
+  approve_plan: false,
+  approve_tool: false,
+  attach_development_plugin: false,
+  attach_session: false,
+  begin_provider_auth: false,
+  cancel_provider_auth: false,
+  clear_queued_messages: false,
+  close_subagent: false,
+  compact: false,
+  complete_provider_auth: false,
+  configure_builtin_provider: false,
+  continue_subagent: false,
+  create_session: false,
+  detach_development_plugin: false,
+  dump_prompt: false,
+  evict_context: false,
+  export_session: false,
+  fork: false,
+  get_context: false,
+  get_cost: false,
+  get_session_controls: false,
+  get_session_review: false,
+  get_session_state: false,
+  get_todos: false,
+  get_ui_catalog: false,
+  get_ui_panels: false,
+  get_workspace_diff: false,
+  get_workspace_status: false,
+  interrupt: false,
+  interrupt_subagent: false,
+  invoke_ui_action: false,
+  list_commands: false,
+  list_mcp_servers: false,
+  list_models: false,
+  list_modes: false,
+  list_permissions: false,
+  list_runtime_services: false,
+  list_sessions: false,
+  list_settings: false,
+  list_subagents: false,
+  pin_context: false,
+  preview_workspace_file: false,
+  read_child_controls: false,
+  read_child_state: false,
+  read_family_controls: true,
+  read_session_children: false,
+  read_transcript: false,
+  read_transcript_content: false,
+  read_transcript_tail: false,
+  remove_mcp_server: false,
+  remove_queued_message: false,
+  remove_session_permission_rule: false,
+  rename_session: false,
+  resolve_child_control: false,
+  resolve_child_read_scope: false,
+  resume_session: false,
+  review_file: false,
+  review_mcp_server: false,
+  revoke_permission_approval: false,
+  rewind: false,
+  search_sessions: false,
+  search_workspace_files: false,
+  send_message: false,
+  set_mcp_server_enabled: false,
+  set_setting: false,
+  shutdown_host: false,
+  switch_mode: false,
+  switch_model: false,
+  take_driver: false,
+  user_shell_ended: false,
+  user_shell_started: false,
+} as const satisfies Record<ClientCommand["type"], boolean>;

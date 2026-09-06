@@ -4,47 +4,90 @@
 //! algebraic enums use internally tagged, named-field variants so Rust, JSON
 //! Schema, and TypeScript all retain the same discriminated-union shape.
 
+pub mod allocation;
+pub mod command_receipt;
+
+mod accounting;
+pub use accounting::{ProviderCallActuals, ProviderCallIdentity};
+
 pub mod attachment_contract;
+pub mod billing;
+pub mod citation_admission;
 pub mod config;
+pub mod context_source;
+pub mod conversation_input;
+pub use context_source::ContextBlockId;
 mod error;
+pub mod extension_contract;
+pub mod extension_control;
+pub mod extension_events;
+pub mod extension_invocation;
+pub mod extension_tools;
+pub mod extension_ui;
+pub mod family_controls;
+pub mod hook_contract;
 mod ir;
 pub mod mcp;
 mod permission_mode;
 mod protocol;
+pub mod question_admission;
+pub mod schema;
+pub mod session_children;
+pub mod session_controls;
+pub mod session_read;
+pub mod session_state;
+pub mod todo;
+pub mod tool_admission;
+pub mod tool_result_admission;
+pub mod transcript;
+pub mod transcript_tail;
 pub mod release_contract {
     include!("generated/release_contract.rs");
 }
 pub mod update_contract;
+pub mod workflow;
 
 pub use error::Error;
 
 pub use config::PermissionDecision;
-pub use ir::{Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta};
+pub use ir::{
+    Block, ImageRef, Role, ToolCallId, ToolInvocationId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
+};
 pub use mcp::{MAX_MCP_SERVER_ID_BYTES, MCP_SERVER_ID_PATTERN, McpServerId, McpServerIdError};
 pub use permission_mode::PermissionModeDescriptor;
 pub use protocol::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
-    CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CommandSource,
-    CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
-    ContextSnapshot, Cost, CostSnapshot, DiffArtifact, DiffArtifactRef, EngineError,
-    EngineErrorCategory, EngineEvent, EngineEventDelivery, EventMeta, MAX_SESSION_ID_BYTES,
-    McpApprovalReview, McpEnvironmentEntry, McpServerDescriptor, McpServerState, ModeDescriptor,
-    ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
-    ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion,
-    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
-    PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep, PromptDump, PromptTool,
-    ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor,
-    ProviderNextAction, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
-    ReviewFileDecision, ReviewFileStatus, RewindTarget, RuntimeServiceDescriptor,
-    RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId, SessionIdError, SessionMode,
-    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
-    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
-    SubagentStatus, SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES, ToolCapability,
-    ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat, TurnAccounting, TurnId,
-    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    CommandAckMeta, CommandDescriptor, CommandExecution, CommandMeta, CommandOutcome, CommandReply,
+    CommandSource, CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot,
+    ContextItemState, ContextSnapshot, Cost, CostSnapshot, DiffArtifact, DiffArtifactRef,
+    EngineError, EngineErrorCategory, EngineEvent, EngineEventDelivery, EventMeta,
+    MAX_CLIENT_CONTROLS, MAX_CLIENT_READS, MAX_CLIENT_URGENT_CONTROLS, MAX_COMMAND_BODY_BYTES,
+    MAX_COMMAND_REPLY_BYTES, MAX_CONTROL_RETAINED_BYTES, MAX_SESSION_ID_BYTES,
+    MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES, MAX_URGENT_CONTROL_RETAINED_BYTES, McpApprovalReview,
+    McpEnvironmentEntry, McpServerDescriptor, McpServerState, ModeDescriptor, ModeId, ModelAlias,
+    ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot,
+    ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion, PermissionApprovalDescriptor,
+    PermissionApprovalScope, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
+    PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
+    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
+    QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindSourcePosition,
+    RewindTarget, RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor,
+    SessionId, SessionIdError, SessionMode, SessionReview, SessionReviewFile, ShellId,
+    StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
+    SubagentResult, SubagentStatus, SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES,
+    ToolCapability, ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat,
+    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};
+
+pub mod json_encoding;
+pub mod json_structure;
+
+pub mod input_claims;

@@ -5,49 +5,11 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 cd "$repo"
 
 export ROTTWEILER_CREDENTIAL_BACKEND=file
-if [ -n "${ROTTWEILER_PERF_PREBUILT_RW:-}" ]; then
-  case $ROTTWEILER_PERF_PREBUILT_RW in
-    /*) ;;
-    *)
-      echo "ROTTWEILER_PERF_PREBUILT_RW must be an absolute path" >&2
-      exit 2
-      ;;
-  esac
-  built_binary=$(python3 - "$ROTTWEILER_PERF_PREBUILT_RW" "${RUNNER_TEMP:-}" "${GITHUB_ACTIONS:-}" <<'PY'
-import os
-import pathlib
-import stat
-import sys
-
-path = pathlib.Path(sys.argv[1])
-metadata = path.lstat()
-mode = stat.S_IMODE(metadata.st_mode)
-if (
-    not stat.S_ISREG(metadata.st_mode)
-    or metadata.st_nlink != 1
-    or not mode & stat.S_IXUSR
-    or mode & 0o077
-):
-    raise SystemExit(
-        "ROTTWEILER_PERF_PREBUILT_RW must be an owner-private, single-link regular executable"
-    )
-resolved = path.resolve(strict=True)
-if sys.argv[3] == "true":
-    if not sys.argv[2]:
-        raise SystemExit("RUNNER_TEMP is required for a CI prebuilt performance binary")
-    runner_temp = pathlib.Path(sys.argv[2]).resolve(strict=True)
-    if os.path.commonpath((resolved, runner_temp)) != str(runner_temp):
-        raise SystemExit("CI prebuilt performance binary must remain under RUNNER_TEMP")
-print(resolved)
-PY
-  )
-  using_prebuilt=1
-else
-  scripts/cargo-release.sh build --locked --release -p rw-cli
-  release_dir=$(scripts/cargo-release.sh artifact-dir)
-  built_binary=$release_dir/rw
-  using_prebuilt=0
+if [ "$#" -ne 1 ]; then
+  echo "usage: perf_gate.sh CANDIDATE_DIRECTORY (build with scripts/build-native-candidate.py)" >&2
+  exit 2
 fi
+candidate=$1
 
 measurement_parent=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 temporary_root=$(mktemp -d "$measurement_parent/rottweiler-perf.XXXXXX")
@@ -55,45 +17,52 @@ root=$temporary_root.noindex
 mv "$temporary_root" "$root"
 trap 'rm -rf "$root"' EXIT HUP INT TERM
 
-python3 - "$repo" "$root" "${ROTTWEILER_PERF_OUTPUT:-}" "$built_binary" "$using_prebuilt" <<'PY'
+python3 - "$repo" "$root" "${ROTTWEILER_PERF_OUTPUT:-}" "$candidate" <<'PY'
 import json
+import hashlib
 import math
 import os
 import pathlib
 import platform
-import shutil
 import stat
 import statistics
-import subprocess
 import sys
 import time
 
 repo = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(repo / "scripts"))
+from perf_process import run_sample
 from release_contract import load_contract
+from native_candidate import verify as verify_candidate
 
 root = pathlib.Path(sys.argv[2])
 output = pathlib.Path(sys.argv[3]) if sys.argv[3] else None
-built_binary = pathlib.Path(sys.argv[4])
-using_prebuilt = sys.argv[5] == "1"
+candidate = pathlib.Path(sys.argv[4])
+receipt = verify_candidate(candidate, repo)
+engine = receipt["components"]["engine"]
+built_binary = candidate / engine["path"]
 binary = root / "rw"
 open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 source_fd = os.open(built_binary, open_flags)
 with os.fdopen(source_fd, "rb") as source:
     source_metadata = os.fstat(source.fileno())
     source_mode = stat.S_IMODE(source_metadata.st_mode)
-    if using_prebuilt and (
+    if (
         not stat.S_ISREG(source_metadata.st_mode)
         or source_metadata.st_uid != os.geteuid()
         or source_metadata.st_nlink != 1
         or not source_mode & stat.S_IXUSR
-        or source_mode & 0o077
     ):
         raise SystemExit(
-            "ROTTWEILER_PERF_PREBUILT_RW changed after validation or is not owner-private"
+            "candidate engine changed after validation or is not an owned executable"
         )
     with binary.open("xb") as destination:
-        shutil.copyfileobj(source, destination)
+        digest = hashlib.sha256()
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+            destination.write(block)
+        if digest.hexdigest() != engine["sha256"]:
+            raise SystemExit("candidate engine changed while making the private measurement copy")
 binary.chmod(0o700)
 script = repo / "crates/rw-cli/tests/fixtures/perf-script.json"
 
@@ -108,7 +77,7 @@ def one(index):
         "PATH": os.environ["PATH"],
     }
     started = time.perf_counter_ns()
-    run = subprocess.run(
+    run = run_sample(
         [
             str(binary),
             "-p", "perf",
@@ -119,9 +88,6 @@ def one(index):
         ],
         cwd=repo,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     if run.returncode != 0 or run.stdout.strip() != b"ready":
@@ -132,11 +98,15 @@ def one(index):
     for line in run.stderr.decode().splitlines():
         if line.startswith("rw_perf_"):
             key, value = line.split("=", 1)
+            if key in markers or not value.isascii() or not value.isdecimal():
+                raise ValueError("invalid or duplicate performance marker")
             markers[key] = int(value) / 1000
     try:
         turn_ms = markers["rw_perf_zero_latency_turn_us"]
     except KeyError as error:
         raise SystemExit(f"missing performance marker: {error}") from error
+    if not math.isfinite(turn_ms) or turn_ms <= 0 or turn_ms > elapsed_ms:
+        raise ValueError("performance turn marker is outside its process interval")
     return elapsed_ms, turn_ms
 
 smoke = os.environ.get("ROTTWEILER_PERF_SMOKE") == "1"
@@ -147,49 +117,21 @@ if sample_count < minimum_samples or sample_count > 5000:
         f"ROTTWEILER_PERF_SAMPLES must be between {minimum_samples} and 5000"
     )
 
-# Fixed hosted runners can still be busy with image-provisioning work when a
-# job begins; a fat-LTO link also leaves Apple runners hot while macOS may
-# inspect the newly installed executable. Give every measurement host one
-# fixed cooling/inspection interval, then use five fixed fresh-process warmups.
-# Smoke mode reduces only the measured sample count; it keeps identical host
-# conditioning so its p99 enforces the same absolute contract instead of
-# measuring cold-runner noise.
-# Measured results are never retried or trimmed, and even smoke mode retains
-# the 100-sample floor required for a meaningful empirical p99.
-time.sleep(60)
-for index in range(-5, 0):
-    one(index)
-samples = [one(index) for index in range(sample_count)]
-starts = sorted(sample[0] for sample in samples)
-turns = sorted(sample[1] for sample in samples)
-p95_index = math.ceil(len(samples) * 0.95) - 1
-p99_index = math.ceil(len(samples) * 0.99) - 1
-start_p50 = statistics.median(starts)
-start_p99 = starts[p99_index]
-turn_p50 = statistics.median(turns)
-turn_p99 = turns[p99_index]
-binary_bytes = binary.stat().st_size
-if output is not None:
+def bounded(value, limit=128):
+    return value[:limit] if isinstance(value, str) else None
+
+def write_evidence(status, phase, error=None):
+    if output is None:
+        return
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(f".{output.name}.tmp")
-    temporary.write_text(json.dumps({
-        "schema_version": 1,
-        "metrics": {
-            "engine_binary_bytes": binary_bytes,
-            "headless_print_p99_us": math.ceil(start_p99 * 1000),
-            "turn_overhead_p99_us": math.ceil(turn_p99 * 1000),
-        },
-    }, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(output)
-
-    def bounded(value, limit=128):
-        return value[:limit] if isinstance(value, str) else None
-
     evidence = output.with_name(f"{output.stem}.evidence{output.suffix}")
     evidence_temporary = evidence.with_name(f".{evidence.name}.tmp")
     evidence_temporary.write_text(json.dumps({
         "schema_version": 1,
         "sample_count": sample_count,
+        "status": status,
+        "phase": phase,
+        "error": error,
         "samples": [
             {
                 "index": index,
@@ -198,6 +140,8 @@ if output is not None:
             }
             for index, (start_ms, turn_ms) in enumerate(samples)
         ],
+        "candidate": {"identity_sha256": receipt["identity_sha256"],
+                      "source": receipt["identity"]["source"], "engine_sha256": engine["sha256"]},
         "runner": {
             "github_actions": os.environ.get("GITHUB_ACTIONS") == "true",
             "image_os": bounded(os.environ.get("ImageOS")),
@@ -212,33 +156,87 @@ if output is not None:
         },
     }, sort_keys=True) + "\n", encoding="utf-8")
     evidence_temporary.replace(evidence)
-print(
-    f"samples={sample_count}; "
-    f"headless_print_ms p50={start_p50:.3f} "
-    f"p95={starts[p95_index]:.3f} p99={start_p99:.3f} max={starts[-1]:.3f}; "
-    f"zero_latency_turn_ms p50={turn_p50:.3f} "
-    f"p95={turns[p95_index]:.3f} p99={turn_p99:.3f} max={turns[-1]:.3f}"
-)
-if smoke and start_p50 >= 80:
-    raise SystemExit(f"headless print-mode smoke p50 {start_p50:.3f}ms exceeds 80ms")
-if smoke and turn_p50 >= 20:
-    raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
-protected_start_limit_ms = 200 if sys.platform == "darwin" else 80
-protected_turn_limit_ms = 60
-if not smoke and start_p99 >= protected_start_limit_ms:
-    raise SystemExit(
-        f"headless print-mode p99 {start_p99:.3f}ms exceeds "
-        f"{protected_start_limit_ms}ms"
+
+samples = []
+phase = "conditioning"
+write_evidence("running", phase)
+
+# Fixed hosted runners can still be busy with image-provisioning work when a
+# job begins; a fat-LTO link also leaves Apple runners hot while macOS may
+# inspect the newly installed executable. Give every measurement host one
+# fixed cooling/inspection interval, then use five fixed fresh-process warmups.
+# Smoke mode reduces only the measured sample count; it keeps identical host
+# conditioning so its p99 enforces the same absolute contract instead of
+# measuring cold-runner noise.
+# Measured results are never retried or trimmed, and even smoke mode retains
+# the 100-sample floor required for a meaningful empirical p99.
+try:
+    time.sleep(60)
+    phase = "warmup"
+    write_evidence("running", phase)
+    for index in range(-5, 0):
+        one(index)
+    phase = "sampling"
+    for index in range(sample_count):
+        samples.append(one(index))
+        write_evidence("running", phase)
+    phase = "budgets"
+    write_evidence("running", phase)
+    starts = sorted(sample[0] for sample in samples)
+    turns = sorted(sample[1] for sample in samples)
+    p95_index = math.ceil(len(samples) * 0.95) - 1
+    p99_index = math.ceil(len(samples) * 0.99) - 1
+    start_p50 = statistics.median(starts)
+    start_p99 = starts[p99_index]
+    turn_p50 = statistics.median(turns)
+    turn_p99 = turns[p99_index]
+    binary_bytes = binary.stat().st_size
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_name(f".{output.name}.tmp")
+        temporary.write_text(json.dumps({
+            "schema_version": 1,
+            "metrics": {
+                "engine_binary_bytes": binary_bytes,
+                "headless_print_p99_us": math.ceil(start_p99 * 1000),
+                "turn_overhead_p99_us": math.ceil(turn_p99 * 1000),
+            },
+        }, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(output)
+
+
+    print(
+        f"samples={sample_count}; "
+        f"headless_print_ms p50={start_p50:.3f} "
+        f"p95={starts[p95_index]:.3f} p99={start_p99:.3f} max={starts[-1]:.3f}; "
+        f"zero_latency_turn_ms p50={turn_p50:.3f} "
+        f"p95={turns[p95_index]:.3f} p99={turn_p99:.3f} max={turns[-1]:.3f}"
     )
-if not smoke and turn_p99 >= protected_turn_limit_ms:
-    raise SystemExit(
-        f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
-        f"{protected_turn_limit_ms}ms"
-    )
-release_platform = load_contract().resolve_platform(platform.system(), platform.machine())
-binary_limit = release_platform.product_budgets.engine_less_than_bytes
-if binary_bytes >= binary_limit:
-    raise SystemExit(
-        f"release binary size {binary_bytes} exceeds {binary_limit // 1_000_000}MB"
-    )
+    if smoke and start_p50 >= 80:
+        raise SystemExit(f"headless print-mode smoke p50 {start_p50:.3f}ms exceeds 80ms")
+    if smoke and turn_p50 >= 20:
+        raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
+    protected_start_limit_ms = 200 if sys.platform == "darwin" else 80
+    protected_turn_limit_ms = 60
+    if not smoke and start_p99 >= protected_start_limit_ms:
+        raise SystemExit(
+            f"headless print-mode p99 {start_p99:.3f}ms exceeds "
+            f"{protected_start_limit_ms}ms"
+        )
+    if not smoke and turn_p99 >= protected_turn_limit_ms:
+        raise SystemExit(
+            f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
+            f"{protected_turn_limit_ms}ms"
+        )
+    release_platform = load_contract().resolve_platform(platform.system(), platform.machine())
+    binary_limit = release_platform.product_budgets.engine_less_than_bytes
+    if binary_bytes >= binary_limit:
+        raise SystemExit(
+            f"release binary size {binary_bytes} exceeds {binary_limit // 1_000_000}MB"
+        )
+    write_evidence("pass", "complete")
+except BaseException as error:
+    write_evidence("fail", phase, str(error)[-4096:])
+    raise
+
 PY

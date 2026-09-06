@@ -20,7 +20,7 @@ pub const DEFAULT_MINIMUM_RECLAIM_TOKENS: u64 = 20_000;
 pub enum PruneRecordKind {
     User,
     ToolOutput {
-        tool_call_id: String,
+        output_id: String,
         tool_name: String,
         completed: bool,
     },
@@ -67,7 +67,7 @@ impl Default for PruneConfig {
 pub struct PruneDecision {
     pub item_id: String,
     pub transcript_index: usize,
-    pub tool_call_id: String,
+    pub output_id: String,
     pub tool_name: String,
     pub original_tokens: u64,
     pub replacement: String,
@@ -130,7 +130,7 @@ impl Pruner {
             }
 
             let PruneRecordKind::ToolOutput {
-                tool_call_id,
+                output_id,
                 tool_name,
                 completed,
             } = &record.kind
@@ -153,7 +153,7 @@ impl Pruner {
             candidates.push(PruneDecision {
                 item_id: record.item_id.clone(),
                 transcript_index: record.transcript_index,
-                tool_call_id: tool_call_id.clone(),
+                output_id: output_id.clone(),
                 tool_name: tool_name.clone(),
                 original_tokens: record.tokens,
                 replacement: PRUNED_TOOL_OUTPUT_REPLACEMENT.to_owned(),
@@ -199,7 +199,7 @@ mod tests {
             item_id: format!("tool-{index}"),
             transcript_index: index,
             kind: PruneRecordKind::ToolOutput {
-                tool_call_id: format!("call-{index}"),
+                output_id: format!("call-{index}"),
                 tool_name: name.into(),
                 completed: true,
             },

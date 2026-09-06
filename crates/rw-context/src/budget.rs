@@ -59,6 +59,37 @@ impl Default for Budgeter {
 }
 
 impl Budgeter {
+    /// Restore a persisted estimator state after validating its derived correction.
+    ///
+    /// # Errors
+    /// Rejects inconsistent totals, sample counts or an invented correction factor.
+    pub fn from_snapshot(snapshot: BudgetSnapshot) -> Result<Self, InvalidBudgetSnapshot> {
+        let expected = if snapshot.sample_count == 0 {
+            if snapshot.estimated_input_total != 0 || snapshot.provider_input_total != 0 {
+                return Err(InvalidBudgetSnapshot);
+            }
+            FACTOR_SCALE
+        } else {
+            if snapshot.estimated_input_total == 0 || snapshot.provider_input_total == 0 {
+                return Err(InvalidBudgetSnapshot);
+            }
+            ratio_millionths(
+                snapshot.provider_input_total,
+                snapshot.estimated_input_total,
+            )
+            .clamp(MIN_FACTOR, MAX_FACTOR)
+        };
+        if expected != snapshot.correction_millionths {
+            return Err(InvalidBudgetSnapshot);
+        }
+        Ok(Self {
+            estimated_input_total: snapshot.estimated_input_total,
+            provider_input_total: snapshot.provider_input_total,
+            correction_millionths: expected,
+            sample_count: snapshot.sample_count,
+        })
+    }
+
     /// Estimates the complete provider input using the current correction.
     #[must_use]
     pub fn estimate(&self, turns: &[Turn], tools: &[ToolDefinition]) -> BudgetEstimate {
@@ -114,6 +145,11 @@ impl Budgeter {
         }
     }
 }
+
+/// Persisted estimator state disagrees with the reconciliation invariant.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("invalid persisted budget estimator state")]
+pub struct InvalidBudgetSnapshot;
 
 /// Overflow/compaction policy derived from provider model metadata.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -215,6 +251,31 @@ mod tests {
     use rw_providers::TokenUsage;
 
     use super::{Budgeter, OverflowPolicy};
+
+    #[test]
+    fn snapshots_round_trip_and_reject_inconsistent_corrections() {
+        let mut budget = Budgeter::default();
+        assert_eq!(Budgeter::from_snapshot(budget.snapshot()), Ok(budget));
+        for (estimate, actual) in [(100, 400), (1000, 2), (1, 1)] {
+            budget.reconcile(
+                estimate,
+                TokenUsage {
+                    input_tokens: actual,
+                    ..TokenUsage::default()
+                },
+            );
+            assert_eq!(Budgeter::from_snapshot(budget.snapshot()), Ok(budget));
+        }
+        let mut invalid = budget.snapshot();
+        invalid.correction_millionths += 1;
+        assert!(Budgeter::from_snapshot(invalid).is_err());
+        invalid = budget.snapshot();
+        invalid.sample_count = 0;
+        assert!(Budgeter::from_snapshot(invalid).is_err());
+        invalid = budget.snapshot();
+        invalid.estimated_input_total = 0;
+        assert!(Budgeter::from_snapshot(invalid).is_err());
+    }
 
     #[test]
     fn reconciliation_includes_all_input_partitions() {

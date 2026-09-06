@@ -1,5 +1,10 @@
 //! Production OS-sandboxed launcher for approved RPC plugins.
 
+mod launch_bytes;
+mod proxy_settlement;
+use launch_bytes::LaunchBytes;
+mod retirement;
+
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -9,13 +14,13 @@ use std::{
 
 use async_trait::async_trait;
 use rw_ext::{
-    CapabilityViolation, LaunchedPluginProcess, PluginLauncher, PluginProcessConfig,
-    PluginProcessError, PluginSandboxProfile, SupervisedPluginProcess,
+    CapabilityViolation, LaunchedPluginProcess, PluginLaunchError, PluginLauncher,
+    PluginProcessConfig, PluginProcessError, PluginSandboxProfile, SupervisedPluginProcess,
 };
 use rw_plugin_protocol::PluginToolEffect;
 use rw_tools::{
-    EgressPolicy, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
-    probe_sandbox, shell_launch_plan,
+    NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy, probe_sandbox,
+    shell_launch_plan,
 };
 use tokio::{
     io::{AsyncReadExt as _, BufReader},
@@ -23,24 +28,33 @@ use tokio::{
 };
 
 const MAX_PLUGIN_STDERR_BYTES: u64 = 256 * 1024;
+const PLUGIN_HANDOFF_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(all(test, unix))]
+mod handoff_tests;
+#[cfg(all(test, unix))]
+mod pinned_tests;
 
 /// A launcher that refuses ambient networking and executes only through the
 /// native Rottweiler sandbox helper. The approved manifest remains the sole
 /// source of capability truth.
 pub struct SandboxedPluginLauncher {
     scratch: PathBuf,
-    helper: PathBuf,
+    helper: rw_tools::SandboxHelper,
 }
 
 impl SandboxedPluginLauncher {
-    /// Creates a launcher from canonical scratch and sandbox-helper paths.
+    /// Creates a launcher from canonical scratch and approved bootstrap authority.
     ///
     /// # Errors
-    /// Returns an error when either path is unsafe or sandbox enforcement is unavailable.
-    pub fn new(scratch: &Path, helper: &Path) -> Result<Self, PluginProcessError> {
+    /// Returns an error when scratch is unsafe or sandbox enforcement is unavailable.
+    pub fn new(
+        scratch: &Path,
+        helper: &rw_tools::SandboxHelper,
+    ) -> Result<Self, PluginProcessError> {
         let scratch = std::fs::canonicalize(scratch).map_err(|error| process_error(&error))?;
-        let helper = std::fs::canonicalize(helper).map_err(|error| process_error(&error))?;
-        if !scratch.is_dir() || !helper.is_file() {
+        let helper = helper.clone();
+        if !scratch.is_dir() {
             return Err(error("plugin launcher scratch/helper is invalid"));
         }
         if probe_sandbox().support != SandboxSupport::Enforced {
@@ -56,10 +70,63 @@ impl PluginLauncher for SandboxedPluginLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
-    ) -> Result<LaunchedPluginProcess, PluginProcessError> {
-        let (child, proxy) = spawn_sandboxed_plugin(config, profile, &self.scratch, &self.helper)?;
-        attach_supervisor(child, proxy, config)
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+        let waiting = std::time::Instant::now();
+        tracing::debug!(target: "rw_performance", stage = "plugin.process_admission", phase = "queued");
+        let admission =
+            rw_resources::acquire(rw_resources::ResourceClass::Process, std::future::pending())
+                .await
+                .map_err(|failure| PluginLaunchError::Rejected(error(&failure.to_string())))?;
+        tracing::debug!(target: "rw_performance", stage = "plugin.process_admission", phase = "admitted",
+            admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
+        let owned_config = config.clone();
+        let profile = profile.clone();
+        let scratch = self.scratch.clone();
+        let helper = self.helper.clone();
+        handoff_in_worker(config.clone(), helper.clone(), admission, move || {
+            spawn_sandboxed_plugin(&owned_config, &profile, &scratch, &helper)
+                .map_err(PluginLaunchError::Rejected)
+        })
+        .await
     }
+}
+
+async fn handoff_in_worker(
+    config: PluginProcessConfig,
+    helper: rw_tools::SandboxHelper,
+    admission: rw_resources::ResourceLease,
+    spawn: impl FnOnce() -> Result<SpawnedPlugin, PluginLaunchError> + Send + 'static,
+) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+    let runtime = tokio::runtime::Handle::current();
+    // The physical worker owns admission, helper bytes and the complete
+    // handoff. Caller cancellation cannot discard a raw spawned child.
+    let waiting = std::time::Instant::now();
+    tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn", phase = "queued");
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn", phase = "admitted",
+            admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
+        let started = std::time::Instant::now();
+        let SpawnedPlugin { child, proxy, bytes } = spawn()?;
+        // Establish the complete physical owner synchronously before any
+        // callback, tracing subscriber or async handoff can fail or be dropped.
+        let handoff = attach_supervisor(child, proxy, &config, helper, admission, bytes);
+        tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
+        let started = std::time::Instant::now();
+        let result = runtime.block_on(handoff);
+        tracing::debug!(target: "rw_performance", stage = "plugin.handoff",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = result.is_ok());
+        result
+    })
+    .await
+    .map_err(|failure| match failure {
+        rw_resources::WorkError::Admission(cause) => {
+            PluginLaunchError::Rejected(error(&cause.to_string()))
+        }
+        rw_resources::WorkError::Worker(_) => PluginLaunchError::EffectsUnsettled {
+            message: "plugin launch worker exited without handoff proof".into(),
+        },
+    })?
 }
 
 fn approved_write_roots(
@@ -95,22 +162,11 @@ fn approved_write_roots(
             "plugin launch domains differ from the approved config identity",
         ));
     }
-    config.validate_executable_identity()?;
-    let mut roots = vec![scratch.to_path_buf()];
-    if has_effect(PluginToolEffect::WritesFilesystem) {
-        if profile.approved_roots.is_empty() {
-            return Err(error(
-                "writes-fs requires at least one explicitly approved root",
-            ));
-        }
-        for root in &profile.approved_roots {
-            let canonical = std::fs::canonicalize(root).map_err(|error| process_error(&error))?;
-            if !canonical.is_dir() {
-                return Err(error("approved plugin root is not a directory"));
-            }
-            roots.push(canonical);
-        }
-    }
+    config.validate_code_root_identity()?;
+    // Exact executable/content validation is performed while copying into the
+    // immutable launch owner, without a redundant full-file hash pass.
+    // Manifest effects are delegated by the host, never ambient worker grants.
+    let roots = vec![scratch.to_path_buf()];
     Ok(roots)
 }
 
@@ -118,37 +174,33 @@ fn spawn_sandboxed_plugin(
     config: &PluginProcessConfig,
     profile: &PluginSandboxProfile,
     scratch: &Path,
-    helper: &Path,
-) -> Result<(Child, SupervisedEgressProxy), PluginProcessError> {
+    helper: &rw_tools::SandboxHelper,
+) -> Result<SpawnedPlugin, PluginProcessError> {
     let roots = approved_write_roots(config, profile, scratch)?;
-    // Keep even no-network plugins on an empty policy proxy so denied
-    // egress is observable and terminal instead of an invisible EPERM.
-    let proxy = SupervisedEgressProxy::start(EgressPolicy::new(&profile.allowed_domains))
-        .map_err(|sandbox| error(&sandbox.to_string()))?;
-    let network = NetworkPolicy::PolicyProxy {
-        port: proxy.address().port(),
-        relay_path: proxy.relay_path().map(Path::to_path_buf),
-    };
-    let mut read_roots = intrinsic_plugin_read_roots(config, scratch)?;
-    if profile.allows_workspace_reads() {
-        read_roots.extend(profile.approved_roots.iter().cloned());
-    }
-    let policy = SandboxPolicy::new(&roots, network)
-        .and_then(|policy| policy.with_read_roots(read_roots))
-        .map_err(|sandbox| error(&sandbox.to_string()))?;
-    let args = config.argv().to_vec();
+    let bytes = Arc::new(LaunchBytes::capture(config, profile)?);
+    spawn_pinned_plugin(config, profile, scratch, helper, bytes, &roots)
+}
+
+fn spawn_pinned_plugin(
+    config: &PluginProcessConfig,
+    profile: &PluginSandboxProfile,
+    scratch: &Path,
+    helper: &rw_tools::SandboxHelper,
+    bytes: Arc<LaunchBytes>,
+    roots: &[PathBuf],
+) -> Result<SpawnedPlugin, PluginProcessError> {
+    bytes.validate_write_roots(roots)?;
+    let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, roots, &bytes)?;
     #[allow(unused_mut)]
-    let mut plan = shell_launch_plan(&policy, helper, config.executable(), &args)
+    let mut plan = shell_launch_plan(&policy, helper, bytes.program(config), bytes.args(config))
         .map_err(|sandbox| error(&sandbox.to_string()))?;
     if !plan.warnings.is_empty() {
         return Err(error("plugin sandbox produced a degradation warning"));
     }
-    // Close the approval-to-exec replacement window at the final boundary.
-    config.validate_executable_identity()?;
     let mut command = tokio::process::Command::new(&plan.program);
     command
         .args(&plan.args)
-        .current_dir(config.cwd())
+        .current_dir(bytes.cwd(config))
         .env_clear()
         .env("HOME", scratch)
         .env("TMPDIR", scratch)
@@ -161,105 +213,230 @@ fn spawn_sandboxed_plugin(
             command.env(name, value);
         }
     }
-    command
-        .env("HTTP_PROXY", proxy.url())
-        .env("HTTPS_PROXY", proxy.url())
-        .env("NO_PROXY", "");
+    if let Some(proxy) = &proxy {
+        command
+            .env("HTTP_PROXY", proxy.url())
+            .env("HTTPS_PROXY", proxy.url())
+            .env("NO_PROXY", "");
+    }
     #[cfg(unix)]
     command.process_group(0);
     let child = command.spawn().map_err(|error| process_error(&error))?;
     #[cfg(target_os = "linux")]
     drop(plan.take_helper_pin());
-    Ok((child, proxy))
+    Ok(SpawnedPlugin {
+        child,
+        proxy,
+        bytes,
+    })
+}
+
+fn plugin_sandbox_policy(
+    config: &PluginProcessConfig,
+    profile: &PluginSandboxProfile,
+    scratch: &Path,
+    roots: &[PathBuf],
+    bytes: &LaunchBytes,
+) -> Result<(SandboxPolicy, Option<SupervisedEgressProxy>), PluginProcessError> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = config;
+    #[cfg(target_os = "linux")]
+    if let rw_ext::PluginSandboxMode::Preparation { filesystem } = &profile.mode {
+        if profile.capabilities != rw_plugin_protocol::PluginCapabilities::default()
+            || !profile.approved_roots.is_empty()
+            || !profile.allowed_domains.is_empty()
+        {
+            return Err(error(
+                "source preparation cannot request plugin capabilities",
+            ));
+        }
+        return SandboxPolicy::for_preparation(filesystem.as_ref().clone())
+            .map(|policy| (policy.without_process_creation(), None))
+            .map_err(|sandbox| error(&sandbox.to_string()));
+    }
+    let read_roots = intrinsic_plugin_read_roots(bytes, scratch)?;
+    let policy = SandboxPolicy::new(roots, NetworkPolicy::Deny)
+        .and_then(|policy| policy.with_read_roots(read_roots))
+        .map_err(|sandbox| error(&sandbox.to_string()))?
+        .with_only_declared_reads()
+        .with_self_process_reads()
+        .without_process_creation();
+    #[cfg(target_os = "macos")]
+    let policy = if matches!(profile.mode, rw_ext::PluginSandboxMode::Preparation { .. }) {
+        policy
+            .with_read_directory_ancestors(config.cwd())
+            .map_err(|sandbox| error(&sandbox.to_string()))?
+    } else {
+        policy
+    };
+    Ok((policy, None))
 }
 
 fn attach_supervisor(
     mut child: Child,
-    proxy: SupervisedEgressProxy,
+    proxy: Option<SupervisedEgressProxy>,
     config: &PluginProcessConfig,
-) -> Result<LaunchedPluginProcess, PluginProcessError> {
+    helper: rw_tools::SandboxHelper,
+    admission: rw_resources::ResourceLease,
+    bytes: Arc<LaunchBytes>,
+) -> impl std::future::Future<Output = Result<LaunchedPluginProcess, PluginLaunchError>> {
     let process_group = child.id();
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| error("plugin stdin is unavailable"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| error("plugin stdout is unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| error("plugin stderr is unavailable"))?;
-    let denials = proxy.denials();
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let denials = proxy.as_ref().map(SupervisedEgressProxy::denials);
     let process = Arc::new(PluginChild {
-        child: Mutex::new(child),
-        process_group,
+        bytes,
+        helper,
+        admission: Mutex::new(Some(admission)),
+        settlement: tokio::sync::Mutex::new(()),
+        child: Mutex::new(Some(child)),
+        process_group: Mutex::new(process_group),
         violation: Arc::new(Mutex::new(None)),
-        _proxy: proxy,
+        proxy: proxy_settlement::PluginProxy::new(proxy),
     });
-    let weak = Arc::downgrade(&process);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            let Some(process) = weak.upgrade() else {
-                return;
-            };
-            if denials.count() == 0 {
-                continue;
+    let executable_identity = config.executable_identity().clone();
+    let handoff = PendingPluginHandoff {
+        process: Arc::clone(&process),
+        settled: false,
+    };
+    async move {
+        let mut handoff = handoff;
+        let (Some(stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
+            // A failed handoff still owns the process and every descendant.
+            let _ = process.kill_tree();
+            let proof =
+                tokio::time::timeout(PLUGIN_HANDOFF_PROOF_TIMEOUT, process.settle_effects()).await;
+            match proof {
+                Ok(Ok(())) => {
+                    handoff.settled = true;
+                    return Err(PluginLaunchError::Rejected(error(
+                        "plugin stdio is unavailable",
+                    )));
+                }
+                Ok(Err(error)) => {
+                    return Err(PluginLaunchError::EffectsUnsettled {
+                        message: error.to_string(),
+                    });
+                }
+                Err(_) => {
+                    return Err(PluginLaunchError::EffectsUnsettled {
+                        message: "plugin launch cleanup proof deadline expired".to_owned(),
+                    });
+                }
             }
-            if let Ok(mut violation) = process.violation.lock() {
-                *violation = Some(
+        };
+        if let Some(denials) = denials {
+            let weak = Arc::downgrade(&process);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let Some(process) = weak.upgrade() else {
+                        return;
+                    };
+                    if denials.count() == 0 {
+                        continue;
+                    }
+                    if let Ok(mut violation) = process.violation.lock() {
+                        *violation = Some(
                         "plugin attempted network egress outside its approved manifest/domain allowlist"
                             .to_owned(),
                     );
-            }
-            tracing::error!("plugin killed after network capability/domain violation");
-            let _ = process.kill_tree();
-            return;
+                    }
+                    tracing::error!("plugin killed after network capability/domain violation");
+                    let _ = process.kill_tree();
+                    return;
+                }
+            });
         }
-    });
-    let process: Arc<dyn SupervisedPluginProcess> = process;
-    Ok(LaunchedPluginProcess {
-        stdin: Box::pin(stdin),
-        stdout: Box::pin(BufReader::new(stdout)),
-        stderr: Box::pin(BufReader::new(stderr.take(MAX_PLUGIN_STDERR_BYTES))),
-        process,
-        executable_identity: config.executable_identity().clone(),
-    })
+        let process: Arc<dyn SupervisedPluginProcess> = process;
+        let launched = LaunchedPluginProcess {
+            stdin: Box::pin(stdin),
+            stdout: Box::pin(BufReader::new(stdout)),
+            stderr: Box::pin(BufReader::new(stderr.take(MAX_PLUGIN_STDERR_BYTES))),
+            process,
+            executable_identity,
+        };
+        handoff.settled = true;
+        Ok(launched)
+    }
+}
+
+struct PendingPluginHandoff {
+    process: Arc<PluginChild>,
+    settled: bool,
+}
+impl Drop for PendingPluginHandoff {
+    fn drop(&mut self) {
+        if !self.settled {
+            let _ = self.process.kill_tree();
+            // Dropping the last Arc invokes PluginChild's owned retirement.
+            // It retains all bytes and capacity until proof, quarantining only
+            // when cleanup cannot be proven instead of leaking a recoverable wait.
+        }
+    }
+}
+
+struct SpawnedPlugin {
+    child: Child,
+    proxy: Option<SupervisedEgressProxy>,
+    bytes: Arc<LaunchBytes>,
 }
 
 struct PluginChild {
-    child: Mutex<Child>,
-    process_group: Option<u32>,
+    bytes: Arc<LaunchBytes>,
+    settlement: tokio::sync::Mutex<()>,
+    admission: Mutex<Option<rw_resources::ResourceLease>>,
+    helper: rw_tools::SandboxHelper,
+    child: Mutex<Option<Child>>,
+    process_group: Mutex<Option<u32>>,
     violation: Arc<Mutex<Option<String>>>,
-    _proxy: SupervisedEgressProxy,
+    proxy: proxy_settlement::PluginProxy,
 }
 
 impl Drop for PluginChild {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        #[cfg(not(unix))]
-        if let Ok(child) = self.child.get_mut() {
-            let _ = child.start_kill();
-        }
+        retirement::retire_dropped(self);
     }
 }
 
 #[async_trait]
 impl SupervisedPluginProcess for PluginChild {
     async fn settle_effects(&self) -> Result<(), PluginProcessError> {
-        self.wait_for_exit().await?;
-        rw_tools::terminate_and_wait_process_group(self.process_group)
-            .await
-            .map_err(|failure| error(&failure.to_string()))
+        let _settlement = self.settlement.lock().await;
+        if self
+            .admission
+            .lock()
+            .map_err(|_| error("plugin process admission owner poisoned"))?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let (process, proxy) = tokio::join!(
+            async {
+                self.wait_for_exit().await?;
+                let group = *self
+                    .process_group
+                    .lock()
+                    .map_err(|_| error("plugin group owner poisoned"))?;
+                rw_tools::terminate_and_wait_process_group(group)
+                    .await
+                    .map_err(|failure| error(&failure.to_string()))?;
+                self.process_group
+                    .lock()
+                    .map_err(|_| error("plugin group owner poisoned"))?
+                    .take();
+                Ok::<(), PluginProcessError>(())
+            },
+            self.proxy.settle()
+        );
+        process?;
+        proxy?;
+        self.admission
+            .lock()
+            .map_err(|_| error("plugin process admission owner poisoned"))?
+            .take();
+        Ok(())
     }
 
     fn mark_capability_violation(&self, violation: &CapabilityViolation) {
@@ -269,29 +446,26 @@ impl SupervisedPluginProcess for PluginChild {
     }
 
     fn kill_tree(&self) -> Result<(), PluginProcessError> {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
-                .or_else(|errno| {
-                    if errno == rustix::io::Errno::SRCH {
-                        Ok(())
-                    } else {
-                        Err(errno)
-                    }
-                })
-                .map_err(|errno| error(&errno.to_string()))?;
-        }
-        #[cfg(not(unix))]
-        self.child
+        let admission = self
+            .admission
             .lock()
-            .map_err(|_| error("plugin child lock was poisoned"))?
-            .start_kill()
-            .map_err(|error| process_error(&error))?;
-        Ok(())
+            .map_err(|_| error("plugin process admission owner poisoned"))?;
+        if admission.is_none() {
+            return Ok(());
+        }
+        let group = self.kill_original_group();
+        let child = self
+            .child
+            .lock()
+            .map_err(|_| error("plugin child lock was poisoned"))
+            .and_then(|mut child| {
+                child
+                    .as_mut()
+                    .ok_or_else(|| error("plugin child owner is unavailable"))?
+                    .start_kill()
+                    .map_err(|error| process_error(&error))
+            });
+        group.and(child)
     }
 
     async fn wait(&self) -> Result<Option<i32>, PluginProcessError> {
@@ -309,12 +483,36 @@ impl SupervisedPluginProcess for PluginChild {
 }
 
 impl PluginChild {
+    fn kill_original_group(&self) -> Result<(), PluginProcessError> {
+        #[cfg(unix)]
+        if let Some(group) = self
+            .process_group
+            .lock()
+            .map_err(|_| error("plugin group owner poisoned"))?
+            .and_then(|id| i32::try_from(id).ok())
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            rustix::process::kill_process_group(group, rustix::process::Signal::KILL)
+                .or_else(|errno| {
+                    if errno == rustix::io::Errno::SRCH {
+                        Ok(())
+                    } else {
+                        Err(errno)
+                    }
+                })
+                .map_err(|errno| error(&errno.to_string()))?;
+        }
+        Ok(())
+    }
+
     async fn wait_for_exit(&self) -> Result<Option<i32>, PluginProcessError> {
         loop {
             let status = self
                 .child
                 .lock()
                 .map_err(|_| error("plugin child lock was poisoned"))?
+                .as_mut()
+                .ok_or_else(|| error("plugin child owner is unavailable"))?
                 .try_wait()
                 .map_err(|error| process_error(&error))?;
             if let Some(status) = status {
@@ -326,20 +524,11 @@ impl PluginChild {
 }
 
 fn intrinsic_plugin_read_roots(
-    config: &PluginProcessConfig,
+    bytes: &LaunchBytes,
     scratch: &Path,
 ) -> Result<Vec<PathBuf>, PluginProcessError> {
     let mut roots = vec![scratch.to_path_buf()];
-    roots.push(config.executable().to_path_buf());
-    if let Some(code_root) = config.code_root() {
-        roots.push(code_root.canonical_path.clone());
-    }
-    roots.extend(
-        config
-            .attested_files()
-            .iter()
-            .map(|identity| identity.canonical_path.clone()),
-    );
+    roots.extend(bytes.read_roots());
     for candidate in [
         "/System",
         "/Library/Apple",
@@ -349,7 +538,12 @@ fn intrinsic_plugin_read_roots(
         "/lib64",
         "/etc/ld.so.cache",
         "/dev",
-        "/proc",
+        "/proc/sys/vm/overcommit_memory",
+        "/proc/sys/vm/mmap_min_addr",
+        "/sys/kernel/mm/transparent_hugepage/enabled",
+        "/proc/meminfo",
+        "/sys/devices/system/cpu",
+        "/sys/fs/cgroup",
         "/private/etc",
         "/private/var/db",
         "/private/var/OOPJit",
@@ -382,14 +576,16 @@ fn error(message: &str) -> PluginProcessError {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    #[path = "code_only.rs"]
+    mod code_only;
+
     use super::*;
     use rw_ext::{
-        ApprovalStore, ApprovalStoreError, DenyPushHandler, LaunchedPluginProcess, PluginHost,
-        PluginLauncher, SupervisedPluginProcess, approve_plugin_launch,
+        ApprovalStore, ApprovalStoreError, DenyPushHandler, PluginHost, PluginLauncher,
+        approve_plugin_launch,
     };
-    use rw_plugin_protocol::{
-        METHOD_TOOL_CALL, PluginCapabilities, PluginManifest, PluginToolCapability,
-    };
+    use rw_plugin_protocol::{PluginCapabilities, PluginManifest, PluginToolCapability};
+    use rw_tools::EgressPolicy;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Mutex as StdMutex;
@@ -397,7 +593,7 @@ mod tests {
     #[test]
     fn intrinsic_runtime_reads_do_not_require_fake_manifest_capability_and_network_fails_closed() {
         let scratch = tempfile::tempdir().expect("scratch");
-        let helper = std::env::current_exe().expect("helper");
+        let helper = helper_executable().expect("fixture sandbox helper prerequisite");
         let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
             return;
         };
@@ -475,24 +671,6 @@ mod tests {
                 .expect("approval lock")
                 .insert(name.to_owned(), fingerprint.to_owned());
             Ok(())
-        }
-    }
-
-    struct RecordingProductionLauncher {
-        inner: SandboxedPluginLauncher,
-        process: StdMutex<Option<Arc<dyn SupervisedPluginProcess>>>,
-    }
-
-    #[async_trait]
-    impl PluginLauncher for RecordingProductionLauncher {
-        async fn launch(
-            &self,
-            config: &PluginProcessConfig,
-            profile: &PluginSandboxProfile,
-        ) -> Result<LaunchedPluginProcess, PluginProcessError> {
-            let launched = self.inner.launch(config, profile).await?;
-            *self.process.lock().expect("process lock") = Some(Arc::clone(&launched.process));
-            Ok(launched)
         }
     }
 
@@ -574,7 +752,7 @@ mod tests {
         approve_plugin_launch(&approvals, &manifest, config, origin).expect("exact approval");
         PluginHost::launch_approved(
             launcher,
-            &approvals,
+            Arc::new(approvals),
             config,
             origin,
             &[sdk.to_path_buf()],
@@ -590,12 +768,13 @@ mod tests {
 
     #[tokio::test]
     async fn three_independent_typescript_shapes_cross_production_sandbox() {
+        let _admission = crate::native_fixture::admit().await;
         let (bun, sdk) = bun_and_sdk();
         let scratch = tempfile::tempdir().expect("scratch");
         let workspace = tempfile::tempdir().expect("workspace");
         let package = workspace.path().join("plugin-code");
         std::fs::create_dir(&package).expect("package directory");
-        let helper = std::env::current_exe().expect("helper");
+        let helper = helper_executable().expect("fixture sandbox helper prerequisite");
         let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
             return;
         };
@@ -603,24 +782,24 @@ mod tests {
             (
                 "pre-tool-deny-custom-tool.ts",
                 json!({
-                    "name":"conformance-policy-tool", "version":"1.0.0", "protocol":2,
+                    "name":"conformance-policy-tool", "version":"1.0.0", "protocol":3,
                     "capabilities": {
                         "tools":[{"name":"fixture_echo","description":"Echo bounded fixture input","schema":{"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},"caps":[]}],
-                        "hooks":[{"name":"pre_tool","failure_policy":"fail-closed"}]
+                        "hooks":[{"name":"pre_tool", "class": "policy","failure_policy":"fail-closed"}]
                     }
                 }),
             ),
             (
                 "event-subscriber.ts",
                 json!({
-                    "name":"conformance-event-subscriber", "version":"1.0.0", "protocol":2,
-                    "capabilities":{"event_subscriptions":["TurnFinished"],"push":["session/set_status"]}
+                    "name":"conformance-event-subscriber", "version":"1.0.0", "protocol":3,
+                    "capabilities":{"event_subscriptions":["turn_finished"],"push":["session/set_status"]}
                 }),
             ),
             (
                 "provider.ts",
                 json!({
-                    "name":"conformance-provider", "version":"1.0.0", "protocol":2,
+                    "name":"conformance-provider", "version":"1.0.0", "protocol":3,
                     "capabilities":{"providers":[{"alias-prefix":"fixture/"}]}
                 }),
             ),
@@ -646,68 +825,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn omitted_network_outbound_is_killed_and_surfaces_terminal_violation() {
-        let (bun, sdk) = bun_and_sdk();
-        let scratch = tempfile::tempdir().expect("scratch");
-        let workspace = tempfile::tempdir().expect("workspace");
-        let package = workspace.path().join("plugin-code");
-        std::fs::create_dir(&package).expect("package directory");
-        let helper = std::env::current_exe().expect("helper");
-        let Ok(inner) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
-            return;
-        };
-        let launcher = RecordingProductionLauncher {
-            inner,
-            process: StdMutex::new(None),
-        };
-        let config = compiled_fixture_config(&bun, &sdk, &package, "network-without-capability.ts");
-        let manifest: PluginManifest = serde_json::from_value(json!({
-            "name":"network-without-capability", "version":"1.0.0", "protocol":2,
-            "capabilities":{}
-        }))
-        .expect("adversarial manifest");
-        let approvals = MemoryApproval::default();
-        approve_plugin_launch(
-            &approvals,
-            &manifest,
-            &config,
-            "conformance:production:network-violation",
-        )
-        .expect("exact approval");
-        let host = PluginHost::launch_approved(
-            &launcher,
-            &approvals,
-            &config,
-            "conformance:production:network-violation",
-            &[workspace.path().to_path_buf()],
-            manifest,
-            Arc::new(DenyPushHandler),
-            Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
-                rw_providers::FixtureRedactor::default(),
-            )),
-        )
-        .await
-        .expect("handshake before adversarial egress");
-        let process = launcher
-            .process
-            .lock()
-            .expect("process lock")
-            .clone()
-            .expect("production process recorded");
-        let error = tokio::time::timeout(Duration::from_secs(3), process.wait())
-            .await
-            .expect("terminal violation deadline")
-            .expect_err("network violation must be surfaced by the supervisor");
-        assert!(
-            error.message.contains("network egress"),
-            "unexpected supervisor error: {}",
-            error.message
-        );
-        drop(host);
-    }
-
-    #[tokio::test]
     async fn no_reads_plugin_cannot_read_sibling_workspace_secret() {
+        let _admission = crate::native_fixture::admit().await;
         let (bun, sdk) = bun_and_sdk();
         let scratch = tempfile::tempdir().expect("scratch");
         let workspace = tempfile::tempdir().expect("workspace");
@@ -718,14 +837,14 @@ mod tests {
             "SIBLING_SECRET_CANARY",
         )
         .expect("secret fixture");
-        let helper = std::env::current_exe().expect("helper");
+        let helper = helper_executable().expect("fixture sandbox helper prerequisite");
         let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
             return;
         };
         let config =
             compiled_fixture_config(&bun, &sdk, &package, "read-sibling-without-capability.ts");
         let manifest: PluginManifest = serde_json::from_value(json!({
-            "name":"read-sibling-without-capability", "version":"1.0.0", "protocol":2,
+            "name":"read-sibling-without-capability", "version":"1.0.0", "protocol":3,
             "capabilities":{"tools":[{
                 "name":"read_sibling_probe",
                 "description":"Verify sibling workspace reads are denied",
@@ -744,7 +863,7 @@ mod tests {
         .expect("exact approval");
         let host = PluginHost::launch_approved(
             &launcher,
-            &approvals,
+            Arc::new(approvals),
             &config,
             "conformance:production:no-reads",
             &[workspace.path().to_path_buf()],
@@ -758,9 +877,15 @@ mod tests {
         .expect("production no-reads host");
         let response = host
             .client()
-            .request(
-                METHOD_TOOL_CALL,
-                json!({"name":"read_sibling_probe","input":{}}),
+            .call_tool(
+                rw_plugin_protocol::ToolCallParams {
+                    name: "read_sibling_probe".to_owned(),
+                    input: json!({}),
+                    lifetime: rw_plugin_protocol::OperationLifetime::default(),
+                },
+                &rw_tools::CancellationToken::default(),
+                Arc::new(rw_tools::NoopProgressSink),
+                None,
             )
             .await
             .expect("probe response");
@@ -768,4 +893,102 @@ mod tests {
         assert!(!response.to_string().contains("SIBLING_SECRET_CANARY"));
         host.shutdown().await.expect("fixture shutdown");
     }
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn failed_stdio_handoff_settles_the_spawned_process_tree() {
+        use tokio::io::AsyncReadExt as _;
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 60 & echo $!; wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().expect("native fixture");
+        let mut pid = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let byte = child
+                    .stdout
+                    .as_mut()
+                    .expect("stdout")
+                    .read_u8()
+                    .await
+                    .expect("child pid");
+                if byte == b'\n' {
+                    break;
+                }
+                pid.push(byte);
+            }
+        })
+        .await
+        .expect("descendant published");
+        let pid: u32 = String::from_utf8(pid)
+            .expect("pid text")
+            .parse()
+            .expect("pid number");
+        let proxy = SupervisedEgressProxy::start(EgressPolicy::new(std::iter::empty::<&str>()))
+            .expect("private proxy");
+        let config = PluginProcessConfig::new("/bin/sh").expect("identity");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            attach_supervisor(
+                child,
+                Some(proxy),
+                &config,
+                rw_tools::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("executable"),
+                )
+                .expect("helper"),
+                process_fixture_lease(),
+                fixture_launch_bytes(),
+            ),
+        )
+        .await
+        .expect("failed handoff settles");
+        assert!(outcome.is_err());
+        let observed = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+            .expect("observe descendant");
+        let status = String::from_utf8(observed.stdout).expect("process status");
+        assert!(
+            status.trim().is_empty() || status.trim().starts_with('Z'),
+            "descendant is still executing: {status}"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_signals;
+
+/// Selects the trusted helper owned by this executable host.
+pub(crate) fn helper_executable() -> std::io::Result<rw_tools::SandboxHelper> {
+    #[cfg(test)]
+    {
+        crate::native_fixture::sandbox_helper()
+    }
+    #[cfg(not(test))]
+    {
+        rw_tools::SandboxHelper::from_running(&std::env::current_exe()?)
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    }
+}
+
+#[cfg(all(test, unix))]
+fn process_fixture_lease() -> rw_resources::ResourceLease {
+    rw_resources::try_acquire(rw_resources::ResourceClass::Process)
+        .unwrap_or_else(|failure| panic!("fixture process admission: {failure}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+fn fixture_launch_bytes() -> Arc<LaunchBytes> {
+    Arc::new(LaunchBytes::Harness {
+        _helper: rw_tools::SandboxHelper::from_running(
+            &std::env::current_exe().expect("test executable"),
+        )
+        .expect("kernel-owned fixture helper"),
+    })
 }

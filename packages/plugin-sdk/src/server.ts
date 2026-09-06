@@ -1,13 +1,32 @@
+import validateEffectCall from "./generated/extension-effect-call-validator.js"
+import validateToolResponse from "./generated/tool-response-validator.js"
+import validateInvocationId from "./generated/extension-invocation-id-validator.js"
+import type { ExtensionInvocationId } from "./generated/extension-contract"
+import validateUiPanelUpdate from "./generated/ui-panel-update-validator.js"
+import validateUiPanelUpdated from "./generated/ui-panel-updated-validator.js"
+import validateUiContribution from "./generated/ui-contribution-validator.js"
+import { eventSourceReader, type EventHandlerContext } from "./host-events"
+import validateEventNotice from "./generated/extension-event-notice-validator.js"
+import validateEventOutcome from "./generated/extension-event-outcome-validator.js"
+import validateEventKind from "./generated/extension-event-kind-validator.js"
+import { hostStateContext, type HostSessionApi, type HostStateApi } from "./host-state"
+import { invokeHook, type HookHandlers } from "./hooks"
+import validateProviderRequest from "./generated/provider-request-validator.js"
+import validateProviderEvent from "./generated/provider-event-validator.js"
+import validateHookInput from "./generated/hook-input-validator.js"
+import validateHookDirective from "./generated/hook-directive-validator.js"
+import { ToolProgressReporter } from "./tool-progress"
+import { StreamCredit } from "./stream-credit"
 import {
   PLUGIN_PROTOCOL_VERSION,
   PLUGIN_HOST_ID,
   PROTOCOL_LIMITS,
   RPC_METHODS,
   type CommandExecuteParams,
-  type EventPublishParams,
-  type HookDecision,
-  type HookInvokeParams,
-  type HookName,
+  type ExtensionEventNotice,
+  type ExtensionEventOutcome,
+  type ExtensionEventKind,
+  type HookInput,
   type InjectMessageResult,
   type JsonObject,
   type JsonValue,
@@ -23,7 +42,8 @@ import {
   type RpcId,
   type ToolCallParams,
   type ToolResponse,
-} from "./generated/protocol-2"
+  type ToolProgress,
+} from "./generated/protocol-3"
 import {
   BoundedJsonWriter,
   DEFAULT_MAX_RPC_LINE_BYTES,
@@ -44,6 +64,7 @@ export class SafeRpcError extends Error {
 }
 
 export interface PushApi {
+  publishPanel(id: string, data: JsonValue): Promise<number>
   injectMessage(sessionId: string, content: string): Promise<InjectMessageResult>
   setStatus(sessionId: string, status: string): Promise<void>
   notify(title: string, message: string, sessionId?: string): Promise<void>
@@ -51,40 +72,49 @@ export interface PushApi {
 
 export interface HandlerContext {
   readonly push: PushApi
-  /** Host-owned authenticated HTTP. Credential values never enter this process. */
-  readonly providerHttp: {
-    request(credentialReference: string, request: ProviderHttpRequest): Promise<ProviderHttpResponse>
-  }
-  /** Aborts on host shutdown, SIGINT/SIGTERM, provider cancellation, or a bounded non-provider handler timeout. */
+  readonly session: HostSessionApi
+  readonly state: HostStateApi
+  /** Aborts on shutdown, provider cancellation, or the admitted operation's deadline. */
   readonly signal: AbortSignal
   /** Writes only a bounded label to stderr. Never pass prompts, tool args, or credentials. */
   debug(label: string): void
 }
 
-export type ToolHandler = (params: ToolCallParams, context: HandlerContext) => ToolResponse | Promise<ToolResponse>
+export interface ProviderHandlerContext extends HandlerContext {
+  /** Host-owned authenticated HTTP. Credential values never enter this process. */
+  readonly providerHttp: {
+    request(credentialReference: string, request: ProviderHttpRequest): Promise<ProviderHttpResponse>
+  }
+}
+
+export interface ToolHandlerContext extends HandlerContext {
+  /** File and HTTP tools run inside this request's approved host scope. */
+  readonly effects: { callTool(name: string, input: JsonValue): Promise<ToolResponse> }
+
+  /** Replaces pending progress; delivery renews idle time within the immutable total deadline. */
+  progress(update: ToolProgress): void
+}
+
+export type ToolHandler = (params: ToolCallParams, context: ToolHandlerContext) => ToolResponse | Promise<ToolResponse>
 export type CommandHandler = (
   params: CommandExecuteParams,
   context: HandlerContext,
 ) => JsonValue | Promise<JsonValue>
-export type HookHandler = (
-  params: HookInvokeParams,
-  context: HandlerContext,
-) => HookDecision | Promise<HookDecision>
-export type EventHandler = (params: EventPublishParams, context: HandlerContext) => void | Promise<void>
+export type EventHandler = (params: ExtensionEventNotice, context: EventHandlerContext) => ExtensionEventOutcome | Promise<ExtensionEventOutcome>
 export type ProviderHandler = (
   params: ProviderCompleteParams,
-  context: HandlerContext,
+  context: ProviderHandlerContext,
 ) => ProviderStream | Promise<ProviderStream>
 export type ProviderModelsHandler = (
   params: ProviderModelsParams,
-  context: HandlerContext,
+  context: ProviderHandlerContext,
 ) => ProviderModelsResponse | Promise<ProviderModelsResponse>
 
 export interface PluginHandlers {
   readonly tools?: Readonly<Record<string, ToolHandler>>
   readonly commands?: Readonly<Record<string, CommandHandler>>
-  readonly hooks?: Partial<Readonly<Record<HookName, HookHandler>>>
-  readonly events?: Readonly<Record<string, EventHandler>>
+  readonly hooks?: HookHandlers
+  readonly events?: Readonly<Partial<Record<ExtensionEventKind, EventHandler>>>
   readonly providers?: Readonly<Record<string, ProviderHandler>>
   readonly providerModels?: Readonly<Record<string, ProviderModelsHandler>>
   readonly shutdown?: (signal: AbortSignal) => void | Promise<void>
@@ -203,14 +233,12 @@ function requireRpcKeys(value: object, label: string, allowed: readonly string[]
   }
 }
 
-type CanonicalNameKind = "plugin" | "tool" | "command" | "event"
+type CanonicalNameKind = "plugin" | "tool" | "command"
 
 function requireCanonicalName(value: string, kind: CanonicalNameKind, label: string): void {
   const expression = kind === "tool"
     ? /^[a-z0-9_]+$/
-    : kind === "event"
-      ? /^[A-Z][A-Za-z0-9_]*$/
-      : /^[a-z0-9_.-]+$/
+    : /^[a-z0-9_.-]+$/
   if (byteLength(value) > PROTOCOL_LIMITS.maxNameBytes || !expression.test(value)) {
     throw new Error(`${label} must be a bounded canonical ${kind} name`)
   }
@@ -243,7 +271,7 @@ function string(value: JsonValue | undefined, label: string): string {
 function validateManifest(manifest: PluginManifest): void {
   requireKeys(manifest, "manifest", ["name", "version", "protocol", "capabilities"])
   requireKeys(manifest.capabilities, "capabilities", [
-    "tools", "commands", "hooks", "providers", "event_subscriptions", "push",
+    "tools", "commands", "hooks", "providers", "event_subscriptions", "push", "ui",
   ])
   if (manifest.protocol !== PLUGIN_PROTOCOL_VERSION) {
     throw new Error(`plugin manifest protocol must be ${PLUGIN_PROTOCOL_VERSION}`)
@@ -273,11 +301,32 @@ function validateManifest(manifest: PluginManifest): void {
     }
     requireUnique(declared, kind)
   }
+  const ui = manifest.capabilities.ui ?? []
+  if (ui.length > 128 || byteLength(JSON.stringify(ui)) > 256 * 1024) throw new Error("UI contribution admission limit")
+  requireUnique(ui.map(item => item.id), "UI contribution")
+  const uiTools: string[] = []
+  for (const contribution of ui) {
+    if (!validateUiContribution(contribution)) throw new Error("invalid UI contribution")
+    requireText(contribution.title, "UI title", 128)
+    if (contribution.fields.length > 32 || contribution.actions.length > 4) throw new Error("UI field/action limit")
+    requireUnique(contribution.fields.map(field => field.id), "UI field")
+    requireUnique(contribution.actions.map(action => action.id), "UI action")
+    if (contribution.surface === "tool") {
+      uiTools.push(contribution.tool_name)
+      if (!manifest.capabilities.tools?.some(tool => tool.name === contribution.tool_name)) throw new Error("UI presenter requires its declared tool")
+    }
+    for (const action of contribution.actions) {
+      if (!manifest.capabilities.commands?.some(command => command.name === action.command)) throw new Error("UI action requires its declared command")
+      if (byteLength(JSON.stringify(action.arguments)) > 4096) throw new Error("UI action argument limit")
+    }
+  }
+  requireUnique(uiTools, "UI tool presenter")
   const push = manifest.capabilities.push ?? []
   if (push.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) throw new Error("too many push capabilities")
   requireUnique(push, "push")
   const validPush = new Set<PluginPushMethod>([
-    RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify,
+    RPC_METHODS.injectMessage, RPC_METHODS.setStatus, RPC_METHODS.notify, RPC_METHODS.publishPanel,
+    RPC_METHODS.sessionQuery, RPC_METHODS.contextRead, RPC_METHODS.sessionControl, RPC_METHODS.sessionToolCall, RPC_METHODS.effectToolCall, RPC_METHODS.stateRead, RPC_METHODS.stateCommit, RPC_METHODS.eventRead,
   ])
   if (push.some((method) => !validPush.has(method))) throw new Error("unknown push capability")
 
@@ -334,7 +383,7 @@ function validateManifest(manifest: PluginManifest): void {
       throw new Error(`tool ${tool.name} has invalid or duplicate capabilities`)
     }
   }
-  for (const event of manifest.capabilities.event_subscriptions ?? []) requireCanonicalName(event, "event", "event subscription")
+  for (const event of manifest.capabilities.event_subscriptions ?? []) { if (!validateEventKind(event)) throw new Error("unknown event subscription") }
   for (const hook of manifest.capabilities.hooks ?? []) {
     const hookName = hook.name
     const validHooks = new Set([
@@ -342,7 +391,10 @@ function validateManifest(manifest: PluginManifest): void {
       "pre_compact", "turn_end", "permission_check",
     ])
     if (!validHooks.has(hookName)) throw new Error(`unknown hook capability ${hookName}`)
-    requireKeys(hook, `hook ${hookName}`, ["name", "failure_policy"])
+    requireKeys(hook, `hook ${hookName}`, ["name", "class", "failure_policy"])
+    if (!["transform", "policy", "observer"].includes(hook.class)) throw new Error(`hook ${hookName} has an invalid class`)
+    if (hook.class === "policy" && hook.failure_policy !== "fail-closed") throw new Error(`policy hook ${hookName} must fail closed`)
+    if (hook.class === "transform" && !["pre_tool", "post_tool", "user_prompt_submit", "pre_compact"].includes(hookName)) throw new Error(`hook ${hookName} cannot transform input`)
     if (hook.failure_policy !== "fail-open" && hook.failure_policy !== "fail-closed") {
       throw new Error(`hook ${hook.name} has an invalid failure policy`)
     }
@@ -483,6 +535,7 @@ export class PluginServer {
   #shuttingDown = false
   #shutdownPromise: Promise<void> | undefined
   readonly #providerCalls = new Map<RpcId, AbortController>()
+  readonly #providerCredits = new Map<RpcId, StreamCredit>()
   readonly #handlerTasks = new Set<Promise<void>>()
   #activeInvocations = 0
   readonly #providerHttp = new Map<RpcId, PendingProviderHttp>()
@@ -568,6 +621,25 @@ export class PluginServer {
     }
     const candidate = message as Record<string, unknown>
     const id = typeof candidate.id === "string" || typeof candidate.id === "number" ? candidate.id : undefined
+    if (own(candidate, "result") || own(candidate, "error")) {
+      try {
+        requireRpcKeys(candidate, "response", own(candidate, "error")
+          ? ["jsonrpc", "id", "error"] : ["jsonrpc", "id", "result"])
+        if (candidate.jsonrpc !== "2.0" || id === undefined) throw new Error("response ID is missing")
+        if (typeof id === "string") requireText(id, "response ID", PROTOCOL_LIMITS.maxNameBytes)
+        else if (!Number.isSafeInteger(id)) throw new Error("response ID is not an integer")
+        if (own(candidate, "error")) {
+          const error = object(candidate.error, "response error")
+          requireRpcKeys(error, "response error", ["code", "message", "data"])
+          if (typeof error.code !== "number" || !Number.isSafeInteger(error.code)
+            || typeof error.message !== "string") throw new Error("invalid response error")
+          requireText(error.message, "response error", PROTOCOL_LIMITS.maxRpcMessageBytes)
+        }
+      } catch {
+        this.#lifetime.abort()
+        throw new SafeRpcError(-32600, "invalid host response")
+      }
+    }
     if (own(candidate, "id") && id === undefined) {
       await this.#controlReply(this.#failure(null, -32600, "invalid request"), concurrent)
       return
@@ -581,6 +653,10 @@ export class PluginServer {
       return
     }
     const isNotification = !own(candidate, "id")
+    if (candidate.method === RPC_METHODS.eventPublish && isNotification) {
+      this.#debug("event delivery requires a correlated request")
+      return
+    }
     if (candidate.method === RPC_METHODS.providerHttpEvent && isNotification) {
       try {
         this.#handleProviderHttpEvent(candidate.params)
@@ -590,11 +666,17 @@ export class PluginServer {
       }
       return
     }
-    if (candidate.method === RPC_METHODS.providerCancel && isNotification) {
+    if (candidate.method === RPC_METHODS.providerCredit && isNotification) {
       try {
-        this.#cancelProvider(candidate.params)
+        const params = object(candidate.params, "provider credit")
+        requireRpcKeys(params, "provider credit", ["request_id", "events", "bytes"])
+        if ((typeof params.request_id !== "string" && typeof params.request_id !== "number")
+          || typeof params.events !== "number" || typeof params.bytes !== "number") {
+          throw new SafeRpcError(-32602, "invalid provider credit")
+        }
+        this.#providerCredits.get(params.request_id)?.grant(params.events, params.bytes)
       } catch {
-        this.#debug("notification provider/cancel failed")
+        this.#lifetime.abort()
       }
       return
     }
@@ -605,14 +687,16 @@ export class PluginServer {
       return
     }
     if (this.#shuttingDown || this.#lifetime.signal.aborted
-      || this.#handlerTasks.size >= 64 || this.#activeInvocations >= 64) {
+      || this.#handlerTasks.size >= PROTOCOL_LIMITS.maxInFlightRequests || this.#activeInvocations >= PROTOCOL_LIMITS.maxInFlightRequests) {
       if (id !== undefined) await this.#controlReply(this.#failure(id, -32005, "plugin handler admission denied"), concurrent)
       return
     }
     const provider = candidate.method === RPC_METHODS.providerComplete && id !== undefined
     const task = provider
       ? this.#handleProvider(id, candidate.params)
-      : this.#handleRequest(candidate.method, candidate.params, id)
+      : candidate.method === RPC_METHODS.toolCall && id !== undefined
+        ? this.#handleTool(id, candidate.params)
+        : this.#handleRequest(candidate.method, candidate.params, id)
     this.#handlerTasks.add(task)
     void task.then(() => this.#handlerTasks.delete(task), () => {
       this.#handlerTasks.delete(task)
@@ -628,7 +712,7 @@ export class PluginServer {
 
   async #handleRequest(method: string, params: unknown, id: RpcId | undefined): Promise<void> {
     try {
-      const result = await this.#dispatch(method, params)
+      const result = await this.#dispatch(id, method, params)
       if (id !== undefined) await this.#success(id, result)
     } catch (error) {
       if (id === undefined) {
@@ -673,10 +757,9 @@ export class PluginServer {
     try {
       const handler = this.definition.handlers.shutdown
       if (handler !== undefined) {
-        await Promise.race([
-          Promise.resolve().then(() => handler(this.#lifetime.signal)).catch(() => this.#debug("shutdown handler failed")),
-          deadline,
-        ])
+        await Promise.resolve()
+          .then(() => handler(this.#lifetime.signal))
+          .catch(() => this.#debug("shutdown handler failed"))
       }
       await Promise.allSettled(this.#handlerTasks)
       await Promise.race([this.#writer.drain().catch(() => undefined), deadline])
@@ -685,11 +768,11 @@ export class PluginServer {
     }
   }
 
-  async #dispatch(method: string, rawParams: unknown): Promise<JsonValue> {
+  async #dispatch(id: RpcId | undefined, method: string, rawParams: unknown): Promise<JsonValue> {
     if (method === RPC_METHODS.initialize) {
       if (this.#initialized) throw new SafeRpcError(-32600, "plugin is already initialized")
       const params = object(rawParams)
-      requireRpcKeys(params, "initialize params", ["host", "protocol", "min_protocol", "max_frame_bytes", "capabilities"])
+      requireRpcKeys(params, "initialize params", ["host", "protocol", "max_frame_bytes", "capabilities"])
       const selectedProtocol = this.definition.manifest.protocol
       const hostCapabilities = params.capabilities
       const needsProviderModels = this.definition.manifest.capabilities.providers?.some(
@@ -700,14 +783,8 @@ export class PluginServer {
       ) === true
       if (
         params.host !== PLUGIN_HOST_ID
-        || typeof params.protocol !== "number"
-        || !Number.isSafeInteger(params.protocol)
-        || typeof params.min_protocol !== "number"
-        || !Number.isSafeInteger(params.min_protocol)
-        || params.min_protocol < PLUGIN_PROTOCOL_VERSION
-        || params.min_protocol > selectedProtocol
-        || params.protocol < selectedProtocol
-        || params.protocol > PLUGIN_PROTOCOL_VERSION
+        || params.protocol !== PLUGIN_PROTOCOL_VERSION
+        || selectedProtocol !== PLUGIN_PROTOCOL_VERSION
         || typeof params.max_frame_bytes !== "number"
         || !Number.isSafeInteger(params.max_frame_bytes)
         || params.max_frame_bytes < 1
@@ -717,11 +794,11 @@ export class PluginServer {
           || hostCapabilities.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind
           || hostCapabilities.some((capability) => typeof capability !== "string")
         ))
-        || (selectedProtocol === 2 && needsProviderModels && (
+        || (needsProviderModels && (
           !Array.isArray(hostCapabilities)
           || !hostCapabilities.includes("provider-models")
         ))
-        || (selectedProtocol === 2 && needsProviderHttp && (
+        || (needsProviderHttp && (
           !Array.isArray(hostCapabilities)
           || !hostCapabilities.includes("provider-http")
         ))
@@ -740,43 +817,111 @@ export class PluginServer {
       await this.shutdown()
       return null
     }
-    if (method === RPC_METHODS.toolCall) {
-      const params = this.#toolParams(rawParams)
-      const handler = this.definition.handlers.tools?.[params.name]
-      if (handler === undefined) throw new SafeRpcError(-32601, "tool is not declared")
-      return this.#runHandler((context) => handler(params, context)) as unknown as Promise<JsonValue>
-    }
     if (method === RPC_METHODS.commandExecute) {
       const params = this.#commandParams(rawParams)
       const handler = this.definition.handlers.commands?.[params.name]
       if (handler === undefined) throw new SafeRpcError(-32601, "command is not declared")
-      return this.#runHandler((context) => handler(params, context))
+      return this.#runHandler((context) => handler(params, context), params.invocation_id, Math.min(params.lifetime.total_ms, params.lifetime.idle_ms))
     }
     if (method === RPC_METHODS.hookInvoke) {
       const params = this.#hookParams(rawParams)
-      const handler = this.definition.handlers.hooks?.[params.hook]
-      if (handler === undefined) throw new SafeRpcError(-32601, "hook is not declared")
-      return this.#runHandler((context) => handler(params, context)) as Promise<JsonValue>
+      const handlers = this.definition.handlers.hooks
+      const declaration = this.definition.manifest.capabilities.hooks?.find(entry => entry.name === params.hook)
+      if (handlers?.[params.hook] === undefined || declaration === undefined) throw new SafeRpcError(-32601, "hook is not declared")
+      return this.#runHandler(async context => {
+        const result = await invokeHook(handlers, params, context)
+        if (!validateHookDirective(result)) throw new SafeRpcError(-32603, "invalid hook directive")
+        if ((result.decision === "transform" && (declaration.class !== "transform" || result.change.hook !== params.hook))
+          || (result.decision === "permission" && (declaration.class !== "policy" || params.hook !== "permission_check"))
+          || (result.decision === "block" && declaration.class !== "policy")) {
+          throw new SafeRpcError(-32603, "hook directive exceeds its declared class")
+        }
+        return result
+      })
     }
     if (method === RPC_METHODS.eventPublish) {
       const params = this.#eventParams(rawParams)
       const handler = this.definition.handlers.events?.[params.event]
       if (handler === undefined) throw new SafeRpcError(-32601, "event is not subscribed")
-      await this.#runHandler((context) => handler(params, context))
-      return null
+      return this.#runHandler(async context => {
+        const result = await handler(params, { ...context, readSource: eventSourceReader(params, (method, request) => this.#push(method, request, context.signal)) })
+        if (!validateEventOutcome(result)) throw new SafeRpcError(-32603, "invalid event outcome")
+        return result as JsonValue
+      })
     }
     if (method === RPC_METHODS.providerModels) {
+      if (id === undefined) throw new SafeRpcError(-32600, "provider catalog requires a request identity")
       const params = this.#providerModelsParams(rawParams)
       const handler = this.definition.handlers.providerModels?.[params.alias_prefix]
       if (handler === undefined) throw new SafeRpcError(-32601, "provider models are not declared")
       const response = await this.#runHandler(
-        (context) => handler(params, context),
-        params.alias_prefix,
+        (context) => handler(params, this.#providerContext(context, id, params.alias_prefix)),
       )
       validateProviderModelsResponse(response)
       return response as unknown as JsonValue
     }
     throw new SafeRpcError(-32601, "method not found")
+  }
+
+  async #handleTool(id: RpcId, rawParams: unknown): Promise<void> {
+    let reporter: ToolProgressReporter | undefined
+    const call = new AbortController()
+    let timedOut = false
+    const cancel = () => call.abort()
+    const expire = () => { timedOut = true; call.abort() }
+    let totalTimer: ReturnType<typeof setTimeout> | undefined
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
+    try {
+      if (!this.#initialized) throw new SafeRpcError(-32002, "plugin is not initialized")
+      const params = this.#toolParams(rawParams)
+      const handler = this.definition.handlers.tools?.[params.name]
+      if (handler === undefined) throw new SafeRpcError(-32601, "tool is not declared")
+      const { total_ms: totalMs, idle_ms: idleMs } = params.lifetime
+      const deadlineAt = performance.now() + totalMs
+      const renewIdle = () => {
+        clearTimeout(idleTimer)
+        if (!call.signal.aborted) idleTimer = setTimeout(expire, idleMs)
+      }
+      totalTimer = setTimeout(expire, totalMs)
+      renewIdle()
+      reporter = new ToolProgressReporter(
+        (sequence, progress) => this.#writer.write({
+          jsonrpc: "2.0", method: RPC_METHODS.toolProgress,
+          params: { request_id: id, sequence, progress },
+        }, "progress"), renewIdle, cancel,
+      )
+      const progress = reporter
+      const result = await this.#invoke(() => {
+          if (this.#lifetime.signal.aborted) call.abort()
+          if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
+          return handler(params, { ...this.#context(call.signal, null),
+            effects: { callTool: async (name, input) => {
+              const request = { request_id: id, name, input }
+              if (!validateEffectCall(request)) throw new SafeRpcError(-32602, "invalid host effect request")
+              const result = await this.#push(RPC_METHODS.effectToolCall, request, call.signal, deadlineAt)
+              if (!validateToolResponse(result)) throw new SafeRpcError(-32603, "invalid host effect result")
+              return result as unknown as ToolResponse
+            } }, progress: update => {
+            if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin tool cancelled")
+            progress.report(update)
+          } })
+        })
+      await reporter.finish()
+      call.signal.throwIfAborted()
+      if (!validateToolResponse(result)) throw new SafeRpcError(-32603, "invalid tool response")
+      await this.#success(id, result as unknown as JsonValue)
+    } catch (error) {
+      await reporter?.finish()
+      if (call.signal.aborted) await this.#failure(id, timedOut ? -32004 : -32800, timedOut ? "plugin tool deadline exceeded" : "plugin tool cancelled")
+      else if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
+      else await this.#failure(id, -32603, "plugin tool failed")
+    } finally {
+      call.abort()
+      clearTimeout(totalTimer)
+      clearTimeout(idleTimer)
+      this.#lifetime.signal.removeEventListener("abort", cancel)
+    }
   }
 
   #providerModelsParams(rawParams: unknown): ProviderModelsParams {
@@ -790,7 +935,7 @@ export class PluginServer {
   }
 
   async #handleProvider(id: RpcId, rawParams: unknown): Promise<void> {
-    if (!this.#initialized || this.#shuttingDown || this.#providerCalls.has(id) || this.#providerCalls.size >= 64) {
+    if (!this.#initialized || this.#shuttingDown || this.#providerCalls.has(id) || this.#providerCalls.size >= PROTOCOL_LIMITS.maxProviderStreams) {
       await this.#failure(id, -32005, "provider stream admission denied")
       return
     }
@@ -811,114 +956,107 @@ export class PluginServer {
     this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
     if (this.#lifetime.signal.aborted) call.abort()
     this.#providerCalls.set(id, call)
-    let rejectCancelled!: (error: Error) => void
-    const cancelled = new Promise<never>((_resolve, reject) => { rejectCancelled = reject })
-    const abort = () => rejectCancelled(new SafeRpcError(-32800, "plugin request cancelled"))
-    call.signal.addEventListener("abort", abort, { once: true })
-    if (call.signal.aborted) abort()
+    const credit = new StreamCredit(call.signal)
+    this.#providerCredits.set(id, credit)
+    const deadline = setTimeout(cancel, PROTOCOL_LIMITS.maxOperationDurationMs)
     const providerHandler = handler
     try {
-      await Promise.race([
-        this.#invoke(async () => {
+      await this.#invoke(async () => {
+        if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
+        const events = await providerHandler(params, this.#providerContext(this.#context(call.signal, null), id, params.alias))
+        if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
+          throw new SafeRpcError(-32603, "provider must return an async event stream")
+        }
+        let sawFinished = false
+        for await (const event of events) {
           if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-          const events = await providerHandler(params, this.#context(call.signal, params.alias))
-          if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
-            throw new SafeRpcError(-32603, "provider must return an async event stream")
+          this.#validateProviderEvent(event, sawFinished)
+          if (event.type === "finished") sawFinished = true
+          const frame: JsonValue = {
+            jsonrpc: "2.0",
+            method: RPC_METHODS.providerEvent,
+            params: { request_id: id, event } as unknown as JsonValue,
           }
-          let sawFinished = false
-          for await (const event of events) {
-            if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-            this.#validateProviderEvent(event, sawFinished)
-            if (event.type === "finished") sawFinished = true
-            await this.#writer.write({
-              jsonrpc: "2.0",
-              method: RPC_METHODS.providerEvent,
-              params: { request_id: id, event } as unknown as JsonValue,
-            })
-          }
-          if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
-        }),
-        cancelled,
-      ])
+          if (event.type !== "finished") await credit.take(byteLength(JSON.stringify(frame)))
+          await this.#writer.write(frame, "data")
+        }
+        if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
+      })
+      if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
       await this.#success(id, null)
     } catch (error) {
-      if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
+      if (call.signal.aborted) await this.#failure(id, -32800, "plugin request cancelled")
+      else if (error instanceof SafeRpcError) await this.#failure(id, error.code, error.safeMessage, error.safeData)
       else await this.#failure(id, -32603, "plugin provider failed")
     } finally {
       this.#providerCalls.delete(id)
-      call.signal.removeEventListener("abort", abort)
+      this.#providerCredits.delete(id)
+      clearTimeout(deadline)
+      credit.close()
       this.#lifetime.signal.removeEventListener("abort", cancel)
     }
   }
 
-  #cancelProvider(rawParams: unknown): void {
-    const value = object(rawParams)
-    requireRpcKeys(value, "provider/cancel params", ["request_id"])
-    const requestId = value.request_id
-    if (typeof requestId !== "string" && typeof requestId !== "number") {
-      throw new SafeRpcError(-32602, "invalid provider/cancel params")
-    }
-    this.#providerCalls.get(requestId)?.abort()
-  }
-
   #validateProviderEvent(event: ProviderEvent, sawFinished: boolean): void {
-    if (event === null || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") {
-      throw new SafeRpcError(-32603, "provider emitted an invalid event")
-    }
-    const allowed = new Set([
-      "route_selected", "message_start", "text_delta", "thinking_delta", "tool_call_start",
-      "tool_call_arguments_delta", "tool_call_end", "citation", "usage", "finished",
-    ])
-    if (!allowed.has(event.type) || sawFinished) {
+    if (!validateProviderEvent(event)) throw new SafeRpcError(-32603, "invalid provider event")
+    if (sawFinished) {
       throw new SafeRpcError(-32603, "provider emitted an invalid event sequence")
     }
   }
 
   #toolParams(raw: unknown): ToolCallParams {
     const value = object(raw)
-    requireRpcKeys(value, "tool/call params", ["name", "input"])
+    requireRpcKeys(value, "tool/call params", ["name", "input", "lifetime"])
+    const lifetime = this.#operationLifetime(value.lifetime, "tool")
     return {
+      lifetime: { total_ms: lifetime.total_ms, idle_ms: lifetime.idle_ms },
       name: string(value.name, "tool name"),
       input: object(value.input, "tool input"),
     }
   }
 
+  #operationLifetime(raw: unknown, label: string): ToolCallParams["lifetime"] {
+    const lifetime = object(raw, `${label} lifetime`)
+    requireRpcKeys(lifetime, `${label} lifetime`, ["total_ms", "idle_ms"])
+    if (typeof lifetime.total_ms !== "number" || typeof lifetime.idle_ms !== "number"
+      || !Number.isInteger(lifetime.total_ms) || !Number.isInteger(lifetime.idle_ms)
+      || lifetime.idle_ms < 1 || lifetime.total_ms < lifetime.idle_ms
+      || lifetime.total_ms > PROTOCOL_LIMITS.maxOperationDurationMs) {
+      throw new SafeRpcError(-32602, `invalid ${label} lifetime`)
+    }
+    return { total_ms: lifetime.total_ms, idle_ms: lifetime.idle_ms }
+  }
+
   #commandParams(raw: unknown): CommandExecuteParams {
     const value = object(raw)
-    requireRpcKeys(value, "command/execute params", ["name", "arguments"])
+    requireRpcKeys(value, "command/execute params", ["name", "arguments", "invocation_id", "lifetime"])
+    const lifetime = this.#operationLifetime(value.lifetime, "command")
+    if (value.invocation_id !== null && !validateInvocationId(value.invocation_id)) throw new SafeRpcError(-32602, "invalid command invocation identity")
     if (typeof value.arguments !== "string") throw new SafeRpcError(-32602, "invalid command arguments")
     return {
+      lifetime,
+      invocation_id: value.invocation_id,
       name: string(value.name, "command name"),
       arguments: value.arguments,
     }
   }
 
-  #hookParams(raw: unknown): HookInvokeParams {
-    const value = object(raw)
-    requireRpcKeys(value, "hook/invoke params", ["hook", "payload"])
-    const hook = string(value.hook, "hook") as HookName
-    return {
-      hook,
-      payload: object(value.payload, "hook payload"),
-    }
+  #hookParams(raw: unknown): HookInput {
+    if (byteLength(JSON.stringify(raw)) > PROTOCOL_LIMITS.maxHookPayloadBytes || !validateHookInput(raw)) throw new SafeRpcError(-32602, "invalid hook input")
+    return raw
   }
 
-  #eventParams(raw: unknown): EventPublishParams {
-    const value = object(raw)
-    requireRpcKeys(value, "event/publish params", ["event", "payload"])
-    return {
-      event: string(value.event, "event"),
-      payload: object(value.payload, "event payload"),
-    }
+  #eventParams(raw: unknown): ExtensionEventNotice {
+    if (!validateEventNotice(raw)) throw new SafeRpcError(-32602, "invalid extension event notice")
+    if (raw.content.storage === "inline" && byteLength(JSON.stringify(raw.content.data)) > 256 * 1024) throw new SafeRpcError(-32602, "extension inline event exceeds byte limit")
+    return raw
   }
 
   #providerParams(raw: unknown): ProviderCompleteParams {
     const value = object(raw)
     requireRpcKeys(value, "provider/complete params", ["alias", "request"])
-    return {
-      alias: string(value.alias, "provider alias"),
-      request: object(value.request, "provider request") as unknown as ProviderCompleteParams["request"],
-    }
+    if (!validateProviderRequest(value.request)) throw new SafeRpcError(-32602, "invalid provider request")
+    return { alias: string(value.alias, "provider alias"), request: value.request }
   }
 
   #debug(label: string): void {
@@ -926,7 +1064,7 @@ export class PluginServer {
     this.transport.error?.write(`[rottweiler-plugin:${this.definition.manifest.name}] ${safe}\n`)
   }
 
-  async #push(method: PluginPushMethod, params: JsonValue, signal: AbortSignal): Promise<JsonValue> {
+  async #push(method: PluginPushMethod, params: JsonValue, signal: AbortSignal, deadlineAt?: number): Promise<JsonValue> {
     if (!this.#pushCapabilities.has(method)) throw new SafeRpcError(-32003, "push method is not declared")
     if (signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
     if (this.#hostCommands.size >= 64) throw new SafeRpcError(-32005, "host command admission denied")
@@ -943,7 +1081,7 @@ export class PluginServer {
       pending.reject(error)
     }
     const cancel = () => fail(new SafeRpcError(-32800, "host command cancelled; outcome unknown"))
-    const timer = setTimeout(() => fail(new SafeRpcError(-32004, "host command deadline exceeded; outcome unknown")), this.#handlerTimeoutMs)
+    const timer = setTimeout(() => fail(new SafeRpcError(-32004, "host command deadline exceeded; outcome unknown")), deadlineAt === undefined ? this.#handlerTimeoutMs : Math.max(0, deadlineAt - performance.now()))
     this.#hostCommands.set(id, {
       resolve, reject,
       cleanup: () => { clearTimeout(timer); signal.removeEventListener("abort", cancel) },
@@ -981,12 +1119,12 @@ export class PluginServer {
   }
 
   async #providerHttpRequest(
-    alias: string | undefined,
+    invocationId: RpcId,
+    alias: string,
     credentialReference: string,
     request: ProviderHttpRequest,
     signal: AbortSignal,
   ): Promise<ProviderHttpResponse> {
-    if (alias === undefined) throw new SafeRpcError(-32003, "provider HTTP is provider-scoped")
     requireText(credentialReference, "credential reference", PROTOCOL_LIMITS.maxNameBytes)
     requireText(request.url, "provider HTTP URL", PROTOCOL_LIMITS.maxHookPayloadBytes)
     requireText(request.credential_header, "provider HTTP credential header", PROTOCOL_LIMITS.maxNameBytes)
@@ -1050,6 +1188,7 @@ export class PluginServer {
         id,
         method: RPC_METHODS.providerHttp,
         params: {
+          invocation_id: invocationId,
           alias,
           credential_reference: credentialReference,
           request: {
@@ -1110,7 +1249,6 @@ export class PluginServer {
         throw new SafeRpcError(-32603, "provider HTTP finished event is invalid")
       }
       pending.sawFinished = true
-      pending.body.finish()
       return
     }
     throw new SafeRpcError(-32603, "provider HTTP event type is invalid")
@@ -1139,18 +1277,32 @@ export class PluginServer {
       const error = new SafeRpcError(-32603, "host-mediated provider HTTP ended incorrectly")
       pending.body.fail(error)
       pending.reject(error)
+      return
+    }
+    pending.body.finish()
+  }
+
+  #providerContext(context: HandlerContext, invocationId: RpcId, alias: string): ProviderHandlerContext {
+    return {
+      ...context,
+      providerHttp: {
+        request: (reference, request) => this.#providerHttpRequest(invocationId, alias, reference, request, context.signal),
+      },
     }
   }
 
-  #context(signal: AbortSignal, providerAlias?: string): HandlerContext {
+  #context(signal: AbortSignal, origin: ExtensionInvocationId | null, deadlineAt?: number): HandlerContext {
     return {
       signal,
-      providerHttp: {
-        request: (credentialReference, request) => this.#providerHttpRequest(
-          providerAlias, credentialReference, request, signal,
-        ),
-      },
+      ...hostStateContext((method, params) => this.#push(method, params, signal, method === RPC_METHODS.sessionToolCall ? deadlineAt : undefined), origin),
       push: {
+        publishPanel: async (id, data) => {
+          const update = { id, data }
+          if (!validateUiPanelUpdate(update)) throw new SafeRpcError(-32602, "invalid panel update")
+          const result = await this.#push(RPC_METHODS.publishPanel, update, signal)
+          if (!validateUiPanelUpdated(result)) throw new SafeRpcError(-32603, "invalid panel revision")
+          return result.revision
+        },
         injectMessage: async (sessionId, content) => {
           requireText(sessionId, "session id", PROTOCOL_LIMITS.maxNameBytes)
           requireText(content, "injected message", PROTOCOL_LIMITS.maxHookPayloadBytes)
@@ -1187,7 +1339,8 @@ export class PluginServer {
 
   async #runHandler<T>(
     invoke: (context: HandlerContext) => T | Promise<T>,
-    providerAlias?: string,
+    origin: ExtensionInvocationId | null = null,
+    deadlineMs: number = this.#handlerTimeoutMs,
   ): Promise<T> {
     if (this.#lifetime.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
     const call = new AbortController()
@@ -1195,24 +1348,22 @@ export class PluginServer {
     const cancel = () => call.abort()
     this.#lifetime.signal.addEventListener("abort", cancel, { once: true })
     if (this.#lifetime.signal.aborted) call.abort()
+    const deadlineAt = performance.now() + deadlineMs
     let timer: ReturnType<typeof setTimeout> | undefined
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      call.signal.addEventListener("abort", () => {
-        reject(new SafeRpcError(
-          timedOut ? -32004 : -32800,
-          timedOut ? "plugin handler timed out" : "plugin request cancelled",
-        ))
-      }, { once: true })
-    })
     timer = setTimeout(() => {
       timedOut = true
       call.abort()
-    }, this.#handlerTimeoutMs)
+    }, deadlineMs)
     try {
-      return await Promise.race([
-        this.#invoke(() => invoke(this.#context(call.signal, providerAlias))),
-        cancelled,
-      ])
+      const result = await this.#invoke(() => invoke(this.#context(call.signal, origin, deadlineAt)))
+      call.signal.throwIfAborted()
+      return result
+    } catch (error) {
+      if (call.signal.aborted) throw new SafeRpcError(
+        timedOut ? -32004 : -32800,
+        timedOut ? "plugin handler timed out" : "plugin request cancelled",
+      )
+      throw error
     } finally {
       if (timer !== undefined) clearTimeout(timer)
       this.#lifetime.signal.removeEventListener("abort", cancel)

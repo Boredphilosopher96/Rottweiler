@@ -1,0 +1,202 @@
+import { CacheRead } from "./read-allocation"
+import type { UiActionLease } from "../ui/actions"
+import { readToolSurface } from "./tool-surface"
+import type { UiSurfaceModel } from "../ui/presentation"
+import type { TranscriptContentPage, TranscriptContentSource, TranscriptView } from "../protocol"
+import type { CacheLease, ClientCache } from "./cache"
+import { HISTORY_PAGE_BYTES, type HistoryCacheValue } from "./controller"
+import type { SessionReader, SessionReadTarget } from "../session-reader"
+
+const CHUNK_BYTES = 4096
+const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
+const MAX_CHUNKS = Math.ceil(MAX_DOCUMENT_BYTES / (CHUNK_BYTES - 3)) + 1
+
+export interface DocumentSnapshot {
+  readonly open: boolean
+  readonly page: TranscriptContentPage | null
+  readonly surface: UiSurfaceModel | null
+  readonly loading: boolean
+  readonly error: string | null
+  readonly previous: boolean
+}
+
+/** One paged document reader shares the transcript cache and never assembles full content. */
+export class DocumentController {
+  readonly #reader: Pick<SessionReader, "page" | "content">
+  readonly #cache: ClientCache<HistoryCacheValue>
+  readonly #changed: (snapshot: DocumentSnapshot) => void
+  #selection: { target: SessionReadTarget; readonly view: TranscriptView; readonly source: TranscriptContentSource; readonly key: string } | null = null
+  #request: AbortController | null = null
+  #active: CacheLease<HistoryCacheValue> | null = null
+  #offsets = [0]
+  #index = 0
+  #loading = false
+  #error: string | null = null
+  #sourceRequest: AbortController | null = null
+  #sourceOpen = false
+
+  constructor(reader: Pick<SessionReader, "page" | "content">, cache: ClientCache<HistoryCacheValue>, changed: (snapshot: DocumentSnapshot) => void) {
+    this.#reader = reader
+    this.#cache = cache
+    this.#changed = changed
+  }
+
+  get snapshot(): DocumentSnapshot {
+    const value = this.#active?.value
+    return {
+      open: this.#selection !== null || this.#sourceOpen, page: value?.kind === "document" ? value.page : null,
+      surface: value?.kind === "surface" ? value.surface : null,
+      loading: this.#loading, error: this.#error, previous: this.#index > 0
+    }
+  }
+
+  open(target: SessionReadTarget, view: TranscriptView, source: TranscriptContentSource): Promise<void> {
+    this.close()
+    if (target.sessionId !== view.session_id) return Promise.reject(new Error("Document authority does not match its source session."))
+    this.#selection = { target, view, source, key: JSON.stringify([target, view, source]) }
+    return this.#load(0, 0)
+  }
+
+  /** Resolve the source against a fresh bounded view without moving the transcript viewport. */
+  async openSource(target: SessionReadTarget, source: TranscriptContentSource): Promise<void> {
+    this.close()
+    const request = new AbortController()
+    this.#sourceRequest = request
+    this.#sourceOpen = true
+    this.#loading = true
+    this.#changed(this.snapshot)
+    let incoming: CacheRead<HistoryCacheValue> | null = null
+    try {
+      for (;;) {
+        incoming?.release()
+        incoming = new CacheRead(this.#cache)
+        const result = await this.#reader.page(target, {
+          known_view: null, position: { type: "latest" }, max_items: 1, max_bytes: HISTORY_PAGE_BYTES,
+        }, request.signal, incoming)
+        if (this.#sourceRequest !== request || request.signal.aborted) return
+        if (result.type !== "ready") {
+          await new Promise<void>(resolve => setTimeout(resolve, 0))
+          request.signal.throwIfAborted()
+          continue
+        }
+        if (result.page.view.session_id !== target.sessionId) throw new Error("Tool content authority does not match its source session.")
+        this.#sourceRequest = null
+        this.#sourceOpen = false
+        await this.open(target, result.page.view, source)
+        return
+      }
+    } catch (error) {
+      if (this.#sourceRequest === request && !request.signal.aborted) {
+        this.#error = error instanceof Error ? error.message : "Tool content read failed."
+      }
+    } finally {
+      incoming?.release()
+      if (this.#sourceRequest === request) {
+        this.#sourceRequest = null
+        this.#loading = false
+        this.#changed(this.snapshot)
+      }
+    }
+  }
+
+  pinAction(): UiActionLease | null {
+    const selection = this.#selection
+    if (selection === null || this.#loading || selection.source.selector.type !== "tool_presentation") return null
+    const lease = this.#cache.lease(`document:${selection.key}:0`)
+    if (lease === null) return null
+    if (lease.value.kind !== "surface") { lease.release(); return null }
+    return {
+      get model() {
+        const value = lease.value
+        if (value.kind !== "surface") throw new Error("surface lease is unavailable")
+        return value.surface
+      },
+      sessionId: selection.view.session_id,
+      target: { surface: "tool", invocation_id: selection.source.selector.invocation_id },
+      release: () => lease.release(),
+    }
+  }
+
+  next(): Promise<void> {
+    const offset = this.snapshot.page?.next_offset
+    return offset == null || this.#loading ? Promise.resolve() : this.#load(offset, this.#index + 1)
+  }
+
+  previous(): Promise<void> {
+    const offset = this.#offsets[this.#index - 1]
+    return offset === undefined || this.#loading ? Promise.resolve() : this.#load(offset, this.#index - 1)
+  }
+
+  close(): void {
+    this.#sourceRequest?.abort()
+    this.#sourceRequest = null
+    this.#sourceOpen = false
+    this.#request?.abort()
+    this.#request = null
+    const previous = this.#active
+    this.#active = null
+    this.#selection = null
+    this.#offsets = [0]
+    this.#index = 0
+    this.#loading = false
+    this.#error = null
+    try { this.#changed(this.snapshot) } finally { previous?.release() }
+  }
+
+  async #load(offset: number, index: number): Promise<void> {
+    const selection = this.#selection
+    if (selection === null) return
+    this.#request?.abort()
+    const request = new AbortController()
+    this.#request = request
+    this.#loading = true
+    this.#error = null
+    this.#changed(this.snapshot)
+    let retired: CacheLease<HistoryCacheValue> | null = null
+    let incoming: CacheRead<HistoryCacheValue> | null = null
+    try {
+      if (index >= MAX_CHUNKS) throw new Error("document exceeds the bounded content index")
+      const key = `document:${selection.key}:${offset}`
+      let lease = this.#cache.lease(key)
+      if (lease === null && selection.source.selector.type === "tool_presentation") {
+        lease = await readToolSurface(this.#reader, this.#cache, selection.target, key, selection.view, selection.source, request.signal)
+        if (this.#request !== request || request.signal.aborted) { lease.release(); return }
+      }
+      if (lease === null) {
+        incoming = new CacheRead(this.#cache)
+        const page = await this.#reader.content(selection.target, {
+          view: selection.view, source: selection.source, offset, max_bytes: CHUNK_BYTES,
+        }, request.signal, incoming)
+        if (this.#request !== request || request.signal.aborted) return
+        const bytes = Buffer.byteLength(page.text)
+        if (JSON.stringify([selection.target, page.view, page.source]) !== selection.key || page.offset !== offset
+          || bytes > CHUNK_BYTES || page.total_bytes > MAX_DOCUMENT_BYTES
+          || offset + bytes > page.total_bytes
+          || (page.next_offset === null ? offset + bytes !== page.total_bytes
+            : page.next_offset !== offset + bytes || bytes === 0)) {
+          throw new Error("document reply violates its source or byte range")
+        }
+        lease = incoming.commit(key, { kind: "document", page })
+      }
+      if (lease === null || (lease.value.kind !== "document" && lease.value.kind !== "surface")) {
+        lease?.release()
+        throw new Error("admitted content is unavailable")
+      }
+      retired = this.#active
+      this.#active = lease
+      this.#index = index
+      this.#offsets[index] = offset
+    } catch (error) {
+      if (this.#request === request && !request.signal.aborted) {
+        this.#error = error instanceof Error ? error.message : "content read failed"
+      }
+    } finally {
+      incoming?.release()
+      if (this.#request === request) {
+        this.#request = null
+        this.#loading = false
+        try { this.#changed(this.snapshot) } finally { retired?.release() }
+      } else retired?.release()
+    }
+  }
+}

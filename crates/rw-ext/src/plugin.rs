@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -15,75 +14,38 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 use thiserror::Error;
 
-use crate::{HookDirective, HookError, HookEvent, HookHandler, HookInvocation};
+use crate::{HookDirective, HookError, HookHandler, HookInvocation};
 
+use rw_plugin_protocol::{
+    ExtensionEventKind, HookEvent, MAX_CAPABILITIES_PER_KIND, MAX_NAME_BYTES,
+    MAX_RPC_MESSAGE_BYTES, METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities,
+    PluginHookCapability, PluginManifest, PluginPush, PluginToolCapability,
+};
 #[cfg(test)]
 use rw_plugin_protocol::{
     FrameDecoder, FrameError, MAX_FRAME_BYTES, MAX_MANIFEST_BYTES, MAX_VERSION_BYTES,
-    METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
+    METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
     METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
     METHOD_TOOL_CALL, METHOD_UI_NOTIFY, PROTOCOL_VERSION, PluginProviderCapability,
+    PluginToolEffect,
 };
-use rw_plugin_protocol::{
-    HookInvokeParams, MAX_CAPABILITIES_PER_KIND, MAX_HOOK_PAYLOAD_BYTES, MAX_NAME_BYTES,
-    MAX_RPC_MESSAGE_BYTES, METHOD_HOOK_INVOKE, ManifestError, PluginCapabilities, PluginHook,
-    PluginHookCapability, PluginHookFailurePolicy, PluginManifest, PluginPush,
-    PluginToolCapability, PluginToolEffect,
-};
-
-impl From<PluginHookFailurePolicy> for crate::HookFailurePolicy {
-    fn from(policy: PluginHookFailurePolicy) -> Self {
-        match policy {
-            PluginHookFailurePolicy::FailOpen => Self::FailOpen,
-            PluginHookFailurePolicy::FailClosed => Self::FailClosed,
-        }
-    }
-}
-
-impl From<PluginHook> for HookEvent {
-    fn from(hook: PluginHook) -> Self {
-        match hook {
-            PluginHook::SessionStart => Self::SessionStart,
-            PluginHook::SessionEnd => Self::SessionEnd,
-            PluginHook::UserPromptSubmit => Self::UserPromptSubmit,
-            PluginHook::PreTool => Self::PreTool,
-            PluginHook::PostTool => Self::PostTool,
-            PluginHook::PreCompact => Self::PreCompact,
-            PluginHook::TurnEnd => Self::TurnEnd,
-            PluginHook::PermissionCheck => Self::PermissionCheck,
-        }
-    }
-}
-
-impl From<HookEvent> for PluginHook {
-    fn from(event: HookEvent) -> Self {
-        match event {
-            HookEvent::SessionStart => Self::SessionStart,
-            HookEvent::SessionEnd => Self::SessionEnd,
-            HookEvent::UserPromptSubmit => Self::UserPromptSubmit,
-            HookEvent::PreTool => Self::PreTool,
-            HookEvent::PostTool => Self::PostTool,
-            HookEvent::PreCompact => Self::PreCompact,
-            HookEvent::TurnEnd => Self::TurnEnd,
-            HookEvent::PermissionCheck => Self::PermissionCheck,
-        }
-    }
-}
 
 /// Converts a protocol hook declaration into rw-ext's runtime registration.
 #[must_use]
 pub fn plugin_hook_registration(
     declaration: PluginHookCapability,
     id: impl Into<String>,
+    effect: crate::HookEffect,
 ) -> crate::HookRegistration {
-    crate::HookRegistration::new(id, declaration.name.into())
-        .with_failure_policy(declaration.failure_policy.into())
+    crate::HookRegistration::new(id, declaration.name, declaration.class)
+        .with_failure_policy(declaration.failure_policy)
+        .with_effect(effect)
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -202,7 +164,7 @@ pub struct ExecutableIdentity {
     pub device: u64,
     pub inode: u64,
     pub length: u64,
-    pub content_blake3: String,
+    pub content_sha256: String,
 }
 
 /// Stable identity for the narrowly readable plugin package directory.
@@ -360,6 +322,9 @@ impl PluginProcessConfig {
         let mut identities = Vec::with_capacity(canonical.len());
         for path in canonical {
             let identity = executable_identity(&path)?;
+            if path == self.executable && identity != self.executable_identity {
+                return Err(PluginProcessConfigError::InvalidAttestedFile);
+            }
             if let Some(root) = &self.code_root
                 && identity.canonical_path != self.executable
                 && !identity.canonical_path.starts_with(&root.canonical_path)
@@ -373,6 +338,24 @@ impl PluginProcessConfig {
                 return Err(PluginProcessConfigError::AttestationLimit);
             }
             identities.push(identity);
+        }
+        // Bind explicit file arguments to the exact captured path while approval
+        // is being constructed. Launch never resolves those mutable paths again.
+        for argument in &mut self.argv {
+            let path = Path::new(argument);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                self.cwd.join(path)
+            };
+            if let Ok(canonical) = path.canonicalize()
+                && identities
+                    .iter()
+                    .any(|identity| identity.canonical_path == canonical)
+                && canonical != self.executable
+            {
+                *argument = canonical.into_os_string();
+            }
         }
         self.attested_files = identities;
         Ok(self)
@@ -477,6 +460,14 @@ impl PluginProcessConfig {
                 });
             }
         }
+        self.validate_code_root_identity()
+    }
+
+    /// Revalidates the code directory while the launch owner pins file bytes.
+    ///
+    /// # Errors
+    /// Rejects replacement of the approved directory identity.
+    pub fn validate_code_root_identity(&self) -> Result<(), PluginProcessError> {
         if let Some(expected) = &self.code_root {
             let current = directory_identity(&expected.canonical_path).map_err(|error| {
                 PluginProcessError {
@@ -524,52 +515,35 @@ fn directory_identity(path: &Path) -> Result<CodeRootIdentity, PluginProcessConf
 }
 
 fn executable_identity(path: &Path) -> Result<ExecutableIdentity, PluginProcessConfigError> {
-    const MAX_IDENTITY_FILE_BYTES: u64 = 256 * 1024 * 1024;
-    let metadata =
-        std::fs::metadata(path).map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
-    if !metadata.is_file() || metadata.len() > MAX_IDENTITY_FILE_BYTES {
+    if std::fs::metadata(path)
+        .map_err(|_| PluginProcessConfigError::InvalidExecutable)?
+        .len()
+        > 256 * 1024 * 1024
+    {
         return Err(PluginProcessConfigError::AttestationLimit);
     }
-    let file =
-        std::fs::File::open(path).map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
-    let mut file = file.take(metadata.len().saturating_add(1));
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 16 * 1024];
-    let mut read_bytes = 0_u64;
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
-        if count == 0 {
-            break;
+    let identity = rw_tools::ExecutableArtifactIdentity::capture(path, 256 * 1024 * 1024)
+        .map_err(|_| PluginProcessConfigError::InvalidExecutable)?;
+    Ok(ExecutableIdentity {
+        canonical_path: identity.executable,
+        device: identity.device,
+        inode: identity.inode,
+        length: identity.bytes,
+        content_sha256: identity.sha256,
+    })
+}
+
+impl ExecutableIdentity {
+    /// Exact file identity supplied to the shared approved-byte owner.
+    #[must_use]
+    pub fn artifact_identity(&self) -> rw_tools::ExecutableArtifactIdentity {
+        rw_tools::ExecutableArtifactIdentity {
+            executable: self.canonical_path.clone(),
+            device: self.device,
+            inode: self.inode,
+            bytes: self.length,
+            sha256: self.content_sha256.clone(),
         }
-        hasher.update(&buffer[..count]);
-        read_bytes = read_bytes.saturating_add(count as u64);
-    }
-    if read_bytes != metadata.len() {
-        return Err(PluginProcessConfigError::InvalidExecutable);
-    }
-    let content_blake3 = hasher.finalize().to_hex().to_string();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(ExecutableIdentity {
-            canonical_path: path.to_path_buf(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            length: metadata.len(),
-            content_blake3,
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(ExecutableIdentity {
-            canonical_path: path.to_path_buf(),
-            device: 0,
-            inode: 0,
-            length: metadata.len(),
-            content_blake3,
-        })
     }
 }
 
@@ -769,25 +743,6 @@ impl CapabilityEnforcer {
             .any(|approved| approved == declaration)
     }
 
-    /// Returns the effective authority held by the shared plugin process.
-    ///
-    /// A plugin process is one sandbox principal, so every tool adapter must
-    /// present this union to the permission and checkpoint chokepoints rather
-    /// than claiming only its handler's narrower declaration.
-    #[must_use]
-    pub fn process_tool_effects(&self) -> BTreeSet<PluginToolEffect> {
-        let mut effects = self
-            .capabilities
-            .tools
-            .iter()
-            .flat_map(|tool| tool.caps.iter().copied())
-            .collect::<BTreeSet<_>>();
-        if !self.capabilities.providers.is_empty() {
-            effects.insert(PluginToolEffect::Network);
-        }
-        effects
-    }
-
     /// Verifies a command declaration, terminating the process on violation.
     ///
     /// # Errors
@@ -809,7 +764,7 @@ impl CapabilityEnforcer {
     /// # Errors
     ///
     /// Returns a violation when the hook was not declared.
-    pub fn check_hook(&self, hook: PluginHook) -> Result<(), CapabilityEnforcementError> {
+    pub fn check_hook(&self, hook: HookEvent) -> Result<(), CapabilityEnforcementError> {
         self.check(
             CapabilityKind::Hook,
             hook.as_str(),
@@ -865,14 +820,11 @@ impl CapabilityEnforcer {
     /// # Errors
     ///
     /// Returns a violation when the event was not declared.
-    pub fn check_event(&self, event: &str) -> Result<(), CapabilityEnforcementError> {
+    pub fn check_event(&self, event: ExtensionEventKind) -> Result<(), CapabilityEnforcementError> {
         self.check(
             CapabilityKind::Event,
-            event,
-            self.capabilities
-                .event_subscriptions
-                .iter()
-                .any(|declared| declared == event),
+            event.as_str(),
+            self.capabilities.event_subscriptions.contains(&event),
         )
     }
 
@@ -986,7 +938,7 @@ pub type PluginProviderEventStream =
 #[async_trait]
 pub trait PluginRpcClient: Send + Sync {
     /// Waits for teardown started by a cancelled or dropped request.
-    async fn settle_effects(&self) {}
+    async fn settle_effects(&self) -> Result<(), PluginRpcError>;
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError>;
 
@@ -1003,6 +955,27 @@ pub trait PluginRpcClient: Send + Sync {
             });
         }
         self.request(method, params).await
+    }
+
+    /// Executes a command under an immutable host-selected deadline.
+    async fn call_command(
+        &self,
+        params: rw_plugin_protocol::CommandExecuteParams,
+        cancellation: &rw_tools::CancellationToken,
+    ) -> Result<Value, PluginRpcError>;
+
+    /// Calls a tool under host-owned total and idle deadlines.
+    async fn call_tool(
+        &self,
+        _params: rw_plugin_protocol::ToolCallParams,
+        _cancellation: &rw_tools::CancellationToken,
+        _progress: Arc<dyn rw_tools::ToolProgressSink>,
+        _effects: Option<Arc<crate::PluginToolEffects>>,
+    ) -> Result<Value, PluginRpcError> {
+        Err(PluginRpcError {
+            code: "unsupported".to_owned(),
+            message: "RPC tool operations are unsupported".to_owned(),
+        })
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), PluginRpcError> {
@@ -1028,51 +1001,40 @@ pub trait PluginRpcClient: Send + Sync {
 
 /// Adapter that registers an out-of-process hook through the common dispatcher.
 pub struct RpcHookHandler {
-    client: Arc<dyn PluginRpcClient>,
-    enforcer: Arc<CapabilityEnforcer>,
+    endpoint: Arc<dyn crate::PluginEndpoint>,
 }
 
 impl RpcHookHandler {
     #[must_use]
-    pub fn new(client: Arc<dyn PluginRpcClient>, enforcer: Arc<CapabilityEnforcer>) -> Self {
-        Self { client, enforcer }
+    pub fn new(endpoint: Arc<dyn crate::PluginEndpoint>) -> Self {
+        Self { endpoint }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RpcHookResponse {
-    Allow {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        payload: Option<Value>,
-    },
-    Deny {
-        message: String,
-    },
-    Replace {
-        payload: Value,
-    },
 }
 
 #[async_trait]
 impl HookHandler for RpcHookHandler {
-    async fn settle_effects(&self) {
-        self.client.settle_effects().await;
+    async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
+        self.endpoint
+            .settle_effects()
+            .await
+            .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
     }
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
-        let hook = PluginHook::from(invocation.event());
-        self.enforcer
+        let hook = invocation.event();
+        let connection = self
+            .endpoint
+            .connect(invocation.cancellation())
+            .await
+            .map_err(|error| HookError::new(error.code, error.message))?;
+        connection
+            .enforcer()
             .check_hook(hook)
             .map_err(|error| HookError::new("capability_violation", error.to_string()))?;
-        let result = self
-            .client
+        let result = connection
+            .client()
             .request_cancellable(
                 METHOD_HOOK_INVOKE,
-                serde_json::to_value(HookInvokeParams {
-                    hook,
-                    payload: invocation.payload().clone(),
-                })
-                .map_err(|error| {
+                serde_json::to_value(invocation.input()).map_err(|error| {
                     HookError::new("invalid_request", format!("hook request failed: {error}"))
                 })?,
                 invocation.cancellation(),
@@ -1091,44 +1053,8 @@ impl HookHandler for RpcHookHandler {
                     HookError::new(error.code, error.message)
                 }
             })?;
-        let mut result = result;
-        if let Value::Object(object) = &mut result
-            && !object.contains_key("decision")
-            && let Some(action) = object.remove("action")
-        {
-            object.insert("decision".to_owned(), action);
-        }
-        let response: RpcHookResponse = serde_json::from_value(result)
-            .map_err(|error| HookError::new("invalid_response", error.to_string()))?;
-        match response {
-            RpcHookResponse::Allow { payload: None } => Ok(HookDirective::Continue),
-            RpcHookResponse::Allow {
-                payload: Some(payload),
-            }
-            | RpcHookResponse::Replace { payload }
-                if serde_json::to_vec(&payload)
-                    .is_ok_and(|bytes| bytes.len() <= MAX_HOOK_PAYLOAD_BYTES) =>
-            {
-                Ok(HookDirective::Replace(payload))
-            }
-            RpcHookResponse::Allow { payload: Some(_) } | RpcHookResponse::Replace { .. } => {
-                Err(HookError::new(
-                    "invalid_response",
-                    "hook replacement payload exceeds the limit",
-                ))
-            }
-            RpcHookResponse::Deny { message }
-                if !message.is_empty()
-                    && message.len() <= MAX_RPC_MESSAGE_BYTES
-                    && !message.chars().any(char::is_control) =>
-            {
-                Ok(HookDirective::Block { message })
-            }
-            RpcHookResponse::Deny { .. } => Err(HookError::new(
-                "invalid_response",
-                "hook denial message is invalid",
-            )),
-        }
+        serde_json::from_value::<HookDirective>(result)
+            .map_err(|error| HookError::new("invalid_response", error.to_string()))
     }
 }
 
@@ -1158,15 +1084,16 @@ mod tests {
                     caps: vec![PluginToolEffect::ReadsFilesystem],
                 }],
                 hooks: vec![PluginHookCapability {
-                    name: PluginHook::PreTool,
-                    failure_policy: PluginHookFailurePolicy::FailClosed,
+                    name: HookEvent::PreTool,
+                    class: rw_types::hook_contract::HookClass::Transform,
+                    failure_policy: rw_plugin_protocol::HookFailurePolicy::FailClosed,
                 }],
                 providers: vec![PluginProviderCapability {
                     alias_prefix: "custom/".to_owned(),
                     capabilities: vec!["models".to_owned()],
                     credential_references: vec!["provider-token".to_owned()],
                 }],
-                event_subscriptions: vec!["ToolCallFinished".to_owned()],
+                event_subscriptions: vec![ExtensionEventKind::ToolCallFinished],
                 push: vec![PluginPush::UiNotify],
                 ..PluginCapabilities::default()
             },
@@ -1230,9 +1157,9 @@ mod tests {
                     "argument_hint": "<name>",
                     "allowed_tools": ["hello"]
                 }],
-                "hooks": [{"name":"pre_tool","failure_policy":"fail-closed"}],
+                "hooks": [{"name":"pre_tool", "class": "policy","failure_policy":"fail-closed"}],
                 "providers": [{"alias-prefix":"fixture/"}],
-                "event_subscriptions": ["TurnFinished"]
+                "event_subscriptions": ["turn_finished"]
             }
         });
         let bytes = serde_json::to_vec(&fixture).expect("fixture JSON");
@@ -1240,14 +1167,14 @@ mod tests {
         assert_eq!(manifest.capabilities.tools[0].caps.len(), 2);
         assert_eq!(
             manifest.capabilities.hooks[0].failure_policy,
-            PluginHookFailurePolicy::FailClosed
+            rw_plugin_protocol::HookFailurePolicy::FailClosed
         );
     }
 
     #[test]
     fn language_neutral_protocol_fixture_matches_rust_constants() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../packages/plugin-sdk/fixtures/wire/protocol-2.json"
+            "../../../packages/plugin-sdk/fixtures/wire/protocol-3.json"
         ))
         .expect("protocol fixture JSON");
         assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
@@ -1261,7 +1188,6 @@ mod tests {
             METHOD_PROVIDER_COMPLETE
         );
         assert_eq!(fixture["methods"]["providerEvent"], METHOD_PROVIDER_EVENT);
-        assert_eq!(fixture["methods"]["providerCancel"], METHOD_PROVIDER_CANCEL);
         assert_eq!(fixture["methods"]["notify"], METHOD_UI_NOTIFY);
         assert_eq!(fixture["methods"]["providerModels"], METHOD_PROVIDER_MODELS);
         assert_eq!(fixture["methods"]["providerHttp"], METHOD_PROVIDER_HTTP);
@@ -1449,10 +1375,24 @@ mod tests {
 
     #[async_trait]
     impl PluginRpcClient for DenyClient {
+        async fn call_command(
+            &self,
+            _: rw_plugin_protocol::CommandExecuteParams,
+            _: &rw_tools::CancellationToken,
+        ) -> Result<Value, PluginRpcError> {
+            Err(PluginRpcError {
+                code: "fixture_capability".into(),
+                message: "fixture does not implement commands".into(),
+            })
+        }
+
+        async fn settle_effects(&self) -> Result<(), PluginRpcError> {
+            Ok(())
+        }
         async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
             assert_eq!(method, METHOD_HOOK_INVOKE);
             assert_eq!(params["hook"], "pre_tool");
-            Ok(json!({"decision":"deny","message":"blocked by plugin"}))
+            Ok(json!({"decision":"block","message":"blocked by plugin"}))
         }
     }
 
@@ -1460,17 +1400,30 @@ mod tests {
     async fn pre_tool_deny_uses_common_hook_dispatcher() {
         let process = Arc::new(ProcessState::default());
         let enforcer = Arc::new(CapabilityEnforcer::new(&manifest(), process));
-        let handler = RpcHookHandler::new(Arc::new(DenyClient), enforcer);
+        let endpoint =
+            crate::plugin_endpoint::fixture_endpoint(manifest(), Arc::new(DenyClient), enforcer);
+        let handler = RpcHookHandler::new(endpoint);
         let mut dispatcher = HookDispatcher::new();
         dispatcher
             .register(
-                HookRegistration::new("plugin:pre-tool", HookEvent::PreTool),
+                HookRegistration::new(
+                    "plugin:pre-tool",
+                    HookEvent::PreTool,
+                    rw_types::hook_contract::HookClass::Policy,
+                ),
                 handler,
             )
             .expect("hook registration");
         let result = dispatcher
-            .dispatch(HookEvent::PreTool, json!({"name":"write"}))
-            .await;
+            .dispatch(crate::HookInput::PreTool(
+                rw_types::hook_contract::HookToolInput {
+                    id: "call".to_owned(),
+                    name: "write".to_owned(),
+                    arguments: json!({}),
+                },
+            ))
+            .await
+            .expect("settled hook");
         assert_eq!(
             result.status(),
             &HookDispatchStatus::Blocked {

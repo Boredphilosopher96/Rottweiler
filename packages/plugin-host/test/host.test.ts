@@ -3,7 +3,8 @@ import { access, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { main, SOURCE_BUNDLE_FORMAT, SOURCE_HOST_ABI } from "../src/index"
+import { main } from "../src/index"
+import { SOURCE_BUNDLE_FORMAT, SOURCE_HOST_ABI } from "../src/protocol"
 
 test("publishes one valid semantic ABI and bundle format", () => {
   expect(SOURCE_HOST_ABI).toBeGreaterThan(0)

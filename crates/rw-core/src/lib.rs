@@ -10,8 +10,14 @@ mod mcp;
 mod model_catalog;
 mod orchestration;
 mod permission;
+pub mod provider_admission;
 mod provider_factory;
 mod subscription_credentials;
+#[cfg(unix)]
+pub mod todo_projection;
+#[cfg(unix)]
+pub mod transcript;
+pub mod ui;
 mod update;
 
 pub use rw_types::config::{
@@ -40,28 +46,35 @@ pub use admin::{
     refresh_model_catalog, resolve_provider_api_key, store_provider_api_key,
     validate_stored_provider_credential,
 };
+#[cfg(unix)]
+pub use engine::recovery;
+
 pub use engine::{
-    AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, CommandToolCall,
-    CommandToolOutputKind, ContextSurgeryAction, EventClock, FolderTrustController,
+    AdmittedEventBatch, AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals,
+    CommandToolCall, CommandToolOutputKind, CompletedTurn, ContextSurgeryAction, EventBatchPlan,
+    EventBatchReservation, EventClock, ExtensionStateView, FolderTrustController,
     FolderTrustOperation, InterruptedToolRepair, MessageDisposition, ModelContextMetadata,
-    ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
-    NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
-    NoopSessionEventSink, NoopSessionExtensionController, NoopWorkspaceRootController,
-    PluginSessionCapability, RecoveredQuestion, RewindCheckpoint, SESSION_EVENT_VERSION,
-    SecretRedactor, SessionActor, SessionActorConfig, SessionCommandAction, SessionCommandContext,
-    SessionCommandOutput, SessionEventSink, SessionExtensionController, SessionExtensionSnapshot,
-    SessionHandle, SessionProjectionError, SessionRecoveredState, SessionSnapshot,
+    ModelDriver, ModelSource, MutationCheckpoint, MutationCheckpointCoordinator,
+    MutationCheckpointOutcome, NoopFolderTrustController, NoopMutationCheckpointCoordinator,
+    NoopSecretRedactor, NoopSessionEventSink, NoopSessionExtensionController, NoopSessionResources,
+    NoopWorkspaceRootController, PluginSessionBinding, PluginSessionCapability,
+    PreparedRuntimePublication, RecoveredQuestion, RewindCheckpoint, RuntimePublication,
+    SESSION_EVENT_VERSION, SecretRedactor, SessionAccountingState, SessionActor,
+    SessionActorConfig, SessionActorRecovery, SessionCommandAction, SessionCommandContext,
+    SessionCommandOutput, SessionEventDelivery, SessionEventReadView, SessionEventSink,
+    SessionExtensionController, SessionExtensionSnapshot, SessionHandle, SessionProjectionError,
+    SessionRecoveredState, SessionReplayLimits, SessionResources, SessionSnapshot,
     SessionSubscription, SessionUsage, StartupNotification, SystemEventClock,
-    TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRuntimeGeneration,
-    builtin_command_registry, builtin_hook_dispatcher, project_session_events,
-    project_session_events_with_modes,
+    TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRootRequest,
+    WorkspaceRuntimeGeneration, builtin_command_registry, builtin_hook_dispatcher,
+    commit_session_events, project_session_events, project_session_events_with_modes,
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
-    ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
-    HostQueryService, HostRuntimeService, HostSubagentService, HostedSession,
-    PreparedForkOperation, ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion,
-    SessionFactory, SubagentReplay,
+    ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostEvent,
+    HostEventBudget, HostMcpService, HostQueryService, HostReadChannel, HostReadResult, HostReply,
+    HostRuntimeService, HostSubagentService, HostedSession, PreparedForkOperation,
+    ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion, SessionFactory,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,
@@ -85,11 +98,12 @@ pub use model_catalog::{
 };
 pub use orchestration::{
     ActorSubagentSessionFactory, DEFAULT_SUBAGENT_CONCURRENCY, DEFAULT_SUBAGENT_MAX_DEPTH,
-    DEFAULT_SUBAGENT_MAX_DURATION, DEFAULT_SUBAGENT_MAX_TURNS, NoopSubagentMetadataStore,
-    OrchestrationError, SpawnAgentTool, SubagentHandle, SubagentLaunch, SubagentLimits,
-    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentProgressObserver,
-    SubagentRecoveryPhase, SubagentRecoveryPolicy, SubagentRecoveryRecord, SubagentRequest,
-    SubagentSession, SubagentSessionFactory, SubagentTurnResult, WorktreeSubagentSessionFactory,
+    DEFAULT_SUBAGENT_MAX_DURATION, DEFAULT_SUBAGENT_MAX_TURNS, DormantChildControls,
+    MAX_RETAINED_SUBAGENTS, NoopSubagentMetadataStore, OrchestrationError, SpawnAgentTool,
+    SubagentArtifactSource, SubagentHandle, SubagentLaunch, SubagentLimits, SubagentMetadataStore,
+    SubagentObserver, SubagentOrchestrator, SubagentProgressObserver, SubagentRecoveryPhase,
+    SubagentRecoveryPolicy, SubagentRecoveryRecord, SubagentRequest, SubagentSession,
+    SubagentSessionFactory, SubagentTurnResult, WorktreeSubagentSessionFactory,
     diff_artifact_reference, incomplete_subagent_lifecycles, interrupted_subagent_recovery_result,
     subagent_result_tool_output,
 };
@@ -101,18 +115,18 @@ pub use permission::{
 pub use provider_factory::{
     AdapterKind, BUILTIN_PROVIDER_PROFILES, BuiltinProviderId, BuiltinProviderProfile,
     ModelPricingSource, ProviderFactory, ProviderFactoryError, ProviderModelCatalogSource,
-    ProviderNativeWebSearcher, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
+    ProviderNativeWebSearchFactory, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
 };
 pub use rw_providers::{
     ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,
 };
 pub use rw_types::PROTOCOL_VERSION;
 pub use rw_types::{
-    Answer, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
-    EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
-    SessionDescriptor, SessionId, ShellId, SubagentActivity, SubagentDescriptor, SubagentId,
-    SubagentIsolation, SubagentResult, ToolOutputStream, TranscriptFormat, TurnId, TurnStatus,
-    UnrestorablePath, Usage,
+    Answer, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome,
+    CommandReply, Cost, EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId,
+    RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, SubagentActivity,
+    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult, ToolOutputStream,
+    TranscriptFormat, TurnId, TurnStatus, UnrestorablePath, Usage,
 };
 pub use update::{
     EMBEDDED_ROOT_KEYS_JSON, EMBEDDED_ROOT_THRESHOLD, EMBEDDED_ROOT_VERSION, TrustedRoot,
@@ -122,3 +136,5 @@ pub use update::{
 
 /// Identifies this workspace component in diagnostics.
 pub const COMPONENT: &str = "core";
+
+pub use engine::FamilyControlAuthority;

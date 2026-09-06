@@ -73,7 +73,7 @@ function createPlannedFetch(
     }
     if (url.pathname === "/v1/command") {
       harness.commands.push(JSON.parse(String(init?.body)) as ClientCommand)
-      return Response.json({ type: "accepted" }, { status: 202 })
+      return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
     }
     const plan = remaining.shift() ?? { chunks: [] }
     return new Response(
@@ -173,14 +173,14 @@ describe("authenticated UDS engine transport", () => {
         if (commandCount === 1) {
           return new Response("engine restarted", { status: 401 })
         }
-        return Response.json({ type: "accepted" }, { status: 202 })
+        return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
       }) as typeof fetch,
     })
 
     await expect(client.postCommand(attach)).rejects.toEqual(
       new EngineTransportError("engine command rejected", 401),
     )
-    expect(await client.postCommand(attach)).toEqual({ type: "accepted" })
+    expect(await client.postCommand(attach)).toEqual({ type: "command", outcome: { type: "accepted" } })
     expect(bootstrapHeaders).toEqual([
       "Bearer bootstrap-before-restart",
       "Bearer bootstrap-after-restart",
@@ -247,7 +247,6 @@ describe("authenticated UDS engine transport", () => {
     expect(state.mode).toBe("plan")
     expect(state.model).toBe("fast")
     expect(state.protocol.duplicateEvents).toBe(1)
-    expect(state.protocol.unknownEvents).toBe(0)
     const attaches = engine.commands.filter(
       (command): command is Extract<ClientCommand, { type: "attach_session" }> =>
         command.type === "attach_session",
@@ -271,7 +270,7 @@ describe("authenticated UDS engine transport", () => {
     expect(delays).toEqual([1])
   })
 
-  test("resets an ahead replay cursor once and retries from the beginning", async () => {
+  test.each([null, "3"])("recovers an ahead cursor once and uses the replacement source cursor %s", async recovered => {
     const replayCompleted = {
       type: "session_replay_completed",
       meta: {
@@ -294,7 +293,7 @@ describe("authenticated UDS engine transport", () => {
           return Response.json({ client_id: "mock-client", token: "mock-token" }, { status: 201 })
         }
         if (url.pathname === "/v1/command") {
-          return Response.json({ type: "accepted" }, { status: 202 })
+          return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
         }
         eventPaths.push(`${url.pathname}${url.search}`)
         eventRequests += 1
@@ -329,7 +328,7 @@ describe("authenticated UDS engine transport", () => {
       getLastSeenSequence: () => cursor,
       onReplayCursorAhead() {
         resets += 1
-        cursor = null
+        cursor = recovered
       },
       onEvent() {
         controller.abort()
@@ -339,7 +338,7 @@ describe("authenticated UDS engine transport", () => {
     expect(resets).toBe(1)
     expect(eventPaths).toEqual([
       "/v1/events?session_id=session-transport&last_seen_sequence=9",
-      "/v1/events?session_id=session-transport",
+      "/v1/events?session_id=session-transport" + (recovered === null ? "" : `&last_seen_sequence=${recovered}`),
     ])
   })
 
@@ -594,6 +593,7 @@ describe("authenticated UDS engine transport", () => {
 
   for (const [name, frame] of [
     ["known event without payload", encodeSseJson({ type: "command_acknowledged" })],
+    ["connection event addressed to another authenticated client", encodeSseJson({ type: "session_navigation_requested", meta: { protocol_version: PROTOCOL_VERSION, client_id: "foreign-client", request_id: "forged-navigation", emitted_at: "2026-01-01T00:00:00Z" }, session_id: "session-transport", target: { kind: "session", session_id: "foreign-session" } })],
     ["known event with malformed nested data", encodeSseJson({ type: "text_delta", meta: durableMeta("2"), turn_id: "1", text: [] })],
     ["invalid JSON", new TextEncoder().encode("data: {broken\n\n")],
   ] as const) {
@@ -638,7 +638,7 @@ describe("authenticated UDS engine transport", () => {
           return Response.json({ client_id: "mock-client", token: "mock-token" }, { status: 201 })
         }
         if (url.endsWith("/v1/command")) {
-          return Response.json({ type: "accepted" }, { status: 202 })
+          return Response.json({ type: "command", outcome: { type: "accepted" } }, { status: 202 })
         }
         controller.abort()
         return new Response(new ReadableStream<Uint8Array>(), {

@@ -7,27 +7,39 @@ use std::sync::Arc;
 
 use rw_core::{EngineHost, EngineHostConfig, HostError, HostQueryService, SessionFactory};
 
+#[cfg(test)]
+mod native_fixture;
+
 mod extension_config;
 mod extension_runtime;
 mod history;
+mod journal_service;
 mod mode_recovery;
 mod plugin_process;
 mod project_commands;
+mod projection_budget;
+/// Durable provider budget admission and storage-worker settlement.
+pub mod provider_admission;
 mod session_host;
+mod session_resources;
 mod session_runtime;
 mod source_plugin;
 mod storage_root;
 mod subagent_metadata;
+mod todo_service;
+mod transcript_service;
 mod workflow_runtime;
 
 pub use extension_runtime::PrivatePluginApprovalStore;
 pub use session_host::{RuntimeHostOptions, RuntimeSessionFactory};
+pub use transcript_service::{OwnedTranscriptRead, TranscriptReader, reader::TranscriptBootstrap};
 
 /// Durable session replay, search, and export APIs.
 pub mod session_history {
     pub use crate::history::{
-        MAX_HISTORY_BYTES, MAX_HISTORY_EVENTS, export_transcript, list_sessions, load_events,
-        load_events_with_size, replay_jsonl, search_sessions, write_transcript_export,
+        MAX_HISTORY_BYTES, MAX_HISTORY_EVENTS, SessionVerification, export_transcript,
+        list_sessions, load_events, load_events_with_size, replay_jsonl, search_sessions,
+        verify_session, write_transcript_export,
     };
 }
 
@@ -43,10 +55,11 @@ pub mod executable_config {
 /// Intentional session-runtime surface consumed by headless frontends.
 pub mod session {
     pub use crate::session_runtime::{
-        HostedProviderMode, RunAction, RunOptions, discover_model_catalog,
-        discover_runtime_extensions, extension_user_roots, initialize_private_storage_root,
+        HostedProviderMode, LocalSession, LocalSessionOptions, LocalSessionPurpose,
+        compose_local_session, discover_model_catalog, discover_runtime_extensions,
+        extension_user_roots, initialize_private_storage_root,
         load_inherited_accounting_boundary_bounded, locate_wasm_host_executable, new_session_id,
-        register_credential_environment, run, select_interactive_session,
+        register_credential_environment, select_interactive_session,
     };
 }
 
@@ -54,15 +67,6 @@ pub mod session {
 pub mod plugin {
     pub use crate::plugin_process::SandboxedPluginLauncher;
     pub use crate::source_plugin::resolve_plugin_process;
-}
-
-/// Provider-output rendering selected by a non-interactive runtime client.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum OutputFormat {
-    #[default]
-    Text,
-    Json,
-    StreamJson,
 }
 
 #[cfg(unix)]
@@ -132,6 +136,57 @@ mod tests {
 
     #[async_trait]
     impl SessionFactory for EmptyFactory {
+        async fn fork(
+            &self,
+            _request: rw_core::ForkSessionRequest,
+        ) -> Result<rw_core::HostedSession, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn load_fork_operation(
+            &self,
+            _key: &rw_core::ForkOperationKey,
+        ) -> Result<rw_core::ForkOperationState, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn prepare_fork_operation(
+            &self,
+            _operation: rw_core::PreparedForkOperation,
+        ) -> Result<rw_core::PreparedForkOperation, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn complete_fork_operation(
+            &self,
+            _key: &rw_core::ForkOperationKey,
+            _result: &rw_core::CompletedForkOperation,
+        ) -> Result<rw_core::CompletedForkOperation, HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+        async fn abandon_prepared_fork_operation(
+            &self,
+            _key: &rw_core::ForkOperationKey,
+        ) -> Result<(), HostError> {
+            Err(HostError::Protocol("no fork storage configured".into()))
+        }
+
+        async fn admit_command_receipt(
+            &self,
+            _command: &rw_core::ClientCommand,
+            _fingerprint: &str,
+        ) -> Result<rw_types::command_receipt::ReceiptAdmission, HostError> {
+            Err(HostError::Protocol("no mutation storage configured".into()))
+        }
+        async fn complete_command_receipt(
+            &self,
+            _operation: &rw_core::RequestId,
+            _fingerprint: &str,
+            _receipt: rw_types::command_receipt::CommandReceipt,
+        ) -> Result<rw_types::command_receipt::CommandReceipt, HostError> {
+            Err(HostError::Protocol("no mutation storage configured".into()))
+        }
+
+        async fn shutdown(&self) -> Result<(), HostError> {
+            Ok(())
+        }
         fn allocate_session_id(&self) -> Result<rw_core::SessionId, HostError> {
             Ok(rw_core::SessionId("empty".to_owned()))
         }
@@ -153,6 +208,39 @@ mod tests {
 
     #[async_trait]
     impl HostQueryService for EmptyFactory {
+        async fn read_transcript_tail(
+            &self,
+            _session: &rw_types::SessionId,
+            _scope: rw_types::session_read::SessionReadScope,
+            _read: rw_types::transcript_tail::TranscriptTailRead,
+        ) -> Result<rw_types::transcript_tail::TranscriptTailResult, HostError> {
+            Err(HostError::Query(
+                "transcript tail is not provided by this fixture".into(),
+            ))
+        }
+
+        async fn session_children(
+            &self,
+            _session: &rw_types::SessionId,
+            _scope: rw_types::session_read::SessionReadScope,
+        ) -> Result<rw_types::session_children::SessionChildrenResult, HostError> {
+            Err(HostError::Query(
+                "fixture has no child lifecycle source".into(),
+            ))
+        }
+
+        async fn todos(
+            &self,
+            _session: &rw_types::SessionId,
+            _scope: rw_types::session_read::SessionReadScope,
+        ) -> Result<rw_types::todo::TodoReadResult, HostError> {
+            Ok(rw_types::todo::TodoReadResult::Ready {
+                todos: rw_types::todo::TodoReadSnapshot {
+                    through: None,
+                    snapshot: rw_types::todo::TodoSnapshot::default(),
+                },
+            })
+        }
         async fn command_descriptors(&self) -> Result<Vec<CommandDescriptor>, HostError> {
             Ok(Vec::new())
         }

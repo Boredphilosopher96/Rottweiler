@@ -1,9 +1,11 @@
+mod navigation;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
 /// Engine-owned slash-command context. Public handlers use this exact type.
 #[derive(Clone, Debug)]
 pub struct SessionCommandContext {
+    pub(super) session_id: SessionId,
     pub(super) running: bool,
     pub(super) queued_messages: usize,
     pub(super) mode: SessionMode,
@@ -17,6 +19,7 @@ pub struct SessionCommandContext {
 impl Default for SessionCommandContext {
     fn default() -> Self {
         Self {
+            session_id: SessionId("command-fixture".to_owned()),
             running: false,
             queued_messages: 0,
             mode: SessionMode::Execute,
@@ -30,6 +33,11 @@ impl Default for SessionCommandContext {
 }
 
 impl SessionCommandContext {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
     #[must_use]
     pub const fn running(&self) -> bool {
         self.running
@@ -83,6 +91,9 @@ pub enum SessionCommandAction {
     #[default]
     None,
     Interrupt,
+    Navigate {
+        target: rw_types::extension_control::SessionNavigationTarget,
+    },
     Rewind {
         to_turn: u64,
     },
@@ -167,6 +178,9 @@ impl FolderTrustController for NoopFolderTrustController {
 
 /// Complete immutable runtime boundary swapped after a live root append.
 pub struct WorkspaceRuntimeGeneration {
+    pub model: Arc<dyn super::ModelDriver>,
+    pub publication: super::RuntimePublication,
+    pub ui: Arc<dyn crate::ui::UiRegistry>,
     pub generation: u64,
     pub effective_from_turn: u64,
     pub roots: Vec<PathBuf>,
@@ -192,16 +206,24 @@ impl fmt::Debug for WorkspaceRuntimeGeneration {
     }
 }
 
+/// Captured actor authority for one append-only root preparation.
+pub struct WorkspaceRootRequest<'a> {
+    pub requested: &'a Path,
+    pub roots: &'a [PathBuf],
+    pub generation: u64,
+    pub effective_from_turn: u64,
+    pub permissions: Arc<PermissionGate>,
+    pub model: Arc<dyn super::ModelDriver>,
+    pub model_alias: &'a str,
+    pub mcp_policy: rw_tools::McpToolPolicy,
+}
+
 /// Host-owned builder and persistence boundary for live workspace generations.
 #[async_trait]
 pub trait WorkspaceRootController: Send + Sync {
     async fn append_root(
         &self,
-        requested: &Path,
-        current_roots: &[PathBuf],
-        current_generation: u64,
-        effective_from_turn: u64,
-        permissions: Arc<PermissionGate>,
+        request: WorkspaceRootRequest<'_>,
     ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError>;
 
     async fn prepare_commit_generation(&self, generation: u64) -> Result<(), AgentLoopError>;
@@ -222,11 +244,7 @@ pub struct NoopWorkspaceRootController;
 impl WorkspaceRootController for NoopWorkspaceRootController {
     async fn append_root(
         &self,
-        _requested: &Path,
-        _current_roots: &[PathBuf],
-        _current_generation: u64,
-        _effective_from_turn: u64,
-        _permissions: Arc<PermissionGate>,
+        _request: WorkspaceRootRequest<'_>,
     ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(
             "live workspace-root changes are unavailable for this session host".to_owned(),
@@ -985,6 +1003,13 @@ pub fn builtin_command_registry()
     let mut registry = CommandRegistry::new();
     registry
         .register(
+            CommandDescriptor::new("goto", "Navigate to a session or transcript sequence")
+                .with_argument_hint("session <id> | sequence <number>"),
+            navigation::NavigateCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
             CommandDescriptor::new("help", "List available commands"),
             HelpCommand,
         )
@@ -1066,6 +1091,13 @@ pub fn builtin_command_registry()
             CompactCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    register_workspace_commands(&mut registry)?;
+    Ok(registry)
+}
+
+fn register_workspace_commands(
+    registry: &mut CommandRegistry<SessionCommandContext, SessionCommandOutput>,
+) -> Result<(), AgentLoopError> {
     registry
         .register(
             CommandDescriptor::new("trust", "Inspect or change folder trust")
@@ -1080,5 +1112,5 @@ pub fn builtin_command_registry()
             AddDirCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    Ok(registry)
+    Ok(())
 }

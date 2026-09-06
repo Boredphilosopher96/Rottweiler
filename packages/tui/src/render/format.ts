@@ -1,4 +1,4 @@
-import type { ContextSnapshot, Cost, CostSnapshot, ToolOutput, Turn, Usage } from "../protocol"
+import type { ContextSnapshot, Cost, CostSnapshot, Turn, Usage } from "../protocol"
 import type { ModelChoice } from "../state"
 
 export const COMMAND_PREVIEW_MAX_LINES = 6
@@ -46,12 +46,12 @@ export function formatSessionCost(
   if (snapshot === null) {
     return fallbackTokens === null ? "$—" : `${fallbackTokens} tokens`
   }
-  if (!snapshot.session_monetary_accounting_complete) {
-    return `${usageTokens(snapshot.session_usage)} tokens`
-  }
   if (decimal(snapshot.session_subscription_quota_entries) > 0) {
     const quota = subscriptionQuota(snapshot)
     return quota ?? `${usageTokens(snapshot.session_usage)} tokens`
+  }
+  if (!snapshot.session_monetary_accounting_complete) {
+    return `${usageTokens(snapshot.session_usage)} tokens`
   }
   if (decimal(snapshot.session_ai_credit_micros) > 0) {
     return `${(decimal(snapshot.session_ai_credit_micros) / 1_000_000).toFixed(3)} credits`
@@ -60,7 +60,7 @@ export function formatSessionCost(
 }
 
 /** Context capacity for the one-row status surface, without inventing a zero limit. */
-export function formatStatusContext(snapshot: ContextSnapshot): string {
+export function formatStatusContext<T extends Pick<ContextSnapshot, "context_window_known" | "used_tokens" | "usable_tokens">>(snapshot: T): string {
   if (!snapshot.context_window_known) {
     return `ctx ${formatTokenCount(snapshot.used_tokens)} · limit unknown`
   }
@@ -105,16 +105,8 @@ export function formatStatusSessionCost(
 }
 
 function subscriptionQuota(snapshot: CostSnapshot): string | null {
-  const values = snapshot.turns
-    .map((turn) => turn.cost)
-    .filter((cost): cost is Extract<Cost, { kind: "subscription_quota" }> =>
-      cost.kind === "subscription_quota" && cost.used !== undefined && cost.used !== null,
-    )
-  if (values.length === 0) return null
-  const units = new Set(values.map((cost) => cost.unit ?? "quota"))
-  if (units.size !== 1) return null
-  const used = values.reduce((sum, cost) => sum + decimal(cost.used ?? "0"), 0)
-  return `${used} ${values[0]?.unit ?? "quota"}`
+  const quota = snapshot.subscription_quota
+  return quota === null ? null : `${quota.used} ${quota.unit}`
 }
 
 function usageTokens(usage: Usage): string {
@@ -180,178 +172,7 @@ export function turnReasoningMarkdown(turn: Turn): string {
     .join("\n\n")
 }
 
-export function toolOutputText(output: ToolOutput | null): string {
-  if (output === null) {
-    return ""
-  }
-  switch (output.type) {
-    case "text":
-      return presentableTextToolOutput(output.text)
-    case "structured":
-      return structuredToolSummary(output.value)
-    case "mixed": {
-      const images = output.parts
-        .filter((part): part is Extract<(typeof output.parts)[number], { type: "image" }> => part.type === "image")
-        .map((part) => `Image attachment · ${part.media_type}`)
-      const structured = output.parts
-        .filter((part): part is Extract<(typeof output.parts)[number], { type: "structured" }> => part.type === "structured")
-        .map((part) => structuredToolSummary(part.value))
-        .filter(Boolean)
-      if (structured.length > 0) return [...structured, ...images].join("\n")
-      const text = output.parts
-        .filter((part): part is Extract<(typeof output.parts)[number], { type: "text" }> => part.type === "text")
-        .map((part) => presentableTextToolOutput(part.text))
-        .filter(Boolean)
-      return [...text, ...images].join("\n")
-    }
-  }
-}
-
-/** Last structured payload emitted for a tool invocation, with the wire envelope removed. */
-export function toolStructuredData(output: ToolOutput | null): unknown | null {
-  if (output === null) return null
-  const values = output.type === "structured"
-    ? [output.value]
-    : output.type === "mixed"
-      ? output.parts.flatMap((part) => part.type === "structured" ? [part.value] : [])
-      : []
-  return values.length === 0 ? null : unwrapToolPayload(values.at(-1))
-}
-
-/** Plain result text for tools whose user-facing result is text, never protected model framing. */
-export function toolPlainText(output: ToolOutput | null): string {
-  if (output === null) return ""
-  const values = output.type === "text"
-    ? [output.text]
-    : output.type === "mixed"
-      ? output.parts.flatMap((part) => part.type === "text" ? [part.text] : [])
-      : []
-  return values
-    .map(presentableTextToolOutput)
-    .filter((value) => !/^\s*<rottweiler_untrusted_[a-z0-9_]+(?:\s[^>]*)?>/i.test(value))
-    .filter(Boolean)
-    .join("\n")
-}
-
-function presentableTextToolOutput(source: string): string {
-  const safe = source
-    .replaceAll("\r\n", "\n")
-    .replaceAll("\r", "\n")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
-  return safe
-}
-
-/** Compact, terminal-safe tool arguments for approval and activity surfaces. */
-export function formatToolArguments(args: unknown, limit = 240): string {
-  let rendered: string
-  try {
-    rendered = argumentPairs(args)
-  } catch {
-    rendered = "[unavailable]"
-  }
-  const safe = rendered
-    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-  return safe.length <= limit ? safe : `${safe.slice(0, Math.max(1, limit - 1))}…`
-}
-
-function argumentPairs(value: unknown): string {
-  if (value === null || value === undefined) return ""
-  if (typeof value !== "object" || Array.isArray(value)) return displayScalar(value)
-  return Object.entries(value)
-    .filter(([key]) => !isInternalField(key))
-    .map(([key, nested]) => `${friendlyKey(key)}=${sensitiveKey(key) ? "[redacted]" : displayScalar(nested)}`)
-    .join(" · ")
-}
-
-export function structuredToolSummary(value: unknown): string {
-  const payload = unwrapToolPayload(value)
-  if (isRecord(payload)) {
-    if (Array.isArray(payload.paths)) {
-      const paths = payload.paths.filter((path): path is string => typeof path === "string")
-      return paths.length === 0 ? "No matching files." : boundedSummaryRows(paths, "files")
-    }
-    if (Array.isArray(payload.entries)) {
-      const entries = payload.entries.flatMap((entry) => {
-        if (!isRecord(entry) || typeof entry.path !== "string") return []
-        return [`${typeof entry.kind === "string" ? friendlyEnumValue(entry.kind) : "Item"}  ${entry.path}`]
-      })
-      return entries.length === 0 ? "No entries." : boundedSummaryRows(entries, "entries")
-    }
-    if (Array.isArray(payload.matches)) {
-      const matches = payload.matches.flatMap((match) => {
-        if (!isRecord(match) || typeof match.path !== "string") return []
-        const line = typeof match.line === "number" ? `:${match.line}` : ""
-        const text = typeof match.text === "string" ? `  ${match.text}` : ""
-        return [`${match.path}${line}${text}`]
-      })
-      return matches.length === 0 ? "No matches." : boundedSummaryRows(matches, "matches")
-    }
-  }
-  const lines: string[] = []
-  collectSummaryLines(payload, lines, "", 0)
-  return lines.length === 0 ? "Completed." : boundedSummaryRows(lines, "details")
-}
-
-function boundedSummaryRows(rows: readonly string[], noun: string, maximum = 24): string {
-  if (rows.length <= maximum) return rows.join("\n")
-  return [...rows.slice(0, maximum), `… ${rows.length - maximum} more ${noun}`].join("\n")
-}
-
-function collectSummaryLines(value: unknown, lines: string[], prefix: string, depth: number): void {
-  if (lines.length >= 32 || depth > 2) return
-  if (!isRecord(value)) {
-    if (prefix !== "") lines.push(`${prefix} · ${displayScalar(value)}`)
-    return
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    if (isInternalField(key) || lines.length >= 32) continue
-    const label = prefix === "" ? friendlyKey(key) : `${prefix} · ${friendlyKey(key)}`
-    if (key === "unified_diff" && typeof nested === "string") {
-      lines.push(`${label} · [diff omitted · ${nested.length} chars]`)
-    } else if (isRecord(nested)) collectSummaryLines(nested, lines, label, depth + 1)
-    else if (Array.isArray(nested)) lines.push(`${label} · ${nested.length} item${nested.length === 1 ? "" : "s"}`)
-    else lines.push(`${label} · ${sensitiveKey(key) ? "[redacted]" : displayScalar(nested)}`)
-  }
-}
-
-function unwrapToolPayload(value: unknown): unknown {
-  if (!isRecord(value)) return value
-  if ("data" in value) return value.data
-  return value
-}
-
-function displayScalar(value: unknown): string {
-  if (value === null) return "none"
-  if (typeof value === "string") return value.length <= 160 ? value : `${value.slice(0, 159)}…`
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value)
-  if (Array.isArray(value)) {
-    return `${value.length} item${value.length === 1 ? "" : "s"}`
-  }
-  return "structured result"
-}
-
-function friendlyKey(key: string): string {
-  return key.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())
-}
-
-function friendlyEnumValue(value: string): string {
-  return value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())
-}
-
-function sensitiveKey(key: string): boolean {
-  return /token|secret|password|authorization|api[_-]?key|credential/i.test(key)
-}
-
-function isInternalField(key: string): boolean {
-  return /^(machine_local_path|stable_prefix_hash|cache_breakpoints|item_id|projected_sequence|tool_registry|checkpoint.*|protocol_version|source|kind)$/i.test(key)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
+export { formatToolArguments } from "../tool-arguments"
 
 export function decimal(value: string): number {
   const parsed = Number(value)

@@ -1,0 +1,314 @@
+#![cfg(test)]
+use super::fixtures::{
+    controllers::PanicQuestionAsker,
+    history,
+    models::ScriptedModel,
+    support::{config, protocol_meta, stop_script, tool_script},
+};
+use crate::{SessionHandle, engine::builtin_hook_dispatcher};
+use rw_tools::{AskUserTool, ToolLimits, ToolRegistry};
+use rw_types::{
+    Answer, ClientCommand, ClientId, ClientRole, CommandOutcome, EngineEvent,
+    config::PermissionDecision, family_controls::ChildControlResponse,
+};
+use std::sync::Arc;
+
+async fn actor(path: &std::path::Path, name: &str, ask: bool) -> SessionHandle {
+    let script = if ask {
+        vec![
+            tool_script(
+                &[(
+                    "question",
+                    "ask_user",
+                    serde_json::json!({"question":"Proceed?","options":["yes","no"]}),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]
+    } else {
+        vec![stop_script("ready", &[])]
+    };
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(AskUserTool::new(
+            Arc::new(PanicQuestionAsker),
+            ToolLimits::default(),
+        )))
+        .expect("tool");
+    let mut config = config(
+        path,
+        Arc::new(ScriptedModel::new(script)),
+        Arc::new(tools),
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    config.session_id = rw_types::SessionId(name.into());
+    let handle = history::spawn(config).await.expect("actor");
+    handle
+        .dispatch(ClientCommand::AttachSession {
+            meta: protocol_meta(&format!("{name}-driver"), "attach"),
+            session_id: handle.session_id().clone(),
+            role: ClientRole::Driver,
+            last_seen_sequence: None,
+        })
+        .await
+        .expect("driver");
+    handle
+}
+#[tokio::test]
+async fn explicit_root_driver_answers_exact_child_question_without_changing_child_driver() {
+    let dir = tempfile::tempdir().expect("root");
+    let root = actor(dir.path(), "root-control", false).await;
+    let child = actor(dir.path(), "child-control", true).await;
+    let mut events = child.subscribe_live().expect("events");
+    child
+        .dispatch(ClientCommand::SendMessage {
+            meta: protocol_meta("child-control-driver", "ask"),
+            session_id: child.session_id().clone(),
+            content: "ask".into(),
+            attachments: vec![],
+        })
+        .await
+        .expect("send");
+    let mut started = None;
+    let question_id = loop {
+        match events.recv().await.expect("event").as_ref().clone() {
+            EngineEvent::TurnStarted { meta, turn_id, .. } => {
+                started = Some((meta.sequence_id, turn_id));
+            }
+            EngineEvent::QuestionAsked { question_id, .. } => break question_id,
+            _ => {}
+        }
+    };
+    let scalar = child.live_state().await.expect("child state");
+    let active = scalar.active_turn.as_ref().expect("active question turn");
+    let (source, turn_id) = started.expect("durable turn start");
+    assert_eq!(active.turn_id, turn_id);
+    assert_eq!(active.started, Some(source));
+    let before = child.child_controls().await.expect("snapshot");
+    assert_eq!(before.snapshot.controls.questions.len(), 1);
+    assert_eq!(child.control_summary().questions, 1);
+    assert!(
+        root.family_control_authority(&ClientId("observer".into()))
+            .is_err()
+    );
+    let response = ChildControlResponse::Question {
+        question_id: question_id.clone(),
+        answer: Answer {
+            question_id,
+            value: "yes".into(),
+        },
+    };
+    let authority = root
+        .family_control_authority(&ClientId("root-control-driver".into()))
+        .expect("root proof");
+    let stale = child
+        .respond_child_control(
+            authority.clone(),
+            protocol_meta("root-control-driver", "stale"),
+            rw_types::SequenceId(before.revision.0.wrapping_add(1)),
+            response.clone(),
+        )
+        .await
+        .expect("rejected");
+    assert!(!matches!(stale, CommandOutcome::Accepted {}));
+    assert_eq!(
+        child
+            .child_controls()
+            .await
+            .expect("still pending")
+            .snapshot
+            .controls
+            .questions
+            .len(),
+        1
+    );
+    let outcome = child
+        .respond_child_control(
+            authority,
+            protocol_meta("root-control-driver", "answer-child"),
+            before.revision,
+            response,
+        )
+        .await
+        .expect("answer");
+    assert!(matches!(outcome, CommandOutcome::Accepted {}));
+    let after = child.child_controls().await.expect("resolved");
+    assert!(after.snapshot.controls.questions.is_empty());
+    assert_ne!(after.revision, before.revision);
+    // The response capability does not attach or take a lease in the child.
+    assert!(
+        child
+            .family_control_authority(&ClientId("child-control-driver".into()))
+            .is_ok()
+    );
+    child.close().await.expect("close child");
+    root.close().await.expect("close root");
+}
+
+async fn approval_actor(
+    path: &std::path::Path,
+) -> (SessionHandle, Arc<super::fixtures::tools::StubTool>) {
+    use super::fixtures::tools::{StubOutcome, StubTool};
+    let tool = Arc::new(
+        StubTool::new(
+            "bash",
+            vec![
+                rw_types::ToolCapability::Execute,
+                rw_types::ToolCapability::WriteFilesystem,
+            ],
+            StubOutcome::Success(rw_tools::ToolResult::new("ran", serde_json::Value::Null)),
+        )
+        .with_behavior(rw_tools::ToolBehavior::Shell),
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).expect("tool");
+    let mut config = config(
+        path,
+        Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "provider-call",
+                    "bash",
+                    serde_json::json!({"command":"rm -rf /tmp/outside-workspace","cwd":".","env":{},"network_domains":[]}),
+                )],
+                &[],
+            ),
+            stop_script("denied", &[]),
+        ])),
+        Arc::new(tools),
+        PermissionDecision::Ask,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    config.session_id = rw_types::SessionId("child-approval".into());
+    let handle = history::spawn(config).await.expect("actor");
+    handle
+        .dispatch(ClientCommand::AttachSession {
+            meta: protocol_meta("child-driver", "attach"),
+            session_id: handle.session_id().clone(),
+            role: ClientRole::Driver,
+            last_seen_sequence: None,
+        })
+        .await
+        .expect("attach");
+    (handle, tool)
+}
+
+#[tokio::test]
+async fn child_approval_rechecks_root_driver_and_survives_response_waiter_loss() {
+    let dir = tempfile::tempdir().expect("root");
+    let root = actor(dir.path(), "root-control", false).await;
+    let (child, tool) = approval_actor(dir.path()).await;
+    let mut events = child.subscribe_live().expect("events");
+    child
+        .dispatch(ClientCommand::SendMessage {
+            meta: protocol_meta("child-driver", "ask"),
+            session_id: child.session_id().clone(),
+            content: "effect".into(),
+            attachments: vec![],
+        })
+        .await
+        .expect("send");
+    loop {
+        match next_family_event(&mut events).await {
+            EngineEvent::ToolApprovalNeeded { .. } => break,
+            EngineEvent::TurnFinished { .. } => panic!("approval fixture completed without asking"),
+            EngineEvent::Error { error, .. } => panic!("approval fixture failed: {error:?}"),
+            _ => {}
+        }
+    }
+    let controls = child.child_controls().await.expect("pending approval");
+    let approval = controls
+        .snapshot
+        .controls
+        .approvals
+        .first()
+        .expect("approval");
+    let response = ChildControlResponse::Approval {
+        tool_call_id: approval.tool_call_id.clone(),
+        invocation_id: approval.invocation_id.clone(),
+        decision: rw_types::ApprovalDecision::Deny,
+        binding: None,
+    };
+    let old_authority = replace_root_driver(&root).await;
+    let rejected = child
+        .respond_child_control(
+            old_authority,
+            protocol_meta("root-control-driver", "expired"),
+            controls.revision,
+            response.clone(),
+        )
+        .await
+        .expect("stale response");
+    assert!(!matches!(rejected, CommandOutcome::Accepted {}));
+    let pending = child.child_controls().await.expect("still pending");
+    assert_eq!(pending.revision, controls.revision);
+    assert_eq!(pending.snapshot.controls.approvals.len(), 1);
+    let authority = root
+        .family_control_authority(&ClientId("replacement".into()))
+        .expect("new root proof");
+    let mut reply = Box::pin(child.respond_child_control(
+        authority,
+        protocol_meta("replacement", "deny"),
+        pending.revision,
+        response,
+    ));
+    // One poll enqueues the command before this single-threaded actor can consume
+    // it. Dropping the reply must not cancel the accepted control or its receipt.
+    assert!(futures_util::poll!(reply.as_mut()).is_pending());
+    drop(reply);
+    let mut resolutions = 0;
+    loop {
+        match next_family_event(&mut events).await {
+            EngineEvent::ToolApprovalResolved { .. } => resolutions += 1,
+            EngineEvent::TurnFinished { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(resolutions, 1);
+    assert_eq!(tool.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let resolved = child.child_controls().await.expect("resolved controls");
+    assert!(resolved.snapshot.controls.approvals.is_empty());
+    assert_ne!(resolved.revision, pending.revision);
+    assert!(
+        child
+            .family_control_authority(&ClientId("child-driver".into()))
+            .is_ok()
+    );
+    child.close().await.expect("close child");
+    root.close().await.expect("close root");
+}
+
+async fn replace_root_driver(root: &SessionHandle) -> crate::FamilyControlAuthority {
+    let old_authority = root
+        .family_control_authority(&ClientId("root-control-driver".into()))
+        .expect("old root proof");
+    root.dispatch(ClientCommand::AttachSession {
+        meta: protocol_meta("replacement", "attach"),
+        session_id: root.session_id().clone(),
+        role: ClientRole::Observer,
+        last_seen_sequence: None,
+    })
+    .await
+    .expect("observer attach");
+    assert!(matches!(
+        root.dispatch(ClientCommand::TakeDriver {
+            meta: protocol_meta("replacement", "take"),
+            session_id: root.session_id().clone(),
+        })
+        .await
+        .expect("take driver"),
+        CommandOutcome::Accepted {}
+    ));
+    old_authority
+}
+
+async fn next_family_event(events: &mut crate::SessionSubscription) -> EngineEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("family control event deadline")
+        .expect("family control event")
+        .as_ref()
+        .clone()
+}

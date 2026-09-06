@@ -11,7 +11,6 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 cargo run --locked --quiet -p xtask -- codegen --check
-cargo run --locked --quiet -p rw-plugin-protocol --bin rw-plugin-protocol-codegen -- --check
 python3 scripts/check-dependency-direction.py
 python3 scripts/check-ownership.py
 python3 scripts/check-toolchain-ownership.py
@@ -26,7 +25,7 @@ bun test --cwd packages/plugin-sdk
 bun run --cwd packages/plugin-sdk build
 bun run --cwd packages/tui typecheck
 bun test --cwd packages/tui
-bun run --cwd packages/tui build
+bun run --cwd packages/js-host build
 bun run --cwd packages/docs-site check
 bun test --cwd packages/docs-site
 bun run --cwd packages/docs-site build

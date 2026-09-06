@@ -13,21 +13,29 @@ if (reportFile === undefined || sessionId === undefined) {
 const setup = await createTestRenderer({ width: 112, height: 32, useThread: false })
 const treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
 treeSitter.setMockResult({ highlights: [] })
-const app = createRottweilerApp(setup.renderer, {
+const runtime = await createEngineRuntimeFromEnvironment()
+if (runtime === null) throw new Error("replay CLI worker requires an engine runtime")
+let taskReadError: unknown = null
+const sessionReader = { ...runtime.sessionReader, todos: async (...args: Parameters<typeof runtime.sessionReader.todos>) => {
+  try { return await runtime.sessionReader.todos(...args) }
+  catch (error) { taskReadError = error; throw error }
+} }
+const app = createRottweilerApp(setup.renderer, { sessionReader, allocations: runtime.allocations,
   sessionId,
   replaySessionId: sessionId,
   treeSitterClient: treeSitter,
 })
 setup.renderer.root.add(app)
 
-const runtime = await createEngineRuntimeFromEnvironment()
-if (runtime === null) throw new Error("replay CLI worker requires an engine runtime")
 runtime.bind(app)
 const running = runtime.start()
 
 try {
-  await waitFor(() => app.state.replay.completedThrough !== null)
-  await setup.waitFor(() => treeSitter.isHighlighting() === false)
+  await waitFor(() => app.state.historyReady !== null && app.transcript.mountedEntryCount === 4)
+  await waitFor(() => app.state.todos.phase === "ready" || app.state.todos.phase === "failed")
+  if (app.state.todos.phase === "failed") throw new Error("historical task snapshot failed", { cause: taskReadError })
+  await setup.renderOnce()
+  await waitFor(() => treeSitter.isHighlighting() === false)
   await setup.flush()
   const frame = setup
     .captureCharFrame()
@@ -45,6 +53,8 @@ try {
       frame,
       styledDigest: stableDigest(JSON.stringify(styled)),
       styledSpanCount: styled.reduce((total, line) => total + line.length, 0),
+      historyThrough: app.state.historyReady?.through,
+      mountedItems: app.transcript.mountedEntryCount,
       completedThrough: app.state.replay.completedThrough,
       lastSequence: app.state.lastSequence,
       invalidEvents: app.state.protocol.invalidEvents,
@@ -63,6 +73,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
   while (!predicate()) {
     if (performance.now() >= deadline) throw new Error("timed out waiting for CLI replay")
     await Bun.sleep(5)
+    await setup.renderOnce()
+    await setup.flush()
   }
 }
 

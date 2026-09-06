@@ -32,7 +32,7 @@ const tsAuthoredEvent = {
   meta: {
     protocol_version: PROTOCOL_VERSION,
     session_id: "session-fixture",
-    sequence_id: "3",
+    sequence_id: "4",
     emitted_at: "2026-01-01T00:00:00Z",
     caused_by: null,
   },
@@ -54,10 +54,10 @@ describe("generated Rust/TypeScript protocol contract", () => {
     expect(roundTripped).toEqual(fixture)
   })
 
-  test("classifies every Rust-authored fixture event as generated protocol", () => {
+  test("projects every Rust-authored fixture event without invalid delivery", () => {
     for (const event of contractFixture.engine_events) {
       const state = reduceRottweilerState(createInitialState(), engineEvent(event))
-      expect(state.protocol.unknownEvents).toBe(0)
+      expect(state.protocol.invalidEvents).toBe(0)
     }
   })
 })

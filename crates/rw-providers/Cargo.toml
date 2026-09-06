@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rw-resources.workspace = true
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 base64.workspace = true
@@ -18,6 +19,8 @@ reqwest = { version = "0.13.4", default-features = false, features = ["form", "h
 regex.workspace = true
 rw-types.workspace = true
 serde.workspace = true
+schemars.workspace = true
+ts-rs.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
@@ -25,6 +28,9 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
 toml.workspace = true
 tracing.workspace = true
 url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "net", "test-util", "time"] }

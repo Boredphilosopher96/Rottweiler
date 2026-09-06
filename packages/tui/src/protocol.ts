@@ -1,10 +1,25 @@
-import type {
-  ClientCommand as GeneratedClientCommand,
-  EngineEvent as GeneratedEngineEvent,
-} from "../../../protocol/types"
-
+export type { SessionStateSnapshot, SessionActiveTurn, TranscriptTailIdentity, TranscriptTailRead, TranscriptTailResult, TranscriptTailPage, TranscriptTailText, TranscriptTailContent, TranscriptTailTool, TranscriptTailCitation, TranscriptTailPart } from "../../../protocol/types"
+export { MAX_SESSION_READ_ANCESTORS } from "../../../protocol/types"
+export type { SessionReadScope, SessionReadAncestor } from "../../../protocol/types"
 export {
   ENGINE_EVENT_DELIVERY,
+  CLIENT_COMMAND_EXECUTION,
+  CLIENT_COMMAND_LANE,
+  TRANSCRIPT_PROJECTION_VERSION,
+  MAX_COMMAND_REPLY_BYTES,
+  MAX_UI_SURFACE_BYTES,
+  MAX_UI_DESCRIPTOR_BYTES,
+  MAX_UI_PANELS_BYTES,
+  MAX_UI_PANEL_SLOTS,
+  MAX_UI_FIELDS,
+  MAX_UI_TABLE_ROWS,
+  MAX_UI_TABLE_COLUMNS,
+  MAX_UI_CONTRIBUTIONS,
+  MAX_UI_LIST_ITEMS,
+  MAX_UI_ACTIONS,
+  MAX_UI_LABEL_BYTES,
+  MAX_UI_VALUE_BYTES,
+  MAX_CLIENT_READS,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_ATTACHMENT_BYTES,
   MAX_MCP_SERVER_ID_BYTES,
@@ -14,6 +29,23 @@ export {
   PROTOCOL_VERSION,
 } from "../../../protocol/types"
 export type {
+  SessionControlsSnapshot,
+  SessionControls,
+  UiPresentation,
+  UiCatalog,
+  UiCatalogEntry,
+  UiPanels,
+  UiContributionOwner,
+  UiDisplayField,
+  UiProjectedField,
+  UiActionRequest,
+  TodoItem,
+  TodoStatus,
+  TodoSnapshot,
+  TodoReadSnapshot,
+  TodoReadResult,
+  ClientCommand,
+  EngineEvent,
   Answer,
   Attachment,
   AttachmentData,
@@ -24,6 +56,30 @@ export type {
   BudgetUnit,
   ClientRole,
   CommandOutcome,
+  CommandAckMeta,
+  CommandReply,
+  TranscriptOrdinal,
+  TranscriptGeneration,
+  TranscriptView,
+  TranscriptPosition,
+  TranscriptRead,
+  TranscriptItem,
+  TranscriptInvalidation,
+  TranscriptAnchor,
+  TranscriptPage,
+  TranscriptReadResult,
+  TranscriptContentRead,
+  TranscriptContentPage,
+  TranscriptItemId,
+  TranscriptContentSelector,
+  TranscriptContentSource,
+  TranscriptPreviewFormat,
+  TranscriptBodyPreview,
+  TranscriptConversationBlock,
+  TranscriptToolStatus,
+  TranscriptSubagentStatus,
+  TranscriptContent,
+
   CommandSource,
   ContextSnapshot,
   Cost,
@@ -68,11 +124,3 @@ export type {
   Usage,
   UnifiedDiff,
 } from "../../../protocol/types"
-
-/**
- * The TUI only consumes protocol types generated from the Rust source of truth.
- * Keeping this boundary in one module makes that ownership explicit and gives
- * the future transport client a stable local import.
- */
-export type ClientCommand = GeneratedClientCommand
-export type EngineEvent = GeneratedEngineEvent

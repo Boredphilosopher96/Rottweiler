@@ -10,8 +10,8 @@ use thiserror::Error;
 use tokio::time::Instant;
 
 use crate::{
-    BoxEventStream, Clock, Delay, JitterSource, ProductionJitter, Provider, ProviderError,
-    ProviderEvent, ProviderRequest, RetryPolicy, TokioClock, TokioDelay,
+    BoxEventStream, Clock, Delay, JitterSource, ProductionJitter, Provider, ProviderAttemptGate,
+    ProviderError, ProviderEvent, ProviderRequest, RetryPolicy, TokioClock, TokioDelay,
 };
 
 const DEFAULT_FAILOVER_COOLDOWN: Duration = Duration::from_secs(30);
@@ -48,6 +48,9 @@ impl ModelCandidate {
 /// Router configuration or dispatch error.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum RouterError {
+    /// Active or unsettled operations exhausted bounded admission.
+    #[error("provider operation admission failed: {0}")]
+    OperationAdmission(String),
     /// Alias is missing or has no candidates.
     #[error("model alias '{0}' is not configured; add an ordered provider/model chain")]
     AliasNotConfigured(String),
@@ -64,6 +67,7 @@ pub enum RouterError {
 
 /// Provider-blind alias router with ordered failover chains.
 pub struct ProviderRouter {
+    operations: crate::settlement::ProviderOperations,
     aliases: BTreeMap<String, Vec<ModelCandidate>>,
     providers: BTreeMap<String, Arc<dyn Provider>>,
     retry: RetryPolicy,
@@ -86,6 +90,38 @@ impl std::fmt::Debug for ProviderRouter {
 }
 
 impl ProviderRouter {
+    /// Retains the exact invoked provider through asynchronous local settlement.
+    ///
+    /// # Errors
+    /// Returns an admission error while the bounded operation registry is full.
+    pub fn stream_provider(
+        &self,
+        candidate: ModelCandidate,
+        provider: Arc<dyn Provider>,
+        request: ProviderRequest,
+        gate: Arc<dyn ProviderAttemptGate>,
+    ) -> Result<BoxEventStream, RouterError> {
+        self.operations
+            .stream(
+                provider,
+                request,
+                crate::settlement::AttemptEntry {
+                    candidate,
+                    gate,
+                    number: 0,
+                },
+            )
+            .map_err(|error| RouterError::OperationAdmission(error.to_string()))
+    }
+
+    /// Waits for abandoned invocation owners, including ones no longer in a catalog.
+    ///
+    /// # Errors
+    /// Returns an error when native effects or durable accounting remain unproven.
+    pub async fn settle_effects(&self) -> Result<(), ProviderError> {
+        self.operations.settle().await
+    }
+
     /// Creates a router from provider-qualified alias chains.
     ///
     /// # Errors
@@ -210,6 +246,7 @@ impl ProviderRouter {
             }
         }
         Ok(Self {
+            operations: crate::settlement::ProviderOperations::default(),
             aliases,
             providers,
             retry,
@@ -245,9 +282,10 @@ impl ProviderRouter {
         &self,
         alias: &str,
         request: ProviderRequest,
+        gate: Arc<dyn ProviderAttemptGate>,
     ) -> Result<BoxEventStream, RouterError> {
         let candidates = self.resolve(alias)?.to_vec();
-        self.stream_candidates(alias, candidates, request)
+        self.stream_candidates(alias, candidates, request, gate)
     }
 
     /// Streams through an already validated subset of one alias's routes.
@@ -263,11 +301,13 @@ impl ProviderRouter {
         alias: &str,
         candidates: Vec<ModelCandidate>,
         request: ProviderRequest,
+        gate: Arc<dyn ProviderAttemptGate>,
     ) -> Result<BoxEventStream, RouterError> {
         if candidates.is_empty() {
             return Err(RouterError::AliasNotConfigured(alias.to_owned()));
         }
         let providers = self.providers.clone();
+        let operations = self.operations.clone();
         let retry = self.retry.clone();
         let delay = Arc::clone(&self.delay);
         let jitter = Arc::clone(&self.jitter);
@@ -276,6 +316,7 @@ impl ProviderRouter {
         let cooldowns = Arc::clone(&self.cooldowns);
         let event_stream = stream! {
             let mut last_error = None;
+            let mut next_attempt = Some(0_u32);
             'candidate: for candidate in candidates {
                 if candidate_is_cooling(&cooldowns, &candidate, clock.now()) {
                     continue 'candidate;
@@ -290,7 +331,13 @@ impl ProviderRouter {
                 let mut candidate_request = request.clone();
                 candidate_request.model = candidate.model.clone();
                 'attempt: for attempt in 0..retry.max_attempts.max(1) {
-                    let mut provider_stream = match provider.stream(candidate_request.clone()).await {
+                    let Some(number) = next_attempt else {
+                        yield Err(ProviderError::new(crate::ProviderErrorKind::InvalidRequest, "provider attempt identity exhausted"));
+                        return;
+                    };
+                    next_attempt = number.checked_add(1);
+                    let entry = crate::settlement::AttemptEntry { candidate: candidate.clone(), gate: gate.clone(), number };
+                    let mut provider_stream = match operations.stream(Arc::clone(&provider), candidate_request.clone(), entry) {
                         Ok(provider_stream) => provider_stream,
                         Err(error) => {
                             let can_retry = error.is_retryable()
@@ -333,6 +380,11 @@ impl ProviderRouter {
                                 }
                             }
                             Err(error) => {
+                                drop(provider_stream);
+                                if let Err(unsettled) = operations.settle().await {
+                                    yield Err(unsettled);
+                                    return;
+                                }
                                 if semantic_emitted || !error.is_retryable() {
                                     yield Err(error);
                                     return;
@@ -459,6 +511,10 @@ mod tests {
 
     #[async_trait]
     impl Provider for FixtureProvider {
+        async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+            Ok(())
+        }
+
         fn name(&self) -> &str {
             &self.name
         }
@@ -497,6 +553,10 @@ mod tests {
 
     #[async_trait]
     impl Provider for PermanentFailureProvider {
+        async fn settle_effects(&self) -> Result<(), crate::ProviderError> {
+            Ok(())
+        }
+
         fn name(&self) -> &str {
             &self.name
         }
@@ -527,7 +587,7 @@ mod tests {
             model: "ignored".to_owned(),
             turns: Vec::new(),
             tools: Vec::new(),
-            tool_choice: crate::ToolChoice::Auto,
+            tool_choice: crate::ToolChoice::Auto {},
             max_output_tokens: 100,
             temperature: None,
             thinking: ThinkingLevel::Off,
@@ -561,7 +621,7 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("router must build: {error}"));
         let events = router
-            .stream_alias("fast", request())
+            .stream_alias("fast", request(), crate::attempt::fixture_gate())
             .unwrap_or_else(|error| panic!("alias must resolve: {error}"))
             .collect::<Vec<_>>()
             .await;
@@ -599,7 +659,7 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("router must build: {error}"));
         let events = router
-            .stream_alias("fast", request())
+            .stream_alias("fast", request(), crate::attempt::fixture_gate())
             .unwrap_or_else(|error| panic!("alias must resolve: {error}"))
             .collect::<Vec<_>>()
             .await;
@@ -665,7 +725,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("router must build: {error}"));
 
         let first = router
-            .stream_alias("fast", request())
+            .stream_alias("fast", request(), crate::attempt::fixture_gate())
             .unwrap_or_else(|error| panic!("alias must resolve: {error}"))
             .collect::<Vec<_>>()
             .await;
@@ -675,7 +735,7 @@ mod tests {
 
         primary.fail.store(false, Ordering::Relaxed);
         let second = router
-            .stream_alias("fast", request())
+            .stream_alias("fast", request(), crate::attempt::fixture_gate())
             .unwrap_or_else(|error| panic!("alias must resolve: {error}"))
             .collect::<Vec<_>>()
             .await;
@@ -685,7 +745,7 @@ mod tests {
 
         clock.advance(Duration::from_secs(30));
         let third = router
-            .stream_alias("fast", request())
+            .stream_alias("fast", request(), crate::attempt::fixture_gate())
             .unwrap_or_else(|error| panic!("alias must resolve: {error}"))
             .collect::<Vec<_>>()
             .await;

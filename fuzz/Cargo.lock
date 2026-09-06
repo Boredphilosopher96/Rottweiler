@@ -1018,6 +1018,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ref-cast"
 version = "1.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1284,10 +1293,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rw-memory-derive"
+version = "0.1.4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "rw-operation-contract"
+version = "0.1.4"
+dependencies = [
+ "schemars",
+ "serde",
+ "thiserror",
+ "ts-rs",
+]
+
+[[package]]
 name = "rw-plugin-protocol"
 version = "0.1.4"
 dependencies = [
  "blake3",
+ "rw-operation-contract",
+ "rw-types",
  "serde",
  "serde_json",
  "thiserror",
@@ -1306,7 +1336,10 @@ dependencies = [
  "getrandom 0.4.3",
  "regex",
  "reqwest",
+ "rustix",
+ "rw-resources",
  "rw-types",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",
@@ -1314,7 +1347,18 @@ dependencies = [
  "tokio",
  "toml 1.1.5+spec-1.1.0",
  "tracing",
+ "ts-rs",
  "url",
+]
+
+[[package]]
+name = "rw-resources"
+version = "0.1.4"
+dependencies = [
+ "rustix",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1323,8 +1367,11 @@ version = "0.1.4"
 dependencies = [
  "blake3",
  "globset",
+ "memchr",
+ "redb",
  "rusqlite",
  "rustix",
+ "rw-resources",
  "rw-types",
  "serde",
  "serde_json",
@@ -1340,6 +1387,8 @@ dependencies = [
 name = "rw-types"
 version = "0.1.4"
 dependencies = [
+ "rw-memory-derive",
+ "rw-operation-contract",
  "schemars",
  "serde",
  "serde_json",

@@ -1,22 +1,33 @@
+import { admittedRecycleDrafts } from "./recycle-drafts"
 import {
   closeSync,
   fchmodSync,
   fsyncSync,
   lstatSync,
   openSync,
-  readFileSync,
+  fstatSync,
+  readSync,
+  constants,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs"
 import { dirname } from "node:path"
 
+import { parseRecycleChild, type RecycleChildTarget } from "./recycle-child"
+import { parseInteractionSelection, type InteractionSelection } from "./interaction-selection"
+import { ClientAllocationError, type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
 import type { Attachment } from "./protocol"
-import { MAX_ATTACHMENTS_PER_MESSAGE } from "./protocol"
+import { MAX_ATTACHMENTS_PER_DRAFT } from "./composer-drafts"
 import type { ComposerDraft } from "./subagent-state"
+import type { HistoryViewport } from "./history/controller"
+import { JsonAllocationShape } from "./transport/reply-allocation"
+import { jsonEncodedBytes } from "./json-size"
+import { parseU64 } from "./transport/types"
 import type { InputMode, VimFocus } from "./keybindings"
 
 export const MAX_RECYCLE_STATE_BYTES = 8 * 1024 * 1024
+export const MAX_RECYCLE_PREPARED_BYTES = 64 * 1024 * 1024
 export const RESTORABLE_PICKERS = [
   "palette", "keyboardHelp", "commands", "attachments", "mcp", "modes", "models",
   "providers", "permissions", "permissionMode", "trust", "queuedMessages",
@@ -42,12 +53,15 @@ export interface TranscriptClientState {
 
 /** Only editable client state belongs here; engine projections and credentials do not. */
 export interface AppClientState {
-  readonly schemaVersion: 2
+  readonly schemaVersion: 4
+  readonly child: RecycleChildTarget | null
+  readonly parentComposer: ComposerDraft | null
+  readonly interaction: InteractionSelection | null
   readonly sessionId: string
   readonly composer: ClientComposerState
   readonly subagentDrafts: readonly { readonly id: string; readonly draft: ComposerDraft }[]
   readonly primaryView: "conversation" | "tools"
-  readonly scrollTop: number
+  readonly history: HistoryViewport
   readonly toolsScrollTop: number
   readonly transcript: TranscriptClientState
   readonly tools: ClientBlockState
@@ -70,11 +84,26 @@ export function isRestorablePicker(kind: string): kind is RestorablePickerKind {
   return RESTORABLE_PICKERS.some((candidate) => candidate === kind)
 }
 
-/** Consume a private, one-shot TUI recycle handoff. Invalid files fail closed. */
-export function readTuiRecycleState(path: string | undefined): AppClientState | null {
+export interface DecodedRecycleState {
+  readonly state: AppClientState
+  /** Consume only after all local editing state has been admitted by its new owners. */
+  consume(): void
+}
+
+function preparedRecycleBytes(bytes: Uint8Array): number {
+  const shape = new JsonAllocationShape()
+  shape.append(bytes)
+  // Decode and normalized handoff coexist until editable state takes ownership.
+  return shape.peak(bytes.byteLength + 1, 0) * 2
+}
+
+/** Read one bounded private handoff, retaining its file until application adoption succeeds. */
+export function readTuiRecycleState(path: string | undefined, allocation: ClientAllocationLease): DecodedRecycleState | null {
   if (path === undefined || path.length === 0) return null
+  let descriptor: number | null = null
   try {
-    const metadata = lstatSync(path)
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const metadata = fstatSync(descriptor)
     if (
       metadata.isSymbolicLink() ||
       !metadata.isFile() ||
@@ -82,19 +111,43 @@ export function readTuiRecycleState(path: string | undefined): AppClientState | 
       (metadata.mode & 0o077) !== 0 ||
       (process.getuid !== undefined && metadata.uid !== process.getuid())
     ) return null
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
-    unlinkSync(path)
-    return parseTuiRecycleState(parsed)
-  } catch {
+    allocation.admit(metadata.size + 2049)
+    const bytes = Buffer.alloc(metadata.size + 1)
+    let used = 0
+    while (used < bytes.length) {
+      const count = readSync(descriptor, bytes, used, bytes.length - used, null)
+      if (count === 0) break
+      used += count
+    }
+    if (used !== metadata.size) return null
+    const prepared = preparedRecycleBytes(bytes.subarray(0, used))
+    if (prepared > MAX_RECYCLE_PREPARED_BYTES) return null
+    allocation.admit(prepared)
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, used)))
+    const state = parseTuiRecycleState(parsed)
+    if (state === null) return null
+    let consumed = false
+    return { state, consume() {
+      if (consumed) return
+      const current = lstatSync(path)
+      if (current.dev !== metadata.dev || current.ino !== metadata.ino || current.size !== metadata.size || current.mtimeMs !== metadata.mtimeMs) {
+        throw new Error("client handoff changed before adoption")
+      }
+      unlinkSync(path); consumed = true
+    } }
+  } catch (error) {
+    if (error instanceof ClientAllocationError) throw error
     return null
-  }
+  } finally { if (descriptor !== null) closeSync(descriptor) }
 }
 
 /** Atomically persist the small TUI-only state lost during an RSS recycle. */
 export function writeTuiRecycleState(path: string | undefined, state: AppClientState): boolean {
   if (path === undefined || path.length === 0) return false
-  const encoded = `${JSON.stringify(state)}\n`
-  if (Buffer.byteLength(encoded) > MAX_RECYCLE_STATE_BYTES) return false
+  if (parseTuiRecycleState(state) === null) return false
+  if (jsonEncodedBytes(state, MAX_RECYCLE_STATE_BYTES - 1) > MAX_RECYCLE_STATE_BYTES - 1) return false
+  const encoded = Buffer.from(`${JSON.stringify(state)}\n`, "utf8")
+  if (preparedRecycleBytes(encoded) > MAX_RECYCLE_PREPARED_BYTES) return false
   const temporary = `${path}.${process.pid}.tmp`
   let descriptor: number | null = null
   try {
@@ -107,7 +160,7 @@ export function writeTuiRecycleState(path: string | undefined, state: AppClientS
     ) return false
     descriptor = openSync(temporary, "wx", 0o600)
     fchmodSync(descriptor, 0o600)
-    writeFileSync(descriptor, encoded, "utf8")
+    writeFileSync(descriptor, encoded)
     fsyncSync(descriptor)
     closeSync(descriptor)
     descriptor = null
@@ -126,6 +179,7 @@ export function writeTuiRecycleState(path: string | undefined, state: AppClientS
 }
 
 export function recycleTuiIfNeeded(options: {
+  readonly allocations: ClientAllocationOwner
   readonly observedBytes: number
   readonly thresholdBytes: number
   readonly path: string | undefined
@@ -133,10 +187,13 @@ export function recycleTuiIfNeeded(options: {
   readonly recycle: () => void
 }): boolean {
   if (options.observedBytes < options.thresholdBytes) return false
-  const state = options.capture()
-  if (state === null || !writeTuiRecycleState(options.path, state)) return false
-  options.recycle()
-  return true
+  try {
+    using _preparation = options.allocations.reserve("decoding", MAX_RECYCLE_PREPARED_BYTES)
+    const state = options.capture()
+    if (state === null || !writeTuiRecycleState(options.path, state)) return false
+    options.recycle()
+    return true
+  } catch (error) { if (error instanceof ClientAllocationError) return false; throw error }
 }
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -147,7 +204,7 @@ const nullableLabel = (value: unknown): value is string | null => value === null
 
 function parseDraft(value: unknown): ComposerDraft | null {
   if (!record(value) || typeof value.content !== "string" || !Array.isArray(value.attachments)
-    || value.attachments.length > MAX_ATTACHMENTS_PER_MESSAGE) return null
+    || value.attachments.length > MAX_ATTACHMENTS_PER_DRAFT) return null
   const attachments: Attachment[] = []
   for (const item of value.attachments) {
     if (!record(item) || !label(item.name) || !label(item.media_type) || !record(item.data)
@@ -181,15 +238,25 @@ function parseBlocks(value: unknown): ClientBlockState | null {
 }
 
 export function parseTuiRecycleState(value: unknown): AppClientState | null {
-  if (!record(value) || value.schemaVersion !== 2 || !label(value.sessionId)
+  if (!record(value) || value.schemaVersion !== 4 || !label(value.sessionId)
     || !record(value.composer) || !offset(value.composer.cursorOffset)
-    || !offset(value.scrollTop) || !offset(value.toolsScrollTop)
+    || !offset(value.toolsScrollTop)
     || (value.primaryView !== "conversation" && value.primaryView !== "tools")
     || (value.inputMode !== "standard" && value.inputMode !== "normal" && value.inputMode !== "insert")
     || (value.focus !== "composer" && value.focus !== "transcript")
     || !label(value.theme) || !Array.isArray(value.subagentDrafts) || value.subagentDrafts.length > 256
   ) return null
-  if (Buffer.byteLength(JSON.stringify(value)) > MAX_RECYCLE_STATE_BYTES) return null
+  if (jsonEncodedBytes(value, MAX_RECYCLE_STATE_BYTES) > MAX_RECYCLE_STATE_BYTES) return null
+  if (!record(value.history) || typeof value.history.following !== "boolean") return null
+  let anchor: HistoryViewport["anchor"] = null
+  if (value.history.anchor !== null) {
+    const item = value.history.anchor
+    if (!record(item) || typeof item.id !== "string" || parseU64(item.id) === null
+      || typeof item.offset !== "number" || !Number.isSafeInteger(item.offset)) return null
+    anchor = { id: item.id, offset: item.offset }
+  }
+  if (value.history.following && anchor !== null) return null
+  const history: HistoryViewport = { following: value.history.following, anchor }
   const tools = parseBlocks(value.tools)
   if (!record(value.transcript) || tools === null) return null
   const blocks = parseBlocks(value.transcript.blocks)
@@ -197,6 +264,11 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
   const reasoning = parseExpansion(value.transcript.reasoning)
   if (blocks === null || toolExpansion === null || reasoning === null) return null
   const transcript: TranscriptClientState = { blocks, tools: toolExpansion, reasoning }
+  const child = value.child === null ? null : parseRecycleChild(value.child, value.sessionId)
+  const parentComposer = value.parentComposer === null ? null : parseDraft(value.parentComposer)
+  const interaction = value.interaction === null ? null : parseInteractionSelection(value.interaction)
+  if ((value.child !== null && child === null) || (value.interaction !== null && interaction === null)
+    || (child === null ? value.parentComposer !== null : parentComposer === null)) return null
   const draft = parseDraft(value.composer)
   if (draft === null) return null
   const textBytes = Buffer.byteLength(draft.content)
@@ -226,12 +298,13 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
       scrollOffset: item.scrollOffset, modelProviderFilter: item.modelProviderFilter,
       onboarding: item.onboarding, themeBeforePreview: item.themeBeforePreview }
   }
-  return {
-    schemaVersion: 2, sessionId: value.sessionId,
+  const state: AppClientState = {
+    schemaVersion: 4, sessionId: value.sessionId, child, parentComposer, interaction,
     composer: { ...draft, cursorOffset: value.composer.cursorOffset,
       selection },
     subagentDrafts, primaryView: value.primaryView === "tools" ? "tools" : "conversation",
-    scrollTop: value.scrollTop, toolsScrollTop: value.toolsScrollTop, transcript, tools,
+    history, toolsScrollTop: value.toolsScrollTop, transcript, tools,
     inputMode: value.inputMode, focus: value.focus, theme: value.theme, picker,
   }
+  return admittedRecycleDrafts(state) ? state : null
 }

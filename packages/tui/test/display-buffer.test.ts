@@ -1,3 +1,4 @@
+import { ToolOutputReader } from "../src/state/output-reader"
 import { describe, expect, spyOn, test } from "bun:test"
 import {
   EMPTY_TOOL_OUTPUT, DISPLAY_TRUNCATION_MARKER, LIVE_OUTPUT_TRUNCATION_MARKER,
@@ -6,14 +7,16 @@ import {
   createInitialState, engineEvent, reduceRottweilerState, toolOutputBuffer, utf8Prefix,
   type ToolProjection,
 } from "../src/state"
-import { toolOutputContent, toolOutputPreview } from "../src/components/transcript"
+import { toolOutputContent, toolOutputPreview } from "../src/components/transcript/blocks"
 import { projectToolActivity } from "../src/render/tools-workspace-presentation"
+import { MAX_ACTIVE_TOOL_DISPLAY_BYTES } from "../src/state/display-buffer"
+import { MAX_PENDING_TOOL_INVOCATIONS } from "../../../protocol/types"
 import { PROTOCOL_VERSION, type EngineEvent } from "../src/protocol"
 
 function tool(chunks = EMPTY_TOOL_OUTPUT): ToolProjection {
   return {
-    toolCallId: "stream", turnId: "1", name: "bash", args: { command: "echo output" },
-    status: "running", capabilities: [], rationale: null, diff: null, chunks, output: null,
+    toolCallId: "stream", invocationId: "stream-1", turnId: "1", name: "bash", args: { command: "echo output" },
+    status: "running", capabilities: [], rationale: null, diff: null, diffSource: null, chunks, display: null, source: null,
     isError: null, callIndex: 0, timing: { kind: "unknown" },
   }
 }
@@ -35,13 +38,13 @@ describe("bounded immutable display streams", () => {
       expect(transcript).toContain(`line-${index}`)
       expect(buffer.materializationWork.visitedNodes).toBe(index + 1)
     }
-    expect(buffer.read().plain).toBe(expected)
+    expect(new ToolOutputReader().read(buffer).plain).toBe(expected)
     const before = buffer.materializationWork.visitedNodes
-    const current = buffer.read()
+    const current = buffer.preview()
     for (let index = 0; index < 100; index += 1) {
       projectToolActivity(tool(buffer), index, false)
       toolOutputPreview(tool(buffer))
-      expect(buffer.read()).toBe(current)
+      expect(buffer.preview()).toBe(current)
     }
     expect(buffer.materializationWork.visitedNodes).toBe(before)
     expect(buffer.materializationWork.retainedVersions).toBe(1)
@@ -71,7 +74,7 @@ describe("bounded immutable display streams", () => {
         projectToolActivity(tool(buffer), index, false)
         toolOutputPreview(tool(buffer))
       }
-      expect(buffer.retainedBytes).toBe(chunk.length * 1000)
+      expect(buffer.retainedBytes).toBe(MAX_TOOL_DISPLAY_BYTES)
       expect(splitCodeUnits).toBeLessThan(buffer.retainedBytes * 4)
       expect(encodeCalls).toBe(0)
       const before = splitCodeUnits
@@ -86,7 +89,7 @@ describe("bounded immutable display streams", () => {
     }
   })
 
-  test("single-line streams have bounded preview copies while complete retained output remains readable", () => {
+  test("single-line streams bound preview copies and identify omitted live payload", () => {
     let buffer = EMPTY_TOOL_OUTPUT
     let presentedCodeUnits = 0
     for (let index = 0; index < 1000; index += 1) {
@@ -97,27 +100,28 @@ describe("bounded immutable display streams", () => {
       if (output.kind !== "text") throw new Error("expected live output")
       expect(output.text.length).toBeLessThanOrEqual(MAX_PREVIEW_LINE_CODE_UNITS)
     }
-    expect(presentedCodeUnits).toBeLessThan((MAX_PREVIEW_LINE_CODE_UNITS + 50) * 1000)
-    expect(buffer.read().plain.length).toBe(1_000_000)
-    expect(buffer.read().tailLines[0]?.startsWith(PREVIEW_LINE_TRUNCATION_MARKER)).toBe(true)
-    expect(buffer.read().sourceTruncated).toBe(false)
-    expect(toolOutputContent({ ...tool(buffer), name: "other" })).not.toContain(PREVIEW_LINE_TRUNCATION_MARKER)
+    expect(presentedCodeUnits).toBeLessThan((MAX_PREVIEW_LINE_CODE_UNITS + DISPLAY_TRUNCATION_MARKER.length + 32) * 1000)
+    expect(new ToolOutputReader().read(buffer).plain.length).toBe(MAX_TOOL_DISPLAY_BYTES + 1 + DISPLAY_TRUNCATION_MARKER.length)
+    expect(buffer.preview().tailLines[0]?.startsWith(PREVIEW_LINE_TRUNCATION_MARKER)).toBe(true)
+    expect(buffer.preview().sourceTruncated).toBe(true)
+    expect(toolOutputContent({ ...tool(buffer), name: "other" }, new ToolOutputReader().read(buffer))).not.toContain(PREVIEW_LINE_TRUNCATION_MARKER)
   })
 
   test("older snapshots and branches remain correct without rolling back the forward cache", () => {
     const old = toolOutputBuffer([{ stream: "stdout", chunk: "one\r" }])
-    const oldView = old.read()
+    const reader = new ToolOutputReader()
+    const oldView = reader.read(old)
     const next = old.append({ stream: "stderr", chunk: "\ntwo\n" })
-    const nextView = next.read()
-    expect(old.read().plain).toBe("one\r")
-    expect(next.read()).toBe(nextView)
+    const nextView = reader.read(next)
+    expect(reader.read(old).plain).toBe("one\r")
+    expect(reader.read(next)).toBe(nextView)
     expect(oldView.plain).toBe("one\r")
     expect(nextView.plain).toBe("one\r\ntwo\n")
-    expect(nextView.tailLines).toEqual(["one", "two"])
+    expect(next.preview().tailLines).toEqual(["one", "two"])
     const branch = old.append({ stream: "stdout", chunk: "other" })
-    expect(branch.read().plain).toBe("one\rother")
-    expect(next.read().plain).toBe("one\r\ntwo\n")
-    expect(old.read().plain).toBe("one\r")
+    expect(reader.read(branch).plain).toBe("one\rother")
+    expect(reader.read(next).plain).toBe("one\r\ntwo\n")
+    expect(reader.read(old).plain).toBe("one\r")
     expect(next.materializationWork.retainedVersions).toBe(1)
   })
 
@@ -130,8 +134,8 @@ describe("bounded immutable display streams", () => {
       full += chunk
       const lines = full.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")
       while (lines.at(-1) === "") lines.pop()
-      expect(buffer.read().lineCount).toBe(lines.length)
-      expect(buffer.read().tailLines).toEqual(lines.slice(-32))
+      expect(buffer.preview().lineCount).toBe(lines.length)
+      expect(buffer.preview().tailLines).toEqual(lines.slice(-32))
       const output = projectToolActivity(tool(buffer), 0, false).output
       if (output.kind !== "text") throw new Error("expected a text output window")
       expect(output.text).toBe(lines.slice(-8).join("\n"))
@@ -145,7 +149,7 @@ describe("bounded immutable display streams", () => {
       for (const chunk of inputs) {
         buffer = buffer.append({ stream: "stdout", chunk })
         const projection = { ...tool(buffer), name, rationale: "Test preview" }
-        const all = toolOutputContent(projection).split("\n")
+        const all = toolOutputContent(projection, new ToolOutputReader().read(buffer)).split("\n")
         const preview = toolOutputPreview(projection)
         expect(preview.content).toBe((all.length <= 8 ? all : all.slice(-7)).join("\n"))
         expect(preview.hiddenLines).toBe(all.length <= 8 ? 0 : all.length - 7)
@@ -165,8 +169,8 @@ describe("bounded immutable display streams", () => {
     expect(buffer.retainedBytes).toBeLessThanOrEqual(MAX_TOOL_DISPLAY_BYTES)
     expect(buffer.truncated).toBe(true)
     expect(buffer.omittedBytes).toBe(4)
-    const initial = buffer.read()
-    expect(initial.plain).toContain(DISPLAY_TRUNCATION_MARKER)
+    const initial = buffer.preview()
+    expect(initial.plainWindow.lines.join("\n")).toContain(DISPLAY_TRUNCATION_MARKER)
     for (let index = 0; index < 2000; index += 1) buffer = buffer.append({ stream: "stderr", chunk: "ignored" })
     expect(buffer.count).toBe(1)
     expect(buffer.retainedBytes).toBe(MAX_TOOL_DISPLAY_BYTES)
@@ -191,18 +195,18 @@ describe("bounded immutable display streams", () => {
 
   test("final output releases live storage while prior immutable snapshots remain readable", () => {
     const running = reduce(createInitialState(), {
-      type: "tool_output_delta", meta: meta(1), turn_id: "1", tool_call_id: "stream", stream: "stdout", chunk: "live prefix",
+      type: "tool_output_delta", meta: meta(1), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1", stream: "stdout", chunk: "live prefix",
     })
-    const before = running.tools.stream
+    const before = running.tools["stream-1"]
     if (before === undefined) throw new Error("expected running projection")
-    before.chunks.read()
+    new ToolOutputReader().read(before.chunks)
     const finished = reduce(running, {
-      type: "tool_call_finished", meta: meta(2), turn_id: "1", tool_call_id: "stream",
+      type: "tool_call_finished", presentation: null, meta: meta(2), turn_id: "1", tool_call_id: "stream", invocation_id: "stream-1",
       output: { type: "text", text: "authoritative final output" }, is_error: false, call_index: 0,
     })
-    expect(finished.tools.stream?.chunks).toBe(EMPTY_TOOL_OUTPUT)
-    expect(before.chunks.read().plain).toBe("live prefix")
-    expect(finished.tools.stream?.output).toEqual({ type: "text", text: "authoritative final output" })
+    expect(finished.tools["stream-1"]?.chunks).toBe(EMPTY_TOOL_OUTPUT)
+    expect(new ToolOutputReader().read(before.chunks).plain).toBe("live prefix")
+    expect(finished.tools["stream-1"]?.display?.details).toBe("authoritative final output")
   })
 
   test("text and reasoning obey independent display budgets with exact omitted-byte metadata", () => {
@@ -221,4 +225,25 @@ describe("bounded immutable display streams", () => {
     expect(utf8Prefix("a🐕b", 4)).toBe("a")
     expect(utf8Prefix("a🐕b", 5)).toBe("a🐕")
   })
+})
+
+
+test("all admitted invocation previews share the aggregate payload ceiling and cache truncated reads", () => {
+  const old = EMPTY_TOOL_OUTPUT.append({ stream: "stdout", chunk: "old" })
+  const reader = new ToolOutputReader()
+  const oldRead = reader.read(old)
+  const newest = old.append({ stream: "stdout", chunk: "x".repeat(MAX_TOOL_DISPLAY_BYTES * 2) })
+  const truncatedRead = reader.read(newest)
+  expect(reader.read(newest)).toBe(truncatedRead)
+  expect(reader.read(old)).toEqual(oldRead)
+  const branch = old.append({ stream: "stderr", chunk: "branch" })
+  expect(reader.read(branch).plain).toBe("oldbranch")
+  expect(reader.read(newest).plain).toBe(truncatedRead.plain)
+  let retained = 0
+  for (let index = 0; index < MAX_PENDING_TOOL_INVOCATIONS; index++) {
+    const stream = EMPTY_TOOL_OUTPUT.append({ stream: "stdout", chunk: "x".repeat(MAX_TOOL_DISPLAY_BYTES + 1) })
+    retained += stream.retainedBytes
+    expect(stream.preview()).toBe(stream.preview())
+  }
+  expect(retained).toBeLessThanOrEqual(MAX_ACTIVE_TOOL_DISPLAY_BYTES)
 })

@@ -1,20 +1,50 @@
 # Rottweiler plugin API
 
-The dependency-leaf `rw-plugin-protocol` crate owns the contract and generates
-the TypeScript, schema, and fixture projections beside this file.
+The `rw-plugin-protocol` crate owns the wire contract and generates the
+TypeScript, schema, and fixture projections beside this file. Shared validated
+operation values and limits belong to the leaf `rw-operation-contract` crate.
+
+## Tool operations
+
+`tool/call` requires a host-owned `lifetime` containing `total_ms` and `idle_ms`.
+Both must be positive, idle cannot exceed total, and total cannot exceed 300000.
+The host grants 300000 total and 90000 idle by default. Total time never
+renews. Hooks, catalog requests and ordinary controls use a five-second deadline.
+
+`command/execute` also requires `lifetime`; its total and idle clocks are fixed
+at admission, including queued output time. Commands have no progress renewal
+channel. The host grants 300000ms for both clocks so a command can await a
+permission-gated host tool. Timeout requests cancellation; the actual handler
+and accepted host operations remain owned until their effects settle. Native
+generation preparation has a separate thirty-second proof deadline, beginning
+after the command handler returns.
+
+Tool handlers receive `context.progress({ message, amount? })`. The SDK replaces
+pending observations and sends at most four updates per second as `tool/progress`
+notifications with `request_id`, increasing `sequence`, and `progress`. Valid
+progress renews idle time within the original total deadline. Messages are
+bounded to 256 Unicode characters without control characters; optional counts
+are unsigned 32-bit integers with `completed <= total` and `total > 0`.
+
+Progress uses a separately bounded lane below control traffic. Completion closes
+progress admission, discards unsent observations, and waits for any current
+physical progress write before sending the terminal response. Progress is
+best-effort transient state, not durable tool output. Timeout or cancellation
+aborts the handler signal; the host still requires its process/effect settlement
+proof before allowing conflicting work.
 
 ## Initialization
 
-The host sends `initialize` with `protocol`, `min_protocol`, and an optional bounded string
-`capabilities` list. A plugin's approved manifest must select the version offered
-by the host. Declared model discovery requires `provider-models`, and declared
+The host sends `initialize` with `host: "rottweiler"`, `protocol: 3`,
+`max_frame_bytes`, and an optional bounded string `capabilities` list.
+The approved manifest and host request must both declare protocol 3. Declared model discovery requires `provider-models`, and declared
 credential references require `provider-http`. Unknown host capability strings
 do not grant authority.
 
 Transport is newline-terminated JSON-RPC 2.0 over stdin/stdout. Empty or unterminated lines,
 invalid UTF-8/JSON, unknown response IDs, and malformed envelopes are fatal protocol violations.
 Requests use bounded integer or string IDs. Error messages are sanitized; arbitrary handler
-exceptions must never cross the boundary. The generated `PROTOCOL_LIMITS` object and current
+exceptions must never cross the boundary. The generated `PROTOCOL_LIMITS` object and
 schema project the authoritative bounds.
 
 Production loads the expected manifest from trusted configuration before any process is started.
@@ -26,14 +56,26 @@ safely execute unapproved code.
 
 Manifest capability arrays contain tools, commands, hooks, provider alias prefixes, event
 subscriptions, and plugin-to-host push methods. Tool effects are exactly `reads-fs`, `writes-fs`,
-`network`, and `exec`; the host permission engine and process sandbox enforce the immutable
-approved declaration. Hooks declare `fail-open` or `fail-closed` and use the generated default
-handler timeout. Events are notifications. Pushes are requests and require an explicit declaration.
+`network`, and `exec`. Native workers can access their code, runtime libraries, and private
+scratch. They cannot directly access the workspace, connect to a network, create child
+processes, or use application launch delegation. The host enforces tool effects at each
+invocation. Hooks declare `fail-open` or `fail-closed` and use the generated default
+handler timeout. Event delivery and pushes use correlated requests. Pushes require an explicit declaration.
 
 The generated `RPC_METHODS` object is the canonical method catalog. The
 generated wire fixture contains exact examples.
 
-`tool/call` returns `{ "content": string, "data": JSON, "truncated"?: boolean }`.
+`tool/call` returns `{ "content": string, "data": JSON, "truncated": boolean }`.
+A tool handler's `effects.callTool(name, input)` sends `effect/tool_call` with the
+exact pending host request identity. Filesystem and HTTP operations must fit both
+the tool declaration and the outer invocation's approved capabilities. Writes
+must fit the outer checkpoint's canonical paths; HTTP redirects retain the same
+approved domain limit. The host admits one nested operation at a time and at most
+128 per invocation. Progress cannot extend its total deadline. Tool completion
+waits for every admitted nested effect to settle. Expired, cancelled, completed,
+and unrelated requests confer no authority. Process, orchestration, MCP,
+interactive, and recursively delegated tools return an explicit denial.
+Hooks and providers do not receive a tool effect scope.
 Provider declarations opt into catalog RPC with
 `"capabilities": ["models"]`; this declaration is part of the approved manifest fingerprint.
 Other bounded canonical capability strings are retained in that fingerprint but confer no host
@@ -58,33 +100,51 @@ deny guard, response bounds, and backpressure used by guarded provider HTTP appl
 `provider/complete` receives Rottweiler's provider-neutral request (`model`, `turns`, `tools`,
 tagged `tool_choice`, `max_output_tokens`, nullable `temperature`, `thinking`, optional
 `cache_hint`). Its original JSON-RPC ID is the stream correlation ID. The plugin emits each tagged
-normalized event immediately as a `provider/event` notification with
-`{ "request_id": <original-id>, "event": ... }`, emits exactly one terminal `finished` event, then
-answers the original request with `result: null`. The host bounds each request's event queue and
-kills a producer that overruns backpressure, emits malformed/out-of-order events, or crosses
-correlation. Dropping the consumer sends `provider/cancel` with the same request ID; the SDK aborts
-the handler's signal and closes the async iterator. Provider streams have bounded admission and
-write deadlines but deliberately have no five-second whole-call deadline. Other handlers retain
-the default five-second deadline.
+normalized event as a `provider/event` notification with
+`{ "request_id": <original-id>, "event": ... }`. The host initially sends
+`provider/credit` with 64 events and 4 MiB; consuming data returns exactly that
+credit, measured as the exact UTF-8 JSON frame bytes excluding LF. The host
+preserves the decoder's original byte length; reserializing numbers or escapes
+must never change the refund. The SDK pauses before emitting data without credit. Each of at most four
+streams has a fixed five-minute total lifetime, including time waiting for a
+consumer. Credit and progress never renew that deadline.
 
-The SDK input pump routes correlated HTTP replies and cancellation independently
-of application handlers. Ordinary handlers can run concurrently, including a
+The producer emits exactly one terminal `finished` event, then replies to the
+original request with `result: null`. Finished has reserved storage outside the
+data window. The host exposes it only after validating the final RPC success and
+draining earlier data. Malformed order, missing completion, and credit violations
+terminate the process. Dropping an unfinished consumer or reaching its deadline
+also closes process admission and starts owned native teardown. There is no
+per-stream native cancellation acknowledgement: shared native authority requires
+whole-process settlement. The actual invoked provider remains retained across
+registry changes and caller-future drop until local process/HTTP/recording owners
+settle. This makes no claim that a remote inference service stopped or that its
+final billing is known.
+
+The SDK input pump handles correlated host replies and delivery control separately
+from application handlers. Ordinary handlers can run concurrently, including a
 catalog handler awaiting host-mediated HTTP. The SDK admits at most 64 handler
 invocations; timed-out invocations keep their slot until the underlying handler
-settles. New requests beyond that limit receive `-32005` (busy).
+settles. New requests beyond that limit receive `-32005` (busy). Hook and catalog
+requests retain the five-second deadline; tools use the admitted lifetime above.
 
-The SDK's output FIFO includes the active write in its 16 MiB and 256-frame
-limits. Overflow, write failure, or a write deadline closes the connection and
-settles pending writers. The server uses its configured handler timeout as the
-write deadline. Host HTTP requests have separate bounded admission and body
-queues; an overflowing body is cancelled without blocking the input pump.
-These are local admission policies, owned by the SDK server and transport;
-generated protocol limits continue to own individual wire-value bounds.
+Both sides use separate bounded control and data queues. Control has a 64-frame,
+16 MiB budget. Provider data has a 16 MiB payload budget across four windows;
+encoded data writers reserve an additional byte per maximum-sized frame for its
+newline. The SDK permits one pending data write per admitted stream. Control
+traffic has priority between physical writes; one blocked write remains bounded
+by the write deadline. Each data producer awaits its actual write before enqueueing
+a terminal reply, so priority cannot reverse that producer's ordering. The Rust
+host's mediated HTTP data lane has 64 frame slots and the same aggregate encoded
+byte limit. An overflowing SDK HTTP body cancels only that host-owned HTTP request
+without blocking the input pump.
 
-Host requests use the generated default deadline and a separately enforced bounded in-flight/writer limit.
-Cancellation removes correlation state atomically; late responses to cancelled/timed-out IDs are
-ignored up to the bounded abandoned-ID limit. Fatal errors close admission, kill the complete
-process tree, and perform a bounded reap. Secret redaction is mandatory before any host value is
+Ordinary host requests retain separately bounded in-flight admission. Cancellation,
+timeout, or a dropped request future closes admission and starts owned teardown;
+caller completion waits for native process-tree and admitted host-effect proof.
+A failed or lost proof remains unsettled. An SDK cancellation reply alone cannot
+prove that an uncooperative native handler has stopped.
+Secret redaction is mandatory before any host value is
 serialized to a plugin. Plugin environment inheritance is cleared and restored only from the
 small safe allowlist. Approved network plugins receive only canonical public `allowed_domains`;
 private, local, link-local, and loopback destinations remain denied by the policy proxy.
@@ -109,3 +169,76 @@ it does not undo an admitted host command, and retrying it may duplicate a
 mutation. The host retains ownership until the actor replies, including during
 process teardown. Commands require request IDs; these methods are not
 fire-and-forget notifications.
+
+`command/execute` requires `invocation_id`, a nullable host-minted identity.
+The SDK captures it in that handler's context and includes it as `origin` in
+`session/control`. The host accepts a non-null origin only while the same
+process owns its outbound command request and the actor retains that invocation,
+configuration, and driver authority. A command can apply its own idle session
+controls; unrelated callbacks receive `busy`, and retired origins are rejected.
+Context/state reads and panel publication remain serviceable while the command
+runs. The handler's actual completion owns release of command admission.
+
+## Hooks
+
+A hook declaration requires `name`, `class`, and `failure_policy`. Classes run in
+this order: `transform`, `policy`, `observer`; priority and ID order each class.
+Policy hooks require `fail-closed`. Observers return `continue` and cannot mutate
+workspace state. Transform handlers receive the phase-specific input type and
+return a transformation for that phase. Invocation identity is immutable.
+
+`hook/invoke` carries a tagged `HookInput`. `HookDirective` permits `continue`,
+`transform`, `permission`, and `block`. Permission results are `allow`, `ask`, or
+`deny`; the strictest decision wins. An `ask` result requires fresh approval.
+The generated hook schemas require every declared input field, including nullable
+values. They reject unknown envelope fields and unknown variants. Tool arguments
+and structured tool results retain the JSON shapes defined by their tool schemas.
+
+Cancellation aborts the handler signal. A tool, hook, command, or provider call
+retains its invocation until that handler and its awaited cleanup settle. The SDK
+does not send an early cancellation response or release admission while the
+handler can still perform effects. The host terminates and reaps an uncooperative
+plugin at its operation deadline before continuing conflicting work.
+
+Provider requests and events use the Rust provider contract. The SDK exports its
+`ProviderRequest`, `ProviderEvent`, and conversation `Block` types and validates
+requests before invoking a handler. Unknown content variants, foreign object
+fields, and missing required fields are rejected. Provider request and event
+JSON schemas are included in the package. `cargo xtask codegen` generates the
+plugin and client projections from their Rust owners.
+
+## Durable event delivery
+
+`event_subscriptions` names members of the generated `ExtensionEventKind` catalog.
+Private namespace transactions and host accounting/control records are excluded.
+The host sends one `event/publish` request at a time per plugin with an exact
+session/sequence cursor, observed state revision, event kind and redacted content.
+Handlers return `{ mutations: [...] }`; the host commits the state mutations and
+that exact acknowledgement atomically. A callback cannot acknowledge another
+cursor or namespace. Concurrent state changes produce a revision conflict and
+pause delivery at the unacknowledged event.
+
+The reader catches up from durable acknowledgement using bounded journal pages.
+Append only coalesces a wakeup; it never queues event payloads on the actor.
+Restart resumes from the saved cursor. External effects therefore have
+at-least-once semantics and handlers must make such effects idempotent.
+Rewind restores namespace state while retaining physical delivery high-water;
+fork inherits state and starts child delivery after its inherited journal prefix.
+
+Inline redacted JSON is limited to 256KiB. Larger events use an immutable source
+of at most 32MiB. A plugin declaring `event/read` can call
+`context.readSource(offset, maxBytes)` for chunks of at most 64KiB. Only the
+active delivery cursor authorizes reads; the host revokes new reads when the
+callback settles. Existing source readers retain their charged allocation.
+Content is redacted JSON; the outer cursor, event kind and revision provide
+correlation independently of any redacted strings inside the content.
+
+Event callbacks use the fixed five-second request deadline. Cancellation stops
+new admission; shutdown waits for accepted reads, callbacks and actor transactions
+and requires endpoint effect settlement. A failed proof keeps the endpoint and
+its resource admission retained.
+
+Authenticated provider HTTP requires `invocation_id`, the exact host request ID
+for the active provider or model catalog call. The SDK exposes this operation
+only on `ProviderHandlerContext`. The host checks identity, exact alias, declared
+credential reference and the invocation deadline before starting the request.
