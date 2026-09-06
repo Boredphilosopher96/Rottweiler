@@ -67,13 +67,14 @@ async fn one_hundred_fifty_turn_overflow_compacts_and_continues_through_actor() 
             signature: None,
         }),
     );
-    let mut model = M3Model::new([compaction_script, stop_script("amber-42", &[])]);
+    let mut model = M3Model::new([stop_script("amber-42", &[])]);
+    model.summary_script = Some(compaction_script);
     model.metadata = ModelContextMetadata {
         max_context_tokens: Some(2_000),
         max_output_tokens: Some(256),
         cache_breakpoints: Some(CacheBreakpointSupport::Explicit),
     };
-    model.budget.session_cost_cap_micros_usd = Some(100);
+    model.budget.session_cost_cap_micros_usd = Some(10_000);
     let model = Arc::new(model);
     let mut actor_config = config(
         root.path(),
@@ -137,20 +138,30 @@ async fn one_hundred_fifty_turn_overflow_compacts_and_continues_through_actor() 
             if text.contains("src/lib.rs checksum amber-42")
     )));
     let requests = model.requests();
-    assert_eq!(requests.len(), 2);
+    assert!(requests.len() > 2);
+    for request in &requests[..requests.len() - 1] {
+        assert!(request.tools.is_empty());
+        let tokens = request
+            .turns
+            .iter()
+            .map(rw_context::LocalTokenEstimator::turn)
+            .sum::<u64>();
+        assert!(tokens + u64::from(request.max_output_tokens) <= 2_000);
+    }
+    let continued = requests.last().expect("continued provider request");
     assert!(requests[0].tools.is_empty());
-    assert!(requests[1].turns.iter().any(|turn| {
+    assert!(continued.turns.iter().any(|turn| {
             turn.role == Role::User
                 && matches!(turn.blocks.as_slice(), [Block::Text { text }] if text == rw_context::AUTO_CONTINUE_TEXT)
         }));
-    let final_prompt = serde_json::to_string(&requests[1].turns).expect("serialize prompt");
+    let final_prompt = serde_json::to_string(&continued.turns).expect("serialize prompt");
     assert!(final_prompt.contains("amber-42"));
     assert!(!final_prompt.contains("turn 149:"));
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         PendingEvent::TextDelta { text, .. } if text == "amber-42"
     )));
-    assert!(requests[1].cache_hint.is_none());
+    assert!(continued.cache_hint.is_none());
     let durable = sink.test_events_after(None).await.expect("durable events");
     let resumed = project_session_events(&durable).expect("resume projection");
     assert!(
@@ -165,7 +176,8 @@ async fn one_hundred_fifty_turn_overflow_compacts_and_continues_through_actor() 
 #[tokio::test]
 async fn post_summary_compaction_failure_emits_correlated_terminal() {
     let root = TempDir::new().expect("tempdir");
-    let mut model = M3Model::new([stop_script("durable compacted summary", &[])]);
+    let mut model = M3Model::new([]);
+    model.summary_script = Some(stop_script("durable compacted summary", &[]));
     model.metadata = ModelContextMetadata {
         max_context_tokens: Some(600),
         max_output_tokens: Some(128),
@@ -264,22 +276,16 @@ async fn one_hundred_fifty_turn_compaction_quality_replays_from_recorded_provide
 
     let fixture_directory = TempDir::new().expect("fixture directory");
     let source = Arc::new(ReplaySourceProvider {
-            scripts: Mutex::new(
-                [
-                    stop_script(
-                        "## Goal\ncontinue\n\n## Instructions\nkeep intent\n\n## Discoveries\nsrc/lib.rs checksum amber-42\n\n## Accomplished\n150 turns\n\n## Relevant files & directories\nsrc/lib.rs\nPROJECT.md",
-                        &[TokenUsage {
-                            input_tokens: 2_000,
-                            output_tokens: 60,
-                            ..TokenUsage::default()
-                        }],
-                    ),
-                    stop_script("amber-42", &[]),
-                ]
-                .into_iter()
-                .collect(),
-            ),
-        });
+        summary: stop_script(
+            "## Goal\ncontinue\n\n## Instructions\nkeep intent\n\n## Discoveries\nsrc/lib.rs checksum amber-42\n\n## Accomplished\n150 turns\n\n## Relevant files & directories\nsrc/lib.rs\nPROJECT.md",
+            &[TokenUsage {
+                input_tokens: 2_000,
+                output_tokens: 60,
+                ..TokenUsage::default()
+            }],
+        ),
+        answer: stop_script("amber-42", &[]),
+    });
     let recorder = Arc::new(Recorder::new(
         source,
         fixture_directory.path(),

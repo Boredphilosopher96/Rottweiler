@@ -2,7 +2,7 @@
 use super::fixtures::{
     history,
     models::M3Model,
-    support::{collect_turn, config, stop_script, text_turn},
+    support::{collect_turn, config, next_matching, stop_script, text_turn},
 };
 use crate::engine::{
     AgentLoopError, AgentTurnStatus, SessionActor, builtin_hook_dispatcher,
@@ -295,12 +295,10 @@ async fn oversized_individual_block_is_summarized_with_complete_fragment_coverag
     let actor = SessionActor::spawn(input).expect("actor");
     let mut events = actor.subscribe().expect("events");
     actor.compact(None).await.expect("compact");
-    let events = collect_turn(&mut events).await;
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.kind, PendingEvent::CompactionFinished { .. }))
-    );
+    next_matching(&mut events, |event| {
+        matches!(event.kind, PendingEvent::CompactionFinished { .. })
+    })
+    .await;
     let mut json = String::new();
     let mut fragments = 0;
     for request in model.requests() {
@@ -358,12 +356,10 @@ async fn oversized_pruned_block_never_reaches_summary_provider() {
     let actor = history::spawn(input).await.expect("actor");
     let mut events = actor.subscribe().expect("events");
     actor.compact(None).await.expect("compact");
-    let events = collect_turn(&mut events).await;
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.kind, PendingEvent::CompactionFinished { .. }))
-    );
+    next_matching(&mut events, |event| {
+        matches!(event.kind, PendingEvent::CompactionFinished { .. })
+    })
+    .await;
     let requests = model.requests();
     assert_eq!(requests.len(), 1);
     let text = serde_json::to_string(&requests).expect("requests");

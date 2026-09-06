@@ -30,7 +30,7 @@ impl CanonicalHistory {
         cursor: ConversationFragmentCursor,
         max_bytes: usize,
     ) -> Result<ConversationFragment, RecoveryError> {
-        if !(1024..=MAX_SUMMARY_FRAGMENT_BYTES).contains(&max_bytes) {
+        if !(256..=MAX_SUMMARY_FRAGMENT_BYTES).contains(&max_bytes) {
             return Err(RecoveryError::Limit("summary fragment byte allowance"));
         }
         let source = self.turn_source(cursor.ordinal)?;

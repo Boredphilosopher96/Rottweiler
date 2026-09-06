@@ -48,6 +48,7 @@ pub(super) struct CompactionExecution {
     pub(super) cost: Cost,
     pub(super) reclaimed_tokens: u64,
     pub(super) remapped_pins: Vec<usize>,
+    pub(super) auto_continue: bool,
     pub(super) hard_stop: bool,
     pub(super) failed_attempt_cost_micros: u64,
     pub(super) failed_attempt_credit_micros: u64,
@@ -155,12 +156,17 @@ pub(super) async fn execute_compaction(
             .as_ref()
             .map(|value| config.secret_redactor.redact(value)),
     };
-    let automatic_continue = !streaming && !input.suppress_auto_continue;
+    let auto_continue = !input.suppress_auto_continue;
+    let automatic_continue = !streaming && auto_continue;
     let compaction_config = config.model.compaction_config();
     let plan = Compactor::plan(CompactionInput {
         conversation: conversation.to_vec(),
         pins,
-        reason: context_compaction_reason(&reason),
+        reason: if streaming {
+            ContextCompactionReason::Manual
+        } else {
+            context_compaction_reason(&reason)
+        },
         instructions,
         hook,
         session_model_alias: config.model_alias.clone(),
@@ -231,7 +237,7 @@ pub(super) async fn execute_compaction(
             turns: summary_request_turns.clone(),
             tools: Vec::new(),
             tool_choice: ToolChoice::None {},
-            max_output_tokens: config.max_output_tokens,
+            max_output_tokens: summary_output_tokens(config, &alias),
             temperature: None,
             thinking: config.thinking,
             cache_hint: None,
@@ -499,6 +505,7 @@ pub(super) async fn execute_compaction(
         cost,
         reclaimed_tokens: old_tokens.saturating_sub(new_tokens),
         remapped_pins,
+        auto_continue,
         hard_stop,
         failed_attempt_cost_micros,
         failed_attempt_credit_micros,
@@ -530,9 +537,25 @@ pub(in crate::engine) async fn compact_during_turn(
 ) -> Result<(u64, u64, u64, bool), AgentLoopError> {
     let view = config.history.capture_history().await?;
     if super::history_compaction::requires_streaming(&view, config, instructions.as_deref())? {
+        let suffix = if reason == CompactionReason::ProviderOverflow {
+            vec![
+                conversation
+                    .iter()
+                    .rev()
+                    .find(|turn| turn.role == Role::User && !turn.meta.synthetic)
+                    .ok_or_else(|| {
+                        AgentLoopError::InvalidConfiguration(
+                            "provider overflow requires a user turn".into(),
+                        )
+                    })?
+                    .clone(),
+            ]
+        } else {
+            Vec::new()
+        };
         let (page, spend) = super::history_compaction::compact(
             view,
-            Vec::new(),
+            suffix,
             config,
             cancellation,
             signals,
@@ -698,4 +721,15 @@ fn append_summary(summary: &mut String, text: &str) -> Result<(), AgentLoopError
     }
     summary.push_str(text);
     Ok(())
+}
+
+pub(super) fn summary_output_tokens(config: &SessionActorConfig, alias: &str) -> u32 {
+    config
+        .model
+        .context_metadata(alias)
+        .max_output_tokens
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .map_or(config.max_output_tokens, |maximum| {
+            config.max_output_tokens.min(maximum)
+        })
 }

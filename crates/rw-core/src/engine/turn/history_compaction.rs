@@ -54,13 +54,17 @@ pub(in crate::engine) async fn compact(
         cancellation,
         signals,
         turn,
-        reason,
+        reason.clone(),
         instructions,
         accounting,
     )
     .await;
     let result: Result<BudgetUsage, AgentLoopError> = async {
         let mut summary = result?;
+        if suffix.is_empty() && reason == CompactionReason::Automatic && !summary.suppress_continue
+        {
+            summary.carry.push(rw_context::auto_continue_turn());
+        }
         summary.carry.extend(suffix);
         check_carry(&summary.carry, &summary.pins)?;
         let mut committed = Vec::with_capacity(summary.carry.len());
@@ -80,6 +84,15 @@ pub(in crate::engine) async fn compact(
             )
             .await?;
         }
+        let now = config.event_clock.unix_time_millis();
+        config
+            .event_sink
+            .budget_totals(crate::engine::event_clock::BudgetLedgerQuery {
+                now_unix_ms: now,
+                utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
+                trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+            })
+            .await?;
         let new_tokens = summary.carry.iter().fold(0u64, |total, value| {
             total.saturating_add(rw_context::LocalTokenEstimator::turn(value))
         });
@@ -120,6 +133,7 @@ pub(in crate::engine) async fn compact(
 struct Summary {
     carry: Vec<Turn>,
     pins: Vec<CarryPin>,
+    suppress_continue: bool,
     cost_micros: u64,
     credit_micros: u64,
     tokens: u64,
@@ -224,8 +238,12 @@ fn page_tokens(
         .checked_sub(
             carry
                 .saturating_add(prompt)
-                .saturating_add(u64::from(config.max_output_tokens))
-                .saturating_add(1024),
+                .saturating_add(u64::from(
+                    super::compaction::summary_output_tokens(config, alias).max(
+                        super::compaction::summary_output_tokens(config, &config.model_alias),
+                    ),
+                ))
+                .saturating_add(32),
         )
         .filter(|tokens| *tokens > 0)
         .ok_or_else(|| invalid("retained summary and pins exhaust compaction context capacity"))
@@ -254,7 +272,7 @@ impl Summary {
                 block_index: 0,
                 byte_offset: 0,
             });
-            let bytes = usize::try_from(tokens.saturating_sub(128).saturating_mul(4))
+            let bytes = usize::try_from(tokens.saturating_sub(16).saturating_mul(4))
                 .unwrap_or(usize::MAX)
                 .min(crate::engine::recovery::MAX_SUMMARY_FRAGMENT_BYTES);
             let result = history.conversation_fragment(cursor, bytes).await?;
@@ -354,6 +372,7 @@ impl Summary {
         if execution.hard_stop {
             return Err(invalid("budget cap prevents complete history compaction"));
         }
+        self.suppress_continue |= !execution.auto_continue;
         self.carry = execution.conversation;
         self.pins = execution
             .remapped_pins

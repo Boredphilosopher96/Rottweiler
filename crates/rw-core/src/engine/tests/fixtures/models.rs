@@ -190,6 +190,7 @@ pub(in crate::engine::tests) struct M3Model {
     pub(in crate::engine::tests) compaction: CompactionConfig,
     pub(in crate::engine::tests) budget: BudgetConfig,
     pub(in crate::engine::tests) cost_override: Option<Cost>,
+    pub(in crate::engine::tests) summary_script: Option<ProviderScript>,
 }
 
 impl M3Model {
@@ -202,6 +203,7 @@ impl M3Model {
             compaction: CompactionConfig::default(),
             budget: BudgetConfig::default(),
             cost_override: None,
+            summary_script: None,
         }
     }
 
@@ -230,7 +232,11 @@ impl ModelDriver for M3Model {
             .lock()
             .expect("operation lock")
             .push(format!("stream:{alias}"));
+        let summary = matches!(request.tool_choice, rw_providers::ToolChoice::None {});
         self.requests.lock().expect("request lock").push(request);
+        if let Some(script) = self.summary_script.as_ref().filter(|_| summary) {
+            return Ok(Box::pin(stream::iter(script.clone())));
+        }
         let script = self
             .scripts
             .lock()
@@ -272,7 +278,8 @@ impl ModelDriver for M3Model {
 }
 
 pub(in crate::engine::tests) struct ReplaySourceProvider {
-    pub(in crate::engine::tests) scripts: Mutex<VecDeque<ProviderScript>>,
+    pub(in crate::engine::tests) summary: ProviderScript,
+    pub(in crate::engine::tests) answer: ProviderScript,
 }
 
 #[async_trait]
@@ -297,16 +304,13 @@ impl Provider for ReplaySourceProvider {
         }
     }
 
-    async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        let script = self
-            .scripts
-            .lock()
-            .expect("replay source scripts")
-            .pop_front()
-            .ok_or_else(|| {
-                ProviderError::new(ProviderErrorKind::ReplayMiss, "missing source script")
-            })?;
-        Ok(Box::pin(stream::iter(script)))
+    async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        let script = if matches!(request.tool_choice, rw_providers::ToolChoice::None {}) {
+            &self.summary
+        } else {
+            &self.answer
+        };
+        Ok(Box::pin(stream::iter(script.clone())))
     }
 }
 
