@@ -55,13 +55,12 @@ pub(super) async fn completion(
             rw_resources::ResourceClass::Cpu,
             move || {
                 let _owner = owner;
-                let logical = match measure_execution(&mut execution) {
-                    Ok(logical) => logical,
-                    Err(_) => {
-                        super::tool_result_budget::reject(&mut execution);
-                        measure_execution(&mut execution)
-                            .map_err(|error| invalid(&error.to_string()))?
-                    }
+                let logical = if let Ok(logical) = measure_execution(&mut execution) {
+                    logical
+                } else {
+                    super::tool_result_budget::reject(&mut execution);
+                    measure_execution(&mut execution)
+                        .map_err(|error| invalid(&error.to_string()))?
                 };
                 Ok::<_, AgentLoopError>((execution, logical))
             },
