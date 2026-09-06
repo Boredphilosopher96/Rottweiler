@@ -31,7 +31,8 @@ fn input_near_record_limit() -> PendingEvent {
         content: String::new(),
         attachments: attachments.clone(),
     };
-    let overhead = serialized_size(&event(1, empty)).expect("envelope size") as usize;
+    let overhead = usize::try_from(serialized_size(&event(1, empty)).expect("envelope size"))
+        .expect("addressable envelope");
     let content =
         "\0".repeat((SessionEventPageLimits::default().max_line_bytes - overhead - 4096) / 6 / 16);
     for attachment in &mut attachments {

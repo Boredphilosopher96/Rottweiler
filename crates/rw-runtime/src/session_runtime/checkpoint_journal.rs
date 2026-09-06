@@ -427,8 +427,11 @@ pub(super) fn load_rewind_coordinator(
         return Err(miette!("rewind coordinator exceeds its size limit"));
     }
     let decision: RewindCoordinatorDecision = serde_json::from_slice(
-        &mapping::read_limit(&path, MAX_REWIND_COORDINATOR_BYTES as usize)
-            .map_err(|error| miette!("rewind coordinator could not load: {error}"))?,
+        &mapping::read_limit(
+            &path,
+            usize::try_from(MAX_REWIND_COORDINATOR_BYTES).into_diagnostic()?,
+        )
+        .map_err(|error| miette!("rewind coordinator could not load: {error}"))?,
     )
     .map_err(|error| miette!("rewind coordinator is corrupt: {error}"))?;
     validate_rewind_coordinator(&decision)?;
