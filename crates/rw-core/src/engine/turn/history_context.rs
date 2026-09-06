@@ -49,7 +49,6 @@ pub(in crate::engine) async fn assemble_view(
     tasks: &crate::engine::task_ownership::ActorTasks,
     view: Arc<dyn SessionHistoryView>,
     queued: VecDeque<String>,
-    include_dump: bool,
 ) -> Result<HistoryRead<CurrentContext>, AgentLoopError> {
     let through = view.through();
     let page = read_view(&view).await?;
@@ -70,7 +69,6 @@ pub(in crate::engine) async fn assemble_view(
                     &queued,
                     &surgery,
                     &page.pruned_tool_outputs,
-                    include_dump,
                 )?;
                 Ok(page.map(|page| CurrentContext {
                     through,

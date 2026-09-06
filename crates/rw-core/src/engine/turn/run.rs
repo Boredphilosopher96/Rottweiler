@@ -263,7 +263,6 @@ pub(super) async fn run_turn(
             &VecDeque::new(),
             &context_surgery,
             &pruned_tool_outputs,
-            false,
         ) {
             Ok(assembled) => assembled,
             Err(error) => {
@@ -327,7 +326,6 @@ pub(super) async fn run_turn(
                     &VecDeque::new(),
                     &context_surgery,
                     &pruned_tool_outputs,
-                    false,
                 ) {
                     Ok(assembled) => assembled,
                     Err(error) => {

@@ -137,7 +137,7 @@ async fn read(
                 .into_iter()
                 .map(|(_, message)| message.content)
                 .collect();
-            history_context::assemble_view(Arc::clone(&config), &tasks, view, queued, dump).await
+            history_context::assemble_view(Arc::clone(&config), &tasks, view, queued).await
         })
         .await
         .try_map(|result| result)?
@@ -153,7 +153,7 @@ async fn read(
                         super::plugin_control::read_context(&current, &request).map(Output::Plugin)
                     } else if dump {
                         Ok(Output::Prompt(prompt_dump(
-                            &current.assembled,
+                            current.assembled,
                             &config.model_alias,
                             None,
                             current.through,
@@ -201,7 +201,7 @@ async fn historical_prompt(
                 .into_iter()
                 .map(|(_, message)| message.content)
                 .collect();
-            history_context::assemble_view(Arc::clone(&config), &tasks, view, queued, true).await
+            history_context::assemble_view(Arc::clone(&config), &tasks, view, queued).await
         })
         .await
         .try_map(|result| result)?
@@ -213,7 +213,7 @@ async fn historical_prompt(
             move || {
                 current.try_map(|current| {
                     let dump = prompt_dump(
-                        &current.assembled,
+                        current.assembled,
                         &config.model_alias,
                         Some(turn),
                         current.through,

@@ -130,7 +130,6 @@ pub(in crate::engine) fn assemble_session_context(
     queued: &VecDeque<String>,
     surgery: &[ContextSurgeryAction],
     pruned_tool_outputs: &BTreeMap<String, u64>,
-    include_prompt_dump: bool,
 ) -> Result<AssembledContext, AgentLoopError> {
     let stable_prefix = config
         .initial_session_context
@@ -225,7 +224,7 @@ pub(in crate::engine) fn assemble_session_context(
         cache_support: metadata
             .cache_breakpoints
             .unwrap_or(CacheBreakpointSupport::None),
-        include_prompt_dump,
+        include_prompt_dump: false,
     })
     .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))
 }
@@ -427,7 +426,7 @@ pub(in crate::engine) fn context_snapshot(
 }
 
 pub(in crate::engine) fn prompt_dump(
-    assembled: &AssembledContext,
+    assembled: AssembledContext,
     model_alias: &str,
     turn_id: Option<TurnId>,
     through: Option<rw_types::SequenceId>,
@@ -436,25 +435,22 @@ pub(in crate::engine) fn prompt_dump(
         through,
         turn_id,
         model_alias: ModelAlias(model_alias.to_owned()),
-        turns: assembled.turns.clone(),
+        turns: assembled.turns,
         tools: assembled
             .tools
-            .iter()
+            .into_iter()
             .map(|tool| PromptTool {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
             })
             .collect(),
-        stable_prefix_hash: assembled.stable_prefix_hash.clone(),
+        stable_prefix_hash: assembled.stable_prefix_hash,
         cache_breakpoints: assembled
             .cache_breakpoints
-            .iter()
+            .into_iter()
             .map(|breakpoint| CacheBreakpoint {
-                after_item_id: breakpoint
-                    .after_item_id
-                    .as_ref()
-                    .map(|id| ContextItemId(id.0.clone())),
+                after_item_id: breakpoint.after_item_id.map(|id| ContextItemId(id.0)),
             })
             .collect(),
         estimated_tokens: assembled.token_totals.total,
