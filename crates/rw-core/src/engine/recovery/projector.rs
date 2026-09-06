@@ -53,6 +53,25 @@ impl CanonicalRecovery {
         recovery.head()?;
         Ok(recovery)
     }
+    /// Open an inert child-control projection independently of its actor owner.
+    /// # Errors
+    /// Rejects unsafe storage, changed registries and invalid source checkpoints.
+    pub fn for_control_discovery(
+        source: &JournalReadView,
+        modes: &ModeRegistry,
+    ) -> Result<Self, RecoveryError> {
+        let recovery = Self {
+            index: RecoveryIndex::open(
+                source,
+                rw_store::session::recovery_index::RecoveryProjection::Controls,
+                VERSION,
+            )?,
+            fingerprint: registry_fingerprint(modes),
+            inherited_journal_through: None,
+        };
+        recovery.head()?;
+        Ok(recovery)
+    }
     /// Build the exact selected fork prefix in its own bounded derived owner.
     /// It cannot move or invalidate the live actor's canonical checkpoint.
     /// # Errors
@@ -211,7 +230,7 @@ pub(super) fn progress(
             || head.next_sequence < source.prefix_identity().next_sequence,
     }
 }
-fn registry_fingerprint(modes: &ModeRegistry) -> [u8; 32] {
+pub(crate) fn registry_fingerprint(modes: &ModeRegistry) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     for mode in modes.iter() {
         hash.update(&(mode.id().0.len() as u64).to_le_bytes());

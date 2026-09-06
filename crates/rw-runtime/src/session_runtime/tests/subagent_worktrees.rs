@@ -1000,6 +1000,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
     let create_storage = storage.clone();
     let create_model = Arc::clone(&model);
     let create_tools = Arc::clone(&child_tools);
+    let control_journals = JournalService::new(&storage).expect("control source");
     let rebind_storage = storage.clone();
     let rebind_model = Arc::clone(&model);
     let rebind_tools = Arc::clone(&child_tools);
@@ -1018,21 +1019,29 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             .await
         })
     })
-    .with_rebuilder(move |session_id, workspace, _policy| {
-        let rebind_storage = rebind_storage.clone();
-        let rebind_model = rebind_model.clone();
-        let rebind_tools = rebind_tools.clone();
-        Box::pin(async move {
-            child_config(
-                &rebind_storage,
-                session_id,
-                workspace,
-                Arc::clone(&rebind_model),
-                Arc::clone(&rebind_tools),
-            )
-            .await
-        })
-    });
+    .with_rebuilder(
+        move |session_id, workspace, _policy| {
+            let rebind_storage = rebind_storage.clone();
+            let rebind_model = rebind_model.clone();
+            let rebind_tools = rebind_tools.clone();
+            Box::pin(async move {
+                child_config(
+                    &rebind_storage,
+                    session_id,
+                    workspace,
+                    Arc::clone(&rebind_model),
+                    Arc::clone(&rebind_tools),
+                )
+                .await
+            })
+        },
+        move |session_id, _| {
+            Box::pin(super::super::dormant_controls::fixture_controls(
+                control_journals.clone(),
+                session_id.clone(),
+            ))
+        },
+    );
     let actor_factory: Arc<dyn SubagentSessionFactory> = Arc::new(actor_factory);
     let factory: Arc<dyn SubagentSessionFactory> = Arc::new(WorktreeSubagentSessionFactory::new(
         actor_factory,

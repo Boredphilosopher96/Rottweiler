@@ -100,9 +100,11 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         let _ = pending.respond.send(Err(rw_tools::ToolError::Cancelled));
     }
 
-    let recovered = SessionActorRecovery::from_bootstrap(
+    let suspended = state.suspended_inputs.is_some();
+    let mut recovered = SessionActorRecovery::from_bootstrap(
         config.history.capture_history().await?.bootstrap().await?,
     )?;
+    let suspended_inputs = suspended.then(|| std::mem::take(&mut recovered.accepted_messages));
     let client_roles = std::mem::take(&mut state.client_roles);
     let tasks = state.tasks.clone();
     let control = Arc::clone(&state.control);
@@ -119,6 +121,7 @@ pub(in crate::engine) async fn recover_actor_from_journal(
         recovered,
         control,
     );
+    state.suspended_inputs = suspended_inputs;
     state.tasks = tasks;
     state.client_roles = client_roles;
 

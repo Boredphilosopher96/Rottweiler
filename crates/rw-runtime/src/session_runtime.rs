@@ -9,6 +9,7 @@ mod credential_resolution;
 mod custom_commands;
 mod declarative_hooks;
 mod deferred_network;
+mod dormant_controls;
 mod durable_session;
 mod extension_discovery;
 mod family_read_scope;

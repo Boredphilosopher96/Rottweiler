@@ -45,7 +45,20 @@ impl SessionActor {
     /// # Errors
     ///
     /// Rejects zero guardrails, empty aliases, or an unusable workspace root.
-    pub fn spawn(mut config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
+    pub fn spawn(config: SessionActorConfig) -> Result<SessionHandle, AgentLoopError> {
+        Self::spawn_with_input_policy(config, true)
+    }
+
+    pub(crate) fn spawn_for_controls(
+        config: SessionActorConfig,
+    ) -> Result<SessionHandle, AgentLoopError> {
+        Self::spawn_with_input_policy(config, false)
+    }
+
+    fn spawn_with_input_policy(
+        mut config: SessionActorConfig,
+        resume_inputs: bool,
+    ) -> Result<SessionHandle, AgentLoopError> {
         validate_config(&config)?;
         let tool_context = ToolContext::from_workspace_roots(
             std::iter::once(&config.workspace_root).chain(&config.additional_workspace_roots),
@@ -90,6 +103,7 @@ impl SessionActor {
             if AssertUnwindSafe(run_actor(
                 config,
                 recovered,
+                resume_inputs,
                 tool_context,
                 command_rx,
                 event_tx,
@@ -207,6 +221,7 @@ pub(super) async fn dispatch_lifecycle_hook(
 pub(super) async fn run_actor(
     config: Arc<SessionActorConfig>,
     mut recovered: SessionActorRecovery,
+    resume_inputs: bool,
     mut tool_context: ToolContext,
     mut commands: mpsc::Receiver<ActorCommand>,
     events: broadcast::Sender<RoutedEvent>,
@@ -296,7 +311,9 @@ pub(super) async fn run_actor(
             });
             state.completed_turns = state.completed_turns.saturating_add(1);
         }
-        if !accepted_messages.is_empty() || !state.queued.is_empty() {
+        if !resume_inputs {
+            state.suspended_inputs = Some(accepted_messages);
+        } else if !accepted_messages.is_empty() || !state.queued.is_empty() {
             state.queued_positions.clear();
             let messages = accepted_messages
                 .into_iter()
@@ -364,6 +381,7 @@ pub(super) async fn run_actor(
             ));
         }
         if !state.closing
+            && state.suspended_inputs.is_none()
             && state.running.is_none()
             && !state.initialization_running
             && state.active_shell.is_none()

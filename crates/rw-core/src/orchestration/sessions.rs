@@ -34,9 +34,18 @@ pub(super) type ActorResumeBuilder = dyn for<'a> Fn(
     + Send
     + Sync;
 
+pub(super) type DormantControlsReader = dyn for<'a> Fn(
+        &'a SessionId,
+        &'a Path,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<super::DormantChildControls, AgentLoopError>,
+    > + Send
+    + Sync;
+
 pub struct ActorSubagentSessionFactory {
     builder: Arc<ActorConfigBuilder>,
-    rebuilder: Option<Arc<ActorResumeBuilder>>,
+    rebuilder: Option<(Arc<ActorResumeBuilder>, Arc<DormantControlsReader>)>,
     recovery_policies: Arc<tokio::sync::Semaphore>,
 }
 
@@ -264,8 +273,17 @@ impl ActorSubagentSessionFactory {
         > + Send
         + Sync
         + 'static,
+        controls: impl for<'a> Fn(
+            &'a SessionId,
+            &'a Path,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<super::DormantChildControls, AgentLoopError>,
+        > + Send
+        + Sync
+        + 'static,
     ) -> Self {
-        self.rebuilder = Some(Arc::new(rebuilder));
+        self.rebuilder = Some((Arc::new(rebuilder), Arc::new(controls)));
         self
     }
 }
@@ -304,7 +322,8 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         allowed_tools: Option<Arc<ToolRegistry>>,
         policy: &SubagentRecoveryPolicy,
     ) -> Result<Option<Arc<dyn SubagentSession>>, OrchestrationError> {
-        let (Some(rebuilder), Some(workspace_root)) = (&self.rebuilder, workspace_root) else {
+        let (Some((rebuilder, controls)), Some(workspace_root)) = (&self.rebuilder, workspace_root)
+        else {
             return Ok(None);
         };
         let policy_permit = super::deferred_actor::admit_policy(
@@ -313,6 +332,14 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
             workspace_root,
             policy,
         )?;
+        let controls = controls(session_id, workspace_root)
+            .await
+            .map_err(|error| OrchestrationError::Session(error.to_string()))?;
+        if controls.session_id != *session_id {
+            return Err(OrchestrationError::Session(
+                "child control source belongs to another session".into(),
+            ));
+        }
         Ok(Some(Arc::new(
             super::deferred_actor::DeferredActorSession::new(
                 Arc::clone(rebuilder),
@@ -321,6 +348,7 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
                 allowed_tools,
                 policy.clone(),
                 policy_permit,
+                controls,
             ),
         )))
     }

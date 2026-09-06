@@ -527,7 +527,9 @@ use policy::{
 mod tools;
 pub use tools::{SpawnAgentTool, subagent_result_tool_output};
 
+mod dormant_controls;
 mod family_controls;
+pub use dormant_controls::DormantChildControls;
 mod sessions;
 pub use sessions::{ActorSubagentSessionFactory, WorktreeSubagentSessionFactory};
 

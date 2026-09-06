@@ -191,6 +191,9 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) has_assistant_text: bool,
     pub(in crate::engine) approved_plan_item: Option<rw_types::ContextItemId>,
     pub(in crate::engine) resolved_model: Option<String>,
+    // The bootstrap allowance owns these pending bodies while a selected child
+    // exposes controls without implicitly resuming inference.
+    pub(in crate::engine) suspended_inputs: Option<Vec<crate::recovery::RecoveredMessage>>,
     pub(in crate::engine) queued: VecDeque<String>,
     pub(in crate::engine) queued_positions: VecDeque<u64>,
     pub(in crate::engine) running: Option<RunningTurn>,
@@ -325,6 +328,7 @@ impl ActorState {
             has_assistant_text: recovered.conversation.has_assistant_text,
             approved_plan_item: recovered.conversation.approved_plan_item,
             _recovery_source: recovered.source,
+            suspended_inputs: None,
             queued: recovered.queued_messages.into_iter().collect(),
             queued_positions,
             running: None,

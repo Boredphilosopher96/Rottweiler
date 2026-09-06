@@ -22,7 +22,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
-fn controller(private: &Path, primary: &Path) -> RuntimeWorkspaceRootController {
+pub(super) fn controller(private: &Path, primary: &Path) -> RuntimeWorkspaceRootController {
     let private = private.to_path_buf();
     let primary = primary.to_path_buf();
     let checkpoint_root = private.join("child-checkpoints");

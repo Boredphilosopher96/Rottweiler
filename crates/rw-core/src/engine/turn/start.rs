@@ -191,6 +191,7 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     messages: Vec<(String, Vec<Attachment>)>,
     overrides: CommandTurnOverrides,
 ) -> Result<(), AgentLoopError> {
+    let messages = resume_suspended_inputs(state, messages);
     let PreparedTurnStart {
         config,
         messages,
@@ -402,4 +403,32 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         let _ = signals.send(TurnSignal::Complete(outcome));
     })?;
     Ok(())
+}
+
+fn resume_suspended_inputs(
+    state: &mut ActorState,
+    messages: Vec<(String, Vec<Attachment>)>,
+) -> Vec<(String, Vec<Attachment>)> {
+    let Some(accepted) = state.suspended_inputs.take() else {
+        return messages;
+    };
+    state.queued_positions.clear();
+    accepted
+        .into_iter()
+        .map(|message| {
+            let attachments = message
+                .attachments
+                .into_iter()
+                .map(|stored| Attachment {
+                    name: stored.name,
+                    source_path: stored.source_path,
+                    media_type: stored.media_type,
+                    data: stored.data,
+                })
+                .collect();
+            (message.content, attachments)
+        })
+        .chain(state.queued.drain(..).map(|content| (content, Vec::new())))
+        .chain(messages)
+        .collect()
 }

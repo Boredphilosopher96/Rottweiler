@@ -312,6 +312,7 @@ use url::Url;
 
 mod checkpoints;
 mod child_plugin_sessions;
+mod dormant_controls;
 mod extensions;
 mod model_initialization;
 mod native_search;

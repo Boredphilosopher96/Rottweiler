@@ -954,14 +954,21 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             max_turns: options.max_turns,
         });
         let create_template = Arc::clone(&template);
+        let controls_template = Arc::clone(&template);
         let factory = ActorSubagentSessionFactory::new(move |launch| {
             let template = Arc::clone(&create_template);
             Box::pin(async move { template.config(launch).await })
         })
-        .with_rebuilder(move |session_id, root, policy| {
-            let template = Arc::clone(&template);
-            Box::pin(async move { template.rebind_config(session_id, root, policy).await })
-        });
+        .with_rebuilder(
+            move |session_id, root, policy| {
+                let template = Arc::clone(&template);
+                Box::pin(async move { template.rebind_config(session_id, root, policy).await })
+            },
+            move |session_id, root| {
+                let template = Arc::clone(&controls_template);
+                Box::pin(async move { template.recovery_controls(session_id, root).await })
+            },
+        );
         let shared: Arc<dyn SubagentSessionFactory> = Arc::new(factory);
         let isolation = match worktree_isolation_task {
             Some(task) => match task.join().await {

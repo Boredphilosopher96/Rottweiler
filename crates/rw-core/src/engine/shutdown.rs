@@ -1,5 +1,6 @@
-//! Explicit actor closure retains failed generations instead of releasing their resources.
+mod unstarted;
 use rw_types::hook_contract::{HookInput, HookSessionInput};
+pub(crate) use unstarted::settle_unstarted;
 
 use std::{future::pending, sync::Arc, time::Duration};
 

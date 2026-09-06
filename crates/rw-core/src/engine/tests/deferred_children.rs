@@ -55,11 +55,13 @@ async fn rebind(
 async fn dormant_close_never_prepares_an_actor() {
     let builds = Arc::new(AtomicUsize::new(0));
     let count = builds.clone();
-    let factory =
-        ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(move |_, _, _| {
+    let factory = ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(
+        move |_, _, _| {
             count.fetch_add(1, Ordering::SeqCst);
             unreachable!("dormant child must not build")
-        });
+        },
+        empty_controls,
+    );
     let root = tempfile::tempdir().expect("root");
     let child = rebind(&factory, root.path()).await;
     child.cancel().await.expect("cancel dormant");
@@ -84,17 +86,21 @@ async fn resumed_followups_observe_only_their_own_turn() {
         stop_script("first answer", &[]),
         stop_script("second answer", &[]),
     ]));
-    let factory =
-        ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(move |_, root, _| {
+    let factory = ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(
+        move |session, root, _| {
             count.fetch_add(1, Ordering::SeqCst);
-            Box::pin(super::fixtures::history::bind(config(
+            let mut configured = config(
                 root,
                 model.clone(),
                 Arc::new(ToolRegistry::new()),
                 PermissionDecision::Allow,
                 builtin_hook_dispatcher().expect("hooks"),
-            )))
-        });
+            );
+            configured.session_id = session.clone();
+            Box::pin(super::fixtures::history::bind(configured))
+        },
+        empty_controls,
+    );
     let root = tempfile::tempdir().expect("root");
     let child = rebind(&factory, root.path()).await;
     assert_eq!(builds.load(Ordering::SeqCst), 0);
@@ -121,8 +127,8 @@ async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
     let started = std::sync::Mutex::new(Some(started));
     let (release, wait) = tokio::sync::oneshot::channel();
     let wait = std::sync::Mutex::new(Some(wait));
-    let factory =
-        ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(move |_, root, _| {
+    let factory = ActorSubagentSessionFactory::new(|_| unreachable!()).with_rebuilder(
+        move |session, root, _| {
             started
                 .lock()
                 .expect("started lock")
@@ -135,18 +141,21 @@ async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
                 .expect("release lock")
                 .take()
                 .expect("one preparation");
-            let config = config(
+            let mut config = config(
                 root,
                 Arc::new(ScriptedModel::default()),
                 Arc::new(ToolRegistry::new()),
                 PermissionDecision::Allow,
                 builtin_hook_dispatcher().expect("hooks"),
             );
+            config.session_id = session.clone();
             Box::pin(async move {
                 wait.await.expect("release");
                 super::fixtures::history::bind(config).await
             })
-        });
+        },
+        empty_controls,
+    );
     let root = tempfile::tempdir().expect("root");
     let child = rebind(&factory, root.path()).await;
     let caller_child = child.clone();
@@ -177,7 +186,7 @@ async fn dropped_activation_retains_preparation_and_close_waits_for_it() {
 #[tokio::test]
 async fn dormant_policy_admission_is_shared_and_released_only_on_close() {
     let factory = ActorSubagentSessionFactory::new(|_| unreachable!())
-        .with_rebuilder(|_, _, _| unreachable!("dormant builder"));
+        .with_rebuilder(|_, _, _| unreachable!("dormant builder"), empty_controls);
     let root = tempfile::tempdir().expect("root");
     let mut policy = policy();
     policy.system_prompt = Some("x".repeat(512 * 1024));
@@ -224,4 +233,21 @@ async fn dormant_policy_admission_is_shared_and_released_only_on_close() {
     for child in children {
         child.close(None).await.expect("close");
     }
+}
+
+fn empty_controls<'a>(
+    session: &'a SessionId,
+    _: &'a std::path::Path,
+) -> futures_util::future::BoxFuture<'a, Result<crate::DormantChildControls, crate::AgentLoopError>>
+{
+    Box::pin(async move {
+        let modes = rw_ext::ModeRegistry::builtins().expect("modes");
+        Ok(crate::DormantChildControls {
+            session_id: session.clone(),
+            through: None,
+            registry_fingerprint: crate::recovery::registry_fingerprint(&modes),
+            questions: 0,
+            pending_plan: false,
+        })
+    })
 }

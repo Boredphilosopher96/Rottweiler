@@ -29,6 +29,7 @@ mod extension;
 pub(in crate::engine) mod input;
 mod maintenance;
 mod projector;
+pub(crate) use projector::registry_fingerprint;
 mod read;
 pub use input::materialize_conversation_event;
 mod receipts;

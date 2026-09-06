@@ -82,6 +82,16 @@ impl SubagentSessionFactory for RuntimeSubagentSessionFactory {
 }
 
 impl ChildActorTemplate {
+    pub(super) async fn recovery_controls(
+        &self,
+        session: &SessionId,
+        workspace: &Path,
+    ) -> std::result::Result<rw_core::DormantChildControls, AgentLoopError> {
+        self.lease_runtime
+            .dormant_controls(session, workspace)
+            .await
+    }
+
     pub(super) async fn config(
         &self,
         launch: &rw_core::SubagentLaunch,

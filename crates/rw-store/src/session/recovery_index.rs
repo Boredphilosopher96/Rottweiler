@@ -126,6 +126,7 @@ pub enum RecoveryProjection {
     Conversation,
     Fork,
     Routing,
+    Controls,
     Tasks,
     Subagents,
 }
@@ -135,6 +136,7 @@ impl RecoveryProjection {
             Self::Conversation => "recovery",
             Self::Fork => "fork_recovery",
             Self::Routing => "routing",
+            Self::Controls => "control_discovery",
             Self::Tasks => "tasks",
             Self::Subagents => "subagents",
         }

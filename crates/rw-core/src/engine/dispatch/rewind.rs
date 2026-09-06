@@ -85,6 +85,9 @@ pub(super) async fn rewind_state(
         state.completed_turns = historical.head.control.completed_turns;
     });
     state.queued.clear();
+    if let Some(inputs) = &mut state.suspended_inputs {
+        inputs.clear();
+    }
     state.queued_positions.clear();
     state.pending_rewind = Some((to_turn, rewind.clone()));
     if let Err(error) = config.checkpoints.acknowledge_rewind(&rewind).await {
