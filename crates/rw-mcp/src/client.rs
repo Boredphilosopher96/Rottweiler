@@ -690,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn stdio_connector_keeps_live_transport_failure_generic() {
         let connector = SandboxedStdioConnector::new(
-            ShellLauncher("exec 1>&-; sleep 10"),
+            ShellLauncher("exec 1>&-; exec sleep 10"),
             Arc::new(AllowConnection),
         );
         let error = connector
