@@ -22,6 +22,7 @@ use super::checkpoints::recover_rewind_transactions;
 use super::code_intelligence::MultiRootCodeIntelligence;
 use super::code_intelligence::lsp_servers_for_root;
 use super::command_execution::CommandFixtureMode;
+#[cfg(target_os = "macos")]
 use super::command_execution::READ_ONLY_HOOK_COMMAND_FIXTURE_NAMESPACE;
 use super::command_execution::build_command_executor;
 use super::command_execution::build_read_only_hook_executor;
@@ -108,6 +109,7 @@ use super::tool_composition::BuildToolsInput;
 use super::tool_composition::build_tools;
 use super::tool_composition::command_mode_can_open_proxy;
 use super::tool_composition::trusted_lsp_roots;
+#[cfg(target_os = "macos")]
 use super::toolchain::HookCommandCapture;
 use super::toolchain::ToolchainRuntime;
 use super::toolchain::toolchain_command_identity;

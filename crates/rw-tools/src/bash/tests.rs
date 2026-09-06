@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+#[cfg(target_os = "macos")]
 use rw_sandbox::SandboxPolicy;
 use rw_types::{ToolCapability, ToolOutputStream};
 use serde_json::json;
