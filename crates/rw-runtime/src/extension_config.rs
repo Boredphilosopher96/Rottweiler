@@ -733,10 +733,10 @@ fn parse_mcp_server(
                     .iter()
                     .any(|identity| identity.path == canonical)
             {
-                *argument = canonical
+                canonical
                     .to_str()
                     .ok_or_else(|| miette!("MCP command path is not UTF-8"))?
-                    .to_owned();
+                    .clone_into(argument);
             }
         }
     }
