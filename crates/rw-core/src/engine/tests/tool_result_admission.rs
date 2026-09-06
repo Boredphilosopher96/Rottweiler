@@ -137,17 +137,38 @@ async fn failed_result_selector_stays_repairable_without_reexecuting_the_tool() 
         .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     handle.send_message("run once").await.expect("message");
-    next_matching(&mut events, |event| {
-        matches!(
-            event,
-            crate::engine::PendingEvent::TurnFinished {
-                turn: 1,
-                status: AgentTurnStatus::Interrupted,
-                ..
+    let terminal = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = events.recv().await.expect("event delivery");
+            if let EngineEvent::TurnFinished { status, .. } = event.as_ref() {
+                break *status;
             }
-        )
+        }
     })
     .await;
+    let diagnostic = sink
+        .test_events_after(None)
+        .await
+        .expect("diagnostic source");
+    let trace = diagnostic
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::TurnStarted { .. } => Some("started".into()),
+            EngineEvent::ToolCallFinished { is_error, .. } => Some(format!("tool:{is_error}")),
+            EngineEvent::ConversationToolResultsCommitted { .. } => Some("selector".into()),
+            EngineEvent::TurnFinished { status, .. } => Some(format!("terminal:{status:?}")),
+            EngineEvent::Error { message, .. } => Some(format!(
+                "error:{}",
+                message.chars().take(512).collect::<String>()
+            )),
+            _ => None,
+        })
+        .collect::<Vec<String>>();
+    assert_eq!(
+        terminal.ok(),
+        Some(rw_types::TurnStatus::Interrupted),
+        "canonical closure trace: {trace:?}"
+    );
     handle
         .close()
         .await
