@@ -10,6 +10,7 @@ use rw_types::session_state::{
     SessionQueuedPreview, SessionShellState, SessionStateSnapshot,
 };
 mod envelope;
+mod family_limits;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -360,34 +361,6 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::session_state::MAX_SESSION_QUEUE_ITEMS,
         ),
         (
-            "MAX_FAMILY_CONTROL_WAITS",
-            rw_types::family_controls::MAX_FAMILY_CONTROL_WAITS,
-        ),
-        (
-            "MAX_CLIENT_FAMILY_CONTROL_WAITS",
-            rw_types::family_controls::MAX_CLIENT_FAMILY_CONTROL_WAITS,
-        ),
-        (
-            "FAMILY_CONTROL_WAIT_MILLIS",
-            rw_types::family_controls::FAMILY_CONTROL_WAIT_MILLIS,
-        ),
-        (
-            "MAX_FAMILY_CONTROL_DEPTH",
-            rw_types::family_controls::MAX_FAMILY_CONTROL_DEPTH,
-        ),
-        (
-            "MAX_FAMILY_CONTROL_ROWS",
-            rw_types::family_controls::MAX_FAMILY_CONTROL_ROWS,
-        ),
-        (
-            "MAX_FAMILY_CONTROLS_BYTES",
-            rw_types::family_controls::MAX_FAMILY_CONTROLS_BYTES,
-        ),
-        (
-            "MAX_FAMILY_CONTROLS_PREPARED_BYTES",
-            rw_types::family_controls::MAX_FAMILY_CONTROLS_PREPARED_BYTES,
-        ),
-        (
             "MAX_SESSION_CONTROLS_BYTES",
             rw_types::session_controls::MAX_SESSION_CONTROLS_BYTES,
         ),
@@ -426,7 +399,10 @@ fn generate_typescript() -> Result<String, XtaskError> {
             rw_types::todo::MAX_TODO_CONTENT_BYTES,
         ),
         ("MAX_TODO_TOTAL_BYTES", rw_types::todo::MAX_TODO_TOTAL_BYTES),
-    ] {
+    ]
+    .into_iter()
+    .chain(family_limits::VALUES)
+    {
         output.push_str("export const ");
         output.push_str(name);
         output.push_str(" = ");
