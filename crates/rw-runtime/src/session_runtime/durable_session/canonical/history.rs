@@ -97,8 +97,10 @@ impl SessionHistoryView for CapturedHistory {
         self.query(move |history| history.conversation_fragment_source(ordinal))
             .await
     }
-    fn reserve_working_set(&self) -> Result<HistoryRead<()>, AgentLoopError> {
-        Ok(HistoryRead::new((), self.journal.retain_history()?))
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn rw_core::recovery::HistoryWorkingAllowance>, AgentLoopError> {
+        Ok(Box::new(self.journal.history_working()))
     }
     async fn bootstrap(&self) -> Result<HistoryRead<RecoveryBootstrap>, AgentLoopError> {
         self.query(CanonicalHistory::bootstrap).await
@@ -183,7 +185,7 @@ impl CapturedHistory {
         + Send
         + 'static,
     ) -> Result<HistoryRead<T>, AgentLoopError> {
-        let retention = self.journal.retain_history()?;
+        let retention = self.journal.retain_history().await?;
         let admission = self.journal.admit_read().map_err(persistence)?;
         let lease = self.lease.clone();
         // The transaction must remain owned by the worker if its waiter drops.

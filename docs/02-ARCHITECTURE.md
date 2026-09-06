@@ -421,6 +421,15 @@ tool result by that sequence plus its block index. Provider tool-call aliases an
 reused turn ordinals cannot redirect a pin, eviction, or prune. Mutation admission
 revalidates the selected source against the effective canonical generation.
 
+Canonical results and context working plans share a 512 MiB allocation owner.
+Resident results and checked working plans use at most 384 MiB, preserving
+128 MiB for a query to make progress. Query admission has a FIFO queue of at
+most 64 callers and a 30-second deadline; waiting does not start a worker.
+Delivered results transfer only their measured bytes into resident ownership.
+Context plans charge profiling metadata before scanning and grow to their
+checked transformation allowance before copying or normalizing content. Their
+high-water charge remains live with cached context and is released by its owner.
+
 Compaction reads token- and byte-bounded pages into an owned rolling summary.
 Large individual blocks use complete source/block/byte continuation through
 UTF-8-safe summary fragments. Evicted and pruned payloads are removed before

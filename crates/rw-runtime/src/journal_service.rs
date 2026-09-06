@@ -164,10 +164,14 @@ impl JournalService {
         })
     }
 
-    pub(crate) fn retain_history(
+    pub(crate) fn history_working(&self) -> retained::HistoryRetention {
+        self.retained_history.working()
+    }
+
+    pub(crate) async fn retain_history(
         &self,
     ) -> Result<retained::HistoryRetention, rw_core::AgentLoopError> {
-        self.retained_history.admit()
+        self.retained_history.query().await
     }
 
     pub(crate) fn admit_read(self: &Arc<Self>) -> Result<JournalReadAdmission> {
