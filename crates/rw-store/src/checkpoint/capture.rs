@@ -5,20 +5,20 @@ use super::{
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     fs::{self, File},
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::Ordering,
 };
 
 use super::{
-    CAPTURE_CHUNK_BYTES, CheckpointError, CheckpointFileState, CheckpointManifest, CheckpointStore,
-    GitDirtyPaths, GitTrackedBaseline, GitTrackedEntry, InventoryEntry, MANIFEST_VERSION,
-    MAX_CAPTURE_FILE_BYTES, OPAQUE_PENDING_VERSION, OpaqueMutation, OpaquePending, RewindReport,
-    atomic_replace, capture_regular_confined, changed_inventory_paths,
-    cleanup_stale_temporaries_in, hash_reader, inventory_confined, is_lower_blake3,
-    normalize_relative, parse_exact_turn_filename, remove_durable, remove_file_or_symlink_confined,
-    restore_regular_confined, same_open_file_identity, validate_session_id,
+    CheckpointError, CheckpointFileState, CheckpointManifest, CheckpointStore, GitDirtyPaths,
+    GitTrackedBaseline, GitTrackedEntry, InventoryEntry, MANIFEST_VERSION, MAX_CAPTURE_FILE_BYTES,
+    OPAQUE_PENDING_VERSION, OpaqueMutation, OpaquePending, RewindReport, atomic_replace,
+    capture_regular_confined, changed_inventory_paths, inventory_confined, is_lower_blake3,
+    is_private_temporary, normalize_relative, parse_exact_turn_filename, remove_durable,
+    remove_file_or_symlink_confined, restore_regular_confined, same_open_file_identity,
+    validate_session_id,
 };
 
 impl CheckpointStore {
@@ -28,38 +28,46 @@ impl CheckpointStore {
         &self.workspace
     }
 
-    /// Creates a checkpoint store under `storage_root/checkpoints`.
+    /// Creates a checkpoint store under `namespace_root/checkpoints`.
     ///
     /// # Errors
     ///
     /// Returns an error when the workspace cannot be canonicalized or storage
     /// directories cannot be created.
-    pub fn open(storage_root: &Path, workspace: &Path) -> Result<Self, CheckpointError> {
+    pub fn open(
+        namespace_root: &Path,
+        workspace: &Path,
+        blobs: std::sync::Arc<super::CheckpointBlobStore>,
+    ) -> Result<Self, CheckpointError> {
         let workspace = fs::canonicalize(workspace)?;
         if !workspace.is_dir() {
             return Err(CheckpointError::WorkspaceNotDirectory);
         }
-        let root = storage_root.join("checkpoints");
-        fs::create_dir_all(root.join("blobs"))?;
+        let root = namespace_root.join("checkpoints");
+        blobs.validate_workspace(&workspace)?;
+        if root.join("blobs").exists() && fs::read_dir(root.join("blobs"))?.next().is_some() {
+            return Err(CheckpointError::LegacyBlobLayout);
+        }
         fs::create_dir_all(root.join("manifests"))?;
         fs::create_dir_all(root.join("pending"))?;
         fs::create_dir_all(root.join("rewinds"))?;
         fs::create_dir_all(root.join("reviews"))?;
         let root = fs::canonicalize(root)?;
-        let storage_relative = root
-            .strip_prefix(&workspace)
-            .ok()
-            .filter(|path| !path.as_os_str().is_empty())
-            .map(normalize_relative)
-            .transpose()?;
-        let store = Self {
+        let mut storage_relative = Vec::new();
+        for path in [root.as_path(), blobs.storage_path()] {
+            if let Ok(relative) = path.strip_prefix(&workspace)
+                && !relative.as_os_str().is_empty()
+            {
+                storage_relative.push(normalize_relative(relative)?);
+            }
+        }
+        Ok(Self {
             root,
             workspace,
             storage_relative,
             git_program: PathBuf::from("git"),
-        };
-        store.cleanup_stale_temporaries()?;
-        Ok(store)
+            blobs,
+        })
     }
 
     /// Captures the known pre-mutation state of the supplied relative paths.
@@ -83,6 +91,7 @@ impl CheckpointStore {
         operation: &mut CheckpointOperation,
     ) -> Result<CheckpointManifest, CheckpointError> {
         validate_session_id(session_id)?;
+        let mut blobs = self.blobs.begin(&self.root, operation)?;
         let path = self.manifest_path(session_id, turn);
         let mut files = if path.exists() {
             self.load_manifest(session_id, turn)?.files
@@ -94,11 +103,13 @@ impl CheckpointStore {
             operation.path(&key)?;
             if let Entry::Vacant(entry) = files.entry(key) {
                 let key = entry.key().clone();
-                let state = self.capture(&key, operation)?;
+                let state = self.capture(&key, operation, &mut blobs)?;
                 entry.insert(state);
             }
         }
-        self.persist_manifest(session_id, turn, files)
+        let manifest = self.persist_manifest(session_id, turn, files)?;
+        blobs.finish()?;
+        Ok(manifest)
     }
 
     /// Adds post-scan paths whose pre-state was not captured (for example a
@@ -113,6 +124,8 @@ impl CheckpointStore {
         relative_paths: impl IntoIterator<Item = PathBuf>,
         reason: &str,
     ) -> Result<(), CheckpointError> {
+        let mut operation = CheckpointOperation::default();
+        let blobs = self.blobs.begin(&self.root, &mut operation)?;
         if manifest.version != MANIFEST_VERSION {
             return Err(CheckpointError::UnsupportedManifestVersion(
                 manifest.version,
@@ -127,7 +140,8 @@ impl CheckpointStore {
                     reason: reason.to_owned(),
                 });
         }
-        self.write_manifest(manifest)
+        self.write_manifest(manifest)?;
+        blobs.finish()
     }
 
     /// Loads one persisted turn manifest.
@@ -176,6 +190,7 @@ impl CheckpointStore {
         if pending_path.exists() {
             return Err(CheckpointError::OpaqueMutationPending);
         }
+        let mut blobs = self.blobs.begin(&self.root, operation)?;
         let before = self.workspace_inventory(operation)?;
         let tracked = self.git_tracked_baseline(operation)?;
         let dirty = self.git_dirty_tracked_paths(operation)?;
@@ -190,7 +205,7 @@ impl CheckpointStore {
         for path in dirty {
             operation.path(&path)?;
             if let Entry::Vacant(entry) = files.entry(path.clone()) {
-                let state = match self.capture(&path, operation) {
+                let state = match self.capture(&path, operation, &mut blobs) {
                     Ok(state) => state,
                     Err(CheckpointError::UnsupportedFileKind(_)) => {
                         CheckpointFileState::Unrestorable {
@@ -213,6 +228,7 @@ impl CheckpointStore {
         let bytes = serialize_metadata(&pending, false)?;
         operation.check()?;
         atomic_replace(&pending_path, &bytes)?;
+        blobs.finish()?;
         Ok(OpaqueMutation {
             session_id: session_id.to_owned(),
             turn,
@@ -235,6 +251,7 @@ impl CheckpointStore {
         operation: &mut CheckpointOperation,
     ) -> Result<CheckpointManifest, CheckpointError> {
         validate_session_id(&mutation.session_id)?;
+        let mut blobs = self.blobs.begin(&self.root, operation)?;
         let pending = self.load_pending(&mutation.session_id, mutation.turn)?;
         let after = self.workspace_inventory(operation)?;
         let mut manifest = self
@@ -256,7 +273,7 @@ impl CheckpointStore {
                     | None => CheckpointFileState::Absent,
                 }
             } else if let Some(tracked) = pending.tracked.get(&path) {
-                self.capture_git_preimage(tracked, operation)?.unwrap_or_else(|| {
+                self.capture_git_preimage(tracked, operation, &mut blobs)?.unwrap_or_else(|| {
                     CheckpointFileState::Unrestorable {
                         reason: "opaque command changed a tracked path whose Git preimage is unavailable"
                             .to_owned(),
@@ -273,6 +290,7 @@ impl CheckpointStore {
         }
         self.write_manifest(&manifest)?;
         remove_durable(&self.pending_path(&mutation.session_id, mutation.turn))?;
+        blobs.finish()?;
         Ok(manifest)
     }
 
@@ -336,6 +354,8 @@ impl CheckpointStore {
         if self.workspace != target.workspace {
             return Err(CheckpointError::ForkWorkspaceMismatch);
         }
+        let mut operation = CheckpointOperation::default();
+        let mut blobs = target.blobs.begin(&target.root, &mut operation)?;
         let manifests_directory = target.root.join("manifests");
         let child_directory = manifests_directory.join(child_session_id);
         let mut turns = self.manifest_turns(parent_session_id)?;
@@ -355,20 +375,25 @@ impl CheckpointStore {
             }
             Err(error) => return Err(error.into()),
         }
-        let result = (|| {
+        let result: Result<(), CheckpointError> = (|| {
             for turn in turns {
                 let mut manifest = self.load_manifest(parent_session_id, turn)?;
                 for state in manifest.files.values() {
                     if let CheckpointFileState::Present { blob, bytes, .. } = state {
                         let content = self.read_valid_blob(blob, *bytes)?;
-                        target.write_blob(blob, &content)?;
+                        let captured =
+                            blobs.capture(&mut content.as_slice(), None, &mut operation)?;
+                        if !matches!(captured, CheckpointFileState::Present { blob: ref actual, .. } if actual == blob)
+                        {
+                            return Err(CheckpointError::CorruptBlob);
+                        }
                     }
                 }
                 child_session_id.clone_into(&mut manifest.session_id);
                 Self::validate_manifest(&manifest, child_session_id, turn)?;
                 atomic_replace(
                     &staging.join(format!("{turn:020}.json")),
-                    &serde_json::to_vec_pretty(&manifest)?,
+                    &serialize_metadata(&manifest, true)?,
                 )?;
             }
             File::open(&staging)?.sync_all()?;
@@ -379,13 +404,15 @@ impl CheckpointStore {
         if result.is_err() {
             let _ = fs::remove_dir_all(&staging);
         }
-        result
+        result?;
+        blobs.finish()
     }
 
     pub(super) fn capture(
         &self,
         key: &str,
         operation: &mut CheckpointOperation,
+        blobs: &mut super::blob_store::BlobWriteGuard<'_>,
     ) -> Result<CheckpointFileState, CheckpointError> {
         let Some((mut file, unix_mode)) = capture_regular_confined(&self.workspace, key)? else {
             return Ok(CheckpointFileState::Absent);
@@ -394,69 +421,18 @@ impl CheckpointStore {
         if before.len() > MAX_CAPTURE_FILE_BYTES {
             return Err(CheckpointError::CaptureFileLimit);
         }
-        let state = self.capture_reader(&mut file, unix_mode, operation)?;
+        let state = blobs.capture(&mut file, unix_mode, operation)?;
         if !same_open_file_identity(&before, &file.metadata()?) {
             return Err(CheckpointError::CaptureChanged);
         }
         Ok(state)
     }
 
-    pub(super) fn capture_reader(
-        &self,
-        reader: &mut impl Read,
-        unix_mode: Option<u32>,
-        operation: &mut CheckpointOperation,
-    ) -> Result<CheckpointFileState, CheckpointError> {
-        let blobs = self.root.join("blobs");
-        let mut temporary = tempfile::Builder::new()
-            .prefix("capture-")
-            .tempfile_in(&blobs)?;
-        let mut hash = blake3::Hasher::new();
-        let mut bytes = 0_u64;
-        let mut chunk = vec![0_u8; CAPTURE_CHUNK_BYTES].into_boxed_slice();
-        loop {
-            operation.check()?;
-            let count = reader.read(&mut chunk)?;
-            if count == 0 {
-                break;
-            }
-            bytes += count as u64;
-            if bytes > MAX_CAPTURE_FILE_BYTES {
-                return Err(CheckpointError::CaptureFileLimit);
-            }
-            operation.capture(count)?;
-            hash.update(&chunk[..count]);
-            temporary.write_all(&chunk[..count])?;
-        }
-        let digest = hash.finalize().to_hex().to_string();
-        let prefix = digest.get(..2).ok_or(CheckpointError::CorruptBlob)?;
-        let directory = blobs.join(prefix);
-        fs::create_dir_all(&directory)?;
-        File::open(&blobs)?.sync_all()?;
-        temporary.as_file().sync_all()?;
-        match temporary.persist_noclobber(directory.join(&digest)) {
-            Ok(_) => File::open(&directory)?.sync_all()?,
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = File::open(directory.join(&digest))?;
-                if existing.metadata()?.len() != bytes
-                    || operation.hash(existing.take(bytes + 1))?.to_hex().as_str() != digest
-                {
-                    return Err(CheckpointError::CorruptBlob);
-                }
-            }
-            Err(error) => return Err(error.error.into()),
-        }
-        Ok(CheckpointFileState::Present {
-            blob: digest,
-            bytes,
-            unix_mode,
-        })
-    }
-
     pub(super) fn capture_git_preimage(
         &self,
         tracked: &GitTrackedEntry,
         operation: &mut CheckpointOperation,
+        blobs: &mut super::blob_store::BlobWriteGuard<'_>,
     ) -> Result<Option<CheckpointFileState>, CheckpointError> {
         let Some(unix_mode) = tracked.unix_mode else {
             return Ok(None);
@@ -474,7 +450,7 @@ impl CheckpointStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let result = self.capture_reader(&mut pipe, Some(unix_mode), operation);
+        let result = blobs.capture(&mut pipe, Some(unix_mode), operation);
         operation.check()?;
         let state = result?;
         Ok(pipe.finish()?.then_some(state))
@@ -506,24 +482,6 @@ impl CheckpointStore {
             &self.manifest_path(&manifest.session_id, manifest.turn),
             &bytes,
         )
-    }
-
-    pub(super) fn write_blob(&self, digest: &str, bytes: &[u8]) -> Result<(), CheckpointError> {
-        let prefix = digest.get(..2).ok_or(CheckpointError::CorruptBlob)?;
-        let path = self.root.join("blobs").join(prefix).join(digest);
-        if path.exists() {
-            let existing = File::open(&path)?;
-            if existing.metadata()?.len() == bytes.len() as u64
-                && hash_reader(existing.take(bytes.len() as u64 + 1))?
-                    .to_hex()
-                    .as_str()
-                    == digest
-            {
-                return Ok(());
-            }
-            return Err(CheckpointError::CorruptBlob);
-        }
-        atomic_replace(&path, bytes)
     }
 
     pub(super) fn restore_state(
@@ -568,7 +526,7 @@ impl CheckpointStore {
             return Err(CheckpointError::CorruptBlob);
         }
         let prefix = blob.get(..2).ok_or(CheckpointError::CorruptBlob)?;
-        let file = File::open(self.root.join("blobs").join(prefix).join(blob))?;
+        let file = File::open(self.blobs.directory().join(prefix).join(blob))?;
         if file.metadata()?.len() != bytes {
             return Err(CheckpointError::CorruptBlob);
         }
@@ -600,7 +558,7 @@ impl CheckpointStore {
         &self,
         operation: &mut CheckpointOperation,
     ) -> Result<BTreeMap<String, InventoryEntry>, CheckpointError> {
-        inventory_confined(&self.workspace, self.storage_relative.as_deref(), operation)
+        inventory_confined(&self.workspace, &self.storage_relative, operation)
     }
 
     pub(super) fn git_tracked_baseline(
@@ -766,11 +724,13 @@ impl CheckpointStore {
         operation: &mut CheckpointOperation,
     ) -> Result<Vec<OpaqueMutation>, CheckpointError> {
         let root = self.root.join("pending");
-        cleanup_stale_temporaries_in(&root)?;
         let mut mutations = Vec::new();
         for session in fs::read_dir(&root)? {
             operation.check()?;
             let session = session?;
+            if is_private_temporary(&session.file_name()) {
+                continue;
+            }
             let metadata = fs::symlink_metadata(session.path())?;
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
                 return Err(CheckpointError::CorruptOpaqueMutation);
@@ -780,9 +740,11 @@ impl CheckpointStore {
                 .into_string()
                 .map_err(|_| CheckpointError::CorruptOpaqueMutation)?;
             validate_session_id(&session_id)?;
-            cleanup_stale_temporaries_in(&session.path())?;
             for entry in fs::read_dir(session.path())? {
                 let entry = entry?;
+                if is_private_temporary(&entry.file_name()) {
+                    continue;
+                }
                 let turn = parse_exact_turn_filename(&entry.file_name())
                     .ok_or(CheckpointError::CorruptOpaqueMutation)?;
                 if !fs::symlink_metadata(entry.path())?.is_file() {
@@ -803,10 +765,12 @@ impl CheckpointStore {
         if !directory.exists() {
             return Ok(Vec::new());
         }
-        cleanup_stale_temporaries_in(&directory)?;
         let mut turns = Vec::new();
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
+            if is_private_temporary(&entry.file_name()) {
+                continue;
+            }
             if !fs::symlink_metadata(entry.path())?.is_file() {
                 return Err(CheckpointError::CorruptManifest);
             }
@@ -816,25 +780,6 @@ impl CheckpointStore {
             );
         }
         Ok(turns)
-    }
-
-    pub(super) fn cleanup_stale_temporaries(&self) -> Result<(), CheckpointError> {
-        for directory in [
-            self.root.join("blobs"),
-            self.root.join("manifests"),
-            self.root.join("pending"),
-            self.root.join("rewinds"),
-            self.root.join("reviews"),
-        ] {
-            cleanup_stale_temporaries_in(&directory)?;
-            for entry in fs::read_dir(&directory)? {
-                let entry = entry?;
-                if fs::symlink_metadata(entry.path())?.is_dir() {
-                    cleanup_stale_temporaries_in(&entry.path())?;
-                }
-            }
-        }
-        Ok(())
     }
 
     pub(super) fn validate_manifest(

@@ -145,6 +145,7 @@ pub(super) fn read_metadata(path: &std::path::Path) -> Result<Vec<u8>, Checkpoin
     if bytes.len() > MAX_METADATA_BYTES {
         return Err(CheckpointError::OperationLimit("32 MiB metadata"));
     }
+    validate_metadata(&bytes)?;
     Ok(bytes)
 }
 
@@ -183,7 +184,32 @@ pub(super) fn serialize_metadata(
         return Err(CheckpointError::OperationLimit("32 MiB metadata"));
     }
     result?;
+    validate_metadata(&output.bytes)?;
     Ok(output.bytes)
+}
+
+fn validate_metadata(bytes: &[u8]) -> Result<(), CheckpointError> {
+    use rw_types::json_structure::{JsonStructureLimits, preflight_json};
+    let shape = preflight_json(
+        bytes,
+        JsonStructureLimits {
+            max_encoded_bytes: MAX_METADATA_BYTES,
+            max_nodes: 100_000,
+            max_string_bytes: MAX_METADATA_BYTES,
+            max_depth: 64,
+        },
+    )?;
+    // Tagged file states and BTree nodes fit within 1 KiB per JSON node;
+    // four copies of string storage cover serde scratch and retained capacities.
+    if shape
+        .nodes
+        .saturating_mul(1024)
+        .saturating_add(shape.string_bytes.saturating_mul(4))
+        > 128 * 1024 * 1024
+    {
+        return Err(CheckpointError::OperationLimit("128 MiB decoded metadata"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

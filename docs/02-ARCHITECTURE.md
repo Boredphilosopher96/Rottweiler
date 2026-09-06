@@ -479,7 +479,24 @@ transaction replaces the canonical conversation generation.
   historical reports require an explicit row allowance and share a 16 MiB
   allocation allowance, checked against borrowed database values before decoding.
   Rewind and search rebuild never erase charged facts.
-- `checkpoints/` — content-addressed blobs (BLAKE3) + per-turn manifests of touched files. Rewind = restore manifest.
+- Session `checkpoints/` namespaces retain per-turn manifests and rewind references.
+  BLAKE3 blobs live in one application-storage owner keyed by the physical workspace,
+  shared across primary/additional-root layouts. That owner admits at most 960 MiB
+  of unique retained content plus one 64 MiB staging capture; equal content is
+  deduplicated even at the retained limit. These are blob-content limits, not a
+  claim about total workspace disk usage. A separate SQLite ledger has a 64 MiB
+  page ceiling, 256 KiB page cache, at most 65,536 blobs and 1,024 namespace paths;
+  its rollback journal and temporary reference tables have separate bounded storage.
+  Source metadata admits at most 32 MiB encoded and a conservative 128 MiB decoded
+  allocation per record. Cleanup also shares the capture operation's path, hash,
+  and deadline bounds. Cold open performs no quota database reads or writes.
+  Captures hold a cross-process workspace writer lease through manifest publication.
+  Staging is reserved before writes; new retained content is admitted before blob
+  publication. Interrupted operations reconcile before new admission. Reclamation
+  validates every registered manifest and rewind reference before removing only
+  unreferenced content; malformed or incomplete inventory fails closed. Referenced
+  history is never evicted to make room. Nonempty per-session blob layouts require
+  explicit migration and cannot silently bypass this shared quota.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.
 
 A rewind spanning multiple workspace roots has one session-level durable

@@ -6,8 +6,8 @@ use std::{
 use super::{
     CheckpointError, CheckpointFileState, CheckpointStore, REWIND_TRANSACTION_VERSION,
     RewindCommit, RewindHandle, RewindPhase, RewindReport, RewindStep, RewindTransaction,
-    atomic_replace, cleanup_stale_temporaries_in, is_lower_blake3, normalize_relative,
-    remove_durable, validate_operation_id, validate_rewind_report, validate_session_id,
+    atomic_replace, is_lower_blake3, is_private_temporary, normalize_relative, remove_durable,
+    validate_operation_id, validate_rewind_report, validate_session_id,
 };
 
 impl CheckpointStore {
@@ -212,8 +212,9 @@ impl CheckpointStore {
         session_id: &str,
     ) -> Result<RewindTransaction, CheckpointError> {
         validate_session_id(session_id)?;
-        let transaction: RewindTransaction =
-            serde_json::from_slice(&fs::read(self.rewind_path(session_id))?)?;
+        let transaction: RewindTransaction = serde_json::from_slice(
+            &super::operation::read_metadata(&self.rewind_path(session_id))?,
+        )?;
         if transaction.version != REWIND_TRANSACTION_VERSION
             || transaction.handle.session_id != session_id
             || transaction.next_step > transaction.steps.len()
@@ -237,16 +238,18 @@ impl CheckpointStore {
     ) -> Result<(), CheckpointError> {
         atomic_replace(
             &self.rewind_path(&transaction.handle.session_id),
-            &serde_json::to_vec(transaction)?,
+            &super::operation::serialize_metadata(transaction, false)?,
         )
     }
 
     pub(super) fn enumerate_rewinds(&self) -> Result<Vec<RewindHandle>, CheckpointError> {
         let directory = self.root.join("rewinds");
-        cleanup_stale_temporaries_in(&directory)?;
         let mut handles = Vec::new();
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
+            if is_private_temporary(&entry.file_name()) {
+                continue;
+            }
             if !fs::symlink_metadata(entry.path())?.is_file() {
                 return Err(CheckpointError::CorruptRewindTransaction);
             }

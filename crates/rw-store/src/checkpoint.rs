@@ -200,10 +200,13 @@ struct ReviewLedger {
 pub struct CheckpointStore {
     root: PathBuf,
     workspace: PathBuf,
-    storage_relative: Option<String>,
+    storage_relative: Vec<String>,
     git_program: PathBuf,
+    blobs: std::sync::Arc<CheckpointBlobStore>,
 }
 
+mod blob_store;
+pub use blob_store::CheckpointBlobStore;
 mod capture;
 mod git;
 mod operation;
@@ -411,30 +414,6 @@ fn is_private_temporary(filename: &std::ffi::OsStr) -> bool {
         && !nonce.is_empty()
         && pid.bytes().all(|byte| byte.is_ascii_digit())
         && nonce.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn cleanup_stale_temporaries_in(directory: &Path) -> Result<(), CheckpointError> {
-    if !directory.exists() {
-        return Ok(());
-    }
-    let mut removed = false;
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if is_private_temporary(&entry.file_name()) {
-            let metadata = fs::symlink_metadata(entry.path())?;
-            if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                fs::remove_dir_all(entry.path())?;
-                removed = true;
-            } else if metadata.is_file() || metadata.file_type().is_symlink() {
-                fs::remove_file(entry.path())?;
-                removed = true;
-            }
-        }
-    }
-    if removed {
-        File::open(directory)?.sync_all()?;
-    }
-    Ok(())
 }
 
 fn remove_durable(path: &Path) -> Result<(), CheckpointError> {
@@ -728,7 +707,7 @@ fn remove_file_or_symlink_confined(workspace: &Path, key: &str) -> Result<(), Ch
 #[cfg(unix)]
 fn inventory_confined(
     workspace: &Path,
-    storage_relative: Option<&str>,
+    storage_relative: &[String],
     operation: &mut CheckpointOperation,
 ) -> Result<BTreeMap<String, InventoryEntry>, CheckpointError> {
     let root = open_workspace_root(workspace)?;
@@ -741,7 +720,7 @@ fn inventory_confined(
 fn inventory_directory_fd(
     directory: &std::os::fd::OwnedFd,
     prefix: &str,
-    storage_relative: Option<&str>,
+    storage_relative: &[String],
     inventory: &mut BTreeMap<String, InventoryEntry>,
     operation: &mut CheckpointOperation,
 ) -> Result<(), CheckpointError> {
@@ -764,7 +743,8 @@ fn inventory_directory_fd(
             format!("{prefix}/{name}")
         };
         if storage_relative
-            .is_some_and(|storage| key == storage || key.starts_with(&format!("{storage}/")))
+            .iter()
+            .any(|storage| key == *storage || key.starts_with(&format!("{storage}/")))
         {
             continue;
         }
@@ -874,14 +854,14 @@ fn remove_file_or_symlink_confined(workspace: &Path, key: &str) -> Result<(), Ch
 #[cfg(not(unix))]
 fn inventory_confined(
     workspace: &Path,
-    storage_relative: Option<&str>,
+    storage_relative: &[String],
     operation: &mut CheckpointOperation,
 ) -> Result<BTreeMap<String, InventoryEntry>, CheckpointError> {
     fn scan(
         workspace: &Path,
         directory: &Path,
         prefix: &Path,
-        storage_relative: Option<&str>,
+        storage_relative: &[String],
         output: &mut BTreeMap<String, InventoryEntry>,
         operation: &mut CheckpointOperation,
     ) -> Result<(), CheckpointError> {
@@ -893,7 +873,8 @@ fn inventory_confined(
             let relative = prefix.join(entry.file_name());
             let key = normalize_relative(&relative)?;
             if storage_relative
-                .is_some_and(|storage| key == storage || key.starts_with(&format!("{storage}/")))
+                .iter()
+                .any(|storage| key == *storage || key.starts_with(&format!("{storage}/")))
             {
                 continue;
             }
@@ -965,18 +946,6 @@ fn checked_workspace_path_fallback(
         }
     }
     Ok(path)
-}
-
-fn hash_reader(mut reader: impl Read) -> Result<blake3::Hash, CheckpointError> {
-    let mut hash = blake3::Hasher::new();
-    let mut chunk = vec![0_u8; CAPTURE_CHUNK_BYTES].into_boxed_slice();
-    loop {
-        let count = reader.read(&mut chunk)?;
-        if count == 0 {
-            return Ok(hash.finalize());
-        }
-        hash.update(&chunk[..count]);
-    }
 }
 
 fn hash_inventory_file(
@@ -1104,6 +1073,27 @@ pub enum CheckpointError {
     /// A child checkpoint namespace already exists.
     #[error("checkpoint fork target already exists")]
     ForkTargetExists,
+    /// The shared owner belongs to a different physical workspace.
+    #[error("checkpoint blob owner does not match the workspace")]
+    BlobWorkspaceMismatch,
+    /// Referenced content cannot be evicted to admit a new checkpoint.
+    #[error(
+        "workspace checkpoint blob quota exhausted; mutation was not admitted; release unneeded checkpoint references before retrying"
+    )]
+    BlobQuotaExceeded,
+    /// Missing or inconsistent quota/reference state cannot authorize reclamation.
+    #[error(
+        "checkpoint blob quota inventory is corrupt or incomplete; no referenced blobs were reclaimed"
+    )]
+    CorruptBlobQuota,
+    /// Unregistered per-session blob layouts cannot silently bypass shared admission.
+    #[error(
+        "per-session checkpoint blobs require an explicit migration to shared workspace storage"
+    )]
+    LegacyBlobLayout,
+    /// Durable quota ledger failure.
+    #[error("checkpoint blob quota ledger failed")]
+    BlobLedger(#[from] rusqlite::Error),
     /// Filesystem failure.
     #[error("checkpoint storage I/O failed")]
     Io(#[from] std::io::Error),
