@@ -3,11 +3,12 @@
 //! An admitted row is never removed automatically. If effects and completion are
 //! separated by a crash, the row remains indeterminate and cannot authorize rerun.
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rw_types::json_encoding::JsonWriter;
 use rw_types::{
     RequestId,
     command_receipt::{CommandReceipt, ReceiptAdmission},
 };
-use std::{fs, io::Write, path::Path, time::Duration};
+use std::{fs, path::Path, time::Duration};
 
 const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
 const APPLICATION_ID: u32 = 0x5257_4f50;
@@ -169,13 +170,13 @@ impl CommandReceipts {
         receipt: &CommandReceipt,
     ) -> Result<(), ReceiptError> {
         validate(operation, fingerprint)?;
-        let mut encoded = BoundedWriter(Vec::new());
-        serde_json::to_writer(&mut encoded, receipt)?;
-        validate_encoded(&encoded.0)?;
+        let mut encoded = Vec::new();
+        JsonWriter::buffer(&mut encoded, MAX_RECEIPT_BYTES, 4096)?.serialize(receipt)?;
+        validate_encoded(&encoded)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute("UPDATE command_receipts SET completion=?3 WHERE operation_id=?1 AND fingerprint=?2 AND completion IS NULL", params![operation.0, fingerprint, encoded.0])?;
+        let changed = transaction.execute("UPDATE command_receipts SET completion=?3 WHERE operation_id=?1 AND fingerprint=?2 AND completion IS NULL", params![operation.0, fingerprint, encoded])?;
         if changed != 1 {
             return Err(ReceiptError::Conflict);
         }
@@ -212,34 +213,6 @@ fn validate(operation: &RequestId, fingerprint: &str) -> Result<(), ReceiptError
     }
     Ok(())
 }
-struct BoundedWriter(Vec<u8>);
-impl Write for BoundedWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let required = self
-            .0
-            .len()
-            .checked_add(bytes.len())
-            .filter(|size| *size <= MAX_RECEIPT_BYTES)
-            .ok_or_else(|| std::io::Error::other("receipt byte limit"))?;
-        if required > self.0.capacity() {
-            let target = required
-                .max(self.0.capacity().max(4096).saturating_mul(2))
-                .min(MAX_RECEIPT_BYTES);
-            self.0
-                .try_reserve_exact(target - self.0.len())
-                .map_err(std::io::Error::other)?;
-            if self.0.capacity() > MAX_RECEIPT_BYTES {
-                return Err(std::io::Error::other("receipt capacity limit"));
-            }
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {

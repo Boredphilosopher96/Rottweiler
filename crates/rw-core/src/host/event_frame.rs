@@ -2,7 +2,7 @@
 use super::{Arc, ClientSubscriptionLease, EngineEvent, HostError, SequenceId};
 use bytes::Bytes;
 use rw_types::allocation::{AllocationPlan, PrepareAllocation};
-use std::io::{self, Write};
+use rw_types::json_encoding::JsonWriter;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const UNIT: usize = 1024;
@@ -86,19 +86,19 @@ impl HostEventBudget {
         rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || {
             let _encoder = encoder;
             let sequence = event.value().meta().map(|meta| meta.sequence_id);
-            let mut writer = EventWriter {
-                bytes: Vec::new(),
-                limit: output_limit,
-            };
-            serde_json::to_writer(&mut writer, event.value()).map_err(|_| limit_error())?;
+            let mut bytes = Vec::new();
+            JsonWriter::buffer(&mut bytes, output_limit, 1024)
+                .map_err(|_| limit_error())?
+                .serialize(event.value())
+                .map_err(|_| limit_error())?;
             drop(event);
             let unused = credit
                 .num_permits()
-                .saturating_sub(writer.bytes.capacity().div_ceil(UNIT));
+                .saturating_sub(bytes.capacity().div_ceil(UNIT));
             drop(credit.split(unused));
             Ok(HostEvent {
                 json: Bytes::from_owner(EventBytes {
-                    bytes: writer.bytes,
+                    bytes,
                     _credit: credit,
                 }),
                 sequence,
@@ -122,41 +122,6 @@ impl AsRef<[u8]> for EventBytes {
         &self.bytes
     }
 }
-struct EventWriter {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-impl Write for EventWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let length = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .filter(|size| *size <= self.limit)
-            .ok_or_else(|| io::Error::other("event encoding limit"))?;
-        if length > self.bytes.capacity() {
-            let capacity = self
-                .bytes
-                .capacity()
-                .max(1024)
-                .saturating_mul(2)
-                .max(length)
-                .min(self.limit);
-            self.bytes
-                .try_reserve_exact(capacity - self.bytes.len())
-                .map_err(io::Error::other)?;
-            if self.bytes.capacity() > self.limit {
-                return Err(io::Error::other("event allocation limit"));
-            }
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {

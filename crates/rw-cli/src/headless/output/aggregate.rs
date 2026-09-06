@@ -37,7 +37,9 @@ impl PrintOutput {
     }
     pub(super) fn finish(self, format: OutputFormat) -> Result<Option<TurnStatus>> {
         if let Some(aggregate) = self.aggregate {
-            serde_json::to_writer(std::io::stdout().lock(), &aggregate).into_diagnostic()?;
+            rw_types::json_encoding::JsonWriter::stream(&mut std::io::stdout().lock(), usize::MAX)
+                .serialize(&aggregate)
+                .into_diagnostic()?;
             println!();
         } else if format == OutputFormat::Text && !self.ends_newline {
             println!();

@@ -165,7 +165,9 @@ pub(super) fn public_cli_event(mut event: EngineEvent) -> EngineEvent {
 
 pub(super) fn write_json_line(value: &impl Serialize) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    serde_json::to_writer(&mut stdout, value).into_diagnostic()?;
+    rw_types::json_encoding::JsonWriter::stream(&mut stdout, usize::MAX)
+        .serialize(value)
+        .into_diagnostic()?;
     stdout.write_all(b"\n").into_diagnostic()?;
     stdout.flush().into_diagnostic()
 }

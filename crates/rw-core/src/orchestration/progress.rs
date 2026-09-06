@@ -1,34 +1,14 @@
 //! Child progress is a bounded preview or an invalidation of its canonical source.
 use super::{MAX_SUBAGENT_PROGRESS_BYTES, OrchestrationError};
+use rw_types::json_encoding::JsonWriter;
 use serde::Serialize;
 use serde_json::Value;
-use std::io::{self, Write};
 
-struct EncodedSize {
-    remaining: usize,
-    exceeded: bool,
-}
-impl Write for EncodedSize {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.remaining {
-            self.exceeded = true;
-            return Err(io::Error::other("child progress preview exceeds limit"));
-        }
-        self.remaining -= bytes.len();
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 fn fits(event: &impl Serialize) -> Result<bool, OrchestrationError> {
-    let mut writer = EncodedSize {
-        remaining: MAX_SUBAGENT_PROGRESS_BYTES,
-        exceeded: false,
-    };
-    match serde_json::to_writer(&mut writer, event) {
+    let mut writer = JsonWriter::count(MAX_SUBAGENT_PROGRESS_BYTES);
+    match writer.serialize(event) {
         Ok(()) => Ok(true),
-        Err(_) if writer.exceeded => Ok(false),
+        Err(_) if writer.exceeded() => Ok(false),
         Err(error) => Err(OrchestrationError::Observer(error.to_string())),
     }
 }

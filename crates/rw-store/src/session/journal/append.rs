@@ -1,8 +1,8 @@
 //! Canonical append sizing and encoding before the exclusive writer performs I/O.
 use super::{EVENT_SCHEMA_VERSION, EventEnvelope, MAX_SEGMENT_BYTES, SessionStoreError};
-use rw_types::SequenceId;
+use rw_types::{SequenceId, json_encoding::JsonWriter};
 use serde::Serialize;
-use std::io::{self, Write};
+use std::io::Write as _;
 
 /// Allocation-free plan for an immutable ordered batch of event payloads.
 #[derive(Clone, Copy, Debug)]
@@ -27,18 +27,13 @@ impl JournalAppendPlan {
             .0
             .checked_add(count)
             .ok_or(SessionStoreError::SequenceOverflow)?;
-        let mut output = Output {
-            destination: Count,
-            written: 0,
-            limit: MAX_SEGMENT_BYTES,
-            exceeded: false,
-        };
+        let mut output = JsonWriter::count(MAX_SEGMENT_BYTES);
         encode_records(first.0, events, &mut output)?;
         Ok(Self {
             first: first.0,
             next,
             count: events.len(),
-            bytes: output.written,
+            bytes: output.written(),
         })
     }
 
@@ -63,26 +58,22 @@ impl JournalAppendPlan {
                 "prepared journal batch count changed",
             ));
         }
-        let mut output = Output {
-            destination: Vec::with_capacity(self.bytes),
-            written: 0,
-            limit: self.bytes,
-            exceeded: false,
-        };
+        let mut bytes = Vec::with_capacity(self.bytes);
+        let mut output = JsonWriter::buffer(&mut bytes, self.bytes, 0)?;
         encode_records(self.first, events, &mut output)?;
-        if output.written != self.bytes {
+        if output.written() != self.bytes {
             return Err(SessionStoreError::CorruptEvent(
                 "prepared journal batch encoding changed",
             ));
         }
-        for line in output.destination.split_inclusive(|byte| *byte == b'\n') {
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
             super::decode::preflight_record::<T>(line)?;
         }
         Ok(PreparedJournalAppend {
             first: self.first,
             next: self.next,
             count: self.count,
-            bytes: output.destination,
+            bytes,
         })
     }
 }
@@ -108,10 +99,10 @@ impl PreparedJournalAppend {
     }
 }
 
-fn encode_records<T: Serialize, W: Write>(
+fn encode_records<T: Serialize>(
     first: u64,
     events: &[T],
-    output: &mut Output<W>,
+    output: &mut JsonWriter<'_>,
 ) -> Result<(), SessionStoreError> {
     for (offset, event) in events.iter().enumerate() {
         let offset = u64::try_from(offset).map_err(|_| SessionStoreError::SequenceOverflow)?;
@@ -128,67 +119,30 @@ fn encode_records<T: Serialize, W: Write>(
     Ok(())
 }
 
-fn write_envelope<T: Serialize, W: Write>(
+fn write_envelope<T: Serialize>(
     envelope: &EventEnvelope<T>,
-    output: &mut Output<W>,
+    output: &mut JsonWriter<'_>,
 ) -> Result<(), SessionStoreError> {
-    let result = serde_json::to_writer(&mut *output, envelope);
-    if output.exceeded {
+    let result = output.serialize(envelope);
+    if output.exceeded() {
         return Err(SessionStoreError::EventRecordTooLarge {
-            max_line_bytes: output.limit,
+            max_line_bytes: output.limit(),
         });
     }
     result?;
     output
         .write_all(b"\n")
         .map_err(|_| SessionStoreError::EventRecordTooLarge {
-            max_line_bytes: output.limit,
+            max_line_bytes: output.limit(),
         })?;
     Ok(())
-}
-
-struct Output<W> {
-    destination: W,
-    written: usize,
-    limit: usize,
-    exceeded: bool,
-}
-impl<W: Write> Write for Output<W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.limit - self.written {
-            self.exceeded = true;
-            return Err(io::Error::other(
-                "journal batch exceeds its byte reservation",
-            ));
-        }
-        self.destination.write_all(bytes)?;
-        self.written += bytes.len();
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.destination.flush()
-    }
-}
-struct Count;
-impl Write for Count {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 pub(super) fn encode_owned<T: Serialize + rw_types::allocation::DecodeAllocation>(
     first: u64,
     events: impl IntoIterator<Item = T>,
 ) -> Result<(PreparedJournalAppend, Vec<EventEnvelope<T>>), SessionStoreError> {
-    let mut output = Output {
-        destination: Vec::new(),
-        written: 0,
-        limit: MAX_SEGMENT_BYTES,
-        exceeded: false,
-    };
+    let mut bytes = Vec::new();
     let mut envelopes = Vec::new();
     for event in events {
         let offset =
@@ -201,9 +155,12 @@ pub(super) fn encode_owned<T: Serialize + rw_types::allocation::DecodeAllocation
             sequence: SequenceId(sequence),
             event,
         };
-        let start = output.written;
-        write_envelope(&envelope, &mut output)?;
-        super::decode::preflight_record::<T>(&output.destination[start..])?;
+        let start = bytes.len();
+        write_envelope(
+            &envelope,
+            &mut JsonWriter::buffer(&mut bytes, MAX_SEGMENT_BYTES, 0)?,
+        )?;
+        super::decode::preflight_record::<T>(&bytes[start..])?;
         envelopes.push(envelope);
     }
     let count = u64::try_from(envelopes.len()).map_err(|_| SessionStoreError::SequenceOverflow)?;
@@ -215,7 +172,7 @@ pub(super) fn encode_owned<T: Serialize + rw_types::allocation::DecodeAllocation
             first,
             next,
             count: envelopes.len(),
-            bytes: output.destination,
+            bytes,
         },
         envelopes,
     ))

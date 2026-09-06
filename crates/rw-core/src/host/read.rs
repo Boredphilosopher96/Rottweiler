@@ -6,10 +6,10 @@ use bytes::Bytes;
 use rw_types::{
     ClientCommand, ClientId, CommandExecution, CommandOutcome, CommandReply, EngineEvent,
     EngineEventDelivery, MAX_CLIENT_READS, MAX_COMMAND_REPLY_BYTES, RequestId,
+    json_encoding::JsonWriter,
 };
 use std::{
     collections::HashMap,
-    io::{self, Write},
     sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -162,9 +162,12 @@ enum ReplyBuffer {
 
 impl HostReply {
     fn encode(reply: CommandReply, lease: Option<ReadLease>) -> Self {
-        let mut writer = ReplyWriter(Vec::new());
-        if serde_json::to_writer(&mut writer, &reply).is_err() {
-            drop(writer);
+        let mut encoded = Vec::new();
+        let result = JsonWriter::buffer(&mut encoded, MAX_COMMAND_REPLY_BYTES, 4096)
+            .map_err(serde_json::Error::io)
+            .and_then(|mut writer| writer.serialize(&reply));
+        if result.is_err() {
+            drop(encoded);
             let read = matches!(reply, CommandReply::Read { .. });
             drop(reply);
             let outcome = rejected("reply_limit", "reply exceeds the encoded byte limit");
@@ -178,7 +181,7 @@ impl HostReply {
         let outcome = match reply {
             CommandReply::Command { outcome } | CommandReply::Read { outcome, .. } => outcome,
         };
-        Self::from_buffer(outcome, ReplyBuffer::Owned(writer.0), lease)
+        Self::from_buffer(outcome, ReplyBuffer::Owned(encoded), lease)
     }
     fn from_buffer(
         outcome: CommandOutcome,
@@ -205,37 +208,6 @@ impl HostReply {
     #[must_use]
     pub fn command(outcome: CommandOutcome) -> Self {
         Self::encode(CommandReply::Command { outcome }, None)
-    }
-}
-struct ReplyWriter(Vec<u8>);
-impl Write for ReplyWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let length = self
-            .0
-            .len()
-            .checked_add(bytes.len())
-            .filter(|length| *length <= MAX_COMMAND_REPLY_BYTES)
-            .ok_or_else(|| io::Error::other("reply limit"))?;
-        if length > self.0.capacity() {
-            let target = self
-                .0
-                .capacity()
-                .max(4096)
-                .saturating_mul(2)
-                .max(length)
-                .min(MAX_COMMAND_REPLY_BYTES);
-            self.0
-                .try_reserve_exact(target - self.0.len())
-                .map_err(io::Error::other)?;
-            if self.0.capacity() > MAX_COMMAND_REPLY_BYTES {
-                return Err(io::Error::other("reply allocation limit"));
-            }
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -505,13 +477,22 @@ mod tests {
 
     #[test]
     fn reply_writer_never_grows_beyond_its_owned_byte_budget() {
-        let mut writer = ReplyWriter(Vec::new());
+        use std::io::Write as _;
+        let mut bytes = Vec::new();
         for _ in 0..MAX_COMMAND_REPLY_BYTES / 1024 {
-            writer.write_all(&[b'x'; 1024]).expect("admitted byte");
-            assert!(writer.0.capacity() <= MAX_COMMAND_REPLY_BYTES);
+            JsonWriter::buffer(&mut bytes, MAX_COMMAND_REPLY_BYTES, 4096)
+                .expect("admitted buffer")
+                .write_all(&[b'x'; 1024])
+                .expect("admitted byte");
+            assert!(bytes.capacity() <= MAX_COMMAND_REPLY_BYTES);
         }
-        assert!(writer.write_all(b"x").is_err());
-        assert_eq!(writer.0.len(), MAX_COMMAND_REPLY_BYTES);
+        assert!(
+            JsonWriter::buffer(&mut bytes, MAX_COMMAND_REPLY_BYTES, 4096)
+                .expect("admitted buffer")
+                .write_all(b"x")
+                .is_err()
+        );
+        assert_eq!(bytes.len(), MAX_COMMAND_REPLY_BYTES);
     }
 
     #[test]
