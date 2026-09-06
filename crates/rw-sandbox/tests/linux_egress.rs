@@ -174,6 +174,8 @@ fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
 }
 
 fn verify_connected_pair_contract() {
+    use std::os::unix::process::CommandExt as _;
+
     for flags in [
         nix::sys::socket::SockFlag::empty(),
         nix::sys::socket::SockFlag::SOCK_CLOEXEC,
@@ -238,7 +240,6 @@ fn verify_connected_pair_contract() {
 
     // A same-UID request makes std bypass posix_spawn and exercise its
     // Linux SOCK_SEQPACKET fork/exec error channel, as Cargo's child setup does.
-    use std::os::unix::process::CommandExt as _;
     assert!(
         Command::new("/bin/true")
             .uid(rustix::process::getuid().as_raw())
