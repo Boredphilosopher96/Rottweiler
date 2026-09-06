@@ -169,12 +169,13 @@ pub(super) fn wasm_startup_notice(plugin_id: &str, message: &str) -> StartupNoti
 }
 
 pub(super) fn sanitized_wasm_notice_text(value: &str, limit: usize) -> String {
-    let mut text = value
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect::<String>();
-    let end = text.floor_char_boundary(text.len().min(limit));
-    text.truncate(end);
+    let mut text = String::with_capacity(value.len().min(limit));
+    for character in value.chars().filter(|character| !character.is_control()) {
+        if text.len().saturating_add(character.len_utf8()) > limit {
+            break;
+        }
+        text.push(character);
+    }
     text
 }
 
