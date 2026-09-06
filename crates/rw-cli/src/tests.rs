@@ -227,8 +227,7 @@ fn unix_identity_helpers_preserve_signed_failure_and_lossless_mode_widening() {
 }
 
 #[test]
-fn detached_readiness_ownership_is_explicit_and_old_descriptors_are_conservative()
--> Result<(), serde_json::Error> {
+fn detached_readiness_requires_explicit_process_ownership() -> Result<(), serde_json::Error> {
     let started: DetachedServerReady = serde_json::from_value(serde_json::json!({
         "version": 1,
         "token": "a".repeat(64),
@@ -241,8 +240,26 @@ fn detached_readiness_ownership_is_explicit_and_old_descriptors_are_conservative
         "version": 1,
         "token": "b".repeat(64),
         "session_id": "session",
+        "started": false,
     }))?;
     assert!(!pre_existing.started);
+    let descriptor = serde_json::json!({
+        "version": 1,
+        "token": "c".repeat(64),
+        "session_id": "session",
+        "started": false,
+    });
+    for field in ["version", "token", "session_id", "started"] {
+        let mut incomplete = descriptor.clone();
+        incomplete
+            .as_object_mut()
+            .expect("descriptor")
+            .remove(field);
+        assert!(serde_json::from_value::<DetachedServerReady>(incomplete).is_err());
+    }
+    let mut unknown = descriptor;
+    unknown["extra"] = serde_json::json!(false);
+    assert!(serde_json::from_value::<DetachedServerReady>(unknown).is_err());
     Ok(())
 }
 

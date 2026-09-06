@@ -38,18 +38,17 @@ pub(super) const COMMAND_REPLAY_TEMP_FILE: &str = "commands.json.tmp";
 pub(super) const COMMAND_REPLAY_ROOT: &str = "${ROTTWEILER_COMMAND_ROOT}";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CanonicalCommandRequest {
     command: String,
     workspace_relative_cwd: String,
     env: BTreeMap<String, String>,
-    #[serde(default)]
     network_domains: Vec<String>,
-    #[serde(default)]
     sandbox: BashSandboxMode,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum RecordedCommandTerminal {
     Success { outcome: CommandOutcome },
     Cancelled,
@@ -58,6 +57,7 @@ pub(super) enum RecordedCommandTerminal {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct RecordedCommandOccurrence {
     request: CanonicalCommandRequest,
     output: Vec<ToolOutputChunk>,

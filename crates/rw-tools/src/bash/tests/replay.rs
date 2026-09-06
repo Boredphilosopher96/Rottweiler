@@ -1,5 +1,57 @@
 use super::*;
 
+#[test]
+fn command_recordings_require_complete_explicit_request_contracts() {
+    let workspace = tempdir().expect("workspace");
+    let fixtures = tempdir().expect("fixtures");
+    let occurrence = json!({
+        "request": {
+            "command": "printf explicit",
+            "workspace_relative_cwd": ".",
+            "env": {},
+            "network_domains": [],
+            "sandbox": "sandboxed"
+        },
+        "output": [],
+        "terminal": { "type": "cancelled" }
+    });
+    let path = fixtures.path().join(COMMAND_REPLAY_FILE);
+    let write = |value: &serde_json::Value| {
+        std::fs::write(&path, serde_json::to_vec(&json!([value])).expect("encode"))
+            .expect("write fixture");
+    };
+    write(&occurrence);
+    ReplayCommandExecutor::load(fixtures.path(), workspace.path()).expect("complete contract");
+    for field in [
+        "command",
+        "workspace_relative_cwd",
+        "env",
+        "network_domains",
+        "sandbox",
+    ] {
+        let mut incomplete = occurrence.clone();
+        incomplete["request"]
+            .as_object_mut()
+            .expect("request")
+            .remove(field);
+        write(&incomplete);
+        assert!(
+            ReplayCommandExecutor::load(fixtures.path(), workspace.path()).is_err(),
+            "{field}"
+        );
+    }
+    for scope in [None, Some("request"), Some("terminal")] {
+        let mut unknown = occurrence.clone();
+        let target = match scope {
+            Some(key) => &mut unknown[key],
+            None => &mut unknown,
+        };
+        target["extra"] = json!(false);
+        write(&unknown);
+        assert!(ReplayCommandExecutor::load(fixtures.path(), workspace.path()).is_err());
+    }
+}
+
 #[tokio::test]
 async fn command_recording_replays_exact_relative_occurrence_without_running_an_executor() {
     let record_root = tempdir().expect("record workspace");

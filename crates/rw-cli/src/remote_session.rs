@@ -547,11 +547,11 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DetachedServerReady {
     pub(super) version: u16,
     pub(super) token: String,
     pub(super) session_id: String,
-    #[serde(default)]
     pub(super) started: bool,
 }
 
