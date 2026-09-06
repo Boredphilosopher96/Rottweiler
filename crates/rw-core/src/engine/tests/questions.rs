@@ -94,7 +94,12 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
             question_id,
             question,
             ..
-        } = events.recv().await.expect("question event")
+        } = events
+            .recv()
+            .await
+            .expect("question event")
+            .as_ref()
+            .clone()
         {
             assert_eq!(meta.caused_by, Some(RequestId("send-question".to_owned())));
             assert_eq!(question.prompt, "Continue?");
@@ -188,7 +193,12 @@ async fn ask_user_is_persisted_and_answered_only_through_client_command() {
     );
     let mut durable_answer = false;
     loop {
-        let event = events.recv().await.expect("terminal event");
+        let event = events
+            .recv()
+            .await
+            .expect("terminal event")
+            .as_ref()
+            .clone();
         if let EngineEvent::QuestionAnswered { meta, answer, .. } = &event {
             assert_eq!(meta.caused_by, Some(RequestId("answer".to_owned())));
             assert_eq!(answer.value, "yes");
@@ -286,7 +296,7 @@ async fn question_answer_persistence_failure_rejects_ack_and_stops_tool_continua
         .expect("send");
     let question_id = loop {
         if let EngineEvent::QuestionAsked { question_id, .. } =
-            events.recv().await.expect("question")
+            events.recv().await.expect("question").as_ref().clone()
         {
             break question_id;
         }

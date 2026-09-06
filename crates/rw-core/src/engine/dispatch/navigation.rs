@@ -1,11 +1,10 @@
 //! Navigation remains a driver-scoped client request, never a session authority transfer.
-use crate::engine::{AgentLoopError, RoutedEvent, session::ActorState};
+use crate::engine::{AgentLoopError, session::ActorState};
 use rw_types::{CommandMeta, EngineEvent, extension_control::SessionNavigationTarget};
-use tokio::sync::broadcast;
 
 pub(super) fn request(
     state: &ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     meta: &CommandMeta,
     target: SessionNavigationTarget,
 ) -> Result<(), AgentLoopError> {

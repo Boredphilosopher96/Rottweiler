@@ -7,7 +7,6 @@ use rw_types::{
     EngineEvent, PROTOCOL_VERSION, SessionId,
 };
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
 
 struct State {
     driver: Option<ClientId>,
@@ -101,7 +100,7 @@ impl SessionControl {
         &self,
         meta: &CommandMeta,
         session: &SessionId,
-        events: &broadcast::Sender<RoutedEvent>,
+        events: &crate::engine::live_events::LiveEvents,
     ) -> CommandOutcome {
         let outcome = {
             let state = self

@@ -114,7 +114,7 @@ fn limit() -> AgentLoopError {
 pub(super) async fn resolve_approval(
     state: &mut ActorState,
     config: &std::sync::Arc<crate::engine::session::SessionActorConfig>,
-    events: &tokio::sync::broadcast::Sender<crate::engine::RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     id: &rw_types::ToolCallId,
     decision: rw_types::ApprovalDecision,
 ) -> Result<(), AgentLoopError> {

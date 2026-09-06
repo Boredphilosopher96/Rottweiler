@@ -67,7 +67,12 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
             .expect("attach"),
         CommandOutcome::Accepted {}
     );
-    let created = driver_events.recv().await.expect("session created");
+    let created = driver_events
+        .recv()
+        .await
+        .expect("session created")
+        .as_ref()
+        .clone();
     assert!(matches!(
         &created,
         EngineEvent::SessionCreated {
@@ -82,7 +87,7 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
             && driver == "driver"
     ));
     assert!(matches!(
-        driver_events.recv().await.expect("attach ack"),
+        driver_events.recv().await.expect("attach ack").as_ref().clone(),
         EngineEvent::CommandAcknowledged {
             meta: CommandAckMeta { emitted_at, .. },
             outcome: CommandOutcome::Accepted {},
@@ -106,11 +111,21 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
         CommandOutcome::Accepted {}
     );
     assert!(matches!(
-        observer_events.recv().await.expect("observer durable gap"),
+        observer_events
+            .recv()
+            .await
+            .expect("observer durable gap")
+            .as_ref()
+            .clone(),
         EngineEvent::SessionCreated { .. }
     ));
     assert!(matches!(
-        observer_events.recv().await.expect("observer attach ack"),
+        observer_events
+            .recv()
+            .await
+            .expect("observer attach ack")
+            .as_ref()
+            .clone(),
         EngineEvent::CommandAcknowledged { .. }
     ));
     assert!(matches!(
@@ -136,7 +151,12 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
         CommandOutcome::Accepted {}
     );
     let changed = loop {
-        let event = observer_events.recv().await.expect("driver changed");
+        let event = observer_events
+            .recv()
+            .await
+            .expect("driver changed")
+            .as_ref()
+            .clone();
         if matches!(event, EngineEvent::DriverChanged { .. }) {
             break event;
         }
@@ -152,7 +172,12 @@ async fn protocol_ack_lease_observer_and_takeover_are_one_durable_event_stream()
         } if request == "take-driver" && driver == "observer"
     ));
     assert!(matches!(
-        driver_events.recv().await.expect("old driver notification"),
+        driver_events
+            .recv()
+            .await
+            .expect("old driver notification")
+            .as_ref()
+            .clone(),
         EngineEvent::DriverChanged { .. }
     ));
 }

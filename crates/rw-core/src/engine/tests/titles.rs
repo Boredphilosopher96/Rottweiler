@@ -135,7 +135,7 @@ async fn manual_rename_before_first_turn_completion_prevents_auto_title_overwrit
     timeout(Duration::from_secs(1), async {
         loop {
             if matches!(
-                events.recv().await.expect("turn event"),
+                events.recv().await.expect("turn event").as_ref().clone(),
                 EngineEvent::TurnFinished { .. }
             ) {
                 break;
@@ -233,7 +233,9 @@ async fn unavailable_title_model_persists_first_prompt_fallback_after_success_on
         let event = timeout(Duration::from_secs(1), events.recv())
             .await
             .expect("title timeout")
-            .expect("title event");
+            .expect("title event")
+            .as_ref()
+            .clone();
         if matches!(event, EngineEvent::TurnFinished { .. }) {
             saw_finished = true;
         }

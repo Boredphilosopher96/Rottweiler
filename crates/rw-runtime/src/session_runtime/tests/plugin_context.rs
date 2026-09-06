@@ -51,7 +51,7 @@ async fn sdk_context_workflow_pins_and_evicts_committed_conversation() {
         .expect("user input");
     tokio::time::timeout(Duration::from_secs(10), async {
         while !matches!(
-            events.recv().await.expect("seed event"),
+            events.recv().await.expect("seed event").as_ref().clone(),
             EngineEvent::TurnFinished { .. }
         ) {}
     })

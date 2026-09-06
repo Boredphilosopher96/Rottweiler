@@ -80,7 +80,7 @@ impl EngineHost {
                         },
                         event = session_events.recv() => match event {
                             Ok(event) => {
-                                if !matches!(event, EngineEvent::CommandAcknowledged { .. })
+                                if !matches!(event.as_ref(), EngineEvent::CommandAcknowledged { .. })
                                     && !send_encoded(&send, &event_budget, &lease, &event).await
                                 {
                                     return;

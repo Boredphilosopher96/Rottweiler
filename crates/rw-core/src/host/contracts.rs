@@ -227,23 +227,23 @@ impl HostedSession {
                     let mut descriptor = descriptor
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match event {
+                    match event.as_ref() {
                         EngineEvent::SessionCreated {
                             driver_client_id, ..
                         }
                         | EngineEvent::DriverChanged {
                             driver_client_id, ..
                         } => {
-                            descriptor.driver_client_id = Some(driver_client_id);
+                            descriptor.driver_client_id = Some(driver_client_id.clone());
                         }
                         EngineEvent::ModelChanged { model, .. } => {
-                            descriptor.model = model;
+                            descriptor.model = model.clone();
                         }
                         EngineEvent::SessionTitleUpdated { title, .. } => {
-                            descriptor.title = title;
+                            descriptor.title = title.clone();
                         }
                         EngineEvent::UserShellStateChanged { active, .. } => {
-                            descriptor.shell_active = active;
+                            descriptor.shell_active = *active;
                         }
                         _ => {}
                     }
@@ -679,6 +679,9 @@ impl From<AgentLoopError> for HostError {
     fn from(value: AgentLoopError) -> Self {
         match value {
             AgentLoopError::ReplayCursorAhead => Self::ReplayCursorAhead,
+            AgentLoopError::EventDeliverySaturated => Self::Protocol(
+                "session event delivery saturated; reconnect from the last durable cursor".into(),
+            ),
             other => Self::Persistence(other.to_string()),
         }
     }

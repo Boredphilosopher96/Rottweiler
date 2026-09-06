@@ -1,5 +1,4 @@
 use crate::engine::AgentLoopError;
-use crate::engine::RoutedEvent;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::ActorState;
 use crate::engine::session::SessionActorConfig;
@@ -7,12 +6,11 @@ use crate::engine::session_mode_name;
 use crate::engine::turn::emit;
 use rw_types::ModeId;
 use rw_types::UnrestorablePath;
-use tokio::sync::broadcast;
 
 pub(super) async fn rewind_state(
     state: &mut ActorState,
     config: &SessionActorConfig,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     to_turn: u64,
 ) -> Result<Vec<UnrestorablePath>, AgentLoopError> {
     if state.running.is_some() {

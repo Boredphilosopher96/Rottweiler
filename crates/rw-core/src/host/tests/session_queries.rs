@@ -226,8 +226,12 @@ async fn rename_persists_and_lists_a_session_without_its_driver_lease() {
         .expect("subscription");
     let persisted_title = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if let EngineEvent::SessionTitleUpdated { title, .. } =
-                durable.recv().await.expect("durable event")
+            if let EngineEvent::SessionTitleUpdated { title, .. } = durable
+                .recv()
+                .await
+                .expect("durable event")
+                .as_ref()
+                .clone()
             {
                 break title;
             }

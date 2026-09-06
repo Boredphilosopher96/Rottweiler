@@ -330,7 +330,7 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
     );
     loop {
         if matches!(
-            events.recv().await.expect("rename event"),
+            events.recv().await.expect("rename event").as_ref().clone(),
             EngineEvent::SessionTitleUpdated { ref title, .. }
                 if title == "Durable Search Rename"
         ) {

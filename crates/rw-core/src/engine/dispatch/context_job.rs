@@ -1,7 +1,7 @@
 //! Read-only context work retains its source and runtime until publication.
 use super::replies::{query_meta, send_connection_event};
 use crate::engine::{
-    AgentLoopError, MessageDisposition, RoutedEvent,
+    AgentLoopError, MessageDisposition,
     pending_event::PendingEvent,
     recovery::HistoryRead,
     session::{ActorState, ProtocolCompletion, SessionActorConfig},
@@ -9,7 +9,7 @@ use crate::engine::{
 };
 use rw_types::{CommandMeta, EngineEvent, ModeId, TurnId, config::ThinkingLevel};
 use std::{collections::VecDeque, sync::Arc};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 type Completion = oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>;
 type PluginReply =
@@ -245,7 +245,7 @@ pub(in crate::engine) async fn finish(
     mut result: ReadResult,
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
 ) {
     let Some(pending) = state.pending_context_read.take() else {
         return;

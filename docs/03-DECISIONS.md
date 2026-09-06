@@ -466,7 +466,7 @@ returning its view, so a starting/stopping unregistered writer cannot expose an
 uncommitted active tail. Reader admission is shared across that host's sessions;
 leases keep admission until blocking read work and its retained views finish.
 
-A subscription installs its broadcast receiver and captures the initial prefix
+A subscription installs its bounded ring cursor and captures the initial prefix
 before returning, even when its caller has not polled replay yet. Initial replay
 and lag recovery retain one bounded page, suppress duplicate live events, and
 reject future cursors. Attach acknowledges the connection without rebroadcasting
@@ -502,7 +502,7 @@ acknowledgement contract.
 **Validation.** Test rotation during reads, crashes at publication boundaries,
 partial final records, cursor-ahead rejection, corrupt indexes/segments/snapshots,
 unsafe descriptors, prefix validation and full verification. Preserve targeted
-acknowledgement ordering across replay and live delivery, including broadcast lag.
+acknowledgement ordering across replay and live delivery, including live-ring lag.
 Use 10K/100K/1M-event fixtures to report bytes read, retained raw-event memory,
 writer-lock hold time, append/interrupt latency and cold-open/rebuild work. Keep
 full-replay versus snapshot-plus-tail equivalence tests for interrupted operations,

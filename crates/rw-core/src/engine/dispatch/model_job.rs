@@ -3,7 +3,7 @@ use super::DispatchContext;
 use crate::engine::session::{
     ActorState, PreparedModelSwitch, ProtocolCompletion, SessionActorConfig,
 };
-use crate::engine::{AgentLoopError, RoutedEvent, model_switch_answer};
+use crate::engine::{AgentLoopError, model_switch_answer};
 use rw_tools::CancellationToken;
 use rw_types::extension_control::{ExtensionControl, ExtensionControlOutcome};
 use rw_types::extension_invocation::ExtensionInvocationId;
@@ -11,7 +11,7 @@ use rw_types::{
     AttachmentData, ClientCommand, ClientId, CommandOutcome, ModeId, ModelContextTransfer,
 };
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 const PREPARATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 type Completion = Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>;
@@ -91,7 +91,7 @@ pub(super) fn protocol_alias(command: &ClientCommand, state: &ActorState) -> Opt
 pub(in crate::engine) fn start(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     alias: String,
     action: SelectionAction,
 ) {
@@ -246,7 +246,7 @@ pub(in crate::engine) async fn finish(mut result: ResultValue, context: Dispatch
 pub(super) async fn dispatch_plugin(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     selection: PluginSelection,
 ) {
     match super::plugin_control::control(
@@ -286,7 +286,7 @@ fn reject(
     action: SelectionAction,
     error: AgentLoopError,
     state: &ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
 ) {
     match action {
         SelectionAction::Protocol {

@@ -67,7 +67,7 @@ async fn sdk_task_reopen_preserves_receipt_and_rebinds_rich_actions() {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let EngineEvent::CommandFinished { name, .. } =
-                events.recv().await.expect("action event")
+                events.recv().await.expect("action event").as_ref().clone()
                 && name == "task-workflow"
             {
                 break;
@@ -126,7 +126,13 @@ async fn run_status(
         let mut reads = 0;
         let mut summary = None;
         loop {
-            match events.recv().await.expect("workflow event") {
+            match events
+                .recv()
+                .await
+                .expect("workflow event")
+                .as_ref()
+                .clone()
+            {
                 EngineEvent::ToolCallStarted { name, .. } if name == "read" => reads += 1,
                 EngineEvent::ToolCallFinished {
                     presentation: Some(presentation),
@@ -204,7 +210,7 @@ async fn complete_tool_action(handle: &rw_core::SessionHandle, expected: &serde_
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let EngineEvent::CommandFinished { name, .. } =
-                events.recv().await.expect("action event")
+                events.recv().await.expect("action event").as_ref().clone()
                 && name == "task-workflow"
             {
                 break;

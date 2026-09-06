@@ -356,7 +356,7 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
         .expect("run parent turn");
     let mut tool_results = Vec::new();
     loop {
-        let event = events.recv().await.expect("actor event");
+        let event = events.recv().await.expect("actor event").as_ref().clone();
         match event {
             EngineEvent::ToolCallFinished {
                 tool_call_id,

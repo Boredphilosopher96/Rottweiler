@@ -37,7 +37,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -47,7 +46,7 @@ pub(in crate::engine) async fn handle_turn_signal(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
     turn_signals: &mpsc::UnboundedSender<TurnSignal>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {
     match signal {

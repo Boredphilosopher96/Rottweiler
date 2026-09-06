@@ -11,10 +11,9 @@ use rw_types::{
         validate_state_transaction,
     },
 };
-use tokio::sync::broadcast;
 
 use super::{
-    AgentLoopError, ExtensionStateView, PendingEvent, RoutedEvent, SessionActorConfig,
+    AgentLoopError, ExtensionStateView, PendingEvent, SessionActorConfig,
     session::{ActorState, validate_plugin_id},
     turn::{emit, redacted_json},
 };
@@ -99,7 +98,7 @@ pub(in crate::engine) async fn commit(
     mut transaction: ExtensionStateTransaction,
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
 ) -> Result<ExtensionStateCommitOutcome, AgentLoopError> {
     validate_plugin_id(&plugin_id)?;
     if state.poisoned || state.closing {

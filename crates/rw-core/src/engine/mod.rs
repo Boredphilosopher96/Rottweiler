@@ -1,3 +1,5 @@
+mod live_events;
+pub use live_events::SessionEventDelivery;
 mod accounting_state;
 pub use accounting_state::SessionAccountingState;
 use rw_types::hook_contract::{HookClass, HookInput};
@@ -58,7 +60,6 @@ use rw_types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::broadcast;
 
 use crate::{InitDepth, PermissionGate, PermissionRequest};
 
@@ -300,6 +301,9 @@ pub enum AgentLoopError {
     /// Durable session log rejected an append.
     #[error("session persistence failure: {0}")]
     Persistence(String),
+    /// A live subscriber or retained payload exceeded its bounded allowance.
+    #[error("session event delivery saturated; reconnect from the last durable cursor")]
+    EventDeliverySaturated,
     /// The session actor is no longer available.
     #[error("session actor is closed")]
     Closed,
@@ -530,7 +534,7 @@ pub struct SessionSnapshot {
 
 async fn apply_mode_change(
     state: &mut ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     sink: &Arc<dyn SessionEventSink>,
     mode_id: ModeId,
     modes: &ModeRegistry,
@@ -566,7 +570,7 @@ async fn apply_mode_change(
 
 async fn apply_permission_mode_change(
     state: &mut ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     config: &SessionActorConfig,
     mode: Option<rw_types::PermissionModeDescriptor>,
 ) -> Result<(), AgentLoopError> {
@@ -630,7 +634,6 @@ pub fn builtin_hook_dispatcher() -> Result<HookDispatcher, AgentLoopError> {
     Ok(dispatcher)
 }
 
-#[derive(Clone, Debug)]
 struct RoutedEvent {
     target: Option<ClientId>,
     event: EngineEvent,

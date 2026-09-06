@@ -7,7 +7,7 @@ use super::{
     tool_scheduling::execute_tool_calls,
 };
 use crate::engine::{
-    AgentLoopError, AgentTurnStatus, RoutedEvent, SessionUsage,
+    AgentLoopError, AgentTurnStatus, SessionUsage,
     pending_event::PendingEvent,
     session::{ActorState, SessionActorConfig},
     wire_turn_id,
@@ -20,7 +20,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 pub(in crate::engine) struct PendingPluginTool {
     turn: u64,
@@ -196,7 +196,7 @@ pub(in crate::engine) async fn finish(
     result: Result<ToolExecution, AgentLoopError>,
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {
     if state

@@ -125,7 +125,10 @@ async fn cancelled_provider_start_cannot_finish_turn_before_local_effect_settlem
         .await
         .expect("cleanup began after future drop");
     while let Ok(event) = events.receiver.try_recv() {
-        assert!(!matches!(event.event, EngineEvent::TurnFinished { .. }));
+        assert!(!matches!(
+            event.as_ref().clone(),
+            EngineEvent::TurnFinished { .. }
+        ));
     }
     assert!(!provider.settled.load(Ordering::SeqCst));
     provider.release.notify_one();
@@ -235,7 +238,7 @@ async fn dropped_tool_future_keeps_checkpoint_open_until_external_effects_settle
     assert_eq!(checkpoints.events.lock().expect("checkpoints").len(), 1);
     while let Ok(event) = events.receiver.try_recv() {
         assert!(!matches!(
-            event.event,
+            event.as_ref().clone(),
             EngineEvent::ToolCallFinished { .. } | EngineEvent::TurnFinished { .. }
         ));
     }

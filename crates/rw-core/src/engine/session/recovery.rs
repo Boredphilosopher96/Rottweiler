@@ -1,7 +1,6 @@
 use super::SessionActorRecovery;
 use crate::engine::AgentLoopError;
 use crate::engine::AgentTurnStatus;
-use crate::engine::RoutedEvent;
 use crate::engine::SessionUsage;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::InterruptedToolRepair;
@@ -17,7 +16,6 @@ use rw_types::TurnAccounting;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use tokio::sync::broadcast;
 
 pub(in crate::engine) fn interrupted_tool_recovery_events(
     repair: &InterruptedToolRepair,
@@ -93,7 +91,7 @@ pub(super) fn interrupted_turn_recovery_events(
 pub(in crate::engine) async fn recover_actor_from_journal(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {
     if let Some(running) = &state.running {

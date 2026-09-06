@@ -196,7 +196,12 @@ async fn transient_turn_signal_failure_recovers_journal_and_accepts_next_turn() 
     );
     let repaired = timeout(Duration::from_secs(2), async {
         loop {
-            let event = events.recv().await.expect("recovery event");
+            let event = events
+                .recv()
+                .await
+                .expect("recovery event")
+                .as_ref()
+                .clone();
             if matches!(
                 event,
                 EngineEvent::TurnFinished {
@@ -220,7 +225,12 @@ async fn transient_turn_signal_failure_recovers_journal_and_accepts_next_turn() 
     );
     let completed = timeout(Duration::from_secs(2), async {
         loop {
-            let event = events.recv().await.expect("completion event");
+            let event = events
+                .recv()
+                .await
+                .expect("completion event")
+                .as_ref()
+                .clone();
             if matches!(
                 event,
                 EngineEvent::TurnFinished {

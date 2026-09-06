@@ -1,6 +1,5 @@
 use crate::engine::AgentLoopError;
 use crate::engine::MessageDisposition;
-use crate::engine::RoutedEvent;
 use crate::engine::SessionSnapshot;
 use crate::engine::durability::SessionEventSink;
 use crate::engine::model::ModelDriver;
@@ -38,13 +37,11 @@ use rw_types::ShellId;
 use rw_types::SubagentId;
 use rw_types::ToolCallId;
 use rw_types::TurnId;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -54,7 +51,7 @@ pub struct SessionHandle {
     pub(super) child_progress: Arc<super::child_progress::HostedChildProgress>,
     pub(super) shutdown: shutdown::ActorShutdown,
     pub(in crate::engine) commands: mpsc::Sender<ActorCommand>,
-    pub(super) events: broadcast::Sender<RoutedEvent>,
+    pub(super) events: crate::engine::live_events::LiveEvents,
     pub(in crate::engine) active_turn: Arc<AtomicU64>,
     pub(super) session_id: SessionId,
     pub(in crate::engine) event_sink: Arc<dyn SessionEventSink>,
@@ -419,21 +416,21 @@ impl SessionHandle {
         client_id: ClientId,
         last_sequence: Option<SequenceId>,
     ) -> Result<SessionSubscription, AgentLoopError> {
-        let receiver = self.events.subscribe();
+        let receiver = self.events.subscribe(client_id)?;
         let replay = self.event_sink.capture_read_view()?;
         let initial_tail = replay.last_sequence();
         if last_sequence.is_some_and(|last| initial_tail.is_none_or(|tail| last > tail)) {
             return Err(AgentLoopError::ReplayCursorAhead);
         }
         Ok(SessionSubscription {
-            client_id,
             session_id: self.session_id.clone(),
             receiver,
             sink: Arc::clone(&self.event_sink),
             last_sequence,
             initial_tail,
-            pending: VecDeque::new(),
+            pending: std::collections::VecDeque::new(),
             replay: Some(replay),
+            read: None,
             needs_initial_replay: true,
         })
     }
@@ -442,18 +439,18 @@ impl SessionHandle {
     /// # Errors
     /// Returns an invalid canonical source or unavailable event channel error.
     pub fn subscribe_live(&self) -> Result<SessionSubscription, AgentLoopError> {
-        let receiver = self.events.subscribe();
+        let receiver = self.events.subscribe(ClientId("local".into()))?;
         let source = self.event_sink.capture_read_view()?;
         let tail = source.last_sequence();
         Ok(SessionSubscription {
-            client_id: ClientId("local".to_owned()),
             session_id: self.session_id.clone(),
             receiver,
             sink: Arc::clone(&self.event_sink),
             last_sequence: tail,
             initial_tail: tail,
-            pending: VecDeque::new(),
+            pending: std::collections::VecDeque::new(),
             replay: None,
+            read: None,
             needs_initial_replay: false,
         })
     }

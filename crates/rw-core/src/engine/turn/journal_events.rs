@@ -1,5 +1,4 @@
 use crate::engine::AgentLoopError;
-use crate::engine::RoutedEvent;
 use crate::engine::durability;
 use crate::engine::durability::SessionEventSink;
 use crate::engine::pending_event::PendingEvent;
@@ -9,11 +8,10 @@ use rw_types::EventMeta;
 use rw_types::PROTOCOL_VERSION;
 use rw_types::SequenceId;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 pub(in crate::engine) async fn emit(
     state: &mut ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     sink: &Arc<dyn SessionEventSink>,
     kind: PendingEvent,
 ) -> Result<EventMeta, AgentLoopError> {
@@ -25,7 +23,7 @@ pub(in crate::engine) async fn emit(
 
 pub(in crate::engine) async fn emit_batch(
     state: &mut ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     sink: &Arc<dyn SessionEventSink>,
     kinds: Vec<PendingEvent>,
 ) -> Result<Vec<EventMeta>, AgentLoopError> {
@@ -64,34 +62,33 @@ pub(in crate::engine) async fn emit_batch(
             "event sink retained the completed batch instead of transferring ownership".to_owned(),
         )
     })?;
-    let (persisted, reservation) = persisted.into_parts();
+    let (persisted, reservation) = persisted.into_prepared_parts();
     state.sequence = persisted
+        .value()
         .last()
         .and_then(EngineEvent::meta)
         .map(|meta| meta.sequence_id.0);
     let receipts = persisted
+        .value()
         .iter()
         .filter_map(EngineEvent::meta)
         .cloned()
         .collect();
-    for event in persisted {
+    for event in persisted.value() {
         state
             .live
-            .observe(&event, state.running.as_ref().map(|turn| turn.id));
+            .observe(event, state.running.as_ref().map(|turn| turn.id));
         if let EngineEvent::SessionCreated {
             driver_client_id, ..
         }
         | EngineEvent::DriverChanged {
             driver_client_id, ..
-        } = &event
+        } = event
         {
             state.control.commit_driver(Some(driver_client_id.clone()));
         }
-        let _ = events.send(RoutedEvent {
-            target: None,
-            event,
-        });
     }
+    events.publish_committed(persisted)?;
     drop(reservation);
     Ok(receipts)
 }

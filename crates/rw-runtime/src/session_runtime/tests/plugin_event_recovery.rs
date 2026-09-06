@@ -141,8 +141,12 @@ async fn sdk_event_process_crash_replays_only_the_unacknowledged_delivery() {
         .expect("produce later subscribed event");
     let barrier_sequence = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let rw_types::EngineEvent::ModeChanged { meta, mode, .. } =
-                events.recv().await.expect("mode event stream")
+            if let rw_types::EngineEvent::ModeChanged { meta, mode, .. } = events
+                .recv()
+                .await
+                .expect("mode event stream")
+                .as_ref()
+                .clone()
             {
                 assert_eq!(mode.0, next);
                 break meta.sequence_id;

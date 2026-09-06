@@ -1,7 +1,6 @@
 use crate::engine::AgentLoopError;
 use crate::engine::AgentTurnStatus;
 use crate::engine::PreparedUserMessage;
-use crate::engine::RoutedEvent;
 use crate::engine::SessionUsage;
 use crate::engine::commands::CommandToolCall;
 use crate::engine::dispatch::prepare_user_message;
@@ -27,7 +26,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 #[derive(Default)]
@@ -43,7 +41,7 @@ pub(in crate::engine) struct StartTurnRuntime<'a> {
     pub(in crate::engine) config: &'a Arc<SessionActorConfig>,
     pub(in crate::engine) tool_context: &'a ToolContext,
     pub(in crate::engine) signals: &'a mpsc::UnboundedSender<TurnSignal>,
-    pub(in crate::engine) events: &'a broadcast::Sender<RoutedEvent>,
+    pub(in crate::engine) events: &'a crate::engine::live_events::LiveEvents,
     pub(in crate::engine) active_turn: &'a Arc<AtomicU64>,
 }
 
@@ -64,7 +62,7 @@ pub(in crate::engine) async fn start_turn(
     config: &Arc<SessionActorConfig>,
     tool_context: &ToolContext,
     signals: &mpsc::UnboundedSender<TurnSignal>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     messages: Vec<(String, Vec<Attachment>)>,
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {

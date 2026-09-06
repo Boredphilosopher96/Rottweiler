@@ -98,7 +98,7 @@ async fn large_reconnect_pages_pin_cursor_and_preserve_attach_ack_after_lag() {
     let mut sequences = Vec::new();
     timeout(Duration::from_secs(3), async {
         loop {
-            let event = observer.recv().await.expect("replay");
+            let event = observer.recv().await.expect("replay").as_ref().clone();
             if let Some(meta) = event.meta() {
                 sequences.push(meta.sequence_id.0);
             }
@@ -163,11 +163,11 @@ async fn lagged_subscription_replays_every_durable_sequence_and_continues_live()
         .await
         .expect("attach");
     assert!(matches!(
-        events.recv().await.expect("created"),
+        events.recv().await.expect("created").as_ref().clone(),
         EngineEvent::SessionCreated { .. }
     ));
     assert!(matches!(
-        events.recv().await.expect("attach ack"),
+        events.recv().await.expect("attach ack").as_ref().clone(),
         EngineEvent::CommandAcknowledged { .. }
     ));
     handle
@@ -198,7 +198,7 @@ async fn lagged_subscription_replays_every_durable_sequence_and_continues_live()
         .sequence;
     let mut replayed = Vec::new();
     while replayed.last().copied() != Some(durable_tail) {
-        let event = events.recv().await.expect("gap event");
+        let event = events.recv().await.expect("gap event").as_ref().clone();
         if let Some(meta) = event.meta() {
             replayed.push(meta.sequence_id);
         }
@@ -217,7 +217,12 @@ async fn lagged_subscription_replays_every_durable_sequence_and_continues_live()
         .await
         .expect("status");
     loop {
-        let event = events.recv().await.expect("continued live event");
+        let event = events
+            .recv()
+            .await
+            .expect("continued live event")
+            .as_ref()
+            .clone();
         if let EngineEvent::CommandFinished { meta, name, .. } = event {
             assert_eq!(name, "status");
             assert_eq!(meta.sequence_id.0, durable_tail.0.saturating_add(1));

@@ -187,7 +187,7 @@ The signed updater follows the same boundary: `rw-core` owns exact-byte threshol
 
 **Remote mode** (ADR-015): `rw --remote <host>` SSHes to the host, starts/attaches an engine there, forwards its socket locally, and runs the local TUI against it — same code path as local, which is the point. Two hard rules this imposes everywhere: no protocol message may assume a shared filesystem with the client (file previews/diffs travel in-band), and reconnect/resync is a tested first-class flow, not an error path.
 
-**Resync semantics**: events carry per-session monotonic sequence IDs. The persisted journal supplies bounded gap pages when a client falls behind live broadcast. A TUI attachment first reads source-fenced snapshots of the active transcript tail, session state, controls, children, and tasks, then subscribes from their minimum source cut. Each reducer retains its own cut so replay cannot overwrite a newer snapshot. A `replay_cursor_ahead` response triggers another owned bootstrap. Historical transcript navigation reads canonical pages independently of live catch-up.
+**Resync semantics**: events carry per-session monotonic sequence IDs. The persisted journal supplies bounded gap pages when a client falls behind the live ring. A TUI attachment first reads source-fenced snapshots of the active transcript tail, session state, controls, children, and tasks, then subscribes from their minimum source cut. Each reducer retains its own cut so replay cannot overwrite a newer snapshot. A `replay_cursor_ahead` response triggers another owned bootstrap. Historical transcript navigation reads canonical pages independently of live catch-up.
 
 HTTP command clients declare the source-owned normal or urgent command lane. The
 transport validates the declaration against the decoded command, reserves input
@@ -318,6 +318,23 @@ session's event log, participate in reconnect/resync, and are available to
 hooks/extensions. The checked-in durable-envelope schema mechanically excludes
 every generated `CommandAckMeta` variant. One event schema, three consumers:
 UI, storage, extensions.
+The core live ring has at most 1,024 slots per actor, with process-wide 128 MiB
+allocation admission for payloads, ring storage, and client identities. At most
+512 subscriptions exist across the process, including at most 64 per actor.
+Committed batches move their prepared allocation into shared immutable delivery
+guards; commit queue credits are released independently. When live bytes fill,
+durable publication stores only sequence fences. Replay uses a separate aggregate
+allowance for four worst-case 16 MiB source + 64 MiB decoded + 64 MiB preparation
+windows (plus 16 KiB descriptors each), shrinking each completed page to its measured
+prepared allocation. Pages contain at most 256 events and 16 MiB encoded source.
+Replay admission has 64 waiters and a 30-second deadline; dropping a receive future
+cancels admission or preserves its already-owned read task for the next poll.
+Returned guards retain allocation credit even after ring/page eviction. A consumer
+holding all credits receives an explicit saturation failure after the bounded wait.
+The actor never waits for subscriber capacity. Evicting an unobserved connection
+reply marks only its target subscriptions failed under the publication lock;
+a later payload drop cannot hide that loss. Actor close wakes subscriptions, which
+finish catch-up through the final durable tail before reporting closure.
 Messages must match the generated schema; 64-bit counters and sequence
 ids cross JSON as decimal strings so JavaScript clients never lose precision.
 
@@ -343,7 +360,7 @@ contains no secret-bearing type, and failed checks set a non-zero CLI status.
 
 ### Session loop (`rw-core`)
 
-Single-writer actor per session (tokio task owning session state; commands in via mpsc, events out via broadcast). Turn execution:
+Single-writer actor per session (tokio task owning session state; commands in via mpsc, events out via a bounded shared ring). Turn execution:
 
 1. Assemble context (`rw-context`): **prune runs here, deterministically** — the ADR-010 backward walk executes at the start of assembly (before the overflow check), and each erasure is persisted as a `ToolOutputPruned` event, so live context, `--resume`, `rw replay`, and golden transcripts always agree. User pins join the prune-protected set; user-evicted items count as already-pruned stop markers. Then: stable prefix → conversation → pending queued messages.
 2. Stream from router; forward deltas as events.

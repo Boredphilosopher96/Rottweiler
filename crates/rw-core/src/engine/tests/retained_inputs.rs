@@ -75,7 +75,7 @@ async fn explicit_continuation_keeps_accepted_source_after_response_waiter_loss(
         loop {
             if let EngineEvent::TurnFinished {
                 turn_id, status, ..
-            } = events.recv().await.expect("event")
+            } = events.recv().await.expect("event").as_ref().clone()
             {
                 if turn_id.0 == "2" {
                     assert_eq!(status, rw_types::TurnStatus::Completed);

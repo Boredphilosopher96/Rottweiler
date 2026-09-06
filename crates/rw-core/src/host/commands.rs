@@ -418,7 +418,7 @@ impl EngineHost {
                     loop {
                         let event = events.recv().await.map_err(HostError::from)?;
                         if matches!(
-                            &event,
+                            event.as_ref(),
                             EngineEvent::SessionTitleUpdated { meta, .. }
                                 if meta.caused_by.as_ref() == Some(&request_id)
                         ) {
@@ -432,7 +432,7 @@ impl EngineHost {
                         "committed session title update was not observable".to_owned(),
                     )
                 })??;
-                if let EngineEvent::SessionTitleUpdated { title, .. } = &updated {
+                if let EngineEvent::SessionTitleUpdated { title, .. } = updated.as_ref() {
                     session
                         .descriptor
                         .write()
@@ -440,7 +440,7 @@ impl EngineHost {
                         .title
                         .clone_from(title);
                 }
-                Ok((outcome, Some(session_id), vec![updated]))
+                Ok((outcome, Some(session_id), vec![updated.as_ref().clone()]))
             }
             ClientCommand::ListCommands { meta, session_id } => {
                 let session = self.ready_session(&session_id).await?;

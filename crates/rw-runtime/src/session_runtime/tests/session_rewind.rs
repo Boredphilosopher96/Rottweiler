@@ -150,7 +150,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
             .await
             .expect("start turn");
         loop {
-            let event = events.recv().await.expect("turn event");
+            let event = events.recv().await.expect("turn event").as_ref().clone();
             if matches!(
                 event,
                 EngineEvent::TurnFinished {
@@ -165,7 +165,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
     }
     actor.rewind(3).await.expect("direct rewind");
     loop {
-        let event = events.recv().await.expect("rewind event");
+        let event = events.recv().await.expect("rewind event").as_ref().clone();
         if matches!(
             event,
             EngineEvent::ConversationRewound {

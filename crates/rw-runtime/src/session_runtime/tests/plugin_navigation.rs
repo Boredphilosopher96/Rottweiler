@@ -62,8 +62,12 @@ pub(super) async fn verify_deferred_navigation(handle: &rw_core::SessionHandle) 
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let EngineEvent::SessionNavigationRequested { meta, target, .. } =
-                events.recv().await.expect("navigation event")
+            if let EngineEvent::SessionNavigationRequested { meta, target, .. } = events
+                .recv()
+                .await
+                .expect("navigation event")
+                .as_ref()
+                .clone()
             {
                 assert_eq!(meta.client_id.0, "local");
                 assert_eq!(

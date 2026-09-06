@@ -398,7 +398,7 @@ async fn add_dir_commit_failure_aborts_generation_and_preserves_live_runtime() {
     assert!(failure.to_string().contains("could not commit"));
     while let Ok(event) = events.receiver.try_recv() {
         assert!(!matches!(
-            event.event,
+            event.as_ref().clone(),
             EngineEvent::WorkspaceRootsChanged { .. }
         ));
     }

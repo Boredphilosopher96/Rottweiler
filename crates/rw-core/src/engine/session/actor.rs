@@ -1,6 +1,5 @@
 use super::SessionActorRecovery;
 use crate::engine::AgentLoopError;
-use crate::engine::RoutedEvent;
 use crate::engine::SessionUsage;
 use crate::engine::dispatch::handle_actor_command;
 use crate::engine::pending_event::PendingEvent;
@@ -33,7 +32,6 @@ use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 /// Starts one single-writer session actor.
@@ -67,7 +65,7 @@ impl SessionActor {
         .with_session_id(config.session_id.clone())
         .with_mcp_tool_policy(config.tools.mcp_tool_policy().clone());
         let (command_tx, command_rx) = mpsc::channel(64);
-        let (event_tx, _) = broadcast::channel(config.event_capacity);
+        let event_tx = crate::engine::live_events::LiveEvents::new(config.event_capacity)?;
         let active_turn = Arc::new(AtomicU64::new(0));
         let command_descriptors = Arc::new(RwLock::new(Arc::from(
             config.commands.descriptors().cloned().collect::<Vec<_>>(),
@@ -99,6 +97,7 @@ impl SessionActor {
         let config = Arc::new(config);
         let retained = Arc::clone(&config);
         let task_shutdown = shutdown.clone();
+        let event_closer = event_tx.clone();
         tokio::spawn(async move {
             if AssertUnwindSafe(Box::pin(run_actor(
                 config,
@@ -120,8 +119,10 @@ impl SessionActor {
             {
                 task_shutdown
                     .complete(Err("session actor exited without cleanup proof".to_owned()));
+                event_closer.close();
                 shutdown::retain_unproven(retained).await;
             }
+            event_closer.close();
         });
         Ok(handle)
     }
@@ -165,7 +166,7 @@ fn validate_config(config: &SessionActorConfig) -> Result<(), AgentLoopError> {
     if config.max_turns == 0
         || config.identical_tool_failure_limit == 0
         || config.max_output_tokens == 0
-        || config.event_capacity == 0
+        || !(1..=crate::engine::live_events::MAX_EVENT_CAPACITY).contains(&config.event_capacity)
     {
         return Err(AgentLoopError::InvalidConfiguration(
             "turn, doom-loop, output, and event limits must be greater than zero".to_owned(),
@@ -178,7 +179,7 @@ pub(super) async fn dispatch_lifecycle_hook(
     event: HookEvent,
     state: &mut ActorState,
     config: &SessionActorConfig,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
 ) -> bool {
     let input = HookSessionInput {
         session_id: config.session_id.0.clone(),
@@ -224,7 +225,7 @@ pub(super) async fn run_actor(
     resume_inputs: bool,
     mut tool_context: ToolContext,
     mut commands: mpsc::Receiver<ActorCommand>,
-    events: broadcast::Sender<RoutedEvent>,
+    events: crate::engine::live_events::LiveEvents,
     control: shutdown::ActorControl,
 ) {
     let shutdown::ActorControl {

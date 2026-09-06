@@ -2,7 +2,7 @@
 use super::{journal_events::emit, signals::TurnSignal};
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::ActorState;
-use crate::engine::{AgentLoopError, RoutedEvent, SessionActorConfig};
+use crate::engine::{AgentLoopError, SessionActorConfig};
 use async_trait::async_trait;
 use rw_tools::{
     CancellationToken, TodoAction, TodoAdmission, TodoStateStore, ToolError, ToolResult,
@@ -16,7 +16,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, broadcast, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 const MAX_REQUESTS: usize = 16;
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -228,7 +228,7 @@ pub(in crate::engine) async fn handle(
     mut request: TodoRequest,
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
 ) -> Result<(), AgentLoopError> {
     if state.running.as_ref().map(|turn| turn.id) != Some(request.turn)
         || state.closing

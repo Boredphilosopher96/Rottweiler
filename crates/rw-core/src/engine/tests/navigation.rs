@@ -105,7 +105,10 @@ async fn navigation_waits_for_command_settlement_and_is_revoked_by_driver_takeov
             .expect("callback");
         while let Ok(event) = events.receiver.try_recv() {
             assert!(
-                !matches!(event.event, EngineEvent::SessionNavigationRequested { .. }),
+                !matches!(
+                    event.as_ref().clone(),
+                    EngineEvent::SessionNavigationRequested { .. }
+                ),
                 "navigation must wait for handler settlement"
             );
         }
@@ -126,8 +129,9 @@ async fn navigation_waits_for_command_settlement_and_is_revoked_by_driver_takeov
         assert_eq!(completion.is_ok(), !takeover);
         let mut navigations = 0;
         while let Ok(event) = events.receiver.try_recv() {
-            if let EngineEvent::SessionNavigationRequested { meta, target, .. } = event.event {
-                assert_eq!(event.target, Some(ClientId("local".into())));
+            if let EngineEvent::SessionNavigationRequested { meta, target, .. } =
+                event.as_ref().clone()
+            {
                 assert_eq!(meta.client_id.0, "local");
                 assert_eq!(
                     target,
@@ -171,7 +175,7 @@ async fn builtin_navigation_uses_the_control_contract_and_rejects_unowned_or_fut
         .expect("builtin session");
     let mut found = false;
     while let Ok(event) = events.receiver.try_recv() {
-        if let EngineEvent::SessionNavigationRequested { target, .. } = event.event {
+        if let EngineEvent::SessionNavigationRequested { target, .. } = event.as_ref().clone() {
             assert_eq!(
                 target,
                 SessionNavigationTarget::Session {

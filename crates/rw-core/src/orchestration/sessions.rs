@@ -513,7 +513,7 @@ impl SubagentSession for ActorSubagentSession {
                     .map_err(|error| OrchestrationError::Session(error.to_string()))?,
             };
             let sequence = event.meta().map(|meta| meta.sequence_id.0);
-            if let EngineEvent::TextDelta { text, .. } = &event {
+            if let EngineEvent::TextDelta { text, .. } = event.as_ref() {
                 let remaining =
                     super::MAX_SUBAGENT_FINAL_TEXT_BYTES.saturating_sub(final_text.len());
                 let mut end = text.len().min(remaining);
@@ -529,15 +529,15 @@ impl SubagentSession for ActorSubagentSession {
                 usage,
                 cost,
                 ..
-            } = event
+            } = event.as_ref()
             {
                 return Ok(SubagentTurnResult {
-                    status: subagent_status(&status),
+                    status: subagent_status(status),
                     final_text,
                     touched_files: Vec::new(),
                     diff_artifact: None,
-                    usage,
-                    cost,
+                    usage: usage.clone(),
+                    cost: cost.clone(),
                     turns: 1,
                 });
             }

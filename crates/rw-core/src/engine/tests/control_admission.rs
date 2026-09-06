@@ -92,15 +92,21 @@ async fn interrupt_acknowledges_while_opening_journal_commit_is_blocked() {
     handle.close().await.expect("close");
 }
 
-#[test]
-fn control_uses_committed_lease_and_never_retargets_an_admitted_interrupt() {
+#[tokio::test]
+async fn control_uses_committed_lease_and_never_retargets_an_admitted_interrupt() {
     let session = SessionId("session".to_owned());
     let control = SessionControl::new(
         session.clone(),
         Some(ClientId("driver".to_owned())),
         Arc::new(FixedClock),
     );
-    let (events, mut received) = tokio::sync::broadcast::channel(16);
+    let events = crate::engine::live_events::LiveEvents::new(16).expect("channel");
+    let mut rejected = events
+        .subscribe(ClientId("next".into()))
+        .expect("next subscriber");
+    let mut accepted = events
+        .subscribe(ClientId("driver".into()))
+        .expect("driver subscriber");
     let first = CancellationToken::default();
     control.start(1, first.clone());
     assert!(matches!(
@@ -119,18 +125,20 @@ fn control_uses_committed_lease_and_never_retargets_an_admitted_interrupt() {
     control.finish(1);
     // Reading the acknowledgement has no cancellation work attached to it.
     assert!(matches!(
-        received.try_recv().expect("rejected ack").event,
+        rejected.recv().await.expect("rejected ack"),
+        crate::engine::live_events::Received::Event(event) if matches!(event.as_ref(),
         EngineEvent::CommandAcknowledged {
             outcome: CommandOutcome::Rejected { .. },
             ..
-        }
+        })
     ));
     assert!(matches!(
-        received.try_recv().expect("accepted ack").event,
+        accepted.recv().await.expect("accepted ack"),
+        crate::engine::live_events::Received::Event(event) if matches!(event.as_ref(),
         EngineEvent::CommandAcknowledged {
             outcome: CommandOutcome::Accepted {},
             ..
-        }
+        })
     ));
     assert!(!second.is_cancelled());
     assert!(matches!(

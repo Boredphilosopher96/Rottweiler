@@ -51,7 +51,6 @@ use rw_types::SequenceId;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 pub(super) struct DispatchContext<'a> {
@@ -59,7 +58,7 @@ pub(super) struct DispatchContext<'a> {
     pub(super) config: &'a mut Arc<SessionActorConfig>,
     pub(super) tool_context: &'a mut ToolContext,
     pub(super) turn_signals: &'a mpsc::UnboundedSender<TurnSignal>,
-    pub(super) events: &'a broadcast::Sender<RoutedEvent>,
+    pub(super) events: &'a crate::engine::live_events::LiveEvents,
     pub(super) active_turn: &'a Arc<AtomicU64>,
     pub(super) command_descriptors: &'a Arc<RwLock<Arc<[CommandDescriptor]>>>,
     pub(super) mode_registry: &'a Arc<RwLock<Arc<ModeRegistry>>>,
@@ -73,7 +72,7 @@ pub(super) async fn handle_actor_command(
     config: &mut Arc<SessionActorConfig>,
     tool_context: &mut ToolContext,
     turn_signals: &mpsc::UnboundedSender<TurnSignal>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     active_turn: &Arc<AtomicU64>,
     command_descriptors: &Arc<RwLock<Arc<[CommandDescriptor]>>>,
     mode_registry: &Arc<RwLock<Arc<ModeRegistry>>>,

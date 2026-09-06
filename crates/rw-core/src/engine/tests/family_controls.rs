@@ -73,7 +73,7 @@ async fn explicit_root_driver_answers_exact_child_question_without_changing_chil
         .expect("send");
     let mut started = None;
     let question_id = loop {
-        match events.recv().await.expect("event") {
+        match events.recv().await.expect("event").as_ref().clone() {
             EngineEvent::TurnStarted { meta, turn_id, .. } => {
                 started = Some((meta.sequence_id, turn_id));
             }
@@ -309,4 +309,6 @@ async fn next_family_event(events: &mut crate::SessionSubscription) -> EngineEve
         .await
         .expect("family control event deadline")
         .expect("family control event")
+        .as_ref()
+        .clone()
 }

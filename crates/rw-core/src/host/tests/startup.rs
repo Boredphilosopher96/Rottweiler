@@ -438,7 +438,12 @@ async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
                 shell_id,
                 active: true,
                 ..
-            } = shell_events.recv().await.expect("shell event")
+            } = shell_events
+                .recv()
+                .await
+                .expect("shell event")
+                .as_ref()
+                .clone()
             {
                 break shell_id;
             }
@@ -514,7 +519,12 @@ async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
                 shell_id,
                 active: true,
                 ..
-            } = broker_events.recv().await.expect("broker shell event")
+            } = broker_events
+                .recv()
+                .await
+                .expect("broker shell event")
+                .as_ref()
+                .clone()
             {
                 break shell_id;
             }

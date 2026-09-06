@@ -63,6 +63,12 @@ impl AdmittedEventBatch {
         self.allocation.bytes()
     }
     #[must_use]
+    pub(in crate::engine) fn into_prepared_parts(
+        self,
+    ) -> (PreparedAllocation<Vec<EngineEvent>>, EventBatchReservation) {
+        (self.allocation, self.reservation)
+    }
+    #[must_use]
     pub fn into_parts(self) -> (Vec<EngineEvent>, EventBatchReservation) {
         (self.allocation.into_inner(), self.reservation)
     }

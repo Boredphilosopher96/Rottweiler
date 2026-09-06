@@ -1,5 +1,4 @@
 use crate::engine::AgentLoopError;
-use crate::engine::RoutedEvent;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::ActorState;
 use crate::engine::session::PreparedModelSwitch;
@@ -7,12 +6,11 @@ use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::emit_batch;
 use rw_types::ModelContextTransfer;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 pub(in crate::engine) async fn commit_prepared_model_switch(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     prepared: PreparedModelSwitch,
     clear_context: bool,
 ) -> Result<(), AgentLoopError> {
@@ -48,7 +46,7 @@ pub(in crate::engine) async fn commit_prepared_model_switch(
 pub(super) async fn request_model_selection(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     model: rw_types::ModelAlias,
     provider: Option<String>,
 ) -> Result<Option<rw_types::QuestionId>, AgentLoopError> {

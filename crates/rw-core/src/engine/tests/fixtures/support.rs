@@ -398,7 +398,7 @@ pub(in crate::engine::tests) async fn next_matching(
             .await
             .expect("event timeout")
             .expect("event channel");
-        let Some(event) = observe_event(wire) else {
+        let Some(event) = observe_event(wire.as_ref().clone()) else {
             continue;
         };
         if matches(&event.kind) {
@@ -415,8 +415,8 @@ pub(in crate::engine::tests) async fn next_permission_state(
             .await
             .expect("permission event timeout")
             .expect("permission event channel");
-        if let EngineEvent::PermissionsListed { permissions, .. } = event {
-            return permissions;
+        if let EngineEvent::PermissionsListed { permissions, .. } = event.as_ref() {
+            return permissions.clone();
         }
     }
 }
@@ -430,7 +430,7 @@ pub(in crate::engine::tests) async fn collect_turn(
             .await
             .expect("event timeout")
             .expect("event channel");
-        let Some(event) = observe_event(wire) else {
+        let Some(event) = observe_event(wire.as_ref().clone()) else {
             continue;
         };
         let done = matches!(event.kind, PendingEvent::TurnFinished { .. });
@@ -446,18 +446,12 @@ pub(in crate::engine::tests) async fn collect_wire_turn(
 ) -> Vec<EngineEvent> {
     let mut events = Vec::new();
     loop {
-        let routed = timeout(Duration::from_secs(3), receiver.receiver.recv())
+        let event = timeout(Duration::from_secs(3), receiver.recv())
             .await
             .expect("wire event timeout")
-            .expect("wire event channel");
-        if routed
-            .target
+            .expect("wire event channel")
             .as_ref()
-            .is_some_and(|target| target != &receiver.client_id)
-        {
-            continue;
-        }
-        let event = routed.event;
+            .clone();
         let done = matches!(event, EngineEvent::TurnFinished { .. });
         events.push(event);
         if done {

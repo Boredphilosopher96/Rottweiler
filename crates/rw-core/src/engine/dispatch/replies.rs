@@ -9,7 +9,6 @@ use rw_types::EngineErrorCategory;
 use rw_types::EngineEvent;
 use rw_types::PROTOCOL_VERSION;
 use rw_types::SessionId;
-use tokio::sync::broadcast;
 
 pub(super) fn protocol_rejection(code: &str, message: impl Into<String>) -> CommandOutcome {
     CommandOutcome::Rejected {
@@ -25,7 +24,7 @@ pub(super) fn protocol_rejection(code: &str, message: impl Into<String>) -> Comm
 
 pub(super) fn send_ack(
     state: &ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     meta: &CommandMeta,
     session_id: Option<SessionId>,
     outcome: CommandOutcome,
@@ -46,7 +45,7 @@ pub(super) fn send_ack(
 }
 
 pub(super) fn send_connection_event(
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     client_id: &ClientId,
     event: EngineEvent,
 ) {

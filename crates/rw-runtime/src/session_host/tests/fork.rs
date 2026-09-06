@@ -83,7 +83,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
     );
     loop {
         if matches!(
-            events.recv().await.expect("parent event"),
+            events.recv().await.expect("parent event").as_ref().clone(),
             rw_core::EngineEvent::TurnFinished { .. }
         ) {
             break;
@@ -112,7 +112,12 @@ async fn production_factory_fork_composes_and_resumes_child() {
             question_id,
             question,
             ..
-        } = events.recv().await.expect("parent model question")
+        } = events
+            .recv()
+            .await
+            .expect("parent model question")
+            .as_ref()
+            .clone()
             && question
                 .model_switch
                 .as_ref()
@@ -143,7 +148,7 @@ async fn production_factory_fork_composes_and_resumes_child() {
     );
     loop {
         if matches!(
-            events.recv().await.expect("parent model event"),
+            events.recv().await.expect("parent model event").as_ref().clone(),
             rw_core::EngineEvent::ModelChanged { ref model, .. } if *model == switched_model
         ) {
             break;

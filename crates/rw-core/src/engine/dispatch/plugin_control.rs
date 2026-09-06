@@ -1,14 +1,13 @@
 //! Machine controls enter the actor without creating or impersonating a driver.
 use crate::engine::session::{ActorState, SessionActorConfig};
 use crate::engine::turn::protocol_context_kind;
-use crate::engine::{AgentLoopError, RoutedEvent, apply_mode_change, mode_permission_base};
+use crate::engine::{AgentLoopError, apply_mode_change, mode_permission_base};
 use rw_types::extension_control::{
     ExtensionContextItem, ExtensionContextPage, ExtensionContextRead, ExtensionControl,
     ExtensionControlOutcome, MAX_CONTEXT_PAGE_ITEMS, validate_context_item_id,
 };
 use rw_types::{ContextItemId, ContextItemState, SessionMode};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 pub(super) fn read_context(
     current: &crate::engine::turn::history_context::CurrentContext,
@@ -98,7 +97,7 @@ pub(super) fn read_context(
 pub(super) async fn control(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     origin: Option<&rw_types::extension_invocation::ExtensionInvocationId>,
     control: ExtensionControl,
     prepared: bool,

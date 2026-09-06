@@ -74,7 +74,7 @@ async fn opening_batch_is_fully_persisted_before_any_event_is_broadcast() {
         .expect("opening batch reached sink");
     assert_eq!(sink.persisted.lock().expect("persisted events").len(), 1);
     assert!(matches!(
-        events.recv().await.expect("command ack"),
+        events.recv().await.expect("command ack").as_ref().clone(),
         EngineEvent::CommandAcknowledged {
             outcome: CommandOutcome::Accepted {},
             ..
@@ -107,8 +107,19 @@ async fn opening_batch_is_fully_persisted_before_any_event_is_broadcast() {
         EngineEvent::UserMessageAccepted { agent_turn: 1, content, .. }
             if content == "persist together"
     ));
-    assert_eq!(events.recv().await.expect("started event"), persisted[1]);
-    assert_eq!(events.recv().await.expect("accepted event"), persisted[2]);
+    assert_eq!(
+        events.recv().await.expect("started event").as_ref().clone(),
+        persisted[1]
+    );
+    assert_eq!(
+        events
+            .recv()
+            .await
+            .expect("accepted event")
+            .as_ref()
+            .clone(),
+        persisted[2]
+    );
 
     assert!(handle.interrupt().await.expect("cleanup interrupt"));
     collect_turn(&mut events).await;
@@ -144,13 +155,18 @@ async fn malformed_batch_payload_or_sequence_is_rejected_before_broadcast_or_mod
         ));
         assert_eq!(model.request_count(), 0);
         assert!(matches!(
-            events.recv().await.expect("command ack"),
+            events.recv().await.expect("command ack").as_ref().clone(),
             EngineEvent::CommandAcknowledged {
                 outcome: CommandOutcome::Accepted {},
                 ..
             }
         ));
-        let failure = events.recv().await.expect("caused-by failure event");
+        let failure = events
+            .recv()
+            .await
+            .expect("caused-by failure event")
+            .as_ref()
+            .clone();
         assert!(matches!(
             failure,
             EngineEvent::Error {

@@ -1,5 +1,4 @@
 use crate::engine::AgentLoopError;
-use crate::engine::RoutedEvent;
 use crate::engine::durability::SessionEventSink;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::session::ActorState;
@@ -7,11 +6,10 @@ use crate::engine::session::SessionActorConfig;
 use crate::engine::turn::emit;
 use rw_types::ContextItemId;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 pub(super) async fn apply_context_surgery(
     state: &mut ActorState,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     sink: &Arc<dyn SessionEventSink>,
     item_id: ContextItemId,
     pinned: bool,
@@ -35,7 +33,7 @@ pub(super) async fn apply_context_surgery(
 pub(super) async fn apply_registered_context_surgery(
     state: &mut ActorState,
     config: &SessionActorConfig,
-    events: &broadcast::Sender<RoutedEvent>,
+    events: &crate::engine::live_events::LiveEvents,
     item_id: ContextItemId,
     pinned: bool,
 ) -> Result<(), AgentLoopError> {
