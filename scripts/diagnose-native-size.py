@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 
@@ -25,6 +26,10 @@ def diagnose(repo: Path, target_dir: Path, output: Path, failed_gate: Path) -> i
     original_gate = json.loads(failed_gate.read_text())
     if original_gate.get("status") != "failed" or original_gate.get("exit_code", 0) == 0:
         raise ValueError("native size diagnostics require a failed build gate")
+    size_failure = re.search(r"ValueError: release engine is ([0-9]+) bytes; product budget is <([0-9]+)",
+                             original_gate.get("log_tail", ""))
+    if size_failure is None or int(size_failure[1]) < int(size_failure[2]):
+        raise ValueError("native link-map diagnostics require the engine size-gate failure")
     identity = native_candidate.build_identity(repo)
     if not identity["platform"].startswith("linux-") or "-linux-" not in identity["target"]:
         raise ValueError("ELF link-map diagnostic requires a native Linux build")
@@ -33,6 +38,8 @@ def diagnose(repo: Path, target_dir: Path, output: Path, failed_gate: Path) -> i
     executable = target_dir / identity["target"] / "release" / "rw"
     if executable.is_symlink() or not executable.is_file():
         raise ValueError("failed native build has no regular engine artifact")
+    if executable.stat().st_size != int(size_failure[1]):
+        raise ValueError("engine artifact size differs from the failed gate")
     with executable.open("rb") as stream:
         if stream.read(4) != b"\x7fELF":
             raise ValueError("failed engine artifact is not ELF")

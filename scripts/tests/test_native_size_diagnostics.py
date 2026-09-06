@@ -26,7 +26,8 @@ class NativeSizeDiagnosticsTests(unittest.TestCase):
         self.engine.write_bytes(self.original)
         self.output = self.repo / "diagnostics"
         self.gate = self.repo / "build.json"
-        self.gate.write_text(json.dumps({"status": "failed", "exit_code": 1, "source_sha": "abc"}))
+        self.gate.write_text(json.dumps({"status": "failed", "exit_code": 1, "source_sha": "abc",
+                                         "log_tail": f"ValueError: release engine is {len(self.original)} bytes; product budget is <10"}))
         self.identity = {"platform": "linux-x86_64", "target": "x86_64-unknown-linux-gnu",
                          "source": {"commit": "abc", "tree_sha256": "tree"},
                          "profile": {"name": "release", "opt_level": "s", "debug": 0}}
@@ -71,6 +72,19 @@ class NativeSizeDiagnosticsTests(unittest.TestCase):
         self.gate.write_text(json.dumps({"status": "passed", "exit_code": 0, "source_sha": "abc"}))
         with self.assertRaisesRegex(ValueError, "failed build gate"):
             self.run_diagnostic(lambda *_: self.fail("must not relink a successful candidate"))
+        self.assertFalse(self.output.exists())
+
+    def test_other_build_failure_cannot_relabel_a_cached_engine_as_size_evidence(self):
+        self.gate.write_text(json.dumps({"status": "failed", "exit_code": 1, "source_sha": "abc",
+                                         "log_tail": "rustc failed before linking"}))
+        with self.assertRaisesRegex(ValueError, "engine size-gate failure"):
+            self.run_diagnostic(lambda *_: self.fail("must not relink an unrelated failure"))
+        self.assertFalse(self.output.exists())
+
+    def test_changed_artifact_cannot_be_substituted_for_reported_size_failure(self):
+        self.engine.write_bytes(self.original + b"changed")
+        with self.assertRaisesRegex(ValueError, "artifact size differs"):
+            self.run_diagnostic(lambda *_: self.fail("must not relink changed artifact"))
         self.assertFalse(self.output.exists())
 
     def test_ci_failure_step_is_diagnostic_only_and_evidence_upload_is_unconditional(self):
