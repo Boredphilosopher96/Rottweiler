@@ -3397,13 +3397,15 @@
         "plugin_id": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[a-z0-9_.-]+$"
+          "maxLength": 160,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+          "x-rw-max-utf8-bytes": 160
         },
         "status": {
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
           "x-rw-max-utf8-bytes": 1024
         },
         "source": {
