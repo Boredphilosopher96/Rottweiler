@@ -170,6 +170,12 @@ async fn lagged_subscription_replays_every_durable_sequence_and_continues_live()
         events.recv().await.expect("attach ack").as_ref().clone(),
         EngineEvent::CommandAcknowledged { .. }
     ));
+    // Exercise durable catch-up independently of connection-scoped replies.
+    // A driver that loses an unread acknowledgement must fail explicitly.
+    drop(events);
+    let mut events = handle
+        .subscribe_client(ClientId("observer".to_owned()), Some(SequenceId(0)))
+        .expect("durable subscription");
     handle
         .dispatch(ClientCommand::SendMessage {
             meta: protocol_meta("driver", "send"),

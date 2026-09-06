@@ -64,7 +64,9 @@ async fn citation_overflow_stops_announcements_and_waits_for_provider_effects() 
     ))
     .await
     .expect("actor");
-    let mut subscription = actor.subscribe().expect("subscription");
+    let mut subscription = actor
+        .subscribe_client(rw_types::ClientId("citation-observer".into()), None)
+        .expect("subscription");
     actor.send_message("cite sources").await.expect("message");
     tokio::time::timeout(std::time::Duration::from_secs(3), model.settling.notified())
         .await
