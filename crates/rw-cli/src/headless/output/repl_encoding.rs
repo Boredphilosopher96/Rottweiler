@@ -1,33 +1,33 @@
-//! A REPL message owns its event and admits preparation plus final encoded bytes.
-use super::{EngineEvent, MAX_REPL_OUTPUT_BYTES, OutputFormat, public_cli_event};
+//! A REPL message admits its public event copy and final bytes before allocation.
+use super::{EngineEvent, MAX_REPL_OUTPUT_BYTES, OutputFormat, public_event::PublicEventPlan};
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_types::{allocation::AllocationPlan, json_encoding::JsonWriter};
+use rw_types::json_encoding::JsonWriter;
 use serde::Serialize;
 use std::{fmt, io::Write as _};
 
-pub(super) fn message(event: EngineEvent, format: OutputFormat) -> Result<Option<String>> {
+pub(super) fn message(event: &EngineEvent, format: OutputFormat) -> Result<Option<String>> {
     encode(event, format, MAX_REPL_OUTPUT_BYTES)
 }
-fn encode(event: EngineEvent, format: OutputFormat, limit: usize) -> Result<Option<String>> {
-    let plan = AllocationPlan::new(public_cli_event(event)).map_err(|_| exhausted())?;
+fn encode(event: &EngineEvent, format: OutputFormat, limit: usize) -> Result<Option<String>> {
+    let plan = PublicEventPlan::new(event).ok_or_else(exhausted)?;
     let output_limit = plan
         .bytes()
         .checked_mul(2)
         .and_then(|bytes| limit.checked_sub(bytes))
         .ok_or_else(exhausted)?;
+    let event = plan.prepare().ok_or_else(exhausted)?;
     if format == OutputFormat::StreamJson {
         let mut count = JsonWriter::count(output_limit);
-        count.serialize(plan.value()).into_diagnostic()?;
+        count.serialize(event.value()).into_diagnostic()?;
         count.write_all(b"\n").into_diagnostic()?;
         let length = count.written();
-        let event = plan.prepare();
         let mut bytes = Vec::with_capacity(length);
         let mut output = JsonWriter::buffer(&mut bytes, length, 0).into_diagnostic()?;
         output.serialize(event.value()).into_diagnostic()?;
         output.write_all(b"\n").into_diagnostic()?;
         return String::from_utf8(bytes).map(Some).into_diagnostic();
     }
-    text(plan.prepare().into_inner(), output_limit)
+    text(event.into_inner(), output_limit)
 }
 fn exhausted() -> miette::Report {
     miette!("REPL output allocation admission exceeded")
@@ -125,21 +125,25 @@ mod tests {
         }
     }
     #[test]
-    fn message_counts_public_projection_before_preparation_and_encoding() {
+    fn message_admits_public_copy_before_preparation_and_encoding() {
         let projected = event(None);
         let mut expected = serde_json::to_string(&projected).expect("public bytes");
         expected.push('\n');
         let limit = projected.prepared_bytes().expect("prepared size") * 2 + expected.len();
-        let actual = encode(
-            event(Some("opaque".repeat(4096))),
-            OutputFormat::StreamJson,
-            limit,
-        )
-        .expect("private signature retired before admission")
-        .expect("message");
+        let source = event(Some("opaque".repeat(4096)));
+        let actual = encode(&source, OutputFormat::StreamJson, limit)
+            .expect("private signature is never copied")
+            .expect("message");
         assert_eq!(actual, expected);
+        assert!(matches!(
+            source,
+            EngineEvent::ThinkingDelta {
+                signature: Some(_),
+                ..
+            }
+        ));
         assert_eq!(actual.capacity(), actual.len());
-        assert!(encode(event(None), OutputFormat::StreamJson, limit - 1).is_err());
+        assert!(encode(&event(None), OutputFormat::StreamJson, limit - 1).is_err());
     }
     #[test]
     fn human_text_formatting_admits_prefix_and_newline() {

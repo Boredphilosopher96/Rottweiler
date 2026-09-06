@@ -1,8 +1,8 @@
 //! A finite JSON result owns admitted events; streaming formats retain only scalars.
+use super::public_event::PublicEventPlan;
 use crate::cli_args::OutputFormat;
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{EngineEvent, TurnStatus, Usage};
-use rw_types::allocation::AllocationPlan;
 use serde::Serialize;
 
 const MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
@@ -21,8 +21,8 @@ impl PrintOutput {
             ends_newline: false,
         }
     }
-    pub(super) fn push(&mut self, event: EngineEvent) -> Result<()> {
-        match &event {
+    pub(super) fn push(&mut self, event: &EngineEvent) -> Result<()> {
+        match event {
             EngineEvent::TextDelta { text, .. } if !text.is_empty() => {
                 self.ends_newline = text.ends_with('\n');
             }
@@ -78,12 +78,11 @@ impl PrintAggregate {
             limit: MAX_JSON_BYTES,
         }
     }
-    fn push(&mut self, event: EngineEvent) -> Result<()> {
+    fn push(&mut self, event: &EngineEvent) -> Result<()> {
         if self.events.len() >= MAX_JSON_EVENTS {
             return Err(limit_error());
         }
-        let plan =
-            AllocationPlan::new(super::public_cli_event(event)).map_err(|_| limit_error())?;
+        let plan = PublicEventPlan::new(event).ok_or_else(limit_error)?;
         let (text, newline) = text_fragment(plan.value());
         let text_len = self
             .text
@@ -122,7 +121,7 @@ impl PrintAggregate {
         self.text.reserve_exact(text_capacity - self.text.len());
         self.events
             .reserve_exact(event_capacity - self.events.len());
-        let event = plan.prepare().into_inner();
+        let event = plan.prepare().ok_or_else(limit_error)?.into_inner();
         let (text, newline) = text_fragment(&event);
         self.text.push_str(text);
         if newline {

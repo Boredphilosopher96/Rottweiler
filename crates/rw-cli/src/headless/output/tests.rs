@@ -29,7 +29,12 @@ fn public_cli_json_drops_opaque_reasoning_signatures() {
         text: "brief summary".to_owned(),
         signature: Some("opaque-encrypted-provider-payload".repeat(100)),
     };
-    let public = serde_json::to_value(public_cli_event(event)).expect("public event");
+    let public = serde_json::to_value(
+        public_cli_event(&event)
+            .expect("admitted projection")
+            .value(),
+    )
+    .expect("public event");
     assert_eq!(public["text"], "brief summary");
     assert!(public["signature"].is_null());
     assert!(

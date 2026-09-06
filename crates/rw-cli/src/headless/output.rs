@@ -19,6 +19,7 @@ use std::path::Path;
 
 mod aggregate;
 mod printer;
+mod public_event;
 mod repl_encoding;
 use aggregate::PrintOutput;
 pub(super) const MAX_REPL_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -114,7 +115,7 @@ pub(super) async fn run_print(
         }
         match format {
             OutputFormat::Text => render_text_event(&event, false)?,
-            OutputFormat::StreamJson => write_json_line(&public_cli_event(event.clone()))?,
+            OutputFormat::StreamJson => write_json_line(public_cli_event(&event)?.value())?,
             OutputFormat::Json => {}
         }
         if let EngineEvent::UserMessageAccepted {
@@ -140,7 +141,7 @@ pub(super) async fn run_print(
             )
         };
         if command_mode || target_turn.is_some() {
-            aggregate.push(event)?;
+            aggregate.push(&event)?;
         }
         if target_finished {
             if perf_markers {
@@ -155,11 +156,20 @@ pub(super) async fn run_print(
     aggregate.finish(format)
 }
 
-pub(super) fn public_cli_event(mut event: EngineEvent) -> EngineEvent {
-    if let EngineEvent::ThinkingDelta { signature, .. } = &mut event {
-        *signature = None;
+pub(super) fn public_cli_event(
+    event: &EngineEvent,
+) -> Result<rw_types::allocation::PreparedAllocation<EngineEvent>> {
+    let plan = public_event::PublicEventPlan::new(event)
+        .ok_or_else(|| miette!("public event allocation admission exceeded"))?;
+    if plan
+        .bytes()
+        .checked_mul(2)
+        .is_none_or(|bytes| bytes > MAX_REPL_OUTPUT_BYTES)
+    {
+        return Err(miette!("public event allocation admission exceeded"));
     }
-    event
+    plan.prepare()
+        .ok_or_else(|| miette!("public event allocation admission exceeded"))
 }
 
 pub(super) fn write_json_line(value: &impl Serialize) -> Result<()> {
@@ -368,7 +378,7 @@ pub(super) async fn run_repl(
                     interactions.retain(|interaction| matches!(interaction, PendingInteraction::Plan));
                     display_next_interaction(interactions.front(), &mut printer).await?;
                 }
-                if let Some(message) = repl_event_message(event, format)? {
+                if let Some(message) = repl_event_message(&event, format)? {
                     printer.print(message).await?;
                 }
             }
@@ -421,7 +431,7 @@ async fn display_next_interaction(
 }
 
 pub(super) fn repl_event_message(
-    event: EngineEvent,
+    event: &EngineEvent,
     format: OutputFormat,
 ) -> Result<Option<String>> {
     repl_encoding::message(event, format)
