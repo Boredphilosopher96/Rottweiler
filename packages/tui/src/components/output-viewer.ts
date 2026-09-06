@@ -27,6 +27,11 @@ export class OutputViewerRenderable extends BoxRenderable {
   #invocationId: string | null = null
   #documentPage: DocumentSnapshot["page"] = null
 
+  override destroy(): void {
+    this.#documentPage = null; this.#invocationId = null
+    super.destroy()
+  }
+
   constructor(ctx: RenderContext, theme: RottweilerTheme) {
     super(ctx, {
       id: "tool-output-viewer",

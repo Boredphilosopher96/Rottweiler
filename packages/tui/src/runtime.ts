@@ -1,5 +1,9 @@
+import { collectSessionBootstrap, type SessionBootstrap } from "./runtime-bootstrap"
+import { TailChanged } from "./history/live-tail"
+import type { ClientCache } from "./history/cache"
+import type { HistoryCacheValue } from "./history/controller"
 import { SessionSnapshotReader } from "./runtime-snapshots"
-import { MAX_SESSION_CONTROLS_PREPARED_BYTES, MAX_SESSION_STATE_PREPARED_BYTES, MAX_SESSION_CHILDREN_PREPARED_BYTES } from "../../../protocol/types"
+import { MAX_SESSION_STATE_PREPARED_BYTES, MAX_SESSION_CHILDREN_PREPARED_BYTES } from "../../../protocol/types"
 import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
@@ -53,6 +57,8 @@ export interface EngineRuntimeConfig {
 }
 
 export interface RuntimeApp {
+  readonly historyCache: ClientCache<HistoryCacheValue>
+  installBootstrap(value: SessionBootstrap): void
   readonly state: RottweilerState
   handleEvent(event: EngineEvent): void
   setState(state: RottweilerState): void
@@ -152,34 +158,6 @@ export class EngineRuntimeError extends Error {
  * synchronous; durable cursor persistence is coalesced in the background.
  */
 export class TuiEngineRuntime {
-  readonly #controls = new SessionSnapshotReader(
-    MAX_SESSION_CONTROLS_PREPARED_BYTES,
-    async (sessionId, signal, allocation) => {
-      const generation = this.#sessionGeneration
-      const reply = await this.#client.postCommand({ type: "get_session_controls", meta: this.#meta(), session_id: sessionId }, signal, allocation)
-      signal.throwIfAborted()
-      if (generation !== this.#sessionGeneration) throw new DOMException("session changed", "AbortError")
-      const event = reply.type === "read" ? reply.events[0] : undefined
-      if (reply.outcome.type === "rejected" || reply.type !== "read" || reply.events.length !== 1
-        || event?.type !== "session_controls_ready" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("session controls reply is missing its session-bound result")
-      }
-      return event
-    },
-    event => {
-      const app = this.#requiredApp(), before = app.state.controls
-      app.handleEvent(event)
-      return app.state.controls !== before
-    },
-    (error, sessionId) => {
-      if (sessionId !== this.#sessionId) return
-      const app = this.#requiredApp()
-      app.setState({ ...app.state, errors: [...app.state.errors.slice(-63), {
-        category: "protocol", code: "session_controls_unavailable", message: safeErrorMessage(error), retryable: true,
-      }] })
-    },
-  )
-
   readonly #metadata = new SessionSnapshotReader(
     MAX_SESSION_STATE_PREPARED_BYTES,
     async (sessionId, signal, allocation) => {
@@ -313,6 +291,7 @@ export class TuiEngineRuntime {
   #transitionController: AbortController | null = null
   #subscriptionController: AbortController | null = null
   #subscription: Promise<void> | null = null
+  #bootstrapPending: Promise<void> | null = null
   #recoveringSequenceGap = false
   readonly #forkRequests = new Map<string, string>()
 
@@ -358,10 +337,8 @@ export class TuiEngineRuntime {
       throw new EngineRuntimeError("engine runtime is already bound to an application")
     }
     this.#app = app
-    // A cursor is meaningful only together with the reducer projection that
-    // produced it. A freshly spawned TUI has an empty projection, so importing
-    // the supervisor's cursor here would permanently omit earlier transcript
-    // events. Reconnects in this process still use app.state.lastSequence.
+    // Source snapshots establish a fresh projection and its own replay cursor.
+    // A bare supervisor cursor cannot authorize omitting historical state.
   }
 
   async start(): Promise<void> {
@@ -384,7 +361,7 @@ export class TuiEngineRuntime {
       }
     } finally {
       await this.#handoff?.close()
-    await Promise.all([this.#controls.settle(), this.#metadata.settle(), this.#children.settle()])
+    await Promise.all([this.#metadata.settle(), this.#children.settle(), this.#bootstrapPending?.catch(() => {})])
     }
   }
 
@@ -494,7 +471,7 @@ export class TuiEngineRuntime {
     this.#transitionController?.abort(this.#controller.signal.reason)
     this.#subscriptionController?.abort(this.#controller.signal.reason)
     await this.#handoff?.close()
-    await Promise.all([this.#controls.settle(), this.#metadata.settle(), this.#children.settle()])
+    await Promise.all([this.#metadata.settle(), this.#children.settle(), this.#bootstrapPending?.catch(() => {})])
   }
 
   /**
@@ -598,6 +575,8 @@ export class TuiEngineRuntime {
         )
       }
 
+      if (!this.#config.replayMode) await this.#bootstrapSession(sessionId, transition.signal)
+
       const subscriptionController = new AbortController()
       const abortSubscription = () => subscriptionController.abort(this.#controller.signal.reason)
       this.#controller.signal.addEventListener("abort", abortSubscription, {
@@ -644,7 +623,7 @@ export class TuiEngineRuntime {
             type: "attach_session",
             meta: this.#meta(),
             session_id: sessionId,
-            last_seen_sequence: null,
+            last_seen_sequence: this.#requiredApp().state.lastSequence,
             role: this.#config.replayMode ? "observer" : "driver",
           },
           signal: subscriptionController.signal,
@@ -667,6 +646,7 @@ export class TuiEngineRuntime {
                 `engine rejected reconnect driver takeover: ${takeover.error.message}`,
               )
             }
+            await this.#bootstrapSession(sessionId, subscriptionController.signal)
           },
           onConnection: (update) => {
             if (generation === this.#sessionGeneration) {
@@ -684,11 +664,16 @@ export class TuiEngineRuntime {
               }
             }
           },
-          onReplayCursorAhead: () => {
+          onReplayCursorAhead: async () => {
             if (generation !== this.#sessionGeneration) return
             const bound = this.#requiredApp()
             restartInitialReplayBatch()
             bound.resetConnectionProjections?.()
+            if (!this.#config.replayMode) {
+              await this.#bootstrapSession(sessionId, subscriptionController.signal)
+              this.#recoveringSequenceGap = false
+              return
+            }
             const initial = this.#config.replayMode
               ? enterReplayMode(createInitialState(), sessionId)
               : createInitialState()
@@ -837,10 +822,33 @@ export class TuiEngineRuntime {
     throw signal.reason ?? new DOMException("session preparation aborted", "AbortError")
   }
 
+  async #bootstrapSession(sessionId: string, signal: AbortSignal): Promise<void> {
+    await this.#bootstrapPending?.catch(() => {})
+    signal.throwIfAborted()
+    const pending = this.#collectBootstrapSession(sessionId, signal)
+    this.#bootstrapPending = pending
+    try { await pending } finally { if (this.#bootstrapPending === pending) this.#bootstrapPending = null }
+  }
+
+  async #collectBootstrapSession(sessionId: string, signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        const bootstrap = await collectSessionBootstrap(
+          (command, signal, allocation) => this.#client.postCommand(command, signal, allocation),
+          () => this.#meta(), this.#requiredApp().historyCache, sessionId, signal,
+        )
+        if (signal.aborted) { bootstrap.release(); signal.throwIfAborted() }
+        this.#requiredApp().installBootstrap(bootstrap)
+        return
+      } catch (error) {
+        if (!(error instanceof TailChanged)) throw error
+        await this.#sleep(250, signal)
+      }
+    }
+    signal.throwIfAborted()
+  }
+
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
-    void this.#controls.refresh(sessionId, signal)
-    void this.#metadata.refresh(sessionId, signal)
-    void this.#children.refresh(sessionId, signal)
     const commands: ClientCommand[] = [
       { type: "list_models", refresh: false, meta: this.#meta(), session_id: sessionId },
       { type: "list_modes", meta: this.#meta(), session_id: sessionId },

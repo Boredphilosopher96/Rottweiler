@@ -1,3 +1,7 @@
+import { ClientCache } from "../../src/history/cache"
+import type { HistoryCacheValue } from "../../src/history/controller"
+import { BootstrapPresentation } from "../../src/app/bootstrap"
+import type { SessionBootstrap } from "../../src/runtime-bootstrap"
 import type { EngineEvent } from "../../src/protocol"
 import { writeFileSync } from "node:fs"
 
@@ -13,6 +17,9 @@ const receivedSequences: string[] = []
 
 class WorkerApp implements RuntimeApp {
   state = createInitialState()
+  readonly historyCache = new ClientCache<HistoryCacheValue>()
+  readonly bootstrap = new BootstrapPresentation(state => this.setState(state))
+  installBootstrap(value: SessionBootstrap): void { this.bootstrap.install(value) }
 
   setSessionId(_sessionId: string): void {}
 

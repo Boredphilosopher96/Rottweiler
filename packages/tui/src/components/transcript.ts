@@ -767,6 +767,10 @@ export class TranscriptRenderable extends BoxRenderable {
   }
 
   override destroy(): void {
+    this.#state = null
+    this.#history = null
+    this.#tailToolCards.clear()
+    this.#finalHistoryInvocations.clear()
     for (const card of this.#tailToolPool) card.destroyRecursively()
     this.#tailToolPool.length = 0
     super.destroy()

@@ -270,7 +270,13 @@ export class ToolBlockRenderable extends BoxRenderable {
   #diffSignature = ""
   #headerSignature = ""
   #collapsed: boolean
-  #tool: ToolProjection
+  #retainedTool: ToolProjection | null = null
+  get #tool(): ToolProjection {
+    const value = this.#retainedTool
+    if (value === null) throw new Error("renderable model is released")
+    return value
+  }
+  set #tool(value: ToolProjection) { this.#retainedTool = value }
   #theme: RottweilerTheme
   #onExpansionChange: ((expanded: boolean) => void) | undefined
   #rendering: TranscriptRenderableOptions | undefined
@@ -281,6 +287,12 @@ export class ToolBlockRenderable extends BoxRenderable {
   #rootsGeneration = ""
   #lastRender: { readonly tool: ToolProjection; readonly width: number; readonly collapsed: boolean; readonly elapsed: string; readonly rootsGeneration: string } | null = null
   blockId: string
+
+  override destroy(): void {
+    this.#retainedTool = null
+    this.#lastRender = null
+    super.destroy()
+  }
 
   constructor(
     ctx: RenderContext,

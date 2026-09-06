@@ -1,3 +1,4 @@
+import { emptyBootstrapReply } from "../runtime/snapshot-fixtures"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
@@ -160,8 +161,8 @@ describe("Rottweiler terminal", () => {
       markHistoricalEventDelivered = resolve
     })
     const client: RuntimeEngineClient = {
-      async postCommand() {
-        return { type: "command", outcome: { type: "accepted" } }
+      async postCommand(command) {
+        return emptyBootstrapReply(command) ?? { type: "command", outcome: { type: "accepted" } }
       },
       restartStream() {
         return false

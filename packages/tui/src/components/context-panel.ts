@@ -53,6 +53,11 @@ export class ContextPanelRenderable extends BoxRenderable {
   #showSession = false
   #previousInputs: ReturnType<typeof contextPanelInputs> | null = null
 
+  override destroy(): void {
+    this.#previousInputs = null; this.#agentIds = []; this.#changedPaths = []
+    super.destroy()
+  }
+
   constructor(ctx: RenderContext, theme: RottweilerTheme, callbacks: ContextPanelCallbacks) {
     super(ctx, {
       id: "context-panel",

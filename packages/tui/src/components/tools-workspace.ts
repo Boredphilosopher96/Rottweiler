@@ -27,13 +27,24 @@ export class ToolActivityRowRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly output: TextRenderable
   readonly marker: TextRenderable
-  #model: ActivityPresentation
+  #retainedModel: ActivityPresentation | null = null
+  get #model(): ActivityPresentation {
+    const value = this.#retainedModel
+    if (value === null) throw new Error("renderable model is released")
+    return value
+  }
+  set #model(value: ActivityPresentation) { this.#retainedModel = value }
   #expanded: boolean
   #selected = false
   #theme: RottweilerTheme
   #availableWidth = 20
   #headerSignature = ""
   #onOpenToolOutput: (invocationId: string) => void
+
+  override destroy(): void {
+    this.#retainedModel = null
+    super.destroy()
+  }
 
   constructor(
     ctx: RenderContext,
@@ -236,6 +247,11 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
   #theme: RottweilerTheme
   #terminalWidth: number
   #terminalHeight: number
+
+  override destroy(): void {
+    this.#model = null; this.#rows.clear()
+    super.destroy()
+  }
 
   constructor(
     ctx: RenderContext,

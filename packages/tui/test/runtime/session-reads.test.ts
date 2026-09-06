@@ -9,7 +9,7 @@ test("session task capability reads a child without changing the driver and reje
   const post = client.postCommand.bind(client)
   let replySession = "child"
   client.postCommand = async (command: ClientCommand): Promise<CommandReply> => {
-    if (command.type !== "get_todos") return post(command)
+    if (command.type !== "get_todos" || command.session_id === "parent") return post(command)
     client.commands.push(command)
     return { type: "read", outcome: { type: "accepted" }, events: [{ type: "todos_read",
       meta: { ...command.meta, emitted_at: "2026-01-01T00:00:00Z" }, session_id: replySession,
@@ -63,7 +63,7 @@ test("live tail reads retain ancestry, allocation and reply session identity", a
   let foreign = false
   let admitted = 0
   client.postCommand = async (command: ClientCommand, _signal?: AbortSignal, allocation?: import("../../src/transport/reply-allocation").ReplyAllocation): Promise<CommandReply> => {
-    if (command.type !== "read_transcript_tail") return post(command)
+    if (command.type !== "read_transcript_tail" || command.session_id === "parent") return post(command)
     client.commands.push(command)
     allocation?.admit(4096)
     return { type: "read", outcome: { type: "accepted" }, events: [{

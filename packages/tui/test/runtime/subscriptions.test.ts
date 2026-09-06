@@ -66,7 +66,7 @@ describe("runtime subscriptions", () => {
 
     await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
     await client.subscription?.onReconnect?.()
-    expect(client.commands.at(-1)?.type).toBe("take_driver")
+    expect(client.commands.slice(-9).map(command => command.type)).toEqual(["take_driver", "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "get_session_state", "get_session_controls", "read_session_children", "get_todos"])
 
     await runtime.sendCommand({
       type: "get_context",
@@ -215,7 +215,6 @@ describe("runtime subscriptions", () => {
         .filter((command) => command.type === "list_commands").length === 1,
     )
 
-    // Recovery readers share a four-per-second admission cadence across reconnects.
     await waitFor(() => client.commands.slice(beforeReconnect).some(command => command.type === "read_session_children"), 1000)
     const reconnectedTypes = client.commands
       .slice(beforeReconnect)
@@ -223,6 +222,7 @@ describe("runtime subscriptions", () => {
     expect(reconnectedTypes[0]).toBe("take_driver")
     expect([...reconnectedTypes].sort()).toEqual(([
       "take_driver",
+      "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "get_todos",
       "list_models",
       "get_session_controls",
       "get_session_state",

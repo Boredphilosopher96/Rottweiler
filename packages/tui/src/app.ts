@@ -1,3 +1,5 @@
+import { BootstrapPresentation } from "./app/bootstrap"
+import type { SessionBootstrap } from "./runtime-bootstrap"
 import { navigateTranscript } from "./app/navigation"
 import { updateOutputViewer } from "./app/output"
 import { UiContributionController } from "./app/ui-contributions"
@@ -116,6 +118,7 @@ export class RottweilerApp extends BoxRenderable {
   readonly #mcp: McpUiController
   readonly #providers: ProviderUiController
   readonly #document: DocumentController
+  readonly #bootstrap: BootstrapPresentation
   readonly #history: HistoryPresentation
   #state: RottweilerState
   #workspaceRoots: RottweilerState["workspaceRoots"] | undefined
@@ -232,6 +235,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#history = new HistoryPresentation(options.sessionReader, snapshot => {
       if (!this.#destroyed && this.transcript !== undefined) this.transcript.setHistory(snapshot)
     }, options.diagnostics)
+    this.#bootstrap = new BootstrapPresentation(state => { this.#presentation.resume(); this.setState(state) })
     this.#document = new DocumentController(options.sessionReader, this.#history.controller.cache, snapshot => {
         if (!this.#destroyed && this.outputViewer !== undefined) {
           if (snapshot.open) this.outputViewer.showDocument(snapshot)
@@ -919,6 +923,9 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+  get historyCache() { return this.#history.controller.cache }
+  installBootstrap(value: SessionBootstrap): void { this.#bootstrap.install(value) }
+
   setState(state: RottweilerState): void {
     if (this.#destroyed) return
     this.#presentation.flushBeforeStateChange()
@@ -1281,6 +1288,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#settings.pickerClosed()
     this.#document?.close()
     this.#history?.dispose()
+    this.#state = createInitialState()
     this.#presentation.destroy()
     this.#submission.reset()
     this.#clearPluginNotificationTimer()
@@ -1295,6 +1303,7 @@ export class RottweilerApp extends BoxRenderable {
     this.ctx.keyInput.off("keypress", this.#input.onGlobalKey)
     this.#syntaxStyle.destroy()
     super.destroy()
+    this.#bootstrap.dispose()
   }
 
   #showClipboardNotice(): void {

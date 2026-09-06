@@ -77,7 +77,7 @@ Timeline handoff restores the selected source through an around read. Unresolved
 
 ## Task state
 
-Task state has one authoritative typed snapshot, committed independently from transformed tool presentation. The client retains no historical task-output checkpoints. A rewind immediately invalidates the displayed snapshot and records its physical sequence as the minimum acceptable read prefix. A late query cannot replace a newer live state commit.
+Task state has one authoritative typed snapshot, committed independently from transformed tool presentation. The client retains no historical task-output checkpoints. A rewind newer than the task snapshot invalidates it and records its physical sequence as the minimum acceptable read prefix. A late query cannot replace a newer live state commit.
 
 `GetTodos` uses the authenticated read channel in live and historical views. Each query advances the mode-independent index by a bounded number of transactions and returns either an exact snapshot or explicit catch-up progress. The main view and the one presented child each own a task controller with one pending read and one catch-up timer. Opening a child loads its exact snapshot without reconstructing task state from tool output. The sidebar displays the presented session's tasks. Leaving the child, switching sessions or destroying the renderer aborts that controller; late results cannot replace another view. An authenticated reconnect refreshes the presented child's task state. Task identities, item count, per-field UTF-8 bytes and aggregate text bytes are validated from the same source schema in Rust and generated client validators.
 
@@ -119,3 +119,13 @@ The question projection owns unresolved interactions only. A durable answer rele
 
 
 Approval payloads remain exact while a decision is unresolved. Completion releases rationale and capability lists, retaining at most a copied 16 KiB inline diff plus its canonical diff selector. Larger proposals and late diff updates keep the source action without retaining the complete proposal in the live tool map. Complete diff inspection resolves an authenticated bounded content view; historical rows continue to use their pinned view.
+
+## Live session bootstrap
+
+A fresh renderer, authenticated reconnect or rejected replay cursor collects source-backed live display components, session metadata, unresolved controls, active children and task state before subscribing. Each component retains its exact applied source prefix. The subscription starts at the minimum of those prefixes; reducer fences suppress only events already covered by the corresponding component. The supervisor cursor alone never authorizes skipping state. Historical inspection uses its session-bound read capability without opening an actor or taking a driver lease.
+
+The display tail reads text, thinking, citations and invocation previews as bounded pages from one structural epoch. Text and thinking each expose at most 64 KiB and report omitted content explicitly. Complete bodies remain available through canonical content selectors. A changed active-turn source or projection epoch causes the collector to release the incomplete bundle and retry. Compaction preview uses the actor's independent attempt/revision fence, including missed transient updates.
+
+Session metadata includes source-qualified plugin status values. Controls preserve exact pending question, approval and plan payloads; the active child snapshot includes bounded canonical spawn identities and task previews. These snapshots do not infer authority from tool presentation or a later query's cursor.
+
+The client allocation owner charges incoming snapshot decoding alongside the mounted source bundle. Only one bootstrap collector runs at a time, including cancellation settlement. Installation retains the old and incoming owners while component references change. A failed partial rebind retains both owners until disposal and rejects further installation. Component destruction severs retained model references before the application releases its snapshot bundle. Drafts and active input ownership survive a successful renderer handoff independently of source state.

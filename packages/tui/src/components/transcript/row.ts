@@ -33,13 +33,25 @@ export class TranscriptRowRenderable extends BoxRenderable {
   readonly reasoning: ReasoningBlockRenderable
   readonly #options: TranscriptRowOptions
   readonly #theme: RottweilerTheme
-  #item: TranscriptItem
+  #retainedItem: TranscriptItem | null = null
+  get #item(): TranscriptItem {
+    const value = this.#retainedItem
+    if (value === null) throw new Error("renderable model is released")
+    return value
+  }
+  set #item(value: TranscriptItem) { this.#retainedItem = value }
   #expanded: boolean
   #selected = false
   #width = 0
   #source: TranscriptContentSource | null = null
   #diffSource: TranscriptContentSource | null = null
   #presentationSource: TranscriptContentSource | null = null
+
+  override destroy(): void {
+    this.#retainedItem = null
+    this.#source = null; this.#diffSource = null; this.#presentationSource = null
+    super.destroy()
+  }
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, item: TranscriptItem, options: TranscriptRowOptions, expanded?: boolean) {
     super(ctx, { id: `history-row:${item.id}`, width: "100%", flexDirection: "column", flexShrink: 0, marginTop: 1 })

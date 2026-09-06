@@ -90,10 +90,9 @@ describe("runtime lifecycle", () => {
       "resume_session",
       "resume_session",
       "take_driver",
+      "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "read_transcript_tail",
+      "get_session_state", "get_session_controls", "read_session_children", "get_todos",
       "list_models",
-      "get_session_controls",
-      "get_session_state",
-      "read_session_children",
       "list_modes",
       "list_sessions",
       "get_context",
@@ -148,10 +147,9 @@ describe("runtime lifecycle", () => {
       "resume_session",
       "resume_session",
       "take_driver",
+      "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "read_transcript_tail",
+      "get_session_state", "get_session_controls", "read_session_children", "get_todos",
       "list_models",
-      "get_session_controls",
-      "get_session_state",
-      "read_session_children",
       "list_modes",
       "list_sessions",
       "get_context",
@@ -362,6 +360,8 @@ describe("runtime lifecycle", () => {
     expect(client.commands.map((command) => command.type)).toEqual([
       "resume_session",
       "take_driver",
+      "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "read_transcript_tail",
+      "get_session_state", "get_session_controls", "read_session_children", "get_todos",
     ])
     expect(readySessions).toEqual([])
 
@@ -371,10 +371,9 @@ describe("runtime lifecycle", () => {
     expect(client.commands.map((command) => command.type)).toEqual([
       "resume_session",
       "take_driver",
+      "read_transcript_tail", "read_transcript_tail", "read_transcript_tail", "read_transcript_tail",
+      "get_session_state", "get_session_controls", "read_session_children", "get_todos",
       "list_models",
-      "get_session_controls",
-      "get_session_state",
-      "read_session_children",
       "list_modes",
       "list_sessions",
       "get_context",

@@ -48,6 +48,11 @@ export class ReviewPanelRenderable extends BoxRenderable {
   #terminalWidth: number
   #primaryHeight: number
 
+  override destroy(): void {
+    this.#review = null
+    super.destroy()
+  }
+
   constructor(
     ctx: RenderContext,
     theme: RottweilerTheme,

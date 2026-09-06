@@ -270,7 +270,7 @@ describe("authenticated UDS engine transport", () => {
     expect(delays).toEqual([1])
   })
 
-  test("resets an ahead replay cursor once and retries from the beginning", async () => {
+  test.each([null, "3"])("recovers an ahead cursor once and uses the replacement source cursor %s", async recovered => {
     const replayCompleted = {
       type: "session_replay_completed",
       meta: {
@@ -328,7 +328,7 @@ describe("authenticated UDS engine transport", () => {
       getLastSeenSequence: () => cursor,
       onReplayCursorAhead() {
         resets += 1
-        cursor = null
+        cursor = recovered
       },
       onEvent() {
         controller.abort()
@@ -338,7 +338,7 @@ describe("authenticated UDS engine transport", () => {
     expect(resets).toBe(1)
     expect(eventPaths).toEqual([
       "/v1/events?session_id=session-transport&last_seen_sequence=9",
-      "/v1/events?session_id=session-transport",
+      "/v1/events?session_id=session-transport" + (recovered === null ? "" : `&last_seen_sequence=${recovered}`),
     ])
   })
 

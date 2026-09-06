@@ -108,6 +108,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
   }
 
   override destroy(): void {
+    this.#subagents = []
     this.#clearElapsedTimer()
     super.destroy()
   }

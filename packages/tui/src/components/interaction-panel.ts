@@ -49,6 +49,11 @@ export class InteractionPanelRenderable extends BoxRenderable {
   #treeSitterClient: TreeSitterClient | undefined
   #terminalHeight: number
 
+  override destroy(): void {
+    this.#activeTool = null; this.#activeQuestion = null; this.#activePlan = null; this.#diff = null
+    super.destroy()
+  }
+
   constructor(
     ctx: RenderContext,
     theme: RottweilerTheme,

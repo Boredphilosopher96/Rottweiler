@@ -14,6 +14,7 @@ export function emptyTodos(): TodoState {
 }
 
 export function invalidateTodos(state: TodoState, through: string | null): TodoState {
+  if (state.phase === "ready" && covers(state.through, through)) return state
   return { ...emptyTodos(), requiredThrough: later(state.requiredThrough, through), phase: "loading" }
 }
 

@@ -1,3 +1,4 @@
+import { emptyBootstrapReply } from "./runtime/snapshot-fixtures"
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
@@ -100,8 +101,8 @@ describe("M4 transport and process acceptance", () => {
         type: "session_controls_ready", session_id: command.session_id,
         meta: { ...command.meta, emitted_at: "2026-07-10T00:00:00Z" }, snapshot: controls,
       }] }
-      return CLIENT_COMMAND_EXECUTION[command.type] === "read" ? { type: "read", outcome: { type: "accepted" }, events: [] }
-        : { type: "command", outcome: { type: "accepted" } }
+      return emptyBootstrapReply(command) ?? (CLIENT_COMMAND_EXECUTION[command.type] === "read" ? { type: "read", outcome: { type: "accepted" }, events: [] }
+        : { type: "command", outcome: { type: "accepted" } })
     })
     await engine.start()
     cleanups.push(() => engine.stop())

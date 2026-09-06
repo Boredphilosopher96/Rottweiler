@@ -1,3 +1,8 @@
+import { ClientCache } from "../../src/history/cache"
+import type { HistoryCacheValue } from "../../src/history/controller"
+import { BootstrapPresentation } from "../../src/app/bootstrap"
+import type { SessionBootstrap } from "../../src/runtime-bootstrap"
+import { tailReply, todosReply } from "./snapshot-fixtures"
 import type { EngineEvent } from "../../src/protocol"
 import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome, type CommandReply } from "../../src/protocol"
 import {
@@ -29,6 +34,9 @@ export class MemoryFiles implements RuntimeFileSystem {
 
 export class TestApp implements RuntimeApp {
   state = createInitialState()
+  readonly historyCache = new ClientCache<HistoryCacheValue>()
+  readonly bootstrap = new BootstrapPresentation(state => this.setState(state))
+  installBootstrap(value: SessionBootstrap): void { this.bootstrap.install(value) }
   sessionId = ""
   readonly connectionPhases: string[] = []
   initialReplayBatchesStarted = 0
@@ -76,6 +84,8 @@ export class ScriptedClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command, "plan")
@@ -129,6 +139,8 @@ export class BlockingPreparationClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -156,6 +168,8 @@ export class SwitchingClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -224,6 +238,8 @@ export class DelayedConnectionClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -258,6 +274,8 @@ export class ReconnectingProjectionClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -288,6 +306,8 @@ export class CursorAheadClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -326,6 +346,8 @@ export class BlockingShutdownClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -351,6 +373,8 @@ export class CorrelatedForkClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -400,6 +424,8 @@ export class RestartRecordingClient implements RuntimeEngineClient {
 
   async postCommand(command: ClientCommand): Promise<CommandReply> {
     this.commands.push(command)
+    if (command.type === "read_transcript_tail") return tailReply(command)
+    if (command.type === "get_todos") return todosReply(command)
     if (command.type === "read_session_children") return childrenReply(command)
     if (command.type === "get_session_controls") return controlsReply(command)
     if (command.type === "get_session_state") return stateReply(command)
@@ -463,6 +489,6 @@ function stateReply(command: Extract<ClientCommand, { type: "get_session_state" 
 function childrenReply(command: Extract<ClientCommand, { type: "read_session_children" }>): CommandReply {
   return { type: "read", outcome: { type: "accepted" }, events: [{ type: "session_children_ready",
     meta: { ...command.meta, emitted_at: "2026-01-01T00:00:00Z" }, session_id: command.session_id,
-    result: { type: "ready", snapshot: { through: "5", children: [] } },
+    result: { type: "ready", snapshot: { through: null, children: [] } },
   }] }
 }

@@ -252,6 +252,7 @@ export class EngineHttpSseClient {
         }
         if (reconnecting) {
           await options.onReconnect?.()
+          if (options.getLastSeenSequence !== undefined) lastSeen = options.getLastSeenSequence()
         }
 
         const streamAuth = await this.#ensureClientAuth(options.signal)
@@ -321,7 +322,7 @@ export class EngineHttpSseClient {
           }
           await options.onReplayCursorAhead()
           replayCursorReset = true
-          lastSeen = null
+          lastSeen = options.getLastSeenSequence?.() ?? null
           attempt = 0
           reconnecting = true
           options.onConnection?.({ phase: "disconnected", attempt })

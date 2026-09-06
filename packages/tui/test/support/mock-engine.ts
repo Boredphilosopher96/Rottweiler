@@ -1,3 +1,4 @@
+import { emptyBootstrapReply } from "../runtime/snapshot-fixtures"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -80,7 +81,7 @@ export class AuthenticatedMockEngine {
     if (url.pathname === "/v1/command" && request.method === "POST") {
       const command = JSON.parse(body) as ClientCommand
       this.commands.push(command)
-      const reply = await this.onCommand?.(command) ?? (CLIENT_COMMAND_EXECUTION[command.type] === "read"
+      const reply = await this.onCommand?.(command) ?? emptyBootstrapReply(command) ?? (CLIENT_COMMAND_EXECUTION[command.type] === "read"
         ? { type: "read", outcome: { type: "accepted" }, events: [] }
         : { type: "command", outcome: { type: "accepted" } })
       return Response.json(reply, { status: reply.type === "read" ? 200 : 202 })
