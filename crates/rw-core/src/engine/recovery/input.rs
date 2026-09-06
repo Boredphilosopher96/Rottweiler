@@ -10,17 +10,19 @@ enum EventSource<'a> {
     Audit(&'a [EngineEvent]),
 }
 
-/// Resolve only the input reference; all other events remain borrowed. The returned
-/// materialization preserves the commit's identity and is never appended to a journal.
-/// The caller's source-read allowance owns the accepted decode and resulting IR.
-///
-/// # Errors
-/// Rejects missing, forward, foreign-session, wrong-turn, or redundant text selectors.
-pub fn materialize_conversation_event<'a>(
+/// Resolve a source event after canonical or published-index authority checked its claim.
+pub(crate) fn materialize_indexed_event<'a>(
     source: &JournalReadView,
     event: &'a EngineEvent,
 ) -> Result<Cow<'a, EngineEvent>, RecoveryError> {
     materialize(EventSource::Journal(source), event)
+}
+
+pub(crate) fn materialize_claimed_event<'a>(
+    source: &JournalReadView,
+    checked: rw_types::input_claims::InputClaimChecked<'a>,
+) -> Result<Cow<'a, EngineEvent>, RecoveryError> {
+    materialize_indexed_event(source, checked.event())
 }
 
 pub(in crate::engine) fn materialize_audit_event<'a>(

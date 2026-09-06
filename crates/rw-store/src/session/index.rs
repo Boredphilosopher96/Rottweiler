@@ -39,6 +39,8 @@ pub struct SessionProjection {
     pub complete: bool,
     /// Exact journal prefix incorporated into this projection.
     pub source: JournalPrefixIdentity,
+    /// Exact bounded input claims folded through the same source watermark.
+    pub input_claims: Vec<u8>,
 }
 
 /// Whether a derived index row agrees with the authoritative event log.
@@ -345,7 +347,14 @@ pub(super) fn upsert_projection(
     if projection.summary.title.len() > 4096 {
         return Err(SessionStoreError::SearchDocumentTooLarge { max_bytes: 4096 });
     }
-    connection.execute("INSERT INTO sessions(id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET title=excluded.title,updated_unix_ms=excluded.updated_unix_ms,cost_micros=excluded.cost_micros,turn_count=excluded.turn_count,explicit_title=excluded.explicit_title,search_complete=excluded.search_complete,next_sequence=excluded.next_sequence,source_digest=excluded.source_digest", params![projection.summary.id,projection.summary.title,projection.summary.updated_unix_ms,projection.summary.cost_micros,projection.summary.turn_count,projection.explicit_title,projection.complete,projection.source.next_sequence.to_string(),projection.source.digest.as_slice()])?;
+    let claims = &projection.input_claims;
+    if claims.is_empty() || claims.len() > rw_types::input_claims::MAX_INPUT_CLAIM_CHECKPOINT_BYTES
+    {
+        return Err(SessionStoreError::CorruptEvent(
+            "input claim checkpoint bytes",
+        ));
+    }
+    connection.execute("INSERT INTO sessions(id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest,input_claims) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET title=excluded.title,updated_unix_ms=excluded.updated_unix_ms,cost_micros=excluded.cost_micros,turn_count=excluded.turn_count,explicit_title=excluded.explicit_title,search_complete=excluded.search_complete,next_sequence=excluded.next_sequence,source_digest=excluded.source_digest,input_claims=excluded.input_claims", params![projection.summary.id,projection.summary.title,projection.summary.updated_unix_ms,projection.summary.cost_micros,projection.summary.turn_count,projection.explicit_title,projection.complete,projection.source.next_sequence.to_string(),projection.source.digest.as_slice(),claims])?;
     connection.execute("INSERT INTO search_documents(session_id,kind,agent_turn,sequence_id,part,body) VALUES(?1,0,'0','0',0,?2) ON CONFLICT(session_id,kind,sequence_id,part) DO UPDATE SET body=excluded.body WHERE body<>excluded.body", params![projection.summary.id,projection.summary.title])?;
     Ok(())
 }
@@ -354,29 +363,32 @@ fn read_projection(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<SessionProjection>, SessionStoreError> {
-    let row = connection.query_row("SELECT id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest FROM sessions WHERE id=?1", [id], |row| {
-        Ok((summary_from_row(row)?, row.get::<_,bool>(5)?, row.get::<_,bool>(6)?, row.get::<_,String>(7)?, row.get::<_,Vec<u8>>(8)?))
+    let row = connection.query_row("SELECT id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest,input_claims FROM sessions WHERE id=?1", [id], |row| {
+        Ok((summary_from_row(row)?, row.get::<_,bool>(5)?, row.get::<_,bool>(6)?, row.get::<_,String>(7)?, row.get::<_,Vec<u8>>(8)?, bounded_claim_checkpoint(row)?))
     }).optional()?;
-    row.map(|(summary, explicit_title, complete, next, digest)| {
-        let next_sequence = next
-            .parse::<u64>()
-            .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
-        if next_sequence.to_string() != next {
-            return Err(SessionStoreError::CorruptProjectionWatermark);
-        }
-        let digest = digest
-            .try_into()
-            .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
-        Ok(SessionProjection {
-            summary,
-            explicit_title,
-            complete,
-            source: JournalPrefixIdentity {
-                next_sequence,
-                digest,
-            },
-        })
-    })
+    row.map(
+        |(summary, explicit_title, complete, next, digest, claims)| {
+            let next_sequence = next
+                .parse::<u64>()
+                .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
+            if next_sequence.to_string() != next {
+                return Err(SessionStoreError::CorruptProjectionWatermark);
+            }
+            let digest = digest
+                .try_into()
+                .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
+            Ok(SessionProjection {
+                input_claims: claims,
+                summary,
+                explicit_title,
+                complete,
+                source: JournalPrefixIdentity {
+                    next_sequence,
+                    digest,
+                },
+            })
+        },
+    )
     .transpose()
 }
 
@@ -448,4 +460,18 @@ impl SearchDocumentWriter<'_> {
         self.connection.execute("DELETE FROM search_invocations WHERE session_id=?1 AND (length(agent_turn)>length(?2) OR (length(agent_turn)=length(?2) AND agent_turn>?2))", params![self.session,turn])?;
         Ok(())
     }
+}
+
+fn bounded_claim_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<u8>> {
+    let bytes = row.get_ref(9)?.as_blob().map_err(|_| {
+        rusqlite::Error::InvalidColumnType(9, "input_claims".into(), rusqlite::types::Type::Blob)
+    })?;
+    if bytes.is_empty() || bytes.len() > rw_types::input_claims::MAX_INPUT_CLAIM_CHECKPOINT_BYTES {
+        return Err(rusqlite::Error::InvalidColumnType(
+            9,
+            "input_claims".into(),
+            rusqlite::types::Type::Blob,
+        ));
+    }
+    Ok(bytes.to_vec())
 }

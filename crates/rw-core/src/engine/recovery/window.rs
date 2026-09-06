@@ -181,7 +181,7 @@ impl super::RecoveryHead {
         self.control.approved_plan = boundary.control.approved_plan;
         self.control.plan_gate_active = boundary.control.plan_gate_active;
         self.control.queued.clear();
-        self.control.accepted.clear();
+        self.control.input_claims.abandon_pending();
         self.control
             .questions
             .retain(|question| question.agent_turn <= turn);

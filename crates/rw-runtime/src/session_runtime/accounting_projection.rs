@@ -158,12 +158,16 @@ pub(super) fn project_accounting(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 pub(super) fn project_session(
     session_id: &str,
     events: &[EngineEvent],
     path: &Path,
 ) -> SessionProjection {
     let mut projection = SessionProjection {
+        input_claims: rw_core::recovery::InputClaimCheckpoint::default()
+            .encode()
+            .expect("empty checkpoint"),
         summary: rw_store::session::SessionSummary {
             id: session_id.into(),
             title: "New session".into(),
@@ -178,6 +182,28 @@ pub(super) fn project_session(
     for event in events {
         super::search_projection::metadata(&mut projection, event);
     }
+    let root = tempfile::tempdir().expect("fixture source");
+    let mut journal = rw_store::session::journal::SegmentedJournal::open(root.path(), session_id)
+        .expect("journal");
+    journal
+        .append_batch(events.iter().cloned())
+        .expect("fixture events");
+    let source = journal.read_view();
+    let page = source
+        .verified_page::<EngineEvent>(None, rw_store::session::SessionEventPageLimits::default())
+        .expect("source page");
+    assert!(!page.page.has_more, "fixture is one bounded page");
+    let mut claims = rw_core::recovery::InputClaimPage::new(
+        &page,
+        rw_core::recovery::InputClaimCheckpoint::default(),
+    )
+    .expect("claims");
+    while claims.next_event().expect("claim transition").is_some() {}
+    projection.input_claims = claims
+        .checkpoint()
+        .and_then(|checkpoint| checkpoint.encode())
+        .expect("fixture checkpoint");
+    projection.source = source.prefix_identity();
     projection
 }
 

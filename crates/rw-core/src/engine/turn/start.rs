@@ -166,6 +166,7 @@ pub(super) fn prepare_turn_opening(
         if message.accepted.is_none() {
             message.accepted = Some(crate::recovery::AcceptedSource {
                 claimed_turn: turn,
+                ended: false,
                 agent_turn: turn,
                 sequence: rw_types::SequenceId(next_source),
                 retained: false,

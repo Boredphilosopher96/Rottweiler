@@ -3,11 +3,11 @@ use super::{
     encoding::serialized_size,
     projector::{BatchRows, key},
     state::{
-        ACCOUNTING, ACTIVE_ASSISTANT, ACTIVE_TOOL_LIFECYCLE, ACTIVE_TOOL_RESULTS, AcceptedSource,
-        ActiveSource, ActiveTurn, BOUNDARIES, Boundary, CONVERSATION, ConversationCut,
-        ConversationSource, MAX_QUESTIONS, MAX_QUEUED, Maintenance, QuestionSource, QueuedSource,
-        RecoveryHead, RewindPhase, SOURCE_ORDINAL, SourceTotals, ToolLifecycleSource,
-        ToolStartIdentity, TurnSourceKind,
+        ACCOUNTING, ACTIVE_ASSISTANT, ACTIVE_TOOL_LIFECYCLE, ACTIVE_TOOL_RESULTS, ActiveSource,
+        ActiveTurn, BOUNDARIES, Boundary, CONVERSATION, ConversationCut, ConversationSource,
+        MAX_QUESTIONS, MAX_QUEUED, Maintenance, QuestionSource, QueuedSource, RecoveryHead,
+        RewindPhase, SOURCE_ORDINAL, SourceTotals, ToolLifecycleSource, ToolStartIdentity,
+        TurnSourceKind,
     },
 };
 use crate::engine::{
@@ -45,8 +45,13 @@ pub(super) fn reduce(
     }
     head.session_id = Some(meta.session_id.clone());
     let sequence = meta.sequence_id;
+    let checked = head
+        .control
+        .input_claims
+        .advance(event)
+        .map_err(RecoveryError::Invalid)?;
     let body_source = super::context_selection::validate(head, event, rows)?;
-    let materialized = super::input::materialize_conversation_event(source, event)?;
+    let materialized = super::input::materialize_claimed_event(source, checked)?;
     let Some(kind) = recovered_pending_event(&materialized)? else {
         head.next_sequence += 1;
         return Ok(());
@@ -98,17 +103,6 @@ pub(super) fn reduce(
                 &turn,
             )?;
             if head.compacting.is_none() {
-                if let EngineEvent::ConversationInputCommitted {
-                    accepted_source, ..
-                } = event
-                    && let Some(index) = head
-                        .control
-                        .accepted
-                        .iter()
-                        .position(|accepted| accepted.sequence == *accepted_source)
-                {
-                    head.control.accepted.remove(index);
-                }
                 if let Some(active) = &mut head.control.active {
                     match turn.role {
                         Role::Assistant => {
@@ -137,7 +131,6 @@ pub(super) fn reduce(
             return Ok(());
         }
         PendingEvent::TurnStarted { turn } => {
-            super::retained_input::claim(head, rows, turn)?;
             rows.delete(key(super::state::PROMPTS, 0, turn));
             head.control.active = Some(ActiveTurn {
                 announced_citations: rw_types::citation_admission::CitationAdmission::default(),
@@ -154,25 +147,8 @@ pub(super) fn reduce(
             head.control.next_turn = head.control.next_turn.max(turn.saturating_add(1));
         }
         PendingEvent::TurnFinished {
-            turn,
-            usage,
-            cost,
-            status,
+            turn, usage, cost, ..
         } => {
-            if status != crate::engine::AgentTurnStatus::Interrupted
-                && head
-                    .control
-                    .accepted
-                    .iter()
-                    .any(|input| input.claimed_turn == turn && input.retained)
-            {
-                return Err(RecoveryError::Invalid(
-                    "retained input requires interrupted closure",
-                ));
-            }
-            head.control
-                .accepted
-                .retain(|accepted| accepted.claimed_turn != turn || accepted.retained);
             head.accounting.record_actuals(&usage.into(), &cost);
             if head
                 .control
@@ -223,25 +199,11 @@ pub(super) fn reduce(
             }
         }
         PendingEvent::QueuedMessagesCleared => head.control.queued.clear(),
-        PendingEvent::UserMessageRetained { accepted_source } => {
-            let active = head.control.active.as_ref().ok_or(RecoveryError::Invalid(
-                "input retention requires an active turn",
-            ))?;
-            let accepted = head
-                .control
-                .accepted
-                .iter_mut()
-                .find(|accepted| accepted.sequence == accepted_source)
-                .ok_or(RecoveryError::Invalid("retained input must be pending"))?;
-            if accepted.retained || accepted.claimed_turn != active.turn {
-                return Err(RecoveryError::Invalid("input retention source or phase"));
-            }
-            accepted.retained = true;
-        }
+        PendingEvent::UserMessageRetained { .. } => {}
         PendingEvent::UserMessageAccepted {
-            turn,
             content,
             attachments,
+            ..
         } => {
             crate::engine::dispatch::recover_user_message(&content, &attachments)
                 .map_err(crate::engine::SessionProjectionError::InvalidAttachment)?;
@@ -254,15 +216,6 @@ pub(super) fn reduce(
             {
                 head.control.queued.remove(index);
             }
-            if head.control.accepted.len() >= MAX_QUEUED {
-                return Err(RecoveryError::Limit("accepted message identities"));
-            }
-            head.control.accepted.push(AcceptedSource {
-                claimed_turn: turn,
-                retained: false,
-                agent_turn: turn,
-                sequence,
-            });
         }
         PendingEvent::QuestionAsked {
             turn,

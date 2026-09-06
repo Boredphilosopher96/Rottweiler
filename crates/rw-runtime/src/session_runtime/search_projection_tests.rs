@@ -282,3 +282,55 @@ fn referenced_input_searches_selected_text() {
         1
     );
 }
+
+#[test]
+fn search_rejects_unclaimed_cross_turn_input_without_publishing_a_new_prefix() {
+    let root = tempfile::tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
+    let [accepted, mut commit] = user(0, 1, "body needle");
+    journal.append_batch([accepted]).expect("accepted source");
+    synchronize(root.path(), "search", &journal.read_view()).expect("pending checkpoint");
+    let index = SessionIndex::open(root.path()).expect("index");
+    let before = index
+        .projection("search")
+        .expect("projection")
+        .expect("row");
+    if let EngineEvent::ConversationInputCommitted { agent_turn, .. } = &mut commit {
+        *agent_turn = 2;
+    }
+    journal.append_batch([commit]).expect("raw invalid event");
+    assert!(synchronize(root.path(), "search", &journal.read_view()).is_err());
+    let after = index
+        .projection("search")
+        .expect("projection")
+        .expect("row");
+    assert_eq!(after.source, before.source);
+    assert_eq!(after.input_claims, before.input_claims);
+}
+
+#[test]
+fn search_rejects_reusing_a_consumed_source_after_restart() {
+    let root = tempfile::tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
+    let events = user(0, 1, "only once");
+    let mut duplicate = events[1].clone();
+    journal.append_batch(events).expect("committed input");
+    synchronize(root.path(), "search", &journal.read_view()).expect("published input");
+    let expected = journal.read_view().prefix_identity();
+    drop(journal);
+    let mut journal = SegmentedJournal::open(root.path(), "search").expect("reopen");
+    duplicate.meta_mut().expect("metadata").sequence_id = SequenceId(2);
+    journal
+        .append_batch([duplicate])
+        .expect("duplicate source claim");
+    assert!(synchronize(root.path(), "search", &journal.read_view()).is_err());
+    assert_eq!(
+        SessionIndex::open(root.path())
+            .expect("index")
+            .projection("search")
+            .expect("projection")
+            .expect("row")
+            .source,
+        expected
+    );
+}

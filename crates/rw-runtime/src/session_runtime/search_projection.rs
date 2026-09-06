@@ -26,7 +26,9 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
         stored = None;
     }
     let mut expected = stored.as_ref().map(|projection| projection.source);
-    let mut projection = stored.unwrap_or_else(|| empty(session));
+    let mut projection = stored.map_or_else(|| empty(session), Ok)?;
+    rw_core::recovery::InputClaimCheckpoint::decode(&projection.input_claims, projection.source)
+        .into_diagnostic()?;
     loop {
         if projection.source == source.prefix_identity() {
             if expected.is_none() {
@@ -39,8 +41,8 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
             .next_sequence
             .checked_sub(1)
             .map(SequenceId);
-        let page = source
-            .page::<EngineEvent>(
+        let verified = source
+            .verified_page::<EngineEvent>(
                 after,
                 SessionEventPageLimits {
                     max_page_events: 128,
@@ -49,6 +51,15 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
                 },
             )
             .into_diagnostic()?;
+        let page = &verified.page;
+        let checkpoint = rw_core::recovery::InputClaimCheckpoint::decode(
+            &projection.input_claims,
+            projection.source,
+        )
+        .into_diagnostic()?;
+        let mut claims =
+            rw_core::recovery::InputClaimPage::new(&verified, checkpoint).into_diagnostic()?;
+        let mut checked = Vec::with_capacity(page.events.len());
         if page.next_cursor == after {
             return Err(miette!("search projection made no source progress"));
         }
@@ -62,8 +73,18 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
                     "search source event identity differs from its envelope"
                 ));
             }
+            checked.push(
+                claims
+                    .next_event()
+                    .into_diagnostic()?
+                    .ok_or_else(|| miette!("missing input claim event"))?,
+            );
             metadata(&mut projection, &envelope.event);
         }
+        projection.input_claims = claims
+            .checkpoint()
+            .and_then(|checkpoint| checkpoint.encode())
+            .into_diagnostic()?;
         projection.complete = !page.has_more;
         projection.source = source
             .prefix_through(page.next_cursor)
@@ -73,12 +94,10 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
             session_projection_updated_at(&root.join("sessions").join(session).join("journal"));
         index
             .apply_page(expected, &projection, |writer| {
-                for envelope in &page.events {
-                    let event =
-                        rw_core::recovery::materialize_conversation_event(source, &envelope.event)
-                            .map_err(|_| {
-                                SessionStoreError::CorruptEvent("accepted search input")
-                            })?;
+                for checked in checked {
+                    let event = checked
+                        .materialize()
+                        .map_err(|_| SessionStoreError::CorruptEvent("accepted search input"))?;
                     documents(writer, &event)?;
                 }
                 Ok(())
@@ -88,8 +107,11 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
     }
 }
 
-fn empty(session: &str) -> SessionProjection {
-    SessionProjection {
+fn empty(session: &str) -> Result<SessionProjection> {
+    Ok(SessionProjection {
+        input_claims: rw_core::recovery::InputClaimCheckpoint::default()
+            .encode()
+            .into_diagnostic()?,
         summary: SessionSummary {
             id: session.into(),
             title: "New session".into(),
@@ -100,7 +122,7 @@ fn empty(session: &str) -> SessionProjection {
         explicit_title: false,
         complete: true,
         source: JournalPrefixIdentity::empty(),
-    }
+    })
 }
 
 pub(super) fn metadata(projection: &mut SessionProjection, event: &EngineEvent) {

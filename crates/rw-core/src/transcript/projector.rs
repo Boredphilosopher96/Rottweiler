@@ -16,7 +16,9 @@ const EVENTS_PER_BATCH: usize = 64;
 const REPAIR_ROWS_PER_BATCH: usize = 16;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct Checkpoint {
+#[serde(deny_unknown_fields)]
+pub(super) struct Checkpoint {
+    input_claims: crate::recovery::InputClaimCheckpoint,
     state: TranscriptProjectionState,
     rewind: Option<PendingRewind>,
 }
@@ -116,6 +118,7 @@ impl TranscriptProjector {
         let verified = view
             .verified_page::<EngineEvent>(after, limits)
             .map_err(TranscriptIndexError::from)?;
+        let mut claims = claim_page(&verified, &checkpoint)?;
         let page = &verified.page;
         let mut overlay = BatchRows {
             index: &self.index,
@@ -127,7 +130,7 @@ impl TranscriptProjector {
         let mut interpreted = 0;
         let mut charged_bytes = 0;
         for envelope in &page.events {
-            let resolved = resolve_source(view, envelope.sequence, &envelope.event)?;
+            let resolved = claimed_event(&mut claims)?;
             match project_transcript_event(&resolved, &checkpoint.state, &overlay)? {
                 TranscriptEventProjection::Update {
                     state,
@@ -151,6 +154,9 @@ impl TranscriptProjector {
                     for change in changes {
                         overlay.apply(change);
                     }
+                    checkpoint.input_claims = claims
+                        .checkpoint()
+                        .map_err(|_| TranscriptProjectionError::Invalid("input checkpoint"))?;
                     checkpoint.state = state;
                     interpreted += 1;
                 }
@@ -228,13 +234,19 @@ impl TranscriptProjector {
     fn checkpoint(&self) -> Result<Checkpoint, TranscriptProjectionError> {
         Self::checkpoint_for(&self.index)
     }
-    fn checkpoint_for(index: &TranscriptIndex) -> Result<Checkpoint, TranscriptProjectionError> {
+    pub(super) fn checkpoint_for(
+        index: &TranscriptIndex,
+    ) -> Result<Checkpoint, TranscriptProjectionError> {
         let head = index.head()?;
         let checkpoint: Checkpoint = if head.state.is_empty() {
             Checkpoint::default()
         } else {
             serde_json::from_slice(&head.state)?
         };
+        checkpoint
+            .input_claims
+            .validate_at(head.prefix)
+            .map_err(|_| TranscriptProjectionError::Invalid("input checkpoint source"))?;
         checkpoint
             .state
             .tail
@@ -341,16 +353,7 @@ impl TranscriptProjector {
             }
         };
         let applied = if complete {
-            checkpoint.state.next_sequence = pending
-                .sequence
-                .0
-                .checked_add(1)
-                .ok_or(TranscriptProjectionError::Invalid("sequence overflow"))?;
-            checkpoint.state.next_ordinal = before.total_rows;
-            checkpoint.state.active_turn = Some(pending.target);
-            checkpoint.state.tail.reset(pending.sequence.0);
-            view.prefix_through(Some(pending.sequence))
-                .map_err(TranscriptIndexError::from)?
+            finish_rewind(view, &mut checkpoint, &pending, before.total_rows)?
         } else {
             checkpoint.rewind = Some(pending);
             view.at_prefix(before.prefix)
@@ -436,16 +439,58 @@ fn projection_page_limits() -> SessionEventPageLimits {
     }
 }
 
-fn resolve_source<'a>(
-    view: &JournalReadView,
-    sequence: SequenceId,
-    event: &'a EngineEvent,
+fn claim_page<'a>(
+    page: &'a rw_store::session::journal::VerifiedJournalPage<EngineEvent>,
+    checkpoint: &Checkpoint,
+) -> Result<crate::recovery::InputClaimPage<'a>, TranscriptProjectionError> {
+    crate::recovery::InputClaimPage::new(page, checkpoint.input_claims.clone())
+        .map_err(|_| TranscriptProjectionError::Invalid("input claim checkpoint"))
+}
+fn claimed_event<'a>(
+    claims: &mut crate::recovery::InputClaimPage<'a>,
 ) -> Result<std::borrow::Cow<'a, EngineEvent>, TranscriptProjectionError> {
-    if event.meta().is_none_or(|meta| meta.sequence_id != sequence) {
-        return Err(TranscriptProjectionError::Invalid(
-            "envelope/event sequence mismatch",
-        ));
-    }
-    crate::recovery::materialize_conversation_event(view, event)
+    claims
+        .next_event()
+        .map_err(|_| TranscriptProjectionError::Invalid("input claim transition"))?
+        .ok_or(TranscriptProjectionError::Invalid(
+            "missing checked input event",
+        ))?
+        .materialize()
         .map_err(|_| TranscriptProjectionError::Invalid("conversation source"))
+}
+
+fn finish_rewind(
+    view: &JournalReadView,
+    checkpoint: &mut Checkpoint,
+    pending: &PendingRewind,
+    total_rows: u64,
+) -> Result<JournalReadView, TranscriptProjectionError> {
+    let sequence = pending.sequence;
+    let page = view
+        .verified_page::<EngineEvent>(
+            sequence.0.checked_sub(1).map(SequenceId),
+            SessionEventPageLimits {
+                max_page_events: 1,
+                ..projection_page_limits()
+            },
+        )
+        .map_err(TranscriptIndexError::from)?;
+    let mut claims = claim_page(&page, checkpoint)?;
+    claims
+        .next_event()
+        .map_err(|_| TranscriptProjectionError::Invalid("rewind input claims"))?
+        .ok_or(TranscriptProjectionError::Invalid("rewind input source"))?;
+    checkpoint.input_claims = claims
+        .checkpoint()
+        .map_err(|_| TranscriptProjectionError::Invalid("rewind input checkpoint"))?;
+    checkpoint.state.next_sequence = sequence
+        .0
+        .checked_add(1)
+        .ok_or(TranscriptProjectionError::Invalid("sequence overflow"))?;
+    checkpoint.state.next_ordinal = total_rows;
+    checkpoint.state.active_turn = Some(pending.target);
+    checkpoint.state.tail.reset(sequence.0);
+    page.proof
+        .prefix_through(Some(sequence))
+        .map_err(|error| TranscriptIndexError::from(error).into())
 }

@@ -39,7 +39,8 @@ pub(super) const SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions(
     explicit_title INTEGER NOT NULL CHECK(explicit_title IN (0,1)),
     search_complete INTEGER NOT NULL CHECK(search_complete IN (0,1)),
     next_sequence TEXT NOT NULL CHECK(length(next_sequence)<=20),
-    source_digest BLOB NOT NULL CHECK(length(source_digest)=32)
+    source_digest BLOB NOT NULL CHECK(length(source_digest)=32),
+    input_claims BLOB NOT NULL CHECK(typeof(input_claims)='blob' AND length(input_claims) BETWEEN 1 AND 32768)
 );";
 pub(super) const DOCUMENTS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS search_documents(
     session_id TEXT NOT NULL,

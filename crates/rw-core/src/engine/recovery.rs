@@ -30,14 +30,15 @@ pub(in crate::engine) mod input;
 mod maintenance;
 mod projector;
 pub(crate) use projector::registry_fingerprint;
+mod input_page;
 mod read;
-pub use input::materialize_conversation_event;
+pub(crate) use input::materialize_indexed_event;
+pub use input_page::{ClaimedInputEvent, InputClaimCheckpoint, InputClaimPage};
 mod receipts;
 mod routing;
 pub use routing::SessionRoutingIndex;
 mod reduce;
 mod repair;
-mod retained_input;
 pub use read::{
     CanonicalHistory, HistoryMaterializationLimits, MAX_MATERIALIZED_HISTORY_BYTES,
     MAX_MATERIALIZED_HISTORY_DECODE_BYTES, MAX_MATERIALIZED_HISTORY_TURNS, RecoverySnapshot,

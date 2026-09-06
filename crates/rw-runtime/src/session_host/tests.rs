@@ -210,6 +210,9 @@ fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
     SessionIndex::open(&factory.options.storage_root)
         .and_then(|index| {
             index.upsert(&SessionProjection {
+                input_claims: rw_core::recovery::InputClaimCheckpoint::default()
+                    .encode()
+                    .expect("empty claim checkpoint"),
                 summary: StoredSessionSummary {
                     id: "scheduling-delay".to_owned(),
                     title: "Scheduling delay".to_owned(),

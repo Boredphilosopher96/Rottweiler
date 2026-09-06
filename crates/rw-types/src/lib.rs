@@ -87,3 +87,5 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};
 
 pub mod json_structure;
+
+pub mod input_claims;

@@ -80,13 +80,7 @@ pub struct QuestionSource {
     pub agent_turn: u64,
     pub sequence: SequenceId,
 }
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AcceptedSource {
-    pub claimed_turn: u64,
-    pub retained: bool,
-    pub agent_turn: u64,
-    pub sequence: SequenceId,
-}
+pub use rw_types::input_claims::AcceptedSource;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActiveTurn {
     pub announced_citations: rw_types::citation_admission::CitationAdmission,
@@ -160,7 +154,7 @@ pub struct RecoveryControl {
     pub workspace_root_count: usize,
     pub workspace_digest: [u8; 32],
     pub queued: Vec<QueuedSource>,
-    pub accepted: Vec<AcceptedSource>,
+    pub input_claims: rw_types::input_claims::InputClaimState,
     pub questions: Vec<QuestionSource>,
 }
 impl Default for RecoveryControl {
@@ -185,7 +179,7 @@ impl Default for RecoveryControl {
             workspace_root_count: 0,
             workspace_digest: *blake3::hash(b"").as_bytes(),
             queued: Vec::new(),
-            accepted: Vec::new(),
+            input_claims: rw_types::input_claims::InputClaimState::default(),
             questions: Vec::new(),
         }
     }
@@ -270,8 +264,17 @@ impl RecoveryHead {
         }
     }
     pub(super) fn validate(&self) -> Result<(), RecoveryError> {
+        if self.maintenance.is_none() {
+            self.control
+                .input_claims
+                .validate_checkpoint(
+                    self.next_sequence,
+                    self.session_id.as_ref().map_or("", |id| id.0.as_str()),
+                )
+                .map_err(RecoveryError::Invalid)?;
+        }
         if self.control.queued.len() > MAX_QUEUED
-            || self.control.accepted.len() > MAX_QUEUED
+            || self.control.input_claims.pending().len() > MAX_QUEUED
             || self.control.questions.len() > MAX_QUESTIONS
         {
             return Err(RecoveryError::Limit("active queue/question identities"));

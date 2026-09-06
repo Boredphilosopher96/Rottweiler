@@ -357,7 +357,7 @@ impl ControlReader<'_> {
                 },
             ));
         }
-        for accepted in &control.accepted {
+        for accepted in control.input_claims.pending() {
             let PendingEvent::UserMessageAccepted {
                 turn,
                 content,

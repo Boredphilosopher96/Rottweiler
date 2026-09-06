@@ -1,7 +1,7 @@
 #![cfg(test)]
 #![allow(clippy::expect_used)]
 use super::{
-    CanonicalRecovery, HistoryMaterializationLimits, materialize_conversation_event,
+    CanonicalRecovery, HistoryMaterializationLimits,
     tests::{append, catch_up, event, terminal},
 };
 use crate::engine::PendingEvent;
@@ -116,13 +116,18 @@ fn referenced_input_has_one_attachment_body_and_identical_recovery_and_display()
 }
 
 fn assert_display(source: &rw_store::session::journal::JournalReadView, commit: &EngineEvent) {
-    let resolved = materialize_conversation_event(source, commit).expect("resolve display");
     let mut projector = crate::transcript::TranscriptProjector::open(source).expect("transcript");
     while projector.advance(source).expect("advance display").has_more {}
+    let resolved = crate::transcript::TranscriptProjector::materialize_source(
+        projector.index(),
+        source,
+        commit.meta().expect("commit metadata").sequence_id,
+    )
+    .expect("published source");
     let rows = projector.index().page(0, 8, 128 * 1024).expect("rows");
     assert!(rows.rows.iter().any(|row| row.source == SequenceId(2)));
     let document = crate::transcript::TranscriptDocument::from_event(
-        resolved.into_owned(),
+        resolved,
         &rw_types::transcript::TranscriptContentSource {
             sequence: SequenceId(2),
             selector: rw_types::transcript::TranscriptContentSelector::ConversationBlock {
@@ -177,6 +182,10 @@ fn input_commit_rejects_wrong_forward_consumed_and_redundant_sources() {
         let source = journal.read_view();
         let mut recovery = CanonicalRecovery::open(&source, &modes, None).expect("recovery");
         assert!(recovery.advance(&source, &modes).is_err());
+        let mut transcript = crate::transcript::TranscriptProjector::open(&source)
+            .expect("independent transcript owner");
+        assert!(transcript.advance(&source).is_err());
+        assert_eq!(transcript.index().head().expect("head").total_rows, 0);
     }
 }
 

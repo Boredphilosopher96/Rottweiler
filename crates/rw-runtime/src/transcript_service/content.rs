@@ -2,11 +2,9 @@
 
 use super::page;
 use rw_core::{HostError, transcript::TranscriptDocument};
-use rw_store::session::{
-    SessionEventPageLimits, journal::JournalReadView, transcript_index::TranscriptIndex,
-};
+use rw_store::session::{journal::JournalReadView, transcript_index::TranscriptIndex};
 use rw_types::{
-    EngineEvent, SessionId,
+    SessionId,
     transcript::{TranscriptContentPage, TranscriptContentRead},
 };
 use std::{
@@ -134,35 +132,17 @@ pub(super) fn read(
         let pinned = journal
             .at_prefix(page::prefix(&request.view)?)
             .map_err(page::storage)?;
-        let limits = SessionEventPageLimits::default();
-        let page = pinned
-            .page::<EngineEvent>(
-                request
-                    .source
-                    .sequence
-                    .0
-                    .checked_sub(1)
-                    .map(rw_types::SequenceId),
-                SessionEventPageLimits {
-                    max_page_events: 1,
-                    max_page_bytes: limits.max_line_bytes as u64 + 1,
-                    max_scan_bytes: limits.max_line_bytes as u64 * 2,
-                    ..limits
-                },
-            )
-            .map_err(page::storage)?;
-        let event = page
-            .events
-            .into_iter()
-            .next()
-            .ok_or_else(|| HostError::Protocol("content source does not exist".into()))?
-            .event;
-        let event = match rw_core::recovery::materialize_conversation_event(&pinned, &event)
-            .map_err(page::storage)?
-        {
-            std::borrow::Cow::Borrowed(_) => event,
-            std::borrow::Cow::Owned(resolved) => resolved,
-        };
+        if request.source.sequence.0 >= pinned.prefix_identity().next_sequence {
+            return Err(HostError::Protocol(
+                "content source exceeds requested view".into(),
+            ));
+        }
+        let event = rw_core::transcript::TranscriptProjector::materialize_source(
+            index,
+            journal,
+            request.source.sequence,
+        )
+        .map_err(page::storage)?;
         let document = TranscriptDocument::from_event(event, &request.source, MAX_DOCUMENT_BYTES)
             .map_err(page::storage)?;
         cache

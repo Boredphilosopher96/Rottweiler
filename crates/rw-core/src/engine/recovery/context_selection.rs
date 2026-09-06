@@ -16,34 +16,6 @@ pub(super) fn validate(
         .ok_or(RecoveryError::Invalid("context metadata"))?
         .sequence_id;
     match event {
-        EngineEvent::ConversationInputCommitted {
-            agent_turn,
-            accepted_source,
-            ..
-        } => {
-            let input = head
-                .control
-                .accepted
-                .iter()
-                .find(|input| input.sequence == *accepted_source)
-                .ok_or(RecoveryError::Invalid("input is not pending"))?;
-            if input.claimed_turn != *agent_turn || input.retained {
-                return Err(RecoveryError::Invalid(
-                    "input commit must own its active claim",
-                ));
-            }
-            if input.agent_turn != *agent_turn
-                && head
-                    .control
-                    .active
-                    .as_ref()
-                    .is_none_or(|active| active.turn != *agent_turn)
-            {
-                return Err(RecoveryError::Invalid(
-                    "retained input requires an active turn",
-                ));
-            }
-        }
         EngineEvent::ConversationContextCommitted {
             selection:
                 ContextSelection::Retained {

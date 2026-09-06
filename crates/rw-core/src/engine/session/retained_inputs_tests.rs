@@ -115,13 +115,24 @@ fn repeated_crash_repair_claims_one_accepted_body_without_duplicate_markers() {
         assert!(repair(&journal).is_empty());
         let state = bootstrap(&journal).expect("reopen");
         assert_eq!(state.controls.accepted_messages.len(), 1);
-        assert_eq!(state.head.control.accepted[0].agent_turn, 1);
-        assert_eq!(state.head.control.accepted[0].claimed_turn, turn);
+        assert_eq!(state.head.control.input_claims.pending()[0].agent_turn, 1);
+        assert_eq!(
+            state.head.control.input_claims.pending()[0].claimed_turn,
+            turn
+        );
         append(
             &mut journal,
             vec![PendingEvent::TurnStarted { turn: turn + 1 }],
         );
-        assert!(!bootstrap(&journal).expect("claimed").head.control.accepted[0].retained);
+        assert!(
+            !bootstrap(&journal)
+                .expect("claimed")
+                .head
+                .control
+                .input_claims
+                .pending()[0]
+                .retained
+        );
     }
     append(&mut journal, vec![commit(4), terminal(4)]);
     assert!(
@@ -129,7 +140,8 @@ fn repeated_crash_repair_claims_one_accepted_body_without_duplicate_markers() {
             .expect("consumed")
             .head
             .control
-            .accepted
+            .input_claims
+            .pending()
             .is_empty()
     );
     // Only the original source contains the attachment; every retry is metadata.
@@ -157,13 +169,34 @@ fn repeated_crash_repair_claims_one_accepted_body_without_duplicate_markers() {
     );
     let audit = crate::engine::project_session_events(&events).expect("audit exact claims");
     assert_eq!(audit.conversation.len(), 1);
-    let resolved =
-        crate::recovery::materialize_conversation_event(&source, &events[events.len() - 2])
-            .expect("public canonical input materialization");
-    let EngineEvent::ConversationTurnCommitted { turn, .. } = resolved.as_ref() else {
+    assert_published_input(&source, &events, &audit.conversation[0]);
+}
+
+fn assert_published_input(
+    source: &rw_store::session::journal::JournalReadView,
+    events: &[EngineEvent],
+    expected: &rw_types::Turn,
+) {
+    let mut projector =
+        crate::transcript::TranscriptProjector::open(source).expect("display source");
+    while projector
+        .advance(source)
+        .expect("display catch-up")
+        .has_more
+    {}
+    let resolved = crate::transcript::TranscriptProjector::materialize_source(
+        projector.index(),
+        source,
+        events[events.len() - 2]
+            .meta()
+            .expect("source identity")
+            .sequence_id,
+    )
+    .expect("published input materialization");
+    let EngineEvent::ConversationTurnCommitted { turn, .. } = &resolved else {
         panic!("resolved conversation input");
     };
-    assert_eq!(&audit.conversation[0], turn);
+    assert_eq!(expected, turn);
 }
 
 #[test]
@@ -191,7 +224,8 @@ fn explicit_cancellation_discards_original_and_resumed_unretained_claims() {
                 .expect("cancelled")
                 .head
                 .control
-                .accepted
+                .input_claims
+                .pending()
                 .is_empty()
         );
         assert!(repair(&journal).is_empty());
@@ -278,7 +312,8 @@ fn rewind_discards_pending_claims_without_resurrecting_accepted_input() {
             .expect("rewound")
             .head
             .control
-            .accepted
+            .input_claims
+            .pending()
             .is_empty()
     );
     assert!(repair(&journal).is_empty());

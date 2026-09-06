@@ -111,7 +111,7 @@ fn head_heap(head: &RecoveryHead) -> Option<usize> {
             .as_ref()
             .map_or(Some(0), |(id, _)| heap(id)),
         vector(&control.queued, |_| Some(0)),
-        vector(&control.accepted, |_| Some(0)),
+        heap(&control.input_claims),
         vector(&control.questions, |question| heap(&question.id)),
     ])
 }

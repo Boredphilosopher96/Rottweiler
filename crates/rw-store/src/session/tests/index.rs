@@ -12,6 +12,7 @@ fn summary(id: &str, title: &str, updated: i64) -> SessionSummary {
 }
 fn projection(summary: SessionSummary, next_sequence: u64) -> SessionProjection {
     SessionProjection {
+        input_claims: checkpoint(&summary.id, next_sequence),
         summary,
         explicit_title: true,
         complete: true,
@@ -170,6 +171,7 @@ fn opening_an_unsupported_index_rejects_without_mutating_database_bytes() {
 fn derived_index_rebuild_replaces_stale_rows() {
     let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
     let stale = SessionProjection {
+        input_claims: checkpoint("stale", 1),
         summary: SessionSummary {
             id: "stale".to_owned(),
             title: "old".to_owned(),
@@ -188,6 +190,7 @@ fn derived_index_rebuild_replaces_stale_rows() {
         .and_then(|index| index.upsert(&stale))
         .unwrap_or_else(|error| panic!("stale row must write: {error}"));
     let current = SessionProjection {
+        input_claims: checkpoint("current", u64::MAX),
         summary: SessionSummary {
             id: "current".to_owned(),
             title: "new".to_owned(),
@@ -250,6 +253,7 @@ fn read_only_search_preserves_stored_rows_and_does_not_create_a_missing_index() 
 
     let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let projection = SessionProjection {
+        input_claims: checkpoint("searchable", 1),
         summary: SessionSummary {
             id: "searchable".to_owned(),
             title: "Needle session".to_owned(),
@@ -293,6 +297,7 @@ fn read_only_search_sees_committed_wal_rows_without_writing_data() {
         .execute_batch("PRAGMA wal_autocheckpoint=0;")
         .unwrap_or_else(|error| panic!("disable autocheckpoint: {error}"));
     let projection = SessionProjection {
+        input_claims: checkpoint("wal-fresh", 5),
         summary: SessionSummary {
             id: "wal-fresh".to_owned(),
             title: "Fresh WAL needle".to_owned(),
@@ -407,4 +412,15 @@ fn missing_or_contradictory_search_triggers_require_a_derived_rebuild() {
             vec![row.summary]
         );
     }
+}
+
+fn checkpoint(session: &str, next: u64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "prefix": { "next_sequence": next, "digest": [0; 32].as_slice() },
+        "claims": {
+            "session": if next == 0 { None } else { Some(session) },
+            "next_sequence": next, "active": null, "pending": [],
+        },
+    }))
+    .expect("explicit claim checkpoint at synthetic store prefix")
 }

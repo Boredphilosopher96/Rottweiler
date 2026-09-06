@@ -62,6 +62,9 @@ fn read_only_session_listing_is_newest_first_and_bounded() {
     for (id, updated) in [("older", 1), ("newer-b", 2), ("newer-a", 2)] {
         index
             .upsert(&SessionProjection {
+                input_claims: rw_core::recovery::InputClaimCheckpoint::default()
+                    .encode()
+                    .expect("empty claim checkpoint"),
                 summary: SessionSummary {
                     id: id.to_owned(),
                     title: id.to_owned(),
