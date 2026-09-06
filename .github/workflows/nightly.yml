@@ -114,7 +114,7 @@ jobs:
           bun-version: 1.3.14
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: ". -> ${{ runner.temp }}/native-target.noindex"
+          workspaces: ". -> target/native-candidate"
           key: native-candidate
       - name: Build and enforce native component sizes
         id: candidate
@@ -122,7 +122,7 @@ jobs:
           python3 scripts/ci_evidence.py --gate build-and-size --output ci-results/build.json --
           python3 scripts/build-native-candidate.py
           --output "$RUNNER_TEMP/native-candidates.noindex"
-          --target-dir "$RUNNER_TEMP/native-target.noindex"
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
           --github-output "$GITHUB_OUTPUT"
       - name: Upload verified native candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -159,7 +159,7 @@ jobs:
           bun-version: 1.3.14
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: ". -> ${{ runner.temp }}/native-target.noindex"
+          workspaces: ". -> target/native-candidate"
           key: native-candidate
       - name: Build and enforce native component sizes
         id: candidate
@@ -167,7 +167,7 @@ jobs:
           python3 scripts/ci_evidence.py --gate build-and-size --output ci-results/build.json --
           python3 scripts/build-native-candidate.py
           --output "$RUNNER_TEMP/native-candidates.noindex"
-          --target-dir "$RUNNER_TEMP/native-target.noindex"
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
           --github-output "$GITHUB_OUTPUT"
       - name: Upload verified native candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -230,7 +230,7 @@ jobs:
         run: crates/rw-cli/tests/m8_release_gate_linux.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
-          CARGO_TARGET_DIR: ${{ runner.temp }}/native-target.noindex
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-candidate
       - run: bun run test:perf
         working-directory: packages/tui
         env:
@@ -292,7 +292,7 @@ jobs:
           python3 scripts/ci_evidence.py --gate build-and-size --output perf-results/build.json --
           python3 scripts/build-native-candidate.py
           --output "$RUNNER_TEMP/native-candidates.noindex"
-          --target-dir "$RUNNER_TEMP/native-target.noindex"
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
           --github-output "$GITHUB_OUTPUT"
       - name: Prepare MCP acceptance fixture before measurement
         id: mcp-fixture
@@ -301,7 +301,7 @@ jobs:
           release_dir=$(scripts/cargo-release.sh artifact-dir)
           echo "executable=$release_dir/rw-mcp-fixture" >> "$GITHUB_OUTPUT"
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/native-target.noindex
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-candidate
           CARGO_PROFILE_RELEASE_DEBUG: 0
       - name: Retain native candidate identity
         run: |
@@ -323,7 +323,7 @@ jobs:
           crates/rw-cli/tests/m8_release_gate.sh "$engine" "${{ steps.mcp-fixture.outputs.executable }}"
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
-          CARGO_TARGET_DIR: ${{ runner.temp }}/native-target.noindex
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-candidate
       - run: bun run test:perf
         working-directory: packages/tui
         env:
@@ -359,7 +359,7 @@ jobs:
             "$GITHUB_WORKSPACE/packages/tui/dist" \
             "$GITHUB_WORKSPACE/packages/tui/node_modules" \
             "$RUNNER_TEMP/native-candidates.noindex" \
-            "$RUNNER_TEMP/native-target.noindex"
+            "$GITHUB_WORKSPACE/target/native-candidate"
 
   macos-soak-dispatch:
     name: Dispatch darwin-arm64 soak
