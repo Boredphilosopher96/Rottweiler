@@ -297,13 +297,12 @@ fn start_host_command(request: RpcRequest, state: &ReaderState) -> bool {
         let response = match response {
             Ok(result) => {
                 drop(reply);
-                match result.redact(request.id, redactor.as_ref()) {
-                    Ok(response) => response,
-                    Err(_) => {
-                        termination.begin();
-                        lease.complete();
-                        return;
-                    }
+                if let Ok(response) = result.redact(request.id, redactor.as_ref()) {
+                    response
+                } else {
+                    termination.begin();
+                    lease.complete();
+                    return;
                 }
             }
             Err(error) => reply.failure(request.id, error),
