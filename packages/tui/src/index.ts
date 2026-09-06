@@ -60,6 +60,15 @@ async function main(): Promise<void> {
     await runCompiledTreeSitterSmoke(treeSitterSmokeReport)
     return
   }
+  const memoryProbeReport = process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT
+  if (memoryProbeReport !== undefined && memoryProbeReport.length > 0) {
+    const directory = process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY
+    if (directory === undefined) throw new Error("client memory probe requires a private directory")
+    const { runClientMemoryProbe } = await import("./diagnostics/memory-probe")
+    await runClientMemoryProbe(memoryProbeReport, directory, Number(process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES ?? "20"),
+      process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE === "1")
+    return
+  }
   let runtimeForShutdown: {
     shutdownHost(): Promise<boolean>
     stop(): Promise<void>

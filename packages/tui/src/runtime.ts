@@ -1,3 +1,4 @@
+import { sessionReader } from "./session-reader-factory"
 import { familyControlsReader } from "./family-controls-reader"
 import { ClientAllocationOwner, commandReplyDomain } from "./client-allocation"
 import { collectSessionBootstrap, type SessionBootstrap } from "./runtime-bootstrap"
@@ -10,7 +11,6 @@ import type { ReplyAllocation } from "./transport/reply-allocation"
 import type { EngineEvent } from "./protocol"
 import type { ClientDiagnostics } from "./client-diagnostics"
 import { CLIENT_COMMAND_EXECUTION } from "./protocol"
-import type { SessionReader } from "./session-reader"
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join } from "node:path"
 
@@ -226,64 +226,8 @@ export class TuiEngineRuntime {
 
   readonly familyControls = familyControlsReader((command, signal, allocation) => this.#readSession(command, signal, allocation), () => this.#meta())
 
-  readonly sessionReader: SessionReader = {
-    children: async ({ sessionId, scope }, signal, allocation) => {
-      const reply = await this.#readSession({ type: "read_session_children", meta: this.#meta(), session_id: sessionId, scope }, signal, allocation)
-      const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "session_children_ready" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("children reply is missing its session-bound result")
-      }
-      return event.result
-    },
-    tail: async ({ sessionId, scope }, read, signal, allocation) => {
-      const reply = await this.#readSession({ type: "read_transcript_tail", meta: this.#meta(), session_id: sessionId, scope, read }, signal, allocation)
-      const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "transcript_tail_ready" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("live tail reply is missing its session-bound result")
-      }
-      return event.result
-    },
-    uiCatalog: async (sessionId, signal, allocation) => {
-      const reply = await this.#readSession({ type: "get_ui_catalog", meta: this.#meta(), session_id: sessionId }, signal, allocation)
-      const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "ui_catalog_ready" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("UI catalog reply is missing its session-bound result")
-      }
-      return event.catalog
-    },
-    uiPanels: async (sessionId, signal, allocation) => {
-      const reply = await this.#readSession({ type: "get_ui_panels", meta: this.#meta(), session_id: sessionId }, signal, allocation)
-      const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "ui_panels_ready" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("UI panels reply is missing its session-bound result")
-      }
-      return event.panels
-    },
-    todos: async ({ sessionId, scope }, signal, allocation) => {
-      const reply = await this.#readSession({ type: "get_todos", meta: this.#meta(), session_id: sessionId, scope }, signal, allocation)
-      const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "todos_read" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("task reply is missing its session-bound result")
-      }
-      return event.result
-    },
-    page: async ({ sessionId, scope }, read, signal, allocation) => {
-      const reply = await this.#readSession({ type: "read_transcript", meta: this.#meta(), session_id: sessionId, scope, read }, signal, allocation)
-      const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "transcript_page_ready" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("transcript page reply is missing its result")
-      }
-      return event.result
-    },
-    content: async ({ sessionId, scope }, read, signal, allocation) => {
-      const reply = await this.#readSession({ type: "read_transcript_content", meta: this.#meta(), session_id: sessionId, scope, read }, signal, allocation)
-      const event = reply.events[0]
-      if (reply.events.length !== 1 || event?.type !== "transcript_content_ready" || event.session_id !== sessionId) {
-        throw new EngineRuntimeError("transcript content reply is missing its result")
-      }
-      return event.page
-    },
-  }
+  readonly sessionReader = sessionReader((command, signal, allocation) => this.#readSession(command, signal, allocation), () => this.#meta())
+
   readonly #config: EngineRuntimeConfig
   readonly #client: RuntimeEngineClient
   readonly #requestId: () => string
