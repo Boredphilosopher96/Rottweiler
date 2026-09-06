@@ -149,11 +149,11 @@ pub(super) fn prepare_turn_start(
 
 pub(super) fn prepare_turn_opening(
     turn: u64,
-    messages: &[PreparedUserMessage],
+    messages: &mut [PreparedUserMessage],
     first_accepted: rw_types::SequenceId,
     synchronous: bool,
     conversation: &mut Vec<Turn>,
-) -> Vec<PendingEvent> {
+) -> Result<Vec<PendingEvent>, AgentLoopError> {
     let capacity = if synchronous {
         messages.len().saturating_mul(2).saturating_add(1)
     } else {
@@ -161,27 +161,41 @@ pub(super) fn prepare_turn_opening(
     };
     let mut events = Vec::with_capacity(capacity);
     events.push(PendingEvent::TurnStarted { turn });
-    events.extend(
-        messages
-            .iter()
-            .map(|message| PendingEvent::UserMessageAccepted {
+    let mut next_source = first_accepted.0;
+    for message in messages.iter_mut() {
+        if message.accepted.is_none() {
+            message.accepted = Some(crate::recovery::AcceptedSource {
+                claimed_turn: turn,
+                agent_turn: turn,
+                sequence: rw_types::SequenceId(next_source),
+                retained: false,
+            });
+            next_source += 1;
+            events.push(PendingEvent::UserMessageAccepted {
                 turn,
                 content: message.content.clone(),
                 attachments: message.stored_attachments.clone(),
-            }),
-    );
+            });
+        }
+    }
     if synchronous {
-        for (index, message) in messages.iter().enumerate() {
+        for message in messages.iter() {
             let user_turn = message.turn(message.content.clone());
             events.push(PendingEvent::ConversationInputCommitted {
                 agent_turn: turn,
-                accepted_source: rw_types::SequenceId(first_accepted.0 + index as u64),
+                accepted_source: message
+                    .accepted
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AgentLoopError::Persistence("accepted input source was not assigned".into())
+                    })?
+                    .sequence,
                 selection: rw_types::conversation_input::InputSelection::Accepted {},
             });
             conversation.push(user_turn);
         }
     }
-    events
+    Ok(events)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -191,12 +205,26 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     messages: Vec<(String, Vec<Attachment>)>,
     overrides: CommandTurnOverrides,
 ) -> Result<(), AgentLoopError> {
-    let messages = resume_suspended_inputs(state, messages);
+    let messages = if state.suspended_inputs.is_some() {
+        state
+            .queued
+            .iter()
+            .cloned()
+            .map(|content| (content, Vec::new()))
+            .chain(messages)
+            .collect()
+    } else {
+        messages
+    };
     let PreparedTurnStart {
         config,
         messages,
         tool_calls,
     } = prepare_turn_start(state, runtime.config, messages, overrides)?;
+    validate_accepted(
+        &config,
+        state.suspended_inputs.as_deref().unwrap_or_default(),
+    )?;
     let history =
         super::history_context::capture(runtime.config, state.sequence.map(rw_types::SequenceId))
             .await?;
@@ -212,6 +240,13 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         )?,
     );
 
+    // All input and route checks precede transferring the retained source owner.
+    let accepted = state.suspended_inputs.take();
+    if accepted.is_some() {
+        state.queued.clear();
+        state.queued_positions.clear();
+    }
+    let mut messages = prepend_accepted(accepted.unwrap_or_default(), messages);
     state.next_turn = state.next_turn.saturating_add(1);
     let cancellation = CancellationToken::default();
     state.running = Some(RunningTurn {
@@ -234,15 +269,19 @@ pub(in crate::engine) async fn start_turn_with_overrides(
         .filter(|first| first.checked_add(messages.len() as u64).is_some())
         .map(rw_types::SequenceId)
         .ok_or_else(|| AgentLoopError::Persistence("input source sequence overflow".into()))?;
-    let opening_commit_start = first_accepted.0 + messages.len() as u64;
+    let opening_commit_start = first_accepted.0
+        + messages
+            .iter()
+            .filter(|message| message.accepted.is_none())
+            .count() as u64;
     let mut opening_conversation = Vec::new();
     let opening_events = prepare_turn_opening(
         turn,
-        &messages,
+        &mut messages,
         first_accepted,
         prepare_users_synchronously,
         &mut opening_conversation,
-    );
+    )?;
     if let Err(error) = emit_batch(
         state,
         runtime.events,
@@ -262,13 +301,21 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     } else {
         messages
             .into_iter()
-            .enumerate()
-            .map(|(index, message)| AcceptedUserMessage {
-                source: rw_types::SequenceId(first_accepted.0 + index as u64),
-                original_content: message.content.clone(),
-                message,
+            .map(|message| {
+                let source = message
+                    .accepted
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AgentLoopError::Persistence("accepted input source was not assigned".into())
+                    })?
+                    .sequence;
+                Ok(AcceptedUserMessage {
+                    source,
+                    original_content: message.content.clone(),
+                    message,
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, AgentLoopError>>()?
     };
     let protocol_asker: Arc<dyn QuestionAsker> = Arc::new(ActorQuestionAsker::new(
         runtime.signals.clone(),
@@ -405,30 +452,42 @@ pub(in crate::engine) async fn start_turn_with_overrides(
     Ok(())
 }
 
-fn resume_suspended_inputs(
-    state: &mut ActorState,
-    messages: Vec<(String, Vec<Attachment>)>,
-) -> Vec<(String, Vec<Attachment>)> {
-    let Some(accepted) = state.suspended_inputs.take() else {
-        return messages;
-    };
-    state.queued_positions.clear();
+fn validate_accepted(
+    config: &SessionActorConfig,
+    accepted: &[crate::recovery::RecoveredMessage],
+) -> Result<(), AgentLoopError> {
+    for message in accepted {
+        if message.accepted.is_none() {
+            return Err(AgentLoopError::Persistence(
+                "recovered input has no accepted source".into(),
+            ));
+        }
+        if !config.model.supports_vision(&config.model_alias)
+            && message.attachments.iter().any(|attachment| {
+                matches!(
+                    &attachment.data,
+                    rw_types::AttachmentData::InlineBase64 { .. }
+                )
+            })
+        {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "selected model does not support accepted image attachments".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+fn prepend_accepted(
+    accepted: Vec<crate::recovery::RecoveredMessage>,
+    messages: Vec<PreparedUserMessage>,
+) -> Vec<PreparedUserMessage> {
     accepted
         .into_iter()
-        .map(|message| {
-            let attachments = message
-                .attachments
-                .into_iter()
-                .map(|stored| Attachment {
-                    name: stored.name,
-                    source_path: stored.source_path,
-                    media_type: stored.media_type,
-                    data: stored.data,
-                })
-                .collect();
-            (message.content, attachments)
+        .map(|message| PreparedUserMessage {
+            accepted: message.accepted,
+            content: message.content,
+            stored_attachments: message.attachments,
         })
-        .chain(state.queued.drain(..).map(|content| (content, Vec::new())))
         .chain(messages)
         .collect()
 }

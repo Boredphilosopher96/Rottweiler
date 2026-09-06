@@ -33,6 +33,11 @@ pub(in crate::engine) fn recovered_pending_event(
             position: *position,
         },
         EngineEvent::QueuedMessagesCleared { .. } => PendingEvent::QueuedMessagesCleared,
+        EngineEvent::UserMessageRetained {
+            accepted_source, ..
+        } => PendingEvent::UserMessageRetained {
+            accepted_source: *accepted_source,
+        },
         EngineEvent::UserMessageAccepted {
             agent_turn,
             content,

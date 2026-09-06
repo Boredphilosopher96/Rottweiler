@@ -332,6 +332,10 @@ pub enum EngineEvent {
     QueuedMessagesCleared {
         meta: EventMeta,
     },
+    UserMessageRetained {
+        meta: EventMeta,
+        accepted_source: SequenceId,
+    },
     UserMessageAccepted {
         meta: EventMeta,
         #[serde(with = "decimal_u64")]
@@ -821,6 +825,7 @@ impl EngineEvent {
             | Self::MessageQueued { .. }
             | Self::QueuedMessageRemoved { .. }
             | Self::QueuedMessagesCleared { .. }
+            | Self::UserMessageRetained { .. }
             | Self::UserMessageAccepted { .. }
             | Self::SessionTitleUpdated { .. }
             | Self::PluginMessageInjected { .. }
@@ -952,6 +957,7 @@ impl EngineEvent {
             | Self::MessageQueued { meta, .. }
             | Self::QueuedMessageRemoved { meta, .. }
             | Self::QueuedMessagesCleared { meta, .. }
+            | Self::UserMessageRetained { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
             | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }
@@ -1066,6 +1072,7 @@ impl EngineEvent {
             | Self::MessageQueued { meta, .. }
             | Self::QueuedMessageRemoved { meta, .. }
             | Self::QueuedMessagesCleared { meta, .. }
+            | Self::UserMessageRetained { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
             | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }

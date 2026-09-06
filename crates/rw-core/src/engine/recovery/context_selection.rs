@@ -21,14 +21,26 @@ pub(super) fn validate(
             accepted_source,
             ..
         } => {
-            if !head
+            let input = head
                 .control
                 .accepted
                 .iter()
-                .any(|input| input.agent_turn == *agent_turn && input.sequence == *accepted_source)
+                .find(|input| input.sequence == *accepted_source)
+                .ok_or(RecoveryError::Invalid("input is not pending"))?;
+            if input.claimed_turn != *agent_turn || input.retained {
+                return Err(RecoveryError::Invalid(
+                    "input commit must own its active claim",
+                ));
+            }
+            if input.agent_turn != *agent_turn
+                && head
+                    .control
+                    .active
+                    .as_ref()
+                    .is_none_or(|active| active.turn != *agent_turn)
             {
                 return Err(RecoveryError::Invalid(
-                    "input is not pending in the effective turn",
+                    "retained input requires an active turn",
                 ));
             }
         }

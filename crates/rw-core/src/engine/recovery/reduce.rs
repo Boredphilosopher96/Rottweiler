@@ -101,9 +101,11 @@ pub(super) fn reduce(
                 if let EngineEvent::ConversationInputCommitted {
                     accepted_source, ..
                 } = event
-                    && let Some(index) = head.control.accepted.iter().position(|accepted| {
-                        accepted.agent_turn == agent_turn && accepted.sequence == *accepted_source
-                    })
+                    && let Some(index) = head
+                        .control
+                        .accepted
+                        .iter()
+                        .position(|accepted| accepted.sequence == *accepted_source)
                 {
                     head.control.accepted.remove(index);
                 }
@@ -135,6 +137,7 @@ pub(super) fn reduce(
             return Ok(());
         }
         PendingEvent::TurnStarted { turn } => {
+            super::retained_input::claim(head, rows, turn)?;
             rows.delete(key(super::state::PROMPTS, 0, turn));
             head.control.active = Some(ActiveTurn {
                 announced_citations: rw_types::citation_admission::CitationAdmission::default(),
@@ -151,11 +154,25 @@ pub(super) fn reduce(
             head.control.next_turn = head.control.next_turn.max(turn.saturating_add(1));
         }
         PendingEvent::TurnFinished {
-            turn, usage, cost, ..
+            turn,
+            usage,
+            cost,
+            status,
         } => {
+            if status != crate::engine::AgentTurnStatus::Interrupted
+                && head
+                    .control
+                    .accepted
+                    .iter()
+                    .any(|input| input.claimed_turn == turn && input.retained)
+            {
+                return Err(RecoveryError::Invalid(
+                    "retained input requires interrupted closure",
+                ));
+            }
             head.control
                 .accepted
-                .retain(|accepted| accepted.agent_turn != turn);
+                .retain(|accepted| accepted.claimed_turn != turn || accepted.retained);
             head.accounting.record_actuals(&usage.into(), &cost);
             if head
                 .control
@@ -206,6 +223,21 @@ pub(super) fn reduce(
             }
         }
         PendingEvent::QueuedMessagesCleared => head.control.queued.clear(),
+        PendingEvent::UserMessageRetained { accepted_source } => {
+            let active = head.control.active.as_ref().ok_or(RecoveryError::Invalid(
+                "input retention requires an active turn",
+            ))?;
+            let accepted = head
+                .control
+                .accepted
+                .iter_mut()
+                .find(|accepted| accepted.sequence == accepted_source)
+                .ok_or(RecoveryError::Invalid("retained input must be pending"))?;
+            if accepted.retained || accepted.claimed_turn != active.turn {
+                return Err(RecoveryError::Invalid("input retention source or phase"));
+            }
+            accepted.retained = true;
+        }
         PendingEvent::UserMessageAccepted {
             turn,
             content,
@@ -226,6 +258,8 @@ pub(super) fn reduce(
                 return Err(RecoveryError::Limit("accepted message identities"));
             }
             head.control.accepted.push(AcceptedSource {
+                claimed_turn: turn,
+                retained: false,
                 agent_turn: turn,
                 sequence,
             });

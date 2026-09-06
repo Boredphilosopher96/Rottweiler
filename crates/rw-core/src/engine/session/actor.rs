@@ -311,34 +311,16 @@ pub(super) async fn run_actor(
             });
             state.completed_turns = state.completed_turns.saturating_add(1);
         }
-        if !resume_inputs {
-            state.suspended_inputs = Some(accepted_messages);
-        } else if !accepted_messages.is_empty() || !state.queued.is_empty() {
-            state.queued_positions.clear();
-            let messages = accepted_messages
-                .into_iter()
-                .map(|message| {
-                    let attachments = message
-                        .attachments
-                        .into_iter()
-                        .map(|stored| rw_types::Attachment {
-                            name: stored.name,
-                            source_path: stored.source_path,
-                            media_type: stored.media_type,
-                            data: stored.data,
-                        })
-                        .collect();
-                    (message.content, attachments)
-                })
-                .chain(state.queued.drain(..).map(|content| (content, Vec::new())))
-                .collect();
+        let has_pending_input = !accepted_messages.is_empty() || !state.queued.is_empty();
+        state.suspended_inputs = Some(accepted_messages);
+        if resume_inputs && has_pending_input {
             if start_turn(
                 &mut state,
                 &config,
                 &tool_context,
                 &turn_signals,
                 &events,
-                messages,
+                Vec::new(),
                 &active_turn,
             )
             .await
@@ -347,6 +329,8 @@ pub(super) async fn run_actor(
                 state.unsettled = Some("session startup failed before completion".to_owned());
                 break 'startup;
             }
+        } else if resume_inputs {
+            state.suspended_inputs = None;
         }
     }
     let mut commands_open = true;

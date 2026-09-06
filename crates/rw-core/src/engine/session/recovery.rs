@@ -56,6 +56,14 @@ pub(super) fn interrupted_turn_recovery_events(
         .iter()
         .flat_map(interrupted_tool_recovery_events)
         .collect::<Vec<_>>();
+    events.extend(recovered.accepted_messages.iter().filter_map(|message| {
+        let accepted = message.accepted.as_ref()?;
+        (accepted.claimed_turn == turn && !accepted.retained).then_some(
+            PendingEvent::UserMessageRetained {
+                accepted_source: accepted.sequence,
+            },
+        )
+    }));
     if let Some(assistant) = &recovered.interrupted_assistant_turn {
         events.push(PendingEvent::ConversationTurnCommitted {
             agent_turn: turn,
@@ -104,7 +112,6 @@ pub(in crate::engine) async fn recover_actor_from_journal(
     let mut recovered = SessionActorRecovery::from_bootstrap(
         config.history.capture_history().await?.bootstrap().await?,
     )?;
-    let suspended_inputs = suspended.then(|| std::mem::take(&mut recovered.accepted_messages));
     let client_roles = std::mem::take(&mut state.client_roles);
     let tasks = state.tasks.clone();
     let control = Arc::clone(&state.control);
@@ -112,6 +119,8 @@ pub(in crate::engine) async fn recover_actor_from_journal(
     let interrupted_compaction = recovered.interrupted_compaction;
     let interrupted_turn = recovered.interrupted_turn;
     let recovery_events = interrupted_turn_recovery_events(&recovered);
+    let suspended_inputs = (suspended || !recovered.accepted_messages.is_empty())
+        .then(|| std::mem::take(&mut recovered.accepted_messages));
     *state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),

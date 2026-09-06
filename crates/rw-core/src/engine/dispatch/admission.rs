@@ -841,9 +841,6 @@ pub(super) async fn dispatch_protocol(
         match persisted {
             Ok(()) => {
                 state.queued.clear();
-                if let Some(inputs) = &mut state.suspended_inputs {
-                    inputs.clear();
-                }
                 state.queued_positions.clear();
                 let accepted = CommandOutcome::Accepted {};
                 send_ack(state, events, &meta, session, accepted.clone());

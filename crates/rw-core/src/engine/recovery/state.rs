@@ -82,6 +82,8 @@ pub struct QuestionSource {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AcceptedSource {
+    pub claimed_turn: u64,
+    pub retained: bool,
     pub agent_turn: u64,
     pub sequence: SequenceId,
 }

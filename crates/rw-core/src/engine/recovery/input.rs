@@ -216,7 +216,7 @@ pub(super) fn resolve_input(
     if input_meta.sequence_id != *accepted_source
         || input_meta.sequence_id >= meta.sequence_id
         || input_meta.session_id != meta.session_id
-        || input_turn != agent_turn
+        || input_turn > agent_turn
         || input_meta.protocol_version != meta.protocol_version
     {
         return Err(RecoveryError::Invalid("accepted input source identity"));

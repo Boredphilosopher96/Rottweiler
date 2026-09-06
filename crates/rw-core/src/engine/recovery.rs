@@ -37,6 +37,7 @@ mod routing;
 pub use routing::SessionRoutingIndex;
 mod reduce;
 mod repair;
+mod retained_input;
 pub use read::{
     CanonicalHistory, HistoryMaterializationLimits, MAX_MATERIALIZED_HISTORY_BYTES,
     MAX_MATERIALIZED_HISTORY_DECODE_BYTES, MAX_MATERIALIZED_HISTORY_TURNS, RecoverySnapshot,

@@ -22,6 +22,7 @@ pub struct RecoveredModelSelection {
 /// Exact accepted or queued client message; attachment selectors remain authoritative.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecoveredMessage {
+    pub accepted: Option<super::AcceptedSource>,
     pub content: String,
     pub attachments: Vec<StoredAttachment>,
 }
@@ -350,6 +351,7 @@ impl ControlReader<'_> {
             result.queued_messages.push((
                 position,
                 RecoveredMessage {
+                    accepted: None,
                     content,
                     attachments,
                 },
@@ -372,6 +374,7 @@ impl ControlReader<'_> {
             result.accepted_messages.push((
                 turn,
                 RecoveredMessage {
+                    accepted: Some(accepted.clone()),
                     content,
                     attachments,
                 },

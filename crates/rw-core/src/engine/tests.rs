@@ -39,6 +39,7 @@ mod questions;
 mod reasoning;
 mod recovery;
 mod redaction;
+mod retained_inputs;
 mod rewind;
 mod shell;
 mod snapshots;

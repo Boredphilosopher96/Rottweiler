@@ -119,6 +119,7 @@ fn prepare_with_vision(
         return Err("message content and attachments cannot both be empty".to_owned());
     }
     Ok(PreparedUserMessage {
+        accepted: None,
         content: content.to_owned(),
         stored_attachments,
     })

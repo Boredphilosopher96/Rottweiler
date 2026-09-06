@@ -379,13 +379,28 @@ impl SessionProjector {
                 accepted_source,
                 ..
             } = event
-                && !uncommitted_users.get(agent_turn).is_some_and(|pending| {
-                    pending.iter().any(|(source, _)| source == accepted_source)
-                })
             {
-                return Err(SessionProjectionError::InvalidInput(
-                    "input is not pending in this turn",
-                ));
+                let pending = uncommitted_users.iter().find_map(|(turn, pending)| {
+                    pending
+                        .iter()
+                        .find(|(source, _)| source == accepted_source)
+                        .map(|(_, message)| (*turn, message))
+                });
+                let Some((original_turn, message)) = pending else {
+                    return Err(SessionProjectionError::InvalidInput("input is not pending"));
+                };
+                let input = message
+                    .accepted
+                    .as_ref()
+                    .ok_or(SessionProjectionError::InvalidInput("input source absent"))?;
+                if input.claimed_turn != *agent_turn
+                    || input.retained
+                    || (original_turn != *agent_turn && active_turn != Some(*agent_turn))
+                {
+                    return Err(SessionProjectionError::InvalidInput(
+                        "input commit must own its active claim",
+                    ));
+                }
             }
             if matches!(
                 event,
@@ -419,6 +434,24 @@ impl SessionProjector {
                 }
                 PendingEvent::ProviderCallAccounted { .. } => {}
                 PendingEvent::TurnStarted { turn } => {
+                    for (_, message) in uncommitted_users.values_mut().flatten() {
+                        let input = message
+                            .accepted
+                            .as_mut()
+                            .ok_or(SessionProjectionError::InvalidInput("input source absent"))?;
+                        if input.retained {
+                            if active_turn.is_some()
+                                || *turn <= input.claimed_turn
+                                || !turn_ends.contains_key(&input.claimed_turn)
+                            {
+                                return Err(SessionProjectionError::InvalidInput(
+                                    "retained input claim requires an ended turn",
+                                ));
+                            }
+                            input.claimed_turn = *turn;
+                            input.retained = false;
+                        }
+                    }
                     active_tool_starts.clear();
                     active_turn = Some(*turn);
                     partial_assistant_blocks.clear();
@@ -437,12 +470,36 @@ impl SessionProjector {
                     }
                 }
                 PendingEvent::QueuedMessagesCleared => queued.clear(),
+                PendingEvent::UserMessageRetained { accepted_source } => {
+                    let Some((_, message)) =
+                        uncommitted_users.iter_mut().find_map(|(turn, messages)| {
+                            messages
+                                .iter_mut()
+                                .find(|(source, _)| source == accepted_source)
+                                .map(|(_, message)| (*turn, message))
+                        })
+                    else {
+                        return Err(SessionProjectionError::InvalidInput(
+                            "retained input is not pending",
+                        ));
+                    };
+                    let input = message
+                        .accepted
+                        .as_mut()
+                        .ok_or(SessionProjectionError::InvalidInput("input source absent"))?;
+                    if input.retained || active_turn != Some(input.claimed_turn) {
+                        return Err(SessionProjectionError::InvalidInput(
+                            "input retention source or phase",
+                        ));
+                    }
+                    input.retained = true;
+                }
                 PendingEvent::UserMessageAccepted {
                     turn,
                     content,
                     attachments,
                 } => {
-                    let message =
+                    let mut message =
                         crate::engine::dispatch::recover_user_message(content, attachments)
                             .map_err(SessionProjectionError::InvalidAttachment)?;
                     if let Some(position) = queued
@@ -451,6 +508,12 @@ impl SessionProjector {
                     {
                         queued.remove(position);
                     }
+                    message.accepted = Some(crate::recovery::AcceptedSource {
+                        claimed_turn: *turn,
+                        sequence: meta.sequence_id,
+                        agent_turn: *turn,
+                        retained: false,
+                    });
                     uncommitted_users
                         .entry(*turn)
                         .or_default()
@@ -481,13 +544,10 @@ impl SessionProjector {
                         compacted.push((*agent_turn, turn.clone()));
                         break 'event;
                     }
-                    if turn.role == Role::User
-                        && let Some(pending) = uncommitted_users.get_mut(agent_turn)
-                        && let Some(index) = pending
-                            .iter()
-                            .position(|(source, _)| input_source == Some(*source))
-                    {
-                        pending.remove(index);
+                    if turn.role == Role::User {
+                        for pending in uncommitted_users.values_mut() {
+                            pending.retain(|(source, _)| input_source != Some(*source));
+                        }
                     }
                     conversation.push(turn.clone());
                     conversation_agent_turns.push(*agent_turn);
@@ -530,7 +590,7 @@ impl SessionProjector {
                     }
                     turn_ends.retain(|turn, _| *turn <= *to_turn);
                     queued.clear();
-                    uncommitted_users.retain(|turn, _| *turn <= *to_turn);
+                    uncommitted_users.clear();
                     if active_turn.is_some_and(|turn| turn > *to_turn) {
                         active_turn = None;
                         partial_assistant_blocks.clear();
@@ -560,9 +620,30 @@ impl SessionProjector {
                     });
                 }
                 PendingEvent::TurnFinished {
-                    turn, usage, cost, ..
+                    turn,
+                    usage,
+                    cost,
+                    status,
                 } => {
-                    uncommitted_users.remove(turn);
+                    if *status != crate::engine::AgentTurnStatus::Interrupted
+                        && uncommitted_users.values().flatten().any(|(_, message)| {
+                            message
+                                .accepted
+                                .as_ref()
+                                .is_some_and(|input| input.claimed_turn == *turn && input.retained)
+                        })
+                    {
+                        return Err(SessionProjectionError::InvalidInput(
+                            "retained input requires interrupted closure",
+                        ));
+                    }
+                    for messages in uncommitted_users.values_mut() {
+                        messages.retain(|(_, message)| {
+                            message.accepted.as_ref().is_some_and(|source| {
+                                source.claimed_turn != *turn || source.retained
+                            })
+                        });
+                    }
                     if active_turn == Some(*turn) {
                         active_tool_starts.clear();
                         active_turn = None;

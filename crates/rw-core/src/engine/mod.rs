@@ -156,6 +156,7 @@ const MAX_PERMISSION_LABEL_BYTES: usize = 512;
 
 #[derive(Clone, Debug, PartialEq)]
 struct PreparedUserMessage {
+    accepted: Option<recovery::AcceptedSource>,
     content: String,
     stored_attachments: Vec<StoredAttachment>,
 }

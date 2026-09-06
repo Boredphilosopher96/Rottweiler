@@ -61,6 +61,9 @@ pub(super) enum PendingEvent {
     TurnStarted {
         turn: u64,
     },
+    UserMessageRetained {
+        accepted_source: SequenceId,
+    },
     UserMessageAccepted {
         turn: u64,
         content: String,
@@ -353,6 +356,10 @@ impl PendingEvent {
             Self::TurnStarted { turn } => EngineEvent::TurnStarted {
                 meta,
                 turn_id: wire_turn_id(turn),
+            },
+            Self::UserMessageRetained { accepted_source } => EngineEvent::UserMessageRetained {
+                meta,
+                accepted_source,
             },
             Self::UserMessageAccepted {
                 turn,
