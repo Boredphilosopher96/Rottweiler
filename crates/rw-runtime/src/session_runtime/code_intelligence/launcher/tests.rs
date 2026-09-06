@@ -49,7 +49,7 @@ impl LspProcessHandle for PendingKill {
     }
 }
 #[tokio::test]
-async fn dropped_lsp_handle_retainsscratch_until_actual_settlement() {
+async fn dropped_lsp_handle_retains_scratch_until_actual_settlement() {
     let root = tempfile::tempdir().expect("workspace");
     let owner = prepare(&[root.path().to_path_buf()], &Mutex::new(None)).expect("prepare");
     let weak = Arc::downgrade(&owner);
