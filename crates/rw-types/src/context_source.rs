@@ -31,6 +31,7 @@ pub fn conversation_item(sequence: SequenceId) -> ContextItemId {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
     use super::ContextBlockId;
     #[test]
     fn block_source_requires_exact_named_identity() {
