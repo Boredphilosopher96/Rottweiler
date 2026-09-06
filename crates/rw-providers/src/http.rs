@@ -679,16 +679,8 @@ pub async fn guarded_http_fetch(
     }
     let status = response.status().as_u16();
     let final_url = response.url().clone();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let location = response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let content_type = response_header(&response, reqwest::header::CONTENT_TYPE);
+    let location = response_header(&response, reqwest::header::LOCATION);
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -707,6 +699,15 @@ pub async fn guarded_http_fetch(
         body,
         location,
     })
+}
+
+fn response_header(response: &Response, name: reqwest::header::HeaderName) -> Option<String> {
+    response
+        .headers()
+        .get(name)?
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 fn validate_fetch_timeout(timeout: Duration) -> Result<(), GuardedHttpFetchError> {
