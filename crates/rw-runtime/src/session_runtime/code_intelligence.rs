@@ -1,5 +1,6 @@
-use super::command_execution::PrivateScratch;
+mod launcher;
 use async_trait::async_trait;
+use launcher::DeferredLspSpawner;
 use miette::Result;
 use miette::miette;
 use rw_tools::CodeIntelligence;
@@ -11,7 +12,6 @@ use rw_tools::Location;
 use rw_tools::LspConfig;
 use rw_tools::Position;
 use rw_tools::RenameResult;
-use rw_tools::SandboxedLspSpawner;
 use rw_tools::SymbolsTool;
 use rw_tools::Tool;
 use rw_tools::ToolContext;
@@ -34,7 +34,6 @@ pub(super) struct LazySymbolsTool {
 pub(super) struct MultiRootCodeIntelligence {
     pub(super) providers: Vec<Arc<CodeIntelligence>>,
     pub(super) symbols: Arc<WorkspaceSymbolIndex>,
-    pub(super) _scratch: PrivateScratch,
 }
 
 pub(super) fn lsp_servers_for_root(
@@ -64,13 +63,7 @@ impl MultiRootCodeIntelligence {
         } else {
             discover_sandboxed_lsp_servers(roots)
         };
-        let scratch = PrivateScratch::create("lsp")?;
-        let helper = crate::plugin_process::helper_executable()
-            .map_err(|error| miette!("LSP sandbox helper could not resolve: {error}"))?;
-        let spawner = Arc::new(
-            SandboxedLspSpawner::new(roots, scratch.path(), &helper)
-                .map_err(|error| miette!("LSP sandbox could not start: {error}"))?,
-        );
+        let spawner = Arc::new(DeferredLspSpawner::new(roots));
         let uri_mapper = Arc::new(
             WorkspaceUriMapper::new(roots)
                 .map_err(|error| miette!("LSP workspace mapping could not start: {error}"))?,
@@ -95,11 +88,7 @@ impl MultiRootCodeIntelligence {
                 .map_err(|error| miette!("code-intelligence workspace could not start: {error}"))
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self {
-            providers,
-            symbols,
-            _scratch: scratch,
-        })
+        Ok(Self { providers, symbols })
     }
 
     pub(super) fn route(&self, path: &Path) -> Option<(usize, PathBuf)> {

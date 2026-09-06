@@ -160,7 +160,7 @@ Remote sessions use a launch-fixed strict permission policy.
 
 ## ADR-016: Code intelligence = tree-sitter index (always on) + LSP (auto-start)
 
-**Decision.** Two tiers: a tree-sitter symbol index (zero-config, incremental, powers the `symbols` tool) and LSP client integration (auto-start servers found on PATH; diagnostics-after-edit; go-to-def/references/rename tools). Formatters/linters are not LSP's job here: they load through the declarative `[toolchain]` config, which registers built-in `post_tool` hooks on the public hook API.
+**Decision.** Two tiers: a tree-sitter symbol index (zero-config, incremental, powers the `symbols` tool) and LSP client integration (auto-start servers found on PATH; diagnostics-after-edit; go-to-def/references/rename tools). Native LSP helper verification, private scratch and sandbox launch preparation run on the first actual server launch under owned blocking admission. Syntax-only and offline queries prepare no native launch authority; a launched process retains that authority and scratch until cleanup is proved. Formatters/linters are not LSP's job here: they load through the declarative `[toolchain]` config, which registers built-in `post_tool` hooks on the public hook API.
 
 **Rationale.** Tree-sitter gives every language a floor with no setup; LSP gives depth where servers exist; hooks give formatters/linters a uniform mechanism that third parties can extend (dogfooding rule: the built-in `[toolchain]` tier is sugar over the same hook registration a plugin would use).
 

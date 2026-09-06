@@ -67,8 +67,8 @@ pub use registry::{
 };
 pub use rw_intel::{
     CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,
-    Language, Location, LspConfig, LspProcessHandle, LspProcessSpawner, LspServerConfig, Position,
-    Range, RenameResult, SpawnedLspProcess, SymbolIndex, WorkspaceUriMapper,
+    Language, Location, LspConfig, LspError, LspProcessHandle, LspProcessSpawner, LspServerConfig,
+    Position, Range, RenameResult, SpawnedLspProcess, SymbolIndex, WorkspaceUriMapper,
 };
 #[doc(hidden)]
 pub use rw_sandbox::{
