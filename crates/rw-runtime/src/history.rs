@@ -11,6 +11,7 @@ use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{EngineEvent, TranscriptFormat};
 use rw_providers::FixtureRedactor;
 use rw_store::session::{EventEnvelope, SessionIndex, SessionSummary};
+use rw_types::json_encoding::JsonWriter;
 use serde_json::Value;
 
 mod redaction;
@@ -123,12 +124,28 @@ pub(crate) fn load_events_from_view(
 /// Returns an error when an event cannot be serialized or the render cap is exceeded.
 pub fn replay_jsonl(events: &[EventEnvelope<EngineEvent>]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
-    for envelope in events {
-        serde_json::to_writer(&mut output, &envelope.event).into_diagnostic()?;
-        output.push(b'\n');
-        enforce_render_limit(&output)?;
-    }
+    write_replay_jsonl(
+        events,
+        &mut JsonWriter::buffer(&mut output, MAX_RENDERED_BYTES, 4096).into_diagnostic()?,
+    )?;
     Ok(output)
+}
+
+fn write_replay_jsonl(
+    events: &[EventEnvelope<EngineEvent>],
+    output: &mut JsonWriter<'_>,
+) -> Result<()> {
+    for envelope in events {
+        let result = output.serialize(&envelope.event);
+        if output.exceeded() {
+            return Err(miette!("rendered session history exceeds its output limit"));
+        }
+        result.into_diagnostic()?;
+        output
+            .write_all(b"\n")
+            .map_err(|_| miette!("rendered session history exceeds its output limit"))?;
+    }
+    Ok(())
 }
 
 /// Renders a redacted transcript in the selected stable export format.

@@ -56,6 +56,38 @@ fn replay_is_the_exact_engine_event_jsonl_seam() {
 }
 
 #[test]
+fn replay_rejects_before_escaped_bytes_or_delimiter_exceed_admission() {
+    let mut events = fixture();
+    if let EngineEvent::UiNotification { message, .. } = &mut events[0].event {
+        *message = "\0\n🦀".repeat(16);
+    }
+    let mut expected = serde_json::to_vec(&events[0].event).expect("exact encoded event");
+    expected.push(b'\n');
+    let mut bytes = Vec::new();
+    write_replay_jsonl(
+        &events,
+        &mut JsonWriter::buffer(&mut bytes, expected.len(), 4096).expect("exact admission"),
+    )
+    .expect("exact frame");
+    assert_eq!(bytes, expected);
+    assert!(bytes.capacity() <= expected.len());
+    for limit in [expected.len() - 1, expected.len() / 2] {
+        let mut rejected = Vec::new();
+        let error = write_replay_jsonl(
+            &events,
+            &mut JsonWriter::buffer(&mut rejected, limit, 4096).expect("small admission"),
+        )
+        .expect_err("frame exceeds admission");
+        assert_eq!(
+            error.to_string(),
+            "rendered session history exceeds its output limit"
+        );
+        assert!(rejected.len() <= limit);
+        assert!(rejected.capacity() <= limit);
+    }
+}
+
+#[test]
 fn read_only_session_listing_is_newest_first_and_bounded() {
     let storage = tempfile::tempdir().expect("storage");
     let index = SessionIndex::open(storage.path()).expect("index");
