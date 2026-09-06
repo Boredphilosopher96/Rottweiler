@@ -113,7 +113,7 @@ fn main() {
                     &std::env::current_exe().expect("native driver"),
                 )
                 .expect("running helper"),
-                hook_owner,
+                Arc::clone(&hook_owner),
             ),
         );
         let ordinary = RecordingCommandExecutor::new(ordinary_live, &recordings, &workspace)
@@ -229,6 +229,11 @@ fn main() {
                 .expect_err("each namespaced occurrence is consumed exactly once");
             assert!(error.to_string().contains("exhausted"));
         }
+        drop(hook_owner);
+        assert!(
+            !hook_scratch.exists(),
+            "fixture scratch is removed after replay"
+        );
     });
 }
 
