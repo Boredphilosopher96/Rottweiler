@@ -42,6 +42,7 @@ mod subagent_recovery;
 mod subagent_runtime;
 pub(crate) mod tool_composition;
 mod toolchain;
+mod toolchain_authority;
 mod wasm_hooks;
 mod web_fetch;
 mod websearch_recording;

@@ -250,6 +250,11 @@ pub(super) fn parse_tui_token_limit(key: &str, value: &str) -> Result<Option<u64
 pub(super) fn validate_toolchain(
     config: &rw_types::config::ToolchainConfig,
 ) -> Result<(), ConfigError> {
+    if !rw_types::config::valid_toolchain_runtime_read_roots(&config.runtime_read_roots) {
+        return Err(ConfigError::Validation(
+            "toolchain.runtime_read_roots requires at most 32 absolute UTF-8 paths of at most 4096 bytes".to_owned(),
+        ));
+    }
     for (label, command) in [
         ("toolchain.formatter", config.formatter.as_deref()),
         ("toolchain.test", config.test.as_deref()),

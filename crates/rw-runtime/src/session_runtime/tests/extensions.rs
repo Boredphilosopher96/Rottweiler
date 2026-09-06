@@ -465,6 +465,7 @@ async fn read_only_shell_hooks_cannot_write_workspace_for_tool_or_lifecycle_even
     .expect("read-only executor");
     let fixture_executor = Arc::new(FixtureToolchainExecutor::default());
     let runtime = Arc::new(ToolchainRuntime::new_with_read_only(
+        fixture_executor.clone(),
         fixture_executor,
         read_only,
         scratch,

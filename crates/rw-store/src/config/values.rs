@@ -342,6 +342,10 @@ impl LoadedConfig {
             "sandbox.safe_list",
             &format!("{:?}", self.config.sandbox.safe_list),
         ));
+        lines.push(self.render_leaf(
+            "toolchain.runtime_read_roots",
+            &format!("{:?}", self.config.toolchain.runtime_read_roots),
+        ));
         lines.push(
             self.render_leaf(
                 "toolchain.formatter",

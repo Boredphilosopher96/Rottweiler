@@ -714,6 +714,9 @@ pub struct SandboxConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolchainConfig {
+    /// Absolute runtime paths read only by configured formatter, linter, and test commands.
+    #[schemars(length(max = 32))]
+    pub runtime_read_roots: Vec<std::path::PathBuf>,
     /// Formatter applied when no more-specific rule overrides it.
     pub formatter: Option<String>,
     /// Linters applied when no more-specific rule overrides them.
@@ -723,6 +726,18 @@ pub struct ToolchainConfig {
     /// Glob-specific toolchain overrides, in declaration order.
     #[serde(rename = "rule")]
     pub rules: Vec<ToolchainRule>,
+}
+
+/// Whether explicitly supplied toolchain runtime paths fit the configuration contract.
+#[must_use]
+pub fn valid_toolchain_runtime_read_roots(roots: &[std::path::PathBuf]) -> bool {
+    roots.len() <= 32
+        && roots.iter().all(|root| {
+            root.is_absolute()
+                && root
+                    .to_str()
+                    .is_some_and(|text| text.len() <= 4096 && !text.contains('\0'))
+        })
 }
 
 /// One file-glob-specific toolchain rule.

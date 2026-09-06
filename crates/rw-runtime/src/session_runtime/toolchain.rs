@@ -42,6 +42,7 @@ pub(super) struct CompiledToolchainRule {
 #[derive(Clone)]
 pub(super) struct ToolchainExecutionBoundary {
     pub(super) executor: Arc<dyn CommandExecutor>,
+    pub(super) toolchain_executor: Arc<dyn CommandExecutor>,
     pub(super) read_only_executor: Arc<dyn CommandExecutor>,
     pub(super) read_only_scratch: PathBuf,
     pub(super) workspace_roots: Vec<PathBuf>,
@@ -57,11 +58,18 @@ impl ToolchainRuntime {
     #[cfg(test)]
     pub(super) fn new(executor: Arc<dyn CommandExecutor>, workspace_roots: &[PathBuf]) -> Self {
         let scratch = workspace_roots.first().cloned().unwrap_or_default();
-        Self::new_with_read_only(Arc::clone(&executor), executor, scratch, workspace_roots)
+        Self::new_with_read_only(
+            Arc::clone(&executor),
+            Arc::clone(&executor),
+            executor,
+            scratch,
+            workspace_roots,
+        )
     }
 
     pub(super) fn new_with_read_only(
         executor: Arc<dyn CommandExecutor>,
+        toolchain_executor: Arc<dyn CommandExecutor>,
         read_only_executor: Arc<dyn CommandExecutor>,
         read_only_scratch: PathBuf,
         workspace_roots: &[PathBuf],
@@ -69,6 +77,7 @@ impl ToolchainRuntime {
         Self {
             current: RwLock::new(ToolchainExecutionBoundary {
                 executor,
+                toolchain_executor,
                 read_only_executor,
                 read_only_scratch,
                 workspace_roots: canonical_toolchain_roots(workspace_roots),
@@ -118,6 +127,7 @@ impl ToolchainRuntime {
         &self,
         generation: u64,
         executor: Arc<dyn CommandExecutor>,
+        toolchain_executor: Arc<dyn CommandExecutor>,
         read_only_executor: Arc<dyn CommandExecutor>,
         read_only_scratch: PathBuf,
         workspace_roots: &[PathBuf],
@@ -129,6 +139,7 @@ impl ToolchainRuntime {
                 generation,
                 ToolchainExecutionBoundary {
                     executor,
+                    toolchain_executor,
                     read_only_executor,
                     read_only_scratch,
                     workspace_roots: canonical_toolchain_roots(workspace_roots),
@@ -268,10 +279,10 @@ pub(super) struct ToolchainTestHook {
 impl HookHandler for ToolchainTestHook {
     async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
         let boundary = self.runtime.current();
-        let first = boundary.executor.settle_effects().await;
-        let second = boundary.read_only_executor.settle_effects().await;
-        first
-            .and(second)
+        boundary
+            .toolchain_executor
+            .settle_effects()
+            .await
             .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
     }
 
@@ -293,7 +304,7 @@ impl HookHandler for ToolchainTestHook {
         );
         let capture = Arc::new(HookCommandCapture::default());
         let outcome = boundary
-            .executor
+            .toolchain_executor
             .run(
                 CommandRequest {
                     command: self.command.clone(),
@@ -391,7 +402,7 @@ impl ToolchainHook {
         let capture = Arc::new(HookCommandCapture::default());
         let boundary = self.runtime.current();
         let outcome = boundary
-            .executor
+            .toolchain_executor
             .run(
                 CommandRequest {
                     command,
@@ -443,10 +454,10 @@ pub(super) fn registered_file_mutation_path(
 impl HookHandler for ToolchainHook {
     async fn settle_effects(&self) -> std::result::Result<(), rw_ext::HookError> {
         let boundary = self.runtime.current();
-        let first = boundary.executor.settle_effects().await;
-        let second = boundary.read_only_executor.settle_effects().await;
-        first
-            .and(second)
+        boundary
+            .toolchain_executor
+            .settle_effects()
+            .await
             .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
     }
 

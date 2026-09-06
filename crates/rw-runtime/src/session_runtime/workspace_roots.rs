@@ -187,6 +187,7 @@ impl RuntimeWorkspaceRootController {
             )?;
         let child_project_trusted = trusted_roots.first().copied().unwrap_or(false);
         let mut built = build_tools(BuildToolsInput {
+            toolchain_runtime_read_roots: &self.toolchain_config.runtime_read_roots,
             index_pool: Arc::clone(&self.index_pool),
             workspace_roots: &roots,
             trusted_lsp_roots: &trusted_roots,
@@ -214,6 +215,7 @@ impl RuntimeWorkspaceRootController {
         plugins.tools(&mut built.registry)?;
         let toolchain_runtime = Arc::new(ToolchainRuntime::new_with_read_only(
             Arc::clone(&built.command_executor),
+            Arc::clone(&built.toolchain_executor),
             Arc::clone(&built.read_only_hook_executor),
             built.read_only_hook_scratch.clone(),
             &roots,
@@ -406,6 +408,7 @@ impl RuntimeWorkspaceRootController {
                 },
             )?;
         let built = build_tools(BuildToolsInput {
+            toolchain_runtime_read_roots: &self.toolchain_config.runtime_read_roots,
             index_pool: Arc::clone(&self.index_pool),
             workspace_roots: roots,
             trusted_lsp_roots: &trusted_lsp_roots,
@@ -769,6 +772,7 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
         self.toolchain_runtime.prepare(
             generation,
             Arc::clone(&prepared.built.command_executor),
+            Arc::clone(&prepared.built.toolchain_executor),
             Arc::clone(&prepared.built.read_only_hook_executor),
             prepared.built.read_only_hook_scratch.clone(),
             &prepared.roots,

@@ -11,6 +11,7 @@ use super::deferred_network::DeferredConfiguredWebSearcher;
 use super::deferred_network::DeferredPolicyWebFetcher;
 use super::deferred_network::configured_web_searcher;
 use super::native_search::RuntimeWebSearcher;
+use super::toolchain_authority::build_toolchain_executor;
 use super::web_fetch::OfflineWebFetcher;
 use super::web_fetch::PolicyWebFetcher;
 use miette::Result;
@@ -59,6 +60,7 @@ pub(super) struct BuildToolsInput<'a> {
     pub(super) index_pool: Arc<rw_tools::WorkspaceIndexPool>,
     pub(super) workspace_roots: &'a [PathBuf],
     pub(super) trusted_lsp_roots: &'a [bool],
+    pub(super) toolchain_runtime_read_roots: &'a [PathBuf],
     pub(super) question_asker: Arc<dyn QuestionAsker>,
     pub(super) offline: bool,
     pub(super) global_proxy: Option<&'a ResolvedToolProxy>,
@@ -100,6 +102,7 @@ pub(super) fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         index_pool,
         workspace_roots,
         trusted_lsp_roots,
+        toolchain_runtime_read_roots,
         question_asker,
         offline,
         global_proxy,
@@ -131,6 +134,14 @@ pub(super) fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
     } else {
         Arc::new(PolicyWebFetcher::new(false, global_proxy.cloned()))
     };
+    let toolchain_executor = build_toolchain_executor(
+        workspace_roots,
+        toolchain_runtime_read_roots,
+        workspace,
+        command_fixture_mode.clone(),
+        &execution_lease,
+        command_safety,
+    )?;
     let websearch_fixture_mode = command_fixture_mode.clone();
     let hook_fixture_mode = command_fixture_mode.clone();
     let command_executor: Arc<dyn CommandExecutor> = if let Some(proxy) = deferred_global_proxy {
@@ -226,6 +237,7 @@ pub(super) fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
     Ok(BuiltTools {
         registry: Arc::new(registry),
         command_executor,
+        toolchain_executor,
         read_only_hook_executor,
         read_only_hook_scratch,
         code_intelligence,
@@ -245,6 +257,7 @@ pub(super) fn command_mode_can_open_proxy(mode: &CommandFixtureMode) -> bool {
 pub(crate) struct BuiltTools {
     pub(crate) registry: Arc<ToolRegistry>,
     pub(crate) command_executor: Arc<dyn CommandExecutor>,
+    pub(crate) toolchain_executor: Arc<dyn CommandExecutor>,
     pub(crate) read_only_hook_executor: Arc<dyn CommandExecutor>,
     pub(crate) read_only_hook_scratch: PathBuf,
     pub(crate) code_intelligence: Arc<dyn CodeIntelligenceProvider>,

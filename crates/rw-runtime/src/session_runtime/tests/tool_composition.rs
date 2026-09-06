@@ -55,6 +55,7 @@ fn build_tools_registers_intelligence_and_only_configured_live_websearch() {
         header_credentials: BTreeMap::new(),
     };
     let built = build_tools(BuildToolsInput {
+        toolchain_runtime_read_roots: &[],
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],
@@ -102,6 +103,7 @@ fn build_tools_registers_intelligence_and_only_configured_live_websearch() {
             .expect("offline execution lease"),
     );
     let offline = build_tools(BuildToolsInput {
+        toolchain_runtime_read_roots: &[],
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],
@@ -128,6 +130,7 @@ fn build_tools_registers_intelligence_and_only_configured_live_websearch() {
             .expect("replay execution lease"),
     );
     let replay_native = build_tools(BuildToolsInput {
+        toolchain_runtime_read_roots: &[],
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],
@@ -307,6 +310,7 @@ async fn tool_composition_defers_all_external_credential_backend_reads() {
     );
 
     let built = build_tools(BuildToolsInput {
+        toolchain_runtime_read_roots: &[],
         index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
         workspace_roots: &[root.path().to_path_buf()],
         trusted_lsp_roots: &[false],

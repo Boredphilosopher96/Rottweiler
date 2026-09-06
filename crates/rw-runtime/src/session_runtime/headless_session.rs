@@ -467,12 +467,14 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .collect::<Vec<_>>();
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
     let tool_index_pool = Arc::clone(&index_pool);
+    let toolchain_runtime_read_roots = loaded_config.config.toolchain.runtime_read_roots.clone();
     let mut built_tools =
         rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             build_tools(BuildToolsInput {
                 index_pool: tool_index_pool,
                 workspace_roots: &tool_workspace_roots,
                 trusted_lsp_roots: &trusted_lsp_roots,
+                toolchain_runtime_read_roots: &toolchain_runtime_read_roots,
                 question_asker,
                 offline: offline_fixture,
                 global_proxy: global_proxy.as_ref(),
@@ -843,6 +845,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     ));
     let toolchain_runtime = Arc::new(ToolchainRuntime::new_with_read_only(
         Arc::clone(&built_tools.command_executor),
+        Arc::clone(&built_tools.toolchain_executor),
         Arc::clone(&built_tools.read_only_hook_executor),
         built_tools.read_only_hook_scratch.clone(),
         &workspace_roots,

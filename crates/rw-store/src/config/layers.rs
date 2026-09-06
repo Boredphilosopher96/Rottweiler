@@ -52,6 +52,7 @@ pub(super) fn defaults_with_provenance() -> LoadedConfig {
         "websearch.header_credentials",
         "permissions.default",
         "sandbox.safe_list",
+        "toolchain.runtime_read_roots",
         "toolchain.formatter",
         "toolchain.linters",
         "toolchain.test",
@@ -294,6 +295,7 @@ pub(super) fn apply_file(
     if let Some(toolchain) = file.toolchain.take() {
         loaded.config.toolchain = toolchain;
         for key in [
+            "toolchain.runtime_read_roots",
             "toolchain.formatter",
             "toolchain.linters",
             "toolchain.test",

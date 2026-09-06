@@ -15,12 +15,12 @@ use super::SandboxSupport;
 use super::ToolOutput;
 use super::ToolchainConfig;
 use super::ToolchainRuntime;
-use super::build_command_executor;
 use super::compose_runtime_hooks;
 use super::probe_sandbox;
 use super::semantic_file_tools;
 use super::tempdir;
 use super::toolchain_command_identity;
+use crate::session_runtime::toolchain_authority::build_toolchain_executor;
 
 #[test]
 fn runtime_service_view_reports_only_live_toolchain_commands() {
@@ -91,6 +91,7 @@ async fn toolchain_post_hook_formats_multi_edit_then_appends_linter_diagnostics(
     ));
     let hooks = compose_runtime_hooks(
         &ToolchainConfig {
+            runtime_read_roots: Vec::new(),
             formatter: Some("fixture-format {file}".to_owned()),
             linters: vec!["fixture-lint {file}".to_owned()],
             test: None,
@@ -152,6 +153,7 @@ async fn toolchain_test_runs_only_after_successful_turns_and_blocks_on_failure()
     ));
     let hooks = compose_runtime_hooks(
         &ToolchainConfig {
+            runtime_read_roots: Vec::new(),
             formatter: None,
             linters: Vec::new(),
             test: Some("fixture-lint suite".to_owned()),
@@ -260,18 +262,20 @@ async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
         ExecutionLease::acquire(private.path().join("execution.lock")).expect("execution lease"),
     );
     let safety = Arc::new(CommandSafetyClassifier::default());
-    let executor = build_command_executor(
+    let runtime_read_roots = declared_rust_toolchain_roots();
+    let executor = build_toolchain_executor(
         &roots,
+        &runtime_read_roots,
         root.path(),
         CommandFixtureMode::Live,
         &lease,
         &safety,
-        None,
     )
     .expect("production sandboxed executor");
     let runtime = Arc::new(ToolchainRuntime::new(executor, &roots));
     let hooks = compose_runtime_hooks(
             &ToolchainConfig {
+                runtime_read_roots,
                 formatter: Some("rustfmt {file}".to_owned()),
                 linters: vec![
                     "env -u CARGO_TARGET_DIR cargo clippy --offline --workspace --all-targets -- -D warnings".to_owned(),
@@ -410,4 +414,33 @@ async fn post_multi_edit_hook_appends_lsp_diagnostics_without_running_a_build() 
             .is_empty(),
         "LSP diagnostics must not invoke a formatter, linter, or build"
     );
+}
+
+fn declared_rust_toolchain_roots() -> Vec<std::path::PathBuf> {
+    // The fixture declares its installed toolchain, just as trusted user config
+    // must. Production never derives sandbox authority from PATH or HOME.
+    let binary = std::env::split_paths(&std::env::var_os("PATH").expect("fixture PATH"))
+        .map(|directory| directory.join("rustup"))
+        .find(|path| path.is_file())
+        .expect("M6 requires rustup")
+        .canonicalize()
+        .expect("canonical rustup executable");
+    let output = std::process::Command::new("rustup")
+        .args(["show", "home"])
+        .output()
+        .expect("rustup runtime home");
+    assert!(
+        output.status.success(),
+        "rustup must identify its runtime home"
+    );
+    let home = String::from_utf8(output.stdout).expect("UTF-8 rustup runtime home");
+    vec![
+        binary
+            .parent()
+            .expect("rustup binary directory")
+            .to_path_buf(),
+        std::path::Path::new(home.trim())
+            .canonicalize()
+            .expect("canonical rustup runtime"),
+    ]
 }

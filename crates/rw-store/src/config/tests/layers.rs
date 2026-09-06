@@ -782,6 +782,7 @@ fn toolchain_hooks_are_validated_and_project_overrides_require_trust() {
         &user,
         r#"
 [toolchain]
+runtime_read_roots = ["/opt/user-toolchain"]
 formatter = "rustfmt {file}"
 linters = ["cargo clippy --message-format short"]
 test = "cargo test"
@@ -792,6 +793,7 @@ test = "cargo test"
         &project,
         r#"
 [toolchain]
+runtime_read_roots = ["/opt/project-toolchain"]
 formatter = "prettier --write {file}"
 linters = ["eslint {file}"]
 test = "bun test"
@@ -816,6 +818,14 @@ linters = ["biome check {file}"]
         Some(&ConfigSource::UserFile(user.clone()))
     );
 
+    assert_eq!(
+        untrusted.config.toolchain.runtime_read_roots,
+        vec![std::path::PathBuf::from("/opt/user-toolchain")]
+    );
+    assert_eq!(
+        untrusted.provenance("toolchain.runtime_read_roots"),
+        Some(&ConfigSource::UserFile(user.clone()))
+    );
     let trusted = ConfigLoader::new(user, project.clone())
         .with_project_trust(true)
         .load()
@@ -825,6 +835,14 @@ linters = ["biome check {file}"]
         Some("prettier --write {file}")
     );
     assert_eq!(trusted.config.toolchain.rules.len(), 1);
+    assert_eq!(
+        trusted.config.toolchain.runtime_read_roots,
+        vec![std::path::PathBuf::from("/opt/project-toolchain")]
+    );
+    assert_eq!(
+        trusted.provenance("toolchain.runtime_read_roots"),
+        Some(&ConfigSource::ProjectFile(project.clone()))
+    );
     assert_eq!(
         trusted.provenance("toolchain.rules"),
         Some(&ConfigSource::ProjectFile(project))
@@ -1133,4 +1151,30 @@ fn missing_project_directory_resolves_through_the_assessed_workspace_identity() 
     .expect("absent config through an alias is still the assessed workspace");
     assert!(!loaded.project_trusted);
     assert!(!workspace.join(".rottweiler").exists());
+}
+
+#[test]
+fn toolchain_runtime_read_roots_reject_relative_and_unbounded_paths() {
+    let root = tempdir().expect("config fixture");
+    let user = root.path().join("user.toml");
+    for paths in [
+        vec!["relative".to_owned()],
+        vec!["/opt/toolchain".to_owned(); 33],
+        vec![format!("/{}", "x".repeat(4096))],
+    ] {
+        let mut config = rw_types::config::ToolchainConfig::default();
+        config.runtime_read_roots = paths.into_iter().map(std::path::PathBuf::from).collect();
+        let text = format!(
+            "[toolchain]\n{}",
+            toml::to_string(&config).expect("fixture config")
+        );
+        fs::write(&user, text).expect("config write");
+        let error = ConfigLoader::new(user.clone(), root.path().join("absent.toml"))
+            .load()
+            .expect_err("invalid runtime roots must fail configuration admission");
+        assert!(
+            error.to_string().contains("toolchain.runtime_read_roots"),
+            "{error}"
+        );
+    }
 }

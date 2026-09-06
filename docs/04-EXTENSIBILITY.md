@@ -31,6 +31,28 @@ Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.
 | Toolchain | `toolchain.toml` (or `[toolchain]` in config) | per-language/glob `formatter` and `linters`, plus one workspace `test` command; after edit/write, the matching formatter and linters run on the touched file. After every otherwise-successful turn, the test command runs once and its failure is appended to durable context. Sugar over the public hook API (dogfooding rule) |
 | Themes/keybindings | `themes/*.toml`, `keybindings.toml` | TUI only |
 
+Configured formatter, linter, and test commands can declare
+`toolchain.runtime_read_roots`: at most 32 absolute UTF-8 paths, each at most
+4096 bytes. Paths must exist and are canonicalized before their executor
+generation is published. For a home-installed Rust toolchain, declare the
+actual rustup shim directory and runtime directory explicitly:
+
+```toml
+[toolchain]
+runtime_read_roots = ["/home/alice/.cargo/bin", "/home/alice/.rustup"]
+formatter = "rustfmt {file}"
+linters = ["cargo clippy --offline --workspace"]
+```
+
+These read-only grants apply only to the configured toolchain hooks. General
+Bash and declarative shell hooks do not inherit them. They grant no additional
+writes or network access; credential exclusions still apply. Linux adds them
+to its reviewed system-read baseline. macOS retains its existing general-read
+policy with credential exclusions. Project declarations share the toolchain
+configuration's explicit project-trust gate; merely setting PATH or HOME grants
+nothing. Child and workspace-replacement generations rebuild the same scoped
+executor from the captured configuration.
+
 Mode files use one bounded schema. The file stem must match `id`; `permission`
 selects the built-in permission floor (`discuss`, `plan`, or `execute`), while an
 optional non-empty `allowed-tools` list further narrows the session registry.
