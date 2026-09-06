@@ -218,7 +218,7 @@ async fn attach_supervisor(
         admission: Mutex::new(Some(admission)),
         settlement: tokio::sync::Mutex::new(()),
         child: Mutex::new(Some(child)),
-        process_group,
+        process_group: Mutex::new(process_group),
         violation: Arc::new(Mutex::new(None)),
         proxy: proxy_settlement::PluginProxy::new(proxy),
     });
@@ -303,7 +303,7 @@ struct PluginChild {
     admission: Mutex<Option<rw_resources::ResourceLease>>,
     helper: rw_tools::SandboxHelper,
     child: Mutex<Option<Child>>,
-    process_group: Option<u32>,
+    process_group: Mutex<Option<u32>>,
     violation: Arc<Mutex<Option<String>>>,
     proxy: proxy_settlement::PluginProxy,
 }
@@ -329,9 +329,18 @@ impl SupervisedPluginProcess for PluginChild {
         let (process, proxy) = tokio::join!(
             async {
                 self.wait_for_exit().await?;
-                rw_tools::terminate_and_wait_process_group(self.process_group)
+                let group = *self
+                    .process_group
+                    .lock()
+                    .map_err(|_| error("plugin group owner poisoned"))?;
+                rw_tools::terminate_and_wait_process_group(group)
                     .await
-                    .map_err(|failure| error(&failure.to_string()))
+                    .map_err(|failure| error(&failure.to_string()))?;
+                self.process_group
+                    .lock()
+                    .map_err(|_| error("plugin group owner poisoned"))?
+                    .take();
+                Ok::<(), PluginProcessError>(())
             },
             self.proxy.settle()
         );
@@ -392,6 +401,8 @@ impl PluginChild {
         #[cfg(unix)]
         if let Some(group) = self
             .process_group
+            .lock()
+            .map_err(|_| error("plugin group owner poisoned"))?
             .and_then(|id| i32::try_from(id).ok())
             .and_then(rustix::process::Pid::from_raw)
         {

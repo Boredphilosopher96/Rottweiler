@@ -55,7 +55,7 @@ async fn kill_tree_signals_the_actual_child_after_it_changes_groups() {
             &std::env::current_exe().expect("executable"),
         )
         .expect("helper"),
-        process_group: child.id(),
+        process_group: Mutex::new(child.id()),
         child: Mutex::new(Some(child)),
         violation: Arc::new(Mutex::new(None)),
         proxy: super::proxy_settlement::PluginProxy::new(None),

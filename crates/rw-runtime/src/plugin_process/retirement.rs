@@ -22,7 +22,13 @@ pub(super) fn retire_dropped(process: &mut PluginChild) {
         admission: Mutex::new(Some(admission)),
         helper: process.helper.clone(),
         child: Mutex::new(child),
-        process_group: process.process_group,
+        process_group: Mutex::new(
+            process
+                .process_group
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        ),
         violation: Arc::clone(&process.violation),
         proxy: std::mem::replace(&mut process.proxy, PluginProxy::new(None)),
     };
