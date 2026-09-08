@@ -903,3 +903,75 @@ async fn initialization_cancellation_and_caller_loss_keep_admission_until_retire
         }
     }
 }
+
+#[tokio::test]
+async fn failed_initialization_joins_admitted_host_callback_before_returning() {
+    let root = TempDir::new().expect("tempdir");
+    let config = shell_config(&root)
+        .with_allowed_domains(["example.com"])
+        .expect("domains");
+    let expected = manifest();
+    let approvals = MemoryApproval::default();
+    approve_plugin_launch(
+        &approvals,
+        &expected,
+        &config,
+        "project:initializing-callback",
+    )
+    .expect("approve");
+    let process = Arc::new(FakeProcess::default());
+    let push = Arc::new(DelayedActorPush::default());
+    let task = tokio::spawn({
+        let process = Arc::clone(&process);
+        let push = Arc::clone(&push);
+        let workspace = root.path().to_path_buf();
+        async move {
+            let mut returned = expected.clone();
+            returned.name = "different-initialized-plugin".to_owned();
+            PluginHost::launch_approved(
+                &MemoryLauncher {
+                    manifest: returned,
+                    process,
+                    push: Some(METHOD_UI_NOTIFY.to_owned()),
+                    hang_method: None,
+                },
+                Arc::new(approvals),
+                &config,
+                "project:initializing-callback",
+                &[workspace],
+                expected,
+                push,
+                Arc::new(NoopPluginBoundaryRedactor),
+                &CancellationToken::default(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), push.started.notified())
+        .await
+        .expect("host callback admitted");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        process.retirement_started.notified(),
+    )
+    .await
+    .expect("manifest mismatch starts retirement");
+    assert!(
+        process.waited.load(Ordering::Acquire) > 0,
+        "physical child is already reaped"
+    );
+    assert!(
+        !task.is_finished(),
+        "child exit is not host callback settlement"
+    );
+    assert!(!push.committed.load(Ordering::Acquire));
+    push.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("owned callback settles")
+        .expect("launch task");
+    assert!(
+        matches!(result, Err(PluginHostError::Approval(ref message)) if message.contains("differs"))
+    );
+    assert!(push.committed.load(Ordering::Acquire));
+}

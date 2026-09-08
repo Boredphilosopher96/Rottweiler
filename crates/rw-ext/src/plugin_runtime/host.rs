@@ -182,12 +182,12 @@ impl PluginHost {
         }) {
             Ok(manifest) => manifest,
             Err(error) => {
-                terminate_and_settle(process.as_ref()).await?;
+                settle_failed_initialization(&client).await?;
                 return Err(PluginHostError::Rpc(error));
             }
         };
         if let Err(error) = initialized.validate() {
-            terminate_and_settle(process.as_ref()).await?;
+            settle_failed_initialization(&client).await?;
             return Err(PluginHostError::ApprovalDetails(error.into()));
         }
         if initialized
@@ -197,7 +197,7 @@ impl PluginHost {
                 .fingerprint()
                 .map_err(PluginApprovalError::from)?
         {
-            terminate_and_settle(process.as_ref()).await?;
+            settle_failed_initialization(&client).await?;
             return Err(PluginHostError::Approval(
                 "initialized manifest differs from approved manifest".to_owned(),
             ));
@@ -321,16 +321,32 @@ pub(crate) async fn probe_plugin_manifest(
     }) {
         Ok(manifest) => manifest,
         Err(error) => {
-            terminate_and_settle(process.as_ref()).await?;
+            settle_failed_initialization(&client).await?;
             return Err(error.into());
         }
     };
     if let Err(error) = manifest.validate() {
-        terminate_and_settle(process.as_ref()).await?;
+        settle_failed_initialization(&client).await?;
         return Err(PluginApprovalError::from(error).into());
     }
     client.shutdown(DEFAULT_SHUTDOWN_TIMEOUT).await?;
     Ok(manifest)
+}
+
+async fn settle_failed_initialization(client: &JsonRpcPluginClient) -> Result<(), PluginHostError> {
+    // An initializing peer can already have admitted host callbacks. The
+    // transport owner joins both those callbacks and the actual child process.
+    client.termination.begin();
+    match tokio::time::timeout(DEFAULT_SHUTDOWN_TIMEOUT, client.termination.wait()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(PluginHostError::EffectsUnsettled {
+            message: error.to_string(),
+        }),
+        Err(_) => Err(PluginHostError::EffectsUnsettled {
+            message: "failed plugin initialization retains active process or host effects"
+                .to_owned(),
+        }),
+    }
 }
 
 fn canonical_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, PluginHostError> {
