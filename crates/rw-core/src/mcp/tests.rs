@@ -10,10 +10,7 @@ use std::sync::{
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
-use rw_mcp::{
-    BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServer,
-    SessionSummary,
-};
+mod http_fixture;
 use rw_store::credentials::{
     CredentialError, CredentialStore, CredentialStoreUnavailable, Secret as StoredSecret,
 };
@@ -186,38 +183,6 @@ impl OverflowSpool for PolicySpool {
     }
     async fn settle_effects(&self) -> std::result::Result<(), McpError> {
         Ok(())
-    }
-}
-
-struct EchoBridge;
-
-#[async_trait]
-impl EngineMcpBridge for EchoBridge {
-    async fn tools(&self) -> Result<Vec<EngineTool>, BridgeError> {
-        Ok(vec![EngineTool {
-            name: "echo".to_owned(),
-            description: "Echo one bounded test message".to_owned(),
-            input_schema: json!({"type":"object"}),
-        }])
-    }
-
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, BridgeError> {
-        if name != "echo" {
-            return Err(BridgeError::safe("unknown test tool"));
-        }
-        Ok(arguments)
-    }
-
-    async fn create_session(&self, _title: Option<String>) -> Result<SessionSummary, BridgeError> {
-        Err(BridgeError::safe("not used by test"))
-    }
-
-    async fn list_sessions(&self) -> Result<Vec<SessionSummary>, BridgeError> {
-        Ok(Vec::new())
-    }
-
-    async fn send_message(&self, _session_id: &str, _message: &str) -> Result<Value, BridgeError> {
-        Err(BridgeError::safe("not used by test"))
     }
 }
 
@@ -734,14 +699,11 @@ async fn production_connector_drives_real_rmcp_http_with_bearer_canary() {
     let endpoint = Url::parse(&format!("http://{address}/mcp")).expect("MCP URL");
     let bearer_seen = Arc::new(AtomicBool::new(false));
     let bearer_rejected = Arc::new(AtomicBool::new(false));
-    let service: StreamableHttpService<RottweilerMcpServer, LocalSessionManager> =
+    let session_seen = Arc::new(AtomicBool::new(false));
+    let deletions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let service: StreamableHttpService<http_fixture::ExternalHttpFixture, LocalSessionManager> =
         StreamableHttpService::new(
-            || {
-                Ok(RottweilerMcpServer::new(
-                    Arc::new(EchoBridge),
-                    McpServerAuthority::new(["echo".to_owned()], []),
-                ))
-            },
+            || Ok(http_fixture::ExternalHttpFixture),
             Arc::default(),
             StreamableHttpServerConfig::default().with_sse_keep_alive(None),
         );
@@ -749,6 +711,8 @@ async fn production_connector_drives_real_rmcp_http_with_bearer_canary() {
     let server = tokio::spawn({
         let bearer_seen = bearer_seen.clone();
         let bearer_rejected = bearer_rejected.clone();
+        let session_seen = session_seen.clone();
+        let deletions = deletions.clone();
         async move {
             loop {
                 let (stream, _) = tokio::select! {
@@ -761,13 +725,23 @@ async fn production_connector_drives_real_rmcp_http_with_bearer_canary() {
                 let mcp = service.clone();
                 let bearer_seen = bearer_seen.clone();
                 let bearer_rejected = bearer_rejected.clone();
+                let session_seen = session_seen.clone();
+                let deletions = deletions.clone();
                 tokio::spawn(async move {
                     let guarded =
                         service_fn(move |request: http::Request<hyper::body::Incoming>| {
                             let mut mcp = mcp.clone();
                             let bearer_seen = bearer_seen.clone();
                             let bearer_rejected = bearer_rejected.clone();
+                            let session_seen = session_seen.clone();
+                            let deletions = deletions.clone();
                             async move {
+                                if request.method() == http::Method::DELETE {
+                                    deletions.fetch_add(1, Ordering::SeqCst);
+                                }
+                                if request.headers().contains_key("mcp-session-id") {
+                                    session_seen.store(true, Ordering::SeqCst);
+                                }
                                 let authorization = request
                                     .headers()
                                     .get(http::header::AUTHORIZATION)
@@ -832,6 +806,8 @@ async fn production_connector_drives_real_rmcp_http_with_bearer_canary() {
         .expect("MCP shutdown");
     assert!(bearer_seen.load(Ordering::SeqCst));
     assert!(!bearer_rejected.load(Ordering::SeqCst));
+    assert!(session_seen.load(Ordering::SeqCst));
+    assert_eq!(deletions.load(Ordering::SeqCst), 1);
     let diagnostics = format!("{config:?} {:?}", *result);
     assert!(!diagnostics.contains(HTTP_BEARER_CANARY));
 
