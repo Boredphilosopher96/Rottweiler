@@ -42,7 +42,7 @@ class EvidenceOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
             run = subprocess.run(self.command(output, "print('finished')", True),
-                                 capture_output=True, timeout=10, check=False)
+                                 capture_output=True, timeout=20, check=False)
             self.assertEqual(run.returncode, 1)
             evidence = json.loads(output.read_text())
             self.assertEqual(evidence["status"], "failed")
@@ -54,7 +54,7 @@ class EvidenceOwnershipTests(unittest.TestCase):
             child = ("import os\nfrom perf_process import _SCOPE\n"
                      "token=_SCOPE.starting(); _SCOPE.started(token,1); os._exit(0)\n")
             run = subprocess.run(self.command(output, child, True), capture_output=True,
-                                 env=dict(os.environ, PYTHONPATH=str(SCRIPTS)), timeout=10, check=False)
+                                 env=dict(os.environ, PYTHONPATH=str(SCRIPTS)), timeout=20, check=False)
             self.assertEqual(run.returncode, 1)
             evidence = json.loads(output.read_text())
             self.assertIn('active_children', evidence["cleanup_error"])
@@ -79,7 +79,7 @@ class EvidenceOwnershipTests(unittest.TestCase):
                 f"raise SystemExit(ci_evidence.observe([sys.executable,'-c',{child!r}],'handoff',Path({str(output)!r})))\n"
             )
             run = subprocess.run([sys.executable, "-c", wrapper], capture_output=True,
-                                 env=dict(os.environ, PYTHONPATH=str(SCRIPTS)), timeout=10, check=False)
+                                 env=dict(os.environ, PYTHONPATH=str(SCRIPTS)), timeout=20, check=False)
             self.assertEqual(run.returncode, 130, run.stderr.decode())
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(pid.read_text()), 0)

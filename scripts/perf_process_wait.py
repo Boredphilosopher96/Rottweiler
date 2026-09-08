@@ -58,7 +58,7 @@ def observe_stopped(pid: int) -> bool:
     return result is not None and result[0] == os.CLD_STOPPED
 
 
-def signal_owned_group(pid: int, number: int) -> None:
+def signal_owned_group(pid: int, number: int, *, timeout: float = 1) -> None:
     """Signal an unreaped leader's group; callers must then reap and prove absence."""
     try:
         os.killpg(pid, number)
@@ -71,7 +71,7 @@ def signal_owned_group(pid: int, number: int) -> None:
         # publishes the status. Keep the PID owned through that bounded handoff.
         # An exited leader is not group settlement: every caller still reaps it
         # and requires group disappearance. Live descendants cannot earn an ack.
-        deadline = time.monotonic() + 1
+        deadline = time.monotonic() + timeout
         while observe_exit(pid) is None:
             if time.monotonic() >= deadline:
                 raise

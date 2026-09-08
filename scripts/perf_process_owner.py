@@ -8,6 +8,7 @@ import signal
 import subprocess
 import time
 
+from perf_process_deadline import COOPERATIVE_SECONDS, RETIREMENT_SECONDS, remaining
 from perf_process_scope import SCOPE_FD, ScopeReader, UnsettledScope, inherited_scope
 from perf_process_wait import observe_exit, signal_owned_group, require_group_disappearance
 
@@ -67,19 +68,23 @@ class OwnedProcess:
             raise self.failure
         return observe_exit(self.process.pid)
 
-    def settle(self) -> None:
+    def settle(self, *, deadline: float | None = None) -> None:
         if self.finished:
             return
         if self.failure is not None:
             raise self.failure
         process = self.process
+        started = time.monotonic()
+        deadline = min(deadline, started + RETIREMENT_SECONDS) if deadline is not None else started + RETIREMENT_SECONDS
         try:
+            cooperative_settled = self.scope is None
             if self.scope is not None:
-                signal_owned_group(process.pid, signal.SIGTERM)
-                settle_by = time.monotonic() + 5
+                signal_owned_group(process.pid, signal.SIGTERM, timeout=min(1, remaining(deadline)))
+                settle_by = min(started + COOPERATIVE_SECONDS, deadline - (RETIREMENT_SECONDS - COOPERATIVE_SECONDS))
                 while time.monotonic() < settle_by:
                     self.scope.drain()
                     if observe_exit(process.pid) is not None and self.scope.closed:
+                        cooperative_settled = True
                         break
                     for stream in (process.stdout, process.stderr):
                         if stream is not None:
@@ -88,11 +93,13 @@ class OwnedProcess:
                     time.sleep(.01)
             # The leader remains waitable through the final real group signal.
             # After reap only absence checks are authorized, never another signal.
-            signal_owned_group(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
-            require_group_disappearance(process.pid)
+            signal_owned_group(process.pid, signal.SIGKILL, timeout=min(1, remaining(deadline)))
+            process.wait(timeout=remaining(deadline))
+            require_group_disappearance(process.pid, timeout=remaining(deadline))
             if self.scope is not None:
                 self.scope.require_closed()
+                if not cooperative_settled:
+                    raise UnsettledScope("UNSETTLED delegated owner exceeded cooperative retirement deadline")
             SCOPE.settled(self.registration)
             self.finished = True
         except BaseException as error:

@@ -108,13 +108,13 @@ else:
         from perf_process_wait import observe_exit
         original = perf_process_owner.signal_owned_group
         observed = []
-        def signal(pid, number):
+        def signal(pid, number, **options):
             # A reaped child would raise ECHILD here; WNOWAIT must preserve the
             # identity across both observations and the final group signal.
             first = observe_exit(pid)
             second = observe_exit(pid)
             observed.append((first, second))
-            original(pid, number)
+            original(pid, number, **options)
         with patch.object(perf_process_owner, "signal_owned_group", side_effect=signal), \
                 patch.object(subprocess.Popen, "poll", side_effect=AssertionError("premature reap")):
             result = self.run_python("raise SystemExit(7)")

@@ -31,7 +31,7 @@ class ContainerOwnershipTests(unittest.TestCase):
             sys.executable, str(SCRIPTS / "m8_container.py"), "rottweiler-m8-1-2", "--",
             "docker", "run", "--rm", "--name", "rottweiler-m8-1-2", "fixture", "false",
         ], env=dict(os.environ, PATH=str(root) + ":" + os.environ["PATH"],
-                    DOCKER_LOG=str(root / "calls")), capture_output=True, timeout=15, check=False)
+                    DOCKER_LOG=str(root / "calls")), capture_output=True, timeout=20, check=False)
         return process, json.loads(output.read_text()), [json.loads(line) for line in (root / "calls").read_text().splitlines()]
 
     def test_exit_status_and_exact_container_removal_precede_ack(self):

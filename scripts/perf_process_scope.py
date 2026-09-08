@@ -12,6 +12,7 @@ import os
 import signal
 import stat
 import threading
+import time
 from dataclasses import dataclass, field
 
 SCOPE_FD = "RW_PERF_SETTLEMENT_FD"
@@ -105,6 +106,7 @@ class ProcessScope:
         self.active: set[str] = set()
         self.failed = False
         self.cancelled = 0
+        self.cancelled_at = None
         # The registration capability is for this Python owner, never its native
         # tools. Popen's default close_fds also prevents accidental inheritance.
         if descriptor is not None:
@@ -119,6 +121,8 @@ class ProcessScope:
     def _cancel(self, number, _frame):
         # Popen must finish transferring its actual child before cancellation is
         # observed. Raising in this handler would reopen the spawn handoff gap.
+        if self.cancelled_at is None:
+            self.cancelled_at = time.monotonic()
         self.cancelled = number
 
     def check(self) -> None:

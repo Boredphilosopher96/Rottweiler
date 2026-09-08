@@ -529,7 +529,12 @@ still anchors its group, then requires group disappearance. Participating nested
 Python gates use `--delegated`: their explicit settlement acknowledgement is
 required even on nonzero exit. Cancellation gives their actual owners time to
 settle independently grouped children; missing acknowledgement is `UNSETTLED`
-failure evidence. A raw command receives no nested settlement capability.
+failure evidence. A raw command receives no nested settlement capability. Each
+physical owner has one fifteen-second retirement deadline: at most ten seconds
+for cooperative child closure, with the remaining five seconds reserved for
+forced termination, reaping and group absence. These phases consume the same
+deadline. A late acknowledgement cannot qualify a forced wrapper exit. Workload
+and measured performance deadlines remain separate.
 
 The privileged M8 gate also owns its daemon container, independently of the
 Docker CLI process. Creation returns the full immutable container ID before
@@ -538,7 +543,10 @@ absence query before acknowledgement. An ambiguous creation reply or failed
 removal retains an explicit unsettled obligation; killing the Docker CLI cannot
 satisfy it. Normal creation has no added duration cap. Cancellation allows four
 seconds for its creation reply; removal and absence controls each have two-second
-bounds within the outer cooperative settlement window.
+bounds. The entire cancellation chain, including every physical Docker CLI
+retirement, shares one eight-second deadline beginning with the first cancellation
+signal. Normal removal uses the same total bound. This fits within the outer
+cooperative window; a stuck or ambiguous daemon operation remains unsettled.
 
 `scripts/ci_evidence.py` preserves command exit status and writes bounded partial
 and final diagnostics with source/run/lock identity. Each gate retains an 8 MiB

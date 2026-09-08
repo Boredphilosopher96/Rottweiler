@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 
+from perf_process_deadline import RESOURCE_CLEANUP_SECONDS
 from perf_process_owner import OwnedProcess, SCOPE
 from perf_process_scope import ScopeCancelled, UnsettledScope
 
@@ -19,19 +20,28 @@ CLEANUP_SECONDS = 2
 CANCEL_CREATION_SECONDS = 4
 
 
-def control(command: list[str], parent: str, *, cleanup: bool = False) -> bytes:
+def retirement_deadline() -> float:
+    return (SCOPE.cancelled_at if SCOPE.cancelled_at is not None else time.monotonic()) + RESOURCE_CLEANUP_SECONDS
+
+
+def control(command: list[str], parent: str, *, cleanup: bool = False, deadline: float | None = None) -> bytes:
     """A creation reply must finish or remain ambiguous; cancellation cannot fake it."""
+    if cleanup and deadline is None:
+        raise ValueError("daemon cleanup requires its shared retirement deadline")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise UnsettledScope("UNSETTLED Docker cleanup deadline expired before launch")
     owner = OwnedProcess(command, cwd=Path.cwd(), env=dict(os.environ),
                          output="stdout", cleanup_of=parent)
     output = bytearray()
-    deadline = time.monotonic() + CLEANUP_SECONDS if cleanup else None
+    stage_deadline = min(deadline, time.monotonic() + CLEANUP_SECONDS) if cleanup else None
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(owner.process.stdout, selectors.EVENT_READ)
             while selector.get_map() or owner.observe_exit() is None:
-                if not cleanup and SCOPE.cancelled and deadline is None:
-                    deadline = time.monotonic() + CANCEL_CREATION_SECONDS
-                if deadline is not None and time.monotonic() >= deadline:
+                if not cleanup and SCOPE.cancelled and stage_deadline is None:
+                    deadline = retirement_deadline()
+                    stage_deadline = min(deadline, SCOPE.cancelled_at + CANCEL_CREATION_SECONDS)
+                if stage_deadline is not None and time.monotonic() >= stage_deadline:
                     raise UnsettledScope("UNSETTLED Docker control reply; daemon operation may still be pending")
                 for key, _ in selector.select(.02):
                     chunk = os.read(key.fd, min(4096, CONTROL_BYTES + 1 - len(output)))
@@ -41,12 +51,14 @@ def control(command: list[str], parent: str, *, cleanup: bool = False) -> bytes:
                         output.extend(chunk)
                         if len(output) > CONTROL_BYTES:
                             raise UnsettledScope("UNSETTLED Docker control output exceeded admission")
+        if stage_deadline is not None and time.monotonic() >= stage_deadline:
+            raise UnsettledScope("UNSETTLED Docker control reply exceeded retirement deadline")
         status = owner.observe_exit()
         if status != 0:
             raise RuntimeError(f"Docker control exited {status}: {output.decode(errors='replace')}")
         return bytes(output)
     finally:
-        owner.settle()
+        owner.settle(deadline=deadline if deadline is not None else (retirement_deadline() if SCOPE.cancelled else None))
 
 
 def run(name: str, command: list[str]) -> int:
@@ -86,27 +98,28 @@ def run(name: str, command: list[str]) -> int:
         failure = error
         raise
     finally:
+        cleanup_deadline = retirement_deadline()
         try:
             if not creation_started:
                 SCOPE.settled(parent)
             elif container is None or not re.fullmatch(r"[0-9a-f]{64}", container):
                 raise UnsettledScope(f"UNSETTLED Docker creation for {name}; retain its named resource for investigation") from failure
             if creation_started:
-                retire(container, parent, attached)
+                retire(container, parent, attached, deadline=cleanup_deadline)
                 attached = None
         finally:
             if attached is not None:
-                attached.settle()
+                attached.settle(deadline=cleanup_deadline)
 
 
-def retire(container: str, parent: str, attached: OwnedProcess | None) -> None:
-    control(["docker", "rm", "--force", container], parent, cleanup=True)
+def retire(container: str, parent: str, attached: OwnedProcess | None, *, deadline: float) -> None:
+    control(["docker", "rm", "--force", container], parent, cleanup=True, deadline=deadline)
     remaining = control(["docker", "container", "ls", "--all", "--no-trunc",
-                         "--filter", f"id={container}", "--format", "{{.ID}}"], parent, cleanup=True)
+                         "--filter", f"id={container}", "--format", "{{.ID}}"], parent, cleanup=True, deadline=deadline)
     if remaining.strip():
         raise UnsettledScope(f"UNSETTLED Docker removal: {container}")
     if attached is not None:
-        attached.settle()
+        attached.settle(deadline=deadline)
     SCOPE.settled(parent)
 
 
