@@ -56,9 +56,19 @@ pub(super) fn cancel_active_provider_http(active: &ActiveProviderHttp) {
     }
 }
 
-pub(super) async fn terminate_and_reap(process: &dyn SupervisedPluginProcess) {
+pub(super) async fn terminate_and_settle(
+    process: &dyn SupervisedPluginProcess,
+) -> Result<(), PluginHostError> {
     let _ = process.kill_tree();
-    let _ = tokio::time::timeout(DEFAULT_SHUTDOWN_TIMEOUT, process.reap()).await;
+    match tokio::time::timeout(DEFAULT_SHUTDOWN_TIMEOUT, process.settle_effects()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(PluginHostError::EffectsUnsettled {
+            message: error.to_string(),
+        }),
+        Err(_) => Err(PluginHostError::EffectsUnsettled {
+            message: "failed plugin initialization has not proven physical retirement".to_owned(),
+        }),
+    }
 }
 
 #[allow(clippy::too_many_lines)]

@@ -127,6 +127,7 @@ impl Fixture {
                 self.manifest.clone(),
                 Arc::new(DenyPushHandler),
                 Arc::new(Redactor),
+                &rw_tools::CancellationToken::default(),
             )
             .await
             .expect("native code-only SDK launch"),

@@ -881,6 +881,7 @@ mod tests {
             Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
                 rw_providers::FixtureRedactor::default(),
             )),
+            &rw_tools::CancellationToken::default(),
         )
         .await
         .expect("production sandbox launch")
@@ -1000,6 +1001,7 @@ mod tests {
             Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
                 rw_providers::FixtureRedactor::default(),
             )),
+            &rw_tools::CancellationToken::default(),
         )
         .await
         .expect("production no-reads host");

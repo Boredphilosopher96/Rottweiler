@@ -138,15 +138,24 @@ struct FakeProcess {
     kill_fails: AtomicBool,
     settlement_blocked: AtomicBool,
     settlement_release: tokio::sync::Notify,
+    initialize_received: tokio::sync::Notify,
+    retirement_started: tokio::sync::Notify,
+    retirement_credit: StdMutex<Option<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 #[async_trait]
 impl SupervisedPluginProcess for FakeProcess {
     async fn settle_effects(&self) -> Result<(), PluginProcessError> {
+        self.retirement_started.notify_one();
         if self.settlement_blocked.load(Ordering::Acquire) {
             self.settlement_release.notified().await;
         }
-        self.reap().await
+        self.reap().await?;
+        self.retirement_credit
+            .lock()
+            .expect("retirement credit")
+            .take();
+        Ok(())
     }
     fn mark_capability_violation(&self, violation: &CapabilityViolation) {
         self.violations
@@ -396,6 +405,7 @@ impl PluginLauncher for MemoryLauncher {
         let manifest = self.manifest.clone();
         let push = self.push.clone();
         let hang_method = self.hang_method.clone();
+        let process = Arc::clone(&self.process);
         tokio::spawn(async move {
             let mut input = BufReader::new(plugin_input);
             let mut output = plugin_output;
@@ -405,6 +415,10 @@ impl PluginLauncher for MemoryLauncher {
                 line.clear();
                 match frame {
                     RpcFrame::Request(request) if request.method == METHOD_INITIALIZE => {
+                        process.initialize_received.notify_one();
+                        if hang_method.as_deref() == Some(METHOD_INITIALIZE) {
+                            continue;
+                        }
                         if let Some(method) = push.as_deref() {
                             let push = RpcFrame::Request(RpcRequest {
                                 jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
@@ -689,6 +703,7 @@ async fn approved_fixture_host_with_http(
             push,
             provider_http,
             redactor,
+            &rw_tools::CancellationToken::default(),
         )
         .await
         .expect("launch approved fixture"),

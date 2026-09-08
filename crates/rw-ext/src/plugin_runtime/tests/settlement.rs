@@ -157,6 +157,7 @@ async fn approved_handshake_registers_custom_tool_and_reaps_on_shutdown() {
             manifest.clone(),
             Arc::new(DenyPushHandler),
             Arc::new(NoopPluginBoundaryRedactor),
+            &rw_tools::CancellationToken::default(),
         )
         .await
         .expect("launch"),
@@ -210,6 +211,7 @@ async fn dropping_launched_host_kills_process_without_explicit_shutdown() {
         manifest,
         Arc::new(DenyPushHandler),
         Arc::new(NoopPluginBoundaryRedactor),
+        &rw_tools::CancellationToken::default(),
     )
     .await
     .expect("launch");
@@ -248,6 +250,7 @@ async fn shutdown_uses_effect_proof_instead_of_kill_attempt_outcome() {
             manifest,
             Arc::new(DenyPushHandler),
             Arc::new(NoopPluginBoundaryRedactor),
+            &rw_tools::CancellationToken::default(),
         )
         .await
         .expect("launch");
@@ -774,6 +777,7 @@ async fn cancelled_launch_keeps_blocking_approval_owner_without_blocking_callbac
             manifest(),
             Arc::new(DenyPushHandler),
             Arc::new(NoopPluginBoundaryRedactor),
+            &rw_tools::CancellationToken::default(),
         )
         .await
     });
@@ -804,4 +808,98 @@ async fn cancelled_launch_keeps_blocking_approval_owner_without_blocking_callbac
         0,
         "cancelled verification never launches a process"
     );
+}
+
+#[tokio::test]
+async fn initialization_cancellation_and_caller_loss_keep_admission_until_retirement() {
+    for drop_caller in [false, true] {
+        let root = TempDir::new().expect("tempdir");
+        let config = shell_config(&root)
+            .with_allowed_domains(["example.com"])
+            .expect("domains");
+        let manifest = manifest();
+        let approvals = MemoryApproval::default();
+        approve_plugin_launch(&approvals, &manifest, &config, "project:initialization")
+            .expect("approve");
+        let admission = Arc::new(Semaphore::new(1));
+        let process = Arc::new(FakeProcess::default());
+        process.settlement_blocked.store(true, Ordering::Release);
+        *process.retirement_credit.lock().expect("credit") =
+            Some(Arc::clone(&admission).acquire_owned().await.expect("slot"));
+        let cancellation = CancellationToken::default();
+        let task = tokio::spawn({
+            let process = Arc::clone(&process);
+            let cancellation = cancellation.clone();
+            let workspace = root.path().to_path_buf();
+            async move {
+                PluginHost::launch_approved(
+                    &MemoryLauncher {
+                        manifest: manifest.clone(),
+                        process,
+                        push: None,
+                        hang_method: Some(METHOD_INITIALIZE.to_owned()),
+                    },
+                    Arc::new(approvals),
+                    &config,
+                    "project:initialization",
+                    &[workspace],
+                    manifest,
+                    Arc::new(DenyPushHandler),
+                    Arc::new(NoopPluginBoundaryRedactor),
+                    &cancellation,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            process.initialize_received.notified(),
+        )
+        .await
+        .expect("initialize reached actual transport");
+        cancellation.cancel();
+        // This must precede the independent five-second RPC timer.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            process.retirement_started.notified(),
+        )
+        .await
+        .expect("cancellation starts physical retirement");
+        assert!(process.killed.load(Ordering::Acquire) > 0);
+        assert!(
+            !task.is_finished(),
+            "cancellation cannot claim early settlement"
+        );
+        assert_eq!(admission.available_permits(), 0);
+        assert_eq!(process.waited.load(Ordering::Acquire), 0);
+        let task = if drop_caller {
+            task.abort();
+            let Err(error) = task.await else {
+                panic!("caller was not dropped");
+            };
+            assert!(error.is_cancelled());
+            None
+        } else {
+            Some(task)
+        };
+        process.settlement_blocked.store(false, Ordering::Release);
+        process.settlement_release.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while admission.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual retired process refunds admission");
+        assert!(process.waited.load(Ordering::Acquire) > 0);
+        if let Some(task) = task {
+            let result = tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("launch settles")
+                .expect("launch task");
+            assert!(
+                matches!(result, Err(PluginHostError::Rpc(ref error)) if error.code == "cancelled")
+            );
+        }
+    }
 }

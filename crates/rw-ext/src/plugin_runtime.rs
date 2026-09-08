@@ -17,7 +17,7 @@ mod provider_http;
 #[cfg(test)]
 use incoming::stream_provider_http_body;
 use incoming::{
-    cancel_active_provider_http, drain_stderr, fail_pending, reader_loop, terminate_and_reap,
+    cancel_active_provider_http, drain_stderr, fail_pending, reader_loop, terminate_and_settle,
 };
 
 mod operation;

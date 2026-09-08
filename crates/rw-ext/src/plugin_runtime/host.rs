@@ -90,6 +90,7 @@ impl PluginHost {
         expected_manifest: PluginManifest,
         push_handler: Arc<dyn PushHandler>,
         redactor: Arc<dyn PluginBoundaryRedactor>,
+        cancellation: &CancellationToken,
     ) -> Result<Self, PluginHostError> {
         Self::launch_approved_with_http(
             launcher,
@@ -101,12 +102,15 @@ impl PluginHost {
             push_handler,
             Arc::new(DenyPluginProviderHttpHandler),
             redactor,
+            cancellation,
         )
         .await
     }
 
     /// Launches only an exact approved executable/config/origin/manifest identity and completes
-    /// the protocol handshake before exposing adapters.
+    /// the protocol handshake before exposing adapters. The required cancellation
+    /// token also governs initialization; an accepted launch remains owned until
+    /// its physical settlement proof completes, including a cancelled handshake.
     ///
     /// # Errors
     ///
@@ -126,13 +130,20 @@ impl PluginHost {
         push_handler: Arc<dyn PushHandler>,
         provider_http: Arc<dyn PluginProviderHttpHandler>,
         redactor: Arc<dyn PluginBoundaryRedactor>,
+        cancellation: &CancellationToken,
     ) -> Result<Self, PluginHostError> {
         let (profile, continuation_provenance) =
             verify_approved_launch(store, config, origin, approved_roots, &expected_manifest)
                 .await?;
+        if cancellation.is_cancelled() {
+            return Err(PluginHostError::Rpc(rpc_error(
+                "cancelled",
+                "plugin activation cancelled before launch",
+            )));
+        }
         let child = launcher.launch(config, &profile).await?;
         if child.executable_identity != *config.executable_identity() {
-            terminate_and_reap(child.process.as_ref()).await;
+            terminate_and_settle(child.process.as_ref()).await?;
             return Err(PluginHostError::Approval(
                 "launcher executable attestation differs from approved identity".to_owned(),
             ));
@@ -159,7 +170,9 @@ impl PluginHost {
         .map_err(|error| PluginHostError::Rpc(rpc_error("invalid_request", &error.to_string())))?;
         let started = std::time::Instant::now();
         tracing::debug!(target: "rw_performance", stage = "plugin.initialize", phase = "begin", plugin = %expected_manifest.name);
-        let result = client.request(METHOD_INITIALIZE, initialize).await;
+        let result = client
+            .request_cancellable(METHOD_INITIALIZE, initialize, cancellation)
+            .await;
         tracing::debug!(target: "rw_performance", stage = "plugin.initialize", plugin = %expected_manifest.name,
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             succeeded = result.is_ok(), "plugin activation stage finished");
@@ -169,12 +182,12 @@ impl PluginHost {
         }) {
             Ok(manifest) => manifest,
             Err(error) => {
-                terminate_and_reap(process.as_ref()).await;
+                terminate_and_settle(process.as_ref()).await?;
                 return Err(PluginHostError::Rpc(error));
             }
         };
         if let Err(error) = initialized.validate() {
-            terminate_and_reap(process.as_ref()).await;
+            terminate_and_settle(process.as_ref()).await?;
             return Err(PluginHostError::ApprovalDetails(error.into()));
         }
         if initialized
@@ -184,7 +197,7 @@ impl PluginHost {
                 .fingerprint()
                 .map_err(PluginApprovalError::from)?
         {
-            terminate_and_reap(process.as_ref()).await;
+            terminate_and_settle(process.as_ref()).await?;
             return Err(PluginHostError::Approval(
                 "initialized manifest differs from approved manifest".to_owned(),
             ));
@@ -266,7 +279,7 @@ pub(crate) async fn probe_plugin_manifest(
         )
         .await?;
     if child.executable_identity != *config.executable_identity() {
-        terminate_and_reap(child.process.as_ref()).await;
+        terminate_and_settle(child.process.as_ref()).await?;
         return Err(PluginHostError::Approval(
             "launcher executable attestation differs from configured identity".to_owned(),
         ));
@@ -308,12 +321,12 @@ pub(crate) async fn probe_plugin_manifest(
     }) {
         Ok(manifest) => manifest,
         Err(error) => {
-            terminate_and_reap(process.as_ref()).await;
+            terminate_and_settle(process.as_ref()).await?;
             return Err(error.into());
         }
     };
     if let Err(error) = manifest.validate() {
-        terminate_and_reap(process.as_ref()).await;
+        terminate_and_settle(process.as_ref()).await?;
         return Err(PluginApprovalError::from(error).into());
     }
     client.shutdown(DEFAULT_SHUTDOWN_TIMEOUT).await?;

@@ -117,6 +117,7 @@ pub(super) async fn activate(
         recipe.push_handler.clone(),
         provider_http,
         redactor,
+        &generation.cancellation,
     )
     .await;
     let host = match result {

@@ -250,6 +250,7 @@ async fn manifest_rejects_workspace_root_as_code_root() {
         manifest,
         Arc::new(DenyPushHandler),
         Arc::new(NoopPluginBoundaryRedactor),
+        &rw_tools::CancellationToken::default(),
     )
     .await;
     let Err(error) = result else {
@@ -345,6 +346,7 @@ async fn approved_launch_rejects_substitution_at_the_launcher_before_execution()
         manifest,
         Arc::new(DenyPushHandler),
         Arc::new(NoopPluginBoundaryRedactor),
+        &rw_tools::CancellationToken::default(),
     )
     .await;
     assert!(matches!(result, Err(PluginHostError::Process(_))));
