@@ -507,7 +507,7 @@ describe("authenticated UDS engine transport", () => {
       turn: {
         role: "assistant",
         blocks: [{ type: "text", text: "x".repeat(96 * 1024) }],
-        meta: { synthetic: false, summary: false },
+        meta: { created_at: null, model: null, synthetic: false, summary: false },
       },
     } satisfies EngineEvent
     const finished = {

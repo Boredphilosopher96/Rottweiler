@@ -448,6 +448,7 @@ describe("Rottweiler models", () => {
         role: "assistant",
         blocks: [{ type: "text", text: "fallback response" }],
         meta: {
+          created_at: null,
           model: "openai/gpt-5-fallback",
           synthetic: false,
           summary: false

@@ -9,7 +9,7 @@ test("committed conversation and command bodies do not become retained live stat
   for (let index = 0; index < 300; index++) {
     state = reduce(state, { type: "conversation_turn_committed", meta: meta(String(index * 2)),
       agent_turn: String(index), turn: { role: "user", blocks: [{ type: "text", text }],
-        meta: { synthetic: false, summary: false } } })
+        meta: { created_at: null, model: null, synthetic: false, summary: false } } })
     state = reduce(state, { type: "command_finished", meta: meta(String(index * 2 + 1)),
       name: "extension", message: text, unrestorable_paths: [] })
   }

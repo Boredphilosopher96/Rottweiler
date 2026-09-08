@@ -28,7 +28,7 @@ describe("state streaming", () => {
     const turn: Turn = {
       role: "assistant",
       blocks: [{ type: "text", text: "hello" }],
-      meta: { model: "copilot/gpt-5-mini", synthetic: false, summary: false },
+      meta: { created_at: null, model: "copilot/gpt-5-mini", synthetic: false, summary: false },
     }
     state = reduce(state, {
       type: "conversation_turn_committed",
@@ -296,7 +296,7 @@ describe("state streaming", () => {
         turn: {
           role: "assistant",
           blocks: [{ type: "text", text: `turn ${turnId}` }],
-          meta: { synthetic: false, summary: false },
+          meta: { created_at: null, model: null, synthetic: false, summary: false },
         },
       })
       state = reduce(state, {

@@ -335,7 +335,7 @@ describe("bounded retained rendering", () => {
     const markdown = turnMarkdown({
       role: "tool",
       blocks: [{ type: "tool_result", id: "call-internal", output, is_error: false }],
-      meta: { synthetic: false, summary: false },
+      meta: { created_at: null, model: null, synthetic: false, summary: false },
     })
     expect(markdown).toBe("")
     expect(markdown).not.toContain("machine_local_path")
@@ -346,13 +346,13 @@ describe("bounded retained rendering", () => {
     expect(turnMarkdown({
       role: "assistant",
       blocks: [{ type: "thinking", content: "", signature: "opaque-provider-state" }],
-      meta: { synthetic: false, summary: false },
+      meta: { created_at: null, model: null, synthetic: false, summary: false },
     })).toBe("")
 
     const reasoningTurn = {
       role: "assistant",
       blocks: [{ type: "thinking", content: "**Inspecting**\n\n`Cargo.toml`", signature: null }],
-      meta: { synthetic: false, summary: false },
+      meta: { created_at: null, model: null, synthetic: false, summary: false },
     } satisfies import("../src/protocol").Turn
     expect(turnMarkdown(reasoningTurn)).toBe("")
     expect(turnReasoningMarkdown(reasoningTurn)).toBe("**Inspecting**\n\n`Cargo.toml`")
