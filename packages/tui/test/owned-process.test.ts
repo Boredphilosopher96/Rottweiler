@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { access, readFile, rm, writeFile } from "node:fs/promises"
+import { access, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { TestProcessScope } from "./support/owned-process"
 
@@ -55,24 +55,33 @@ test("cleanup during a pending proof awaits its physical owner and prevents anot
   await expect(access(owner.directory)).rejects.toThrow()
 })
 
-test("a killed bridge cannot acknowledge closure or authorize deleting its directory", async () => {
-  const owner = await TestProcessScope.create("rw-unsettled-process-")
-  const pidFile = join(owner.directory, "pid")
-  const program = `await Bun.write(${JSON.stringify(pidFile)}, String(process.pid));process.kill(process.ppid,"SIGKILL");process.exit(0)`
-  await expect(owner.run([process.execPath, "-e", program], { timeoutMs: 2_000 })).rejects.toThrow("UNSETTLED")
-  expect(() => owner.run([process.execPath, "-e", "process.exit(0)"], { timeoutMs: 2_000 })).toThrow("UNSETTLED")
-  await expect(owner.close()).rejects.toThrow(`retained ${owner.directory}`)
-  await access(pidFile)
-  // The deliberate failure fixture independently observes its own child's exit.
-  // Production cleanup never substitutes this for the missing acknowledgement.
-  const pid = Number(await readFile(pidFile, "utf8"))
-  const until = performance.now() + 5_000
-  while (performance.now() < until) {
-    try { process.kill(pid, 0) } catch { await rm(owner.directory, { recursive: true }); return }
-    await Bun.sleep(10)
-  }
-  throw new Error(`UNSETTLED negative fixture retained ${owner.directory}`)
-}, 10_000)
+test("a killed bridge denies acknowledgement until its failure fixture proves retirement", async () => {
+  const outer = await scope()
+  const controller = `
+import {access,readFile,rm} from "node:fs/promises";
+import {TestProcessScope} from ${JSON.stringify(new URL("./support/owned-process.ts", import.meta.url).pathname)};
+const owner=await TestProcessScope.create("rw-unsettled-process-");
+const pidFile=owner.directory+"/pid";
+const program="await Bun.write("+JSON.stringify(pidFile)+",String(process.pid));process.kill(process.ppid,'SIGKILL');process.exit(0)";
+let rejected=false;
+try{await owner.run([process.execPath,"-e",program],{timeoutMs:2000})}catch(error){rejected=String(error).includes("UNSETTLED")}
+if(!rejected)throw new Error("killed bridge falsely acknowledged");
+try{await owner.close();throw new Error("unproven directory was deleted")}catch(error){if(!String(error).includes("retained"))throw error}
+await access(pidFile);
+const pid=Number(await readFile(pidFile,"utf8"));
+const until=Date.now()+5000;
+let absent=false;
+while(Date.now()<until){try{process.kill(pid,0)}catch{absent=true;break}await Bun.sleep(10)}
+if(!absent)throw new Error("UNSETTLED failure fixture retained "+owner.directory);
+// Its fixed child program creates no descendants and exits immediately after
+// killing the bridge. The controller observed worker exit and this child exit.
+await rm(owner.directory,{recursive:true});
+console.log("negative fixture physically retired");
+`
+  const result = await outer.run([process.execPath, "-e", controller], { timeoutMs: 10_000 })
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain("negative fixture physically retired")
+}, 15_000)
 
 
 test("Bun test timeout cleanup awaits its pending supervisor before deleting scratch", async () => {
@@ -115,17 +124,13 @@ while True:
   await Bun.sleep(100)
   expect(await readFile(heartbeat, "utf8")).toBe(stopped)
   if (failure.includes("UNSETTLED")) {
-    // An unreaped orphan zombie is not group disappearance. The failure fixture
-    // preserves that evidence rather than treating stopped execution as closure.
     await expect(owner.close()).rejects.toThrow(`retained ${owner.directory}`)
-    await access(pidFile)
-    console.error(`Expected unproven preload settlement retained ${owner.directory}`)
-  } else {
-    const pid = Number(await readFile(pidFile, "utf8"))
-    expect(() => process.kill(pid, 0)).toThrow()
-    await owner.close()
-    await expect(access(owner.directory)).rejects.toThrow()
+    throw new Error(`UNSETTLED preload fixture cannot qualify physical closure: ${owner.directory}`)
   }
+  const pid = Number(await readFile(pidFile, "utf8"))
+  expect(() => process.kill(pid, 0)).toThrow()
+  await owner.close()
+  await expect(access(owner.directory)).rejects.toThrow()
 }, 15_000)
 
 test("VM death closes its lifeline and the Python owner reaps native work", async () => {

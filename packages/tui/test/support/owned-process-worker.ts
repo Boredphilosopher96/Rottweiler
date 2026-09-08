@@ -6,7 +6,9 @@ import { parentPort, workerData } from "node:worker_threads"
 const { bridge, request, result } = workerData as { bridge: string; request: string; result: string }
 const child = Bun.spawn(["python3", bridge, request, result], {
   stdin: "pipe", stdout: "ignore", stderr: "ignore",
+  env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "RW_PERF_SETTLEMENT_FD")),
 })
+parentPort!.postMessage({ started: child.pid })
 const status = await child.exited
 await child.stdin.end()
 parentPort!.postMessage(status)

@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Worker } from "node:worker_threads"
+import { registerTestProcess } from "./process-settlement"
 
 interface ProcessResult { code: number; stdout: string; stderr: string }
 interface ProcessOptions { cwd?: string; env?: Record<string, string>; timeoutMs: number; maxOutputBytes?: number }
@@ -40,6 +41,8 @@ export class TestProcessScope {
     // This supervisor's own bounded deadline owns termination. Killing it could
     // abandon a native preload child; missing acknowledgement preserves evidence.
     this.#unsettled = true
+    const registration = registerTestProcess()
+    let protocolError: unknown = null
     // Bun's test VM automatically signals its subprocesses on test timeout,
     // including before Python installs its cooperative cancellation handler.
     // The owned worker VM keeps that startup handoff outside the test auto-killer.
@@ -49,11 +52,16 @@ export class TestProcessScope {
         workerData: { bridge: join(import.meta.dir, "owned-process.py"), request, result },
       })
       worker.on("message", (message: unknown) => {
+        if (typeof message === "object" && message !== null && "started" in message &&
+            typeof message.started === "number" && Number.isInteger(message.started) && message.started > 0) {
+          try { registration.started(message.started) } catch (error) { protocolError = error }
+        }
         if (typeof message === "number" && Number.isInteger(message)) bridgeCode = message
       })
       worker.on("error", () => { bridgeCode = 125 })
       worker.on("exit", (status) => resolve(status === 0 ? bridgeCode : 125))
     })
+    if (protocolError !== null) throw new Error(`UNSETTLED test registration; retained ${this.directory}`, { cause: protocolError })
     let payload: unknown
     try {
       if ((await stat(result)).size > 6 * 1024 * 1024 + 8192) throw new Error("Missing bounded acknowledgement")
@@ -66,6 +74,7 @@ export class TestProcessScope {
     } catch (error) {
       throw new Error(`UNSETTLED test process; retained ${this.directory}: ${String(error)}`, { cause: error })
     }
+    registration.settled()
     this.#unsettled = false
     if ("error" in payload) throw new Error(String(payload.error))
     if (!("code" in payload) || !Number.isInteger(payload.code) || !("stdout" in payload) || typeof payload.stdout !== "string" ||

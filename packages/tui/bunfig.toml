@@ -1,4 +1,4 @@
 preload = ["./scripts/native-preload.ts"]
 
 [test]
-preload = ["./scripts/native-preload.ts"]
+preload = ["./test/support/process-settlement-preload.ts", "./scripts/native-preload.ts"]
