@@ -114,6 +114,7 @@ fn run_native_ask(root: &tempfile::TempDir) {
             ])
             .arg(&script),
     );
+    fs::write(root.path().join("engine-events.jsonl"), &output).expect("canonical fixture evidence");
     let events = parse_stream(&output);
     let approval = events.iter().position(|event| matches!(event, EngineEvent::ToolApprovalNeeded { name, .. } if name == "write"))
         .expect("hook Ask overrides otherwise permissive headless policy");

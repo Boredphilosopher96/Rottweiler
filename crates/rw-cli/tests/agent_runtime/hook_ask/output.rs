@@ -47,7 +47,12 @@ fn capture(command: &mut Command) -> io::Result<Vec<u8>> {
     // group signalling. No assertion or returned diagnostic precedes settlement.
     process.settle();
     match result {
-        Ok(status) if status.success() => Ok(output),
+        Ok(status) if status.success() => {
+            if !diagnostics.is_empty() {
+                eprintln!("fixture stderr: {}", String::from_utf8_lossy(&diagnostics));
+            }
+            Ok(output)
+        }
         result => Err(io::Error::other(format!(
             "fixture process failed: {result:?}; stderr: {}; stdout: {}",
             String::from_utf8_lossy(&diagnostics),
