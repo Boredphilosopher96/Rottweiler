@@ -45,6 +45,12 @@ pub(crate) fn working_allowance(
 pub(crate) struct UnboundHistory;
 #[async_trait]
 impl SessionHistory for UnboundHistory {
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn crate::recovery::HistoryWorkingAllowance>, AgentLoopError> {
+        Ok(working_allowance(()))
+    }
+
     async fn capture_history(&self) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError> {
         Err(failure("test actor history must be bound before spawn"))
     }
@@ -244,6 +250,12 @@ impl SessionEventSink for JournalFixture {
 }
 #[async_trait]
 impl SessionHistory for JournalFixture {
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn crate::recovery::HistoryWorkingAllowance>, AgentLoopError> {
+        Ok(working_allowance(Arc::clone(&self.root)))
+    }
+
     async fn capture_history(&self) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError> {
         let history = self.history()?;
         let cut = history.head().conversation;
@@ -383,4 +395,13 @@ impl SessionHistoryView for View {
             Arc::clone(&self.root),
         ))
     }
+}
+
+/// Admitted immutable instruction source for actor fixtures.
+pub(crate) fn initial_context(turns: Vec<rw_types::Turn>) -> crate::InitialSessionContext {
+    crate::InitialSessionContext::from_owned(
+        HistoryRead::new(turns, working_allowance(())),
+        working_allowance(()),
+    )
+    .expect("fixture context")
 }

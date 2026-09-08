@@ -505,6 +505,14 @@ Context plans charge profiling metadata before scanning and grow to their
 checked transformation allowance before copying or normalizing content. Their
 high-water charge remains live with cached context and is released by its owner.
 
+Initial instruction context retains immutable admitted source bodies across actor
+configurations. Model routing clones shared references. Mode and child policy
+changes admit a replacement before copying the first system turn; other turns
+keep their source identity. Workspace context shares its admitted sources through
+at most 128 segments and 4,096 turns. Source bodies and segment metadata retain
+their resident credit until the final reference is destroyed, including MCP
+catalog context whose original result owner moves intact into the session.
+
 Compaction reads token- and byte-bounded pages into an owned rolling summary.
 Large individual blocks use complete source/block/byte continuation through
 UTF-8-safe summary fragments. Evicted and pruned payloads are removed before

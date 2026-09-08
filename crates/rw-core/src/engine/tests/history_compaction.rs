@@ -22,6 +22,12 @@ struct SmallPages(Arc<dyn SessionHistory>);
 struct SmallView(Arc<dyn SessionHistoryView>);
 #[async_trait]
 impl SessionHistory for SmallPages {
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn crate::recovery::HistoryWorkingAllowance>, AgentLoopError> {
+        self.0.reserve_working_set()
+    }
+
     async fn capture_history(&self) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError> {
         Ok(Arc::new(SmallView(self.0.capture_history().await?)))
     }

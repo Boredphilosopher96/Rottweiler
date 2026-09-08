@@ -81,13 +81,14 @@ async fn initial_project_instructions_steer_replay_without_entering_committed_hi
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     );
-    actor_config.initial_session_context = vec![Turn {
-        role: Role::System,
-        blocks: vec![Block::Text {
-            text: "Root AGENTS.md: reply kennel".to_owned(),
-        }],
-        meta: TurnMeta::default(),
-    }];
+    actor_config.initial_session_context =
+        crate::engine::tests::fixtures::history::initial_context(vec![Turn {
+            role: Role::System,
+            blocks: vec![Block::Text {
+                text: "Root AGENTS.md: reply kennel".to_owned(),
+            }],
+            meta: TurnMeta::default(),
+        }]);
     actor_config.event_sink = sink.clone();
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await

@@ -3,6 +3,8 @@ mod bootstrap;
 pub use bootstrap::SessionActorRecovery;
 mod child_progress;
 mod config;
+mod initial_context;
+pub use initial_context::InitialSessionContext;
 mod control;
 mod family_control;
 pub use family_control::FamilyControlAuthority;

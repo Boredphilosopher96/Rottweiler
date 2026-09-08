@@ -5,10 +5,7 @@ use rw_tools::{
     CancellationToken, ToolRegistry, WorkspaceBinding, WorktreeIsolation, WorktreeLease,
     WorktreeLeaseRecord,
 };
-use rw_types::{
-    Block, DiffArtifact, EngineEvent, Role, SessionId, SessionMode, SubagentIsolation, Turn,
-    TurnMeta,
-};
+use rw_types::{DiffArtifact, EngineEvent, SessionId, SessionMode, SubagentIsolation};
 
 use crate::{AgentLoopError, SessionActor, SessionActorConfig, SessionHandle};
 
@@ -308,7 +305,8 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
             launch.request.system_prompt.as_deref(),
             launch.request.permission_mode,
             launch.max_turns,
-        );
+        )
+        .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         let handle = SessionActor::spawn(config)
             .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         Ok(Arc::new(ActorSubagentSession { handle }))
@@ -360,7 +358,7 @@ pub(super) fn apply_child_policy(
     system_prompt: Option<&str>,
     permission_mode: SessionMode,
     max_turns: usize,
-) {
+) -> Result<(), AgentLoopError> {
     model_alias.clone_into(&mut config.model_alias);
     config.max_turns = config.max_turns.min(max_turns).max(1);
     config.recovered.mode = permission_mode;
@@ -377,36 +375,13 @@ pub(super) fn apply_child_policy(
         }
     };
     if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
-        if let Some(system) = config
+        config
             .initial_session_context
-            .iter_mut()
-            .find(|turn| turn.role == Role::System)
-        {
-            system.blocks.push(Block::Text {
-                text: system_prompt.to_owned(),
-            });
-        } else {
-            config.initial_session_context.insert(
-                0,
-                Turn {
-                    role: Role::System,
-                    blocks: vec![Block::Text {
-                        text: system_prompt.to_owned(),
-                    }],
-                    meta: TurnMeta::default(),
-                },
-            );
-        }
+            .append_system_text(system_prompt, config.history.reserve_working_set()?)?;
     }
-    if let Some(system) = config
+    config
         .initial_session_context
-        .iter_mut()
-        .find(|turn| turn.role == Role::System)
-    {
-        system.blocks.push(Block::Text {
-            text: mode_prompt.to_owned(),
-        });
-    }
+        .append_system_text(mode_prompt, config.history.reserve_working_set()?)
 }
 
 pub(super) fn bind_child_tools(

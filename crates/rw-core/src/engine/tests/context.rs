@@ -130,7 +130,9 @@ async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     );
-    actor_config.initial_session_context = vec![text_turn(Role::System, "protected policy")];
+    actor_config.initial_session_context = crate::engine::tests::fixtures::history::initial_context(
+        vec![text_turn(Role::System, "protected policy")],
+    );
     actor_config.recovered.conversation = vec![inventory_tool_turn()];
     actor_config.recovered.context_surgery = vec![ContextSurgeryAction {
         item_id: ContextItemId("conversation:0".to_owned()),
@@ -351,7 +353,9 @@ async fn stable_prefix_hash_and_hint_remain_identical_across_twenty_turns() {
         PermissionDecision::Allow,
         builtin_hook_dispatcher().expect("hooks"),
     );
-    actor_config.initial_session_context = vec![text_turn(Role::System, "stable policy")];
+    actor_config.initial_session_context = crate::engine::tests::fixtures::history::initial_context(
+        vec![text_turn(Role::System, "stable policy")],
+    );
     actor_config.event_sink = sink.clone();
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await

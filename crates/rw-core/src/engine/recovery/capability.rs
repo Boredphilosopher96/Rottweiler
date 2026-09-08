@@ -11,6 +11,11 @@ use std::{
 /// An application-owned canonical history service for one exact session.
 #[async_trait]
 pub trait SessionHistory: Send + Sync {
+    /// Reserve resident transformation credit independently of a captured snapshot.
+    /// # Errors
+    /// Rejects exhausted application resident admission.
+    fn reserve_working_set(&self) -> Result<Box<dyn HistoryWorkingAllowance>, AgentLoopError>;
+
     /// Capture one committed history generation. The returned owner retains its
     /// read admission and storage descriptors until the last reference is dropped.
     async fn capture_history(&self) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError>;

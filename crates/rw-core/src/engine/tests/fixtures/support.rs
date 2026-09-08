@@ -240,7 +240,7 @@ pub(in crate::engine::tests) fn config(
         workspace_root: root.to_path_buf(),
         additional_workspace_roots: Vec::new(),
         workspace_generation: 0,
-        initial_session_context: Vec::new(),
+        initial_session_context: crate::InitialSessionContext::default(),
         startup_notifications: Vec::new(),
         model_alias: "fast".to_owned(),
         model,

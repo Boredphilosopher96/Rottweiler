@@ -191,7 +191,7 @@ pub struct WorkspaceRuntimeGeneration {
     pub permissions: Arc<PermissionGate>,
     pub checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     pub folder_trust: Arc<dyn FolderTrustController>,
-    pub supplemental_context: Vec<Turn>,
+    pub supplemental_context: super::session::InitialSessionContext,
 }
 
 impl fmt::Debug for WorkspaceRuntimeGeneration {

@@ -117,7 +117,7 @@ fn turn_profile(turn: &Turn) -> Result<Profile, AgentLoopError> {
 fn stable_profile(config: &SessionActorConfig) -> Result<Profile, AgentLoopError> {
     let mut profile = Profile::default();
     let mut encoded = rw_types::json_encoding::JsonWriter::count(usize::MAX);
-    for turn in &config.initial_session_context {
+    for turn in config.initial_session_context.iter() {
         profile.add(turn_profile(turn)?)?;
         encoded
             .serialize(turn)

@@ -73,10 +73,11 @@ fn fixture(root: &std::path::Path, generation: usize) -> SessionActorConfig {
         builtin_hook_dispatcher().expect("hooks"),
     )
     .inner;
-    result.initial_session_context = vec![text_turn(
-        Role::System,
-        format!("Instructions generation {generation}"),
-    )];
+    result.initial_session_context =
+        crate::engine::tests::fixtures::history::initial_context(vec![text_turn(
+            Role::System,
+            format!("Instructions generation {generation}"),
+        )]);
     if generation >= 1 {
         result.model_alias = "other-model".into();
     }

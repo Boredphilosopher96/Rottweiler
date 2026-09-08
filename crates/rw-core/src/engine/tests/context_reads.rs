@@ -20,6 +20,12 @@ struct GatedHistory {
 }
 #[async_trait]
 impl SessionHistory for GatedHistory {
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn crate::recovery::HistoryWorkingAllowance>, AgentLoopError> {
+        self.inner.reserve_working_set()
+    }
+
     async fn capture_history(&self) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError> {
         if self.armed.load(Ordering::Acquire) {
             self.entered.notify_one();

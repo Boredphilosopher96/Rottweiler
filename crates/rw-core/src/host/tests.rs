@@ -214,7 +214,7 @@ impl StubFactory {
             workspace_root: workspace,
             additional_workspace_roots: Vec::new(),
             workspace_generation: 0,
-            initial_session_context: Vec::new(),
+            initial_session_context: crate::InitialSessionContext::default(),
             startup_notifications: Vec::new(),
             model_alias: "fast".to_owned(),
             model: Arc::clone(&self.model),

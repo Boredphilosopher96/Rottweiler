@@ -233,7 +233,7 @@ impl WorkspaceRootController for FixedWorkspaceRootController {
             permissions: Arc::clone(&self.permissions),
             checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(NoopFolderTrustController),
-            supplemental_context: Vec::new(),
+            supplemental_context: crate::InitialSessionContext::default(),
         };
         if let Some(extensions) = &self.extensions {
             let (snapshot, _) = extensions.rebase(SessionExtensionSnapshot {

@@ -42,6 +42,19 @@ pub(super) async fn start_manual_compaction(
             return;
         }
     };
+    let config = match config.with_model_route_and_mode(
+        state.model_alias.clone(),
+        state.provider.clone(),
+        &state.mode_id,
+    ) {
+        Ok(config) => Arc::new(config),
+        Err(error) => {
+            if let Some(completion) = completion {
+                let _ = completion.send(Err(error));
+            }
+            return;
+        }
+    };
     let fallback = state.conversation_summary();
     let summary_turn = state.next_turn;
     let cancellation = CancellationToken::default();
@@ -53,11 +66,6 @@ pub(super) async fn start_manual_compaction(
     state.control.start(summary_turn, cancellation.clone());
     active_turn.store(summary_turn, Ordering::Release);
     let local_session_accounting = session_accounting_fallback(&state.accounting);
-    let config = Arc::new(config.with_model_route_and_mode(
-        state.model_alias.clone(),
-        state.provider.clone(),
-        &state.mode_id,
-    ));
     let signals = turn_signals.clone();
     let tasks = state.tasks.clone();
     if let Err(error) = tasks.spawn(Arc::clone(&config), cancellation.clone(), async move {

@@ -101,7 +101,7 @@ pub(super) fn prepare_turn_start(
         .then(|| state.provider.clone())
         .flatten();
     let mut turn_config =
-        config.with_model_route_and_mode(model_alias.clone(), provider, &state.mode_id);
+        config.with_model_route_and_mode(model_alias.clone(), provider, &state.mode_id)?;
     turn_config.thinking = state.thinking;
     let mode = config.modes.get(&state.mode_id.0).ok_or_else(|| {
         AgentLoopError::InvalidConfiguration(format!("unknown active mode {:?}", state.mode_id.0))

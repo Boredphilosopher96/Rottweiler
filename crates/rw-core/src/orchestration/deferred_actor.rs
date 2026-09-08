@@ -89,7 +89,8 @@ impl Recipe {
             self.policy.system_prompt.as_deref(),
             self.policy.permission_mode,
             self.policy.max_turns,
-        );
+        )
+        .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         Ok(config)
     }
 }

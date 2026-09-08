@@ -181,6 +181,20 @@ async fn apply_workspace(
         })?
         .with_session_id(context.config.session_id.clone())
         .with_mcp_tool_policy(generation.tools.mcp_tool_policy().clone());
+    let next = match context
+        .config
+        .with_workspace_generation(generation, &context.state.mode_id)
+    {
+        Ok(next) => next,
+        Err(error) => {
+            context
+                .config
+                .workspace_roots
+                .abort_generation(generation.generation)
+                .await?;
+            return Err(error);
+        }
+    };
     let result = commit_workspace(generation, &mut context).await;
     if let Err(error) = result {
         context
@@ -194,9 +208,6 @@ async fn apply_workspace(
         .config
         .workspace_roots
         .finalize_generation(generation.generation);
-    let next = context
-        .config
-        .with_workspace_generation(generation, &context.state.mode_id);
     *context
         .command_descriptors
         .write()

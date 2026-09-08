@@ -1,5 +1,6 @@
-use super::SessionActorRecovery;
+use super::{InitialSessionContext, SessionActorRecovery};
 use crate::PermissionGate;
+use crate::engine::AgentLoopError;
 use crate::engine::commands::FolderTrustController;
 use crate::engine::commands::SessionCommandContext;
 use crate::engine::commands::SessionCommandOutput;
@@ -18,12 +19,8 @@ use rw_ext::HookDispatcher;
 use rw_ext::ModeRegistry;
 use rw_ext::ModeSource;
 use rw_tools::ToolRegistry;
-use rw_types::Block;
 use rw_types::ModeId;
-use rw_types::Role;
 use rw_types::SessionId;
-use rw_types::Turn;
-use rw_types::TurnMeta;
 use rw_types::config::ThinkingLevel;
 use std::fmt;
 use std::path::PathBuf;
@@ -47,7 +44,7 @@ pub struct SessionActorConfig {
     pub workspace_root: PathBuf,
     pub additional_workspace_roots: Vec<PathBuf>,
     pub workspace_generation: u64,
-    pub initial_session_context: Vec<Turn>,
+    pub initial_session_context: InitialSessionContext,
     pub startup_notifications: Vec<StartupNotification>,
     pub model_alias: String,
     pub model: Arc<dyn ModelDriver>,
@@ -146,7 +143,7 @@ impl SessionActorConfig {
         &self,
         generation: &WorkspaceRuntimeGeneration,
         active_mode: &ModeId,
-    ) -> Self {
+    ) -> Result<Self, AgentLoopError> {
         let mut configured = self.with_model_alias(self.model_alias.clone());
         configured.workspace_root.clone_from(&generation.roots[0]);
         configured.additional_workspace_roots = generation.roots.iter().skip(1).cloned().collect();
@@ -163,10 +160,11 @@ impl SessionActorConfig {
         configured.permissions = Arc::clone(&generation.permissions);
         configured.checkpoints = Arc::clone(&generation.checkpoints);
         configured.folder_trust = Arc::clone(&generation.folder_trust);
-        configured
-            .initial_session_context
-            .extend(generation.supplemental_context.iter().cloned());
-        configured
+        configured.initial_session_context.append_context(
+            &generation.supplemental_context,
+            self.history.reserve_working_set()?,
+        )?;
+        Ok(configured)
     }
 
     pub(in crate::engine) fn with_extension_snapshot(
@@ -182,38 +180,25 @@ impl SessionActorConfig {
         configured
     }
 
-    pub(super) fn with_model_alias_and_mode(&self, model_alias: String, mode_id: &ModeId) -> Self {
+    pub(super) fn with_model_alias_and_mode(
+        &self,
+        model_alias: String,
+        mode_id: &ModeId,
+    ) -> Result<Self, AgentLoopError> {
         let mut configured = self.with_model_alias(model_alias);
         let Some(mode) = configured.modes.get(&mode_id.0) else {
-            return configured;
+            return Ok(configured);
         };
         // Execute is the base policy already present in the canonical system
         // prompt. Preserve that stable cache prefix for the embedded default;
         // an extension overriding `execute` still contributes its fragment.
         if mode.id().0 == "execute" && matches!(mode.source(), ModeSource::Embedded { .. }) {
-            return configured;
-        }
-        if let Some(system) = configured
-            .initial_session_context
-            .iter_mut()
-            .find(|turn| turn.role == Role::System)
-        {
-            system.blocks.push(Block::Text {
-                text: mode.prompt().to_owned(),
-            });
-        } else {
-            configured.initial_session_context.insert(
-                0,
-                Turn {
-                    role: Role::System,
-                    blocks: vec![Block::Text {
-                        text: mode.prompt().to_owned(),
-                    }],
-                    meta: TurnMeta::default(),
-                },
-            );
+            return Ok(configured);
         }
         configured
+            .initial_session_context
+            .append_system_text(mode.prompt(), self.history.reserve_working_set()?)?;
+        Ok(configured)
     }
 
     pub(in crate::engine) fn with_model_route_and_mode(
@@ -221,9 +206,9 @@ impl SessionActorConfig {
         model_alias: String,
         provider: Option<String>,
         mode_id: &ModeId,
-    ) -> Self {
-        let mut configured = self.with_model_alias_and_mode(model_alias, mode_id);
+    ) -> Result<Self, AgentLoopError> {
+        let mut configured = self.with_model_alias_and_mode(model_alias, mode_id)?;
         configured.recovered.provider = provider;
-        configured
+        Ok(configured)
     }
 }
