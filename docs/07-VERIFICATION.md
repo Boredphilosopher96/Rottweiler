@@ -561,6 +561,13 @@ retain counters and process generations on setup, workload or interruption
 errors. Runner loss can still prevent upload; a local checkpoint alone is not
 remote durable evidence.
 
+CI diagnostic publication has one bounded retry after a five-second backoff.
+Only the upload repeats; failed product gates retain their original status.
+The retry uses a distinct artifact name so an uncertain first publication is
+preserved. Both failures remain in the job log, and missing files or two failed
+uploads fail the job. Cancellation prevents new publication attempts. Native
+candidate artifacts retain their explicit producer/consumer identities.
+
 Private soak admission checks actual runner registration, required labels,
 online status and idle capacity. It reports absent/offline/busy separately. A
 readable runner inventory requires repository administration-read permission;

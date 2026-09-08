@@ -1,0 +1,51 @@
+name: Retain gate evidence
+description: Publish diagnostic evidence with one bounded publication retry.
+inputs:
+  name:
+    description: Artifact name, unique to the job and workflow attempt.
+    required: true
+  path:
+    description: Completed evidence files to retain.
+    required: true
+  retention-days:
+    description: Evidence retention period.
+    default: '30'
+runs:
+  using: composite
+  steps:
+    - id: first
+      if: ${{ !cancelled() }}
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}
+    - name: Back off after failed evidence publication
+      if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      shell: bash
+      run: |
+        echo '::warning::Evidence publication failed. Retaining the first failure in the job log and retrying publication once.'
+        sleep 5
+    - id: retry
+      if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        # An uncertain finalize may have published the first name. Keep it.
+        name: ${{ inputs.name }}-publication-retry
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}
+    - name: Require successful evidence publication
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        FIRST_OUTCOME: ${{ steps.first.outcome }}
+        RETRY_OUTCOME: ${{ steps.retry.outcome }}
+      run: |
+        if [[ "$FIRST_OUTCOME" != success && "$RETRY_OUTCOME" != success ]]; then
+          echo '::error::Gate evidence could not be published.'
+          exit 1
+        fi
