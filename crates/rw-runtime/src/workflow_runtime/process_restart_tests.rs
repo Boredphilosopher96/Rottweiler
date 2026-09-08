@@ -1,0 +1,195 @@
+//! A real task effect outlives its runner; restart must not repeat ambiguous work.
+#![allow(clippy::expect_used)]
+use super::DurableWorkflowJournal;
+use async_trait::async_trait;
+use rw_ext::{
+    ExtensionCatalog, ExtensionDiscoveryConfig, WorkflowJournal as _, WorkflowRunError,
+    WorkflowRunner, WorkflowStepArtifact, WorkflowStepExecutionError, WorkflowStepExecutor,
+    WorkflowStepRequest,
+};
+use rw_resources::process::BlockingProcess;
+use rw_types::{
+    Cost, SessionId, SubagentId, Usage,
+    workflow::{WorkflowRunId, WorkflowTaskOutcome, WorkflowTaskState},
+};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write as _,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+const CHILD_ROOT: &str = "RW_DURABLE_RUNNER_PROCESS_ROOT";
+const CHILD_PHASE: &str = "RW_DURABLE_RUNNER_PROCESS_PHASE";
+const TEST: &str = "workflow_runtime::process_restart_tests::durable_runner_restart_preserves_effect_and_refuses_reexecution";
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+struct EffectTask {
+    root: PathBuf,
+    restarting: bool,
+}
+
+#[async_trait]
+impl WorkflowStepExecutor for EffectTask {
+    async fn execute_step(
+        &self,
+        request: WorkflowStepRequest,
+    ) -> Result<WorkflowStepArtifact, WorkflowStepExecutionError> {
+        assert!(!self.restarting, "restart must not dispatch any task");
+        let root = self.root.clone();
+        let step = request.step_id.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            let mut effects = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(root.join("effects"))?;
+            writeln!(effects, "{step}")?;
+            effects.sync_all()?;
+            if step == "build" {
+                // Publish only after the physical task effect is durable.
+                let ready = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(root.join("effect-ready"))?;
+                ready.sync_all()?;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(|error| WorkflowStepExecutionError::unsettled(error.to_string()))?
+        .map_err(|error| WorkflowStepExecutionError::unsettled(error.to_string()))?;
+        if request.step_id == "build" {
+            // Keep the runner between effect completion and journal settlement.
+            return std::future::pending().await;
+        }
+        Ok(WorkflowStepArtifact {
+            subagent_id: SubagentId("completed-plan".into()),
+            child_session_id: SessionId("plan-session".into()),
+            final_text: "durable plan artifact".into(),
+            touched_files: Vec::new(),
+            diff_artifact: None,
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cost: Cost::Unavailable {
+                reason: "fixture".into(),
+            },
+        })
+    }
+}
+
+async fn child_run(root: &Path, restarting: bool) -> TestResult {
+    let catalog = ExtensionCatalog::discover(
+        &ExtensionDiscoveryConfig::new(root.join("project"), root.join("home"))
+            .with_project_trusted(true),
+    );
+    let workflow = catalog.workflow("delivery").ok_or("workflow missing")?;
+    let journal = DurableWorkflowJournal::open(
+        root.join("journal"),
+        WorkflowRunId::parse("0123456789abcdef0123456789abcdef".into())?,
+        SessionId("parent".into()),
+        workflow,
+    )
+    .await?;
+    let executor = EffectTask {
+        root: root.to_owned(),
+        restarting,
+    };
+    let result = WorkflowRunner::new(&executor, journal.as_ref())
+        .run(workflow)
+        .await;
+    assert!(restarting, "initial runner must wait before settlement");
+    assert!(matches!(result, Err(WorkflowRunError::UnsettledTask { step }) if step == "build"));
+    let state = journal.state().await?;
+    let WorkflowTaskState::Settled {
+        outcome: WorkflowTaskOutcome::Completed { artifact },
+    } = &state.tasks["plan"]
+    else {
+        panic!("completed dependency was lost")
+    };
+    assert_eq!(artifact.final_text, "durable plan artifact");
+    assert!(matches!(
+        state.tasks["build"],
+        WorkflowTaskState::Started { .. }
+    ));
+    assert!(matches!(state.tasks["review"], WorkflowTaskState::Pending));
+    assert_eq!(fs::read_to_string(root.join("effects"))?, "plan\nbuild\n");
+    Ok(())
+}
+
+fn spawn(root: &Path, phase: &str) -> Result<BlockingProcess, Box<dyn std::error::Error>> {
+    let diagnostics = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(root.join(format!("{phase}.log")))?;
+    Ok(BlockingProcess::spawn(
+        Command::new(std::env::current_exe()?)
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD_ROOT, root)
+            .env(CHILD_PHASE, phase)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(diagnostics),
+    )?)
+}
+
+fn await_ready(child: &BlockingProcess, ready: impl Fn() -> bool) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready() {
+        assert!(
+            child.try_status()?.is_none(),
+            "task runner exited before readiness"
+        );
+        assert!(Instant::now() < deadline, "task runner readiness timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[test]
+fn durable_runner_restart_preserves_effect_and_refuses_reexecution() -> TestResult {
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let restarting = std::env::var(CHILD_PHASE)? == "restart";
+        return tokio::runtime::Runtime::new()?.block_on(child_run(Path::new(&root), restarting));
+    }
+    let root = tempfile::tempdir()?;
+    let workflow = root.path().join("project/.agents/workflows/delivery.toml");
+    fs::create_dir_all(workflow.parent().ok_or("workflow parent")?)?;
+    fs::write(
+        workflow,
+        "description = \"restart\"\n[[step]]\nid = \"plan\"\nagent = \"plan\"\n[[step]]\nid = \"build\"\nagent = \"general\"\nneeds = [\"plan\"]\n[[step]]\nid = \"review\"\nagent = \"explore\"\nneeds = [\"build\"]\n",
+    )?;
+    let mut first = spawn(root.path(), "initial")?;
+    await_ready(&first, || root.path().join("effect-ready").exists())?;
+    assert_eq!(
+        fs::read_to_string(root.path().join("effects"))?,
+        "plan\nbuild\n"
+    );
+    first.settle(); // SIGKILL and joined group retirement, without runner destructors.
+    let mut restarted = spawn(root.path(), "restart")?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = restarted.try_status()? {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "restarted runner timed out");
+        thread::sleep(Duration::from_millis(10));
+    };
+    restarted.settle();
+    assert!(
+        status.success(),
+        "restart failed: {}",
+        fs::read_to_string(root.path().join("restart.log"))?
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("effects"))?,
+        "plan\nbuild\n"
+    );
+    Ok(())
+}

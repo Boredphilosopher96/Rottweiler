@@ -716,3 +716,6 @@ fn frame_step_input(request: &WorkflowStepRequest) -> Result<String, WorkflowSte
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod process_restart_tests;
