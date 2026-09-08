@@ -54,7 +54,9 @@ impl PromptShapeStore {
             options.mode(0o600);
         }
         match options.open(path) {
-            Ok(file) => file.sync_all()?,
+            // This empty file is not published authority. The FULL schema
+            // commit and parent sync below must finish before open returns.
+            Ok(file) => drop(file),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
