@@ -11,21 +11,46 @@ import subprocess
 import time
 from typing import BinaryIO
 
+from perf_process_scope import SCOPE_FD, ScopeReader, inherited_scope
+
+_SCOPE = inherited_scope()
+
 
 def run_sample(
     command: list[str], *, cwd: Path, env: dict[str, str],
     timeout: float = 5.0, output_limit: int = 64 * 1024,
-    log: BinaryIO | None = None,
+    log: BinaryIO | None = None, delegated: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     """Drain both pipes within fixed budgets and reap the child on every path."""
     if not math.isfinite(timeout) or timeout <= 0 or output_limit <= 0:
         raise ValueError("sample time and output budgets must be positive")
     started = time.monotonic()
     deadline = started + timeout
-    process = subprocess.Popen(
-        command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-    )
+    registration = _SCOPE.starting() if _SCOPE is not None else None
+    scope = None
+    writer = None
+    environment = dict(env)
+    environment.pop(SCOPE_FD, None)
+    try:
+        if delegated:
+            descriptor, writer = os.pipe()
+            scope = ScopeReader(descriptor)
+            os.set_blocking(descriptor, False)
+            environment[SCOPE_FD] = str(writer)
+        process = subprocess.Popen(
+            command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            pass_fds=() if writer is None else (writer,),
+        )
+    except BaseException:
+        if scope is not None:
+            os.close(scope.descriptor)
+        if registration is not None:
+            _SCOPE.settled(registration)
+        raise
+    finally:
+        if writer is not None:
+            os.close(writer)
     spawn_ms = (time.monotonic() - started) * 1000
     stdout, stderr = bytearray(), bytearray()
 
@@ -39,12 +64,21 @@ def run_sample(
         )
 
     try:
+        for stream in (process.stdout, process.stderr):
+            assert stream is not None
+            os.set_blocking(stream.fileno(), False)
+        if registration is not None:
+            _SCOPE.started(registration, process.pid)
         with selectors.DefaultSelector() as selector:
             for stream, captured in ((process.stdout, stdout), (process.stderr, stderr)):
                 assert stream is not None
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, captured)
+            if scope is not None:
+                selector.register(scope.descriptor, selectors.EVENT_READ, scope)
             while selector.get_map():
+                if _SCOPE is not None:
+                    _SCOPE.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise deadline_error(len(selector.get_map()))
@@ -55,11 +89,14 @@ def run_sample(
                 candidates = [key for key, _ in ready] if ready else list(selector.get_map().values())
                 for key in candidates:
                     try:
-                        chunk = os.read(key.fd, min(16 * 1024, output_limit + 1 - len(key.data)))
+                        chunk = os.read(key.fd, 4096 if isinstance(key.data, ScopeReader) else min(16 * 1024, output_limit + 1 - len(key.data)))
                     except BlockingIOError:
                         continue
                     if not chunk:
                         selector.unregister(key.fileobj)
+                        continue
+                    if isinstance(key.data, ScopeReader):
+                        key.data.append(chunk)
                         continue
                     if log is not None:
                         log.write(chunk[:max(0, output_limit - len(key.data))])
@@ -67,22 +104,44 @@ def run_sample(
                     key.data.extend(chunk)
                     if len(key.data) > output_limit:
                         raise ValueError(f"performance sample exceeded {output_limit} output bytes per stream")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise deadline_error(0)
-            try:
-                returncode = process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired as error:
-                raise deadline_error(0) from error
+            while True:
+                if _SCOPE is not None:
+                    _SCOPE.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise deadline_error(0)
+                try:
+                    returncode = process.wait(timeout=min(remaining, .05))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
         return subprocess.CompletedProcess(command, returncode, bytes(stdout), bytes(stderr))
     finally:
-        # Descendants can retain pipe descriptors after the leader exits. The
-        # sample owns its process group even when output or a deadline fails.
+        # A cooperative wrapper must let its actual Popen owners settle their
+        # separately grouped children before it exits. Never signal a delegated
+        # PID from a registration: that PID may already have been reused.
+        if scope is not None and process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            settle_by = time.monotonic() + 5
+            while process.poll() is None and time.monotonic() < settle_by:
+                scope.drain()
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None and not os.get_blocking(stream.fileno()):
+                        with contextlib.suppress(BlockingIOError):
+                            os.read(stream.fileno(), 16 * 1024)
+                time.sleep(.01)
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         try:
             process.wait(timeout=5)
+            if scope is not None:
+                scope.require_closed()
+            if registration is not None:
+                _SCOPE.settled(registration)
         finally:
             for stream in (process.stdout, process.stderr):
                 if stream is not None:
                     stream.close()
+            if scope is not None:
+                os.close(scope.descriptor)

@@ -291,6 +291,16 @@ the leader before the gate returns. Evidence records the active phase and each
 completed sample as it runs, including failures during warmup or sampling.
 Malformed, duplicate, negative, and out-of-interval timing markers fail the gate.
 
+Nested Python verification owners opt into a bounded settlement channel. Each
+child is registered before launch and released after its actual process owner
+reaps it; only then may the wrapper acknowledge closure. Cancellation gives the
+wrapper five seconds to settle its children. Forced wrapper death, missing
+closure, or an incomplete spawn handoff is `UNSETTLED` and stops subsequent
+gates. Delegated PID records are diagnostic identities, never authority to kill
+a possibly reused process. This contract covers participating process owners;
+importing the helper does not cover unrelated raw subprocesses or detached
+processes. The measured native child does not inherit the settlement channel.
+
 The required pull-request and `main` TUI smoke measures input dispatch through
 native frame capture with wall time, requiring every trial's median below 16ms.
 Input reports retain every wall/CPU sample and the selected statistic.
