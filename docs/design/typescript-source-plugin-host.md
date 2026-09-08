@@ -8,11 +8,11 @@ small source package executed by the host's Bun runtime. Rust owns trust,
 approval, preparation, sandbox policy, registration, credentials,
 replay, and process lifecycle.
 
-Production executes a sealed, content-addressed ESM bundle prepared from an exact
-source and dependency graph. Development may execute source under a temporary,
-session-scoped grant. The generic executable JSON-RPC plugin tier remains
-supported for every language, including TypeScript authors who deliberately want
-a standalone executable.
+Execution uses a sealed, content-addressed ESM bundle prepared from an exact
+source and dependency graph. Live-session development uses the same preparation
+and launch contract under an explicit session-scoped grant. The generic executable
+JSON-RPC plugin tier remains supported for every language, including TypeScript
+authors who deliberately want a standalone executable.
 
 As specified in ADR-003, the Rust engine does not embed JavaScript. Unrelated
 plugins have separate processes and authority. Newline-delimited JSON-RPC is the

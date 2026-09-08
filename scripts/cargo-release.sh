@@ -1,10 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Release optimization is deliberately platform-specific. A controlled
-# 100-sample macOS comparison recorded in
-# benchmarks/release-optimization-2026-08-22.json selected opt-level 3. Linux
-# retains its independently size-qualified s profile until measured there.
+# Native release optimization is platform-specific: opt-level 3 on macOS and
+# s on Linux. scripts/native_profile.py owns the exact settings consumed by
+# Cargo, candidate receipts, and size/performance gates.
 # Official packages and performance evidence are native-only. Force Cargo's
 # host target so user or ancestor build.target configuration cannot redirect
 # output while a gate inspects or packages a stale host-path executable.

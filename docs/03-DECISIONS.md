@@ -71,7 +71,7 @@ Search indexes are derived from session events. Workspace checkpoints store cont
 
 ## ADR-007: Sandbox = OS-native primitives, per-command policy
 
-**Decision.** macOS Seatbelt (`sandbox-exec` profile), Linux Landlock + seccomp (bubblewrap fallback when unavailable). Three-way command classification: **safe-list** (read-only, run sandboxed without asking), **ask** (default), **deny-list**. Network egress blocked inside sandbox by default, with a proxy escape hatch per-domain. Details in 05-SECURITY.
+**Decision.** macOS Seatbelt (`sandbox-exec` profile); Linux Landlock ABI V3, user/PID/network namespaces, and seccomp. Missing required Linux primitives refuse sandbox launch. Three-way command classification: **safe-list** (read-only, run sandboxed without asking), **ask** (default), **deny-list**. Network egress blocked inside sandbox by default, with a proxy escape hatch per-domain. Details in 05-SECURITY.
 **Rationale.** Matches the brief ("sandbox for only some commands") and current best practice (Codex CLI, Claude Code sandbox). Container-based isolation adds startup cost and changes local toolchain access.
 **Revisit when.** Windows-native support demanded (currently: warn + no sandbox on Windows, WSL recommended).
 
