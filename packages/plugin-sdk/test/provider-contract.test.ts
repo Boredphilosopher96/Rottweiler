@@ -31,12 +31,28 @@ test("provider events reject malformed variants before delivery", () => {
   expect(validateEvent({ type: "route_selected", route: "forged" })).toBe(false)
 })
 
-test("conversation metadata and content allow their optional semantic fields", () => {
-  const turns = [{ role: "assistant", meta: { synthetic: false, summary: false }, blocks: [
-    { type: "thinking", content: "reason" },
-    { type: "citation", uri: "https://example.com" },
-  ] }]
-  expect(validateRequest({ ...request, turns })).toBe(true)
+test("conversation metadata and content require explicit nullable fields", () => {
+  const turn: ProviderRequest["turns"][number] = {
+    role: "assistant",
+    meta: { created_at: null, model: null, synthetic: false, summary: false },
+    blocks: [
+      { type: "thinking", content: "reason", signature: null },
+      { type: "citation", uri: "https://example.com", title: null, excerpt: null },
+    ],
+  }
+  expect(validateRequest({ ...request, turns: [turn] })).toBe(true)
+  for (const field of Object.keys(turn.meta)) {
+    const meta: Record<string, unknown> = { ...turn.meta }
+    delete meta[field]
+    expect(validateRequest({ ...request, turns: [{ ...turn, meta }] })).toBe(false)
+  }
+  for (const block of turn.blocks) {
+    for (const field of Object.keys(block)) {
+      const incomplete: Record<string, unknown> = { ...block }
+      delete incomplete[field]
+      expect(validateRequest({ ...request, turns: [{ ...turn, blocks: [incomplete] }] })).toBe(false)
+    }
+  }
 })
 
 // @ts-expect-error Provider content is a closed semantic union.
