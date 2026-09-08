@@ -182,7 +182,7 @@ impl SupervisedPluginProcess for FakeProcess {
 struct MemoryLauncher {
     manifest: PluginManifest,
     process: Arc<FakeProcess>,
-    push: Option<String>,
+    push: Option<(String, Value)>,
     hang_method: Option<String>,
 }
 
@@ -419,12 +419,12 @@ impl PluginLauncher for MemoryLauncher {
                         if hang_method.as_deref() == Some(METHOD_INITIALIZE) {
                             continue;
                         }
-                        if let Some(method) = push.as_deref() {
+                        if let Some((method, params)) = push.as_ref() {
                             let push = RpcFrame::Request(RpcRequest {
                                 jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                                 id: RpcId::String("push-1".to_owned()),
                                 method: method.to_owned(),
-                                params: Some(json!({"message":"hello"})),
+                                params: Some(params.clone()),
                             });
                             output
                                 .write_all(

@@ -932,7 +932,10 @@ async fn failed_initialization_joins_admitted_host_callback_before_returning() {
                 &MemoryLauncher {
                     manifest: returned,
                     process,
-                    push: Some(METHOD_UI_NOTIFY.to_owned()),
+                    push: Some((
+                        METHOD_UI_NOTIFY.to_owned(),
+                        json!({"title":"fixture","message":"hello"}),
+                    )),
                     hang_method: None,
                 },
                 Arc::new(approvals),

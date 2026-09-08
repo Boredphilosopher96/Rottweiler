@@ -343,7 +343,10 @@ async fn undeclared_push_kills_and_prevents_handshake() {
     let launcher = MemoryLauncher {
         manifest: manifest.clone(),
         process: process.clone(),
-        push: Some(rw_plugin_protocol::METHOD_SESSION_SET_STATUS.to_owned()),
+        push: Some((
+            rw_plugin_protocol::METHOD_SESSION_SET_STATUS.to_owned(),
+            json!({"session_id":"fixture","status":"hello"}),
+        )),
         hang_method: None,
     };
     let result = PluginHost::launch_approved(
