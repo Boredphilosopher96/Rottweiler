@@ -176,6 +176,7 @@ pub struct TranscriptIndexIo {
 /// One independently locked index owner. Database transactions never escape it.
 pub struct TranscriptIndex {
     database: Database,
+    commits: super::derived_database::DerivedCommitPolicy,
     counters: Arc<IoCounters>,
     directory: File,
     _lock: AdvisoryFileLock,
@@ -216,6 +217,7 @@ impl TranscriptIndex {
         let empty = owner.was_empty;
         let index = Self {
             database: owner.database,
+            commits: owner.commits,
             counters: owner.counters,
             directory: owner.directory,
             _lock: owner.lock,
@@ -385,7 +387,8 @@ impl TranscriptIndex {
                 )
                 .map_err(storage)?;
         }
-        transaction.commit().map_err(storage)?;
+        self.commits
+            .commit(transaction, charged_bytes.saturating_add(state.len()))?;
         Ok(())
     }
 

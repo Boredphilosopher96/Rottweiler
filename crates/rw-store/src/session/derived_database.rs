@@ -1,5 +1,8 @@
 //! Descriptor-owned derived database machinery shared by semantic projections.
 
+mod commit;
+pub(crate) use commit::DerivedCommitPolicy;
+
 use super::file_lock::AdvisoryFileLock;
 use super::{journal::JournalReadView, sync_event_file};
 use redb::{Database, StorageBackend};
@@ -33,6 +36,7 @@ pub(crate) struct DerivedDatabase {
     pub(crate) lock: AdvisoryFileLock,
     pub(crate) counters: Arc<IoCounters>,
     pub(crate) was_empty: bool,
+    pub(crate) commits: DerivedCommitPolicy,
 }
 
 impl DerivedDatabase {
@@ -91,6 +95,7 @@ impl DerivedDatabase {
             lock,
             counters,
             was_empty,
+            commits: DerivedCommitPolicy::default(),
         })
     }
 }

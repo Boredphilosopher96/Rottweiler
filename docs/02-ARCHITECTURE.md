@@ -503,6 +503,11 @@ transaction replaces the canonical conversation generation.
 - `sessions/<id>/journal/` — bounded sealed JSONL segments, `active.jsonl`, and a
   stable `writer.lock`. An append batch is synchronized before publication.
   Captured committed-prefix views support bounded cursor pages (ADR-029).
+- Derived recovery and transcript rows publish atomically after their journal prefix is durable.
+  Their persistence batches contain at most eight transactions or four MiB of charged
+  mutations and checkpoint data, bounding pending database transaction metadata.
+  Reaching either threshold flushes the batch; clean close flushes the remainder.
+  This cadence applies only to rebuildable indexes, never to canonical journal appends.
 - Derived projection databases refuse database-wide crash repair. An unclean
   projection resets only its verified descriptor while retaining the writer lock,
   then catches up from bounded journal pages. Authoritative journal data and

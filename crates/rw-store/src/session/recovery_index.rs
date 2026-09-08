@@ -323,7 +323,7 @@ impl RecoveryIndex {
                 ),
             )
             .map_err(storage)?;
-        transaction.commit().map_err(storage)?;
+        self.owner.commits.commit(transaction, charged)?;
         Ok(())
     }
 
