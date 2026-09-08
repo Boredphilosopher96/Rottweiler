@@ -49,8 +49,9 @@ fn capture(command: &mut Command) -> io::Result<Vec<u8>> {
     match result {
         Ok(status) if status.success() => Ok(output),
         result => Err(io::Error::other(format!(
-            "fixture process failed: {result:?}; stderr: {}",
-            String::from_utf8_lossy(&diagnostics)
+            "fixture process failed: {result:?}; stderr: {}; stdout: {}",
+            String::from_utf8_lossy(&diagnostics),
+            String::from_utf8_lossy(&output)
         ))),
     }
 }
@@ -118,6 +119,19 @@ fn streaming_overflow_settles_infinite_producer_on_either_pipe() {
         ]);
         let error = capture(&mut command).expect_err("live producer exceeds capture ceiling");
         assert!(error.to_string().contains("byte limit"));
-        assert!(error.to_string().len() <= STDERR_LIMIT + 256);
+        assert!(error.to_string().len() <= STDOUT_LIMIT + STDERR_LIMIT + 256);
     }
+}
+
+#[test]
+fn failed_process_keeps_bounded_canonical_output_with_stderr() {
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        "printf 'first canonical failure'; printf 'secondary failure' >&2; exit 1",
+    ]);
+    let error = capture(&mut command).expect_err("nonzero status");
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("first canonical failure"));
+    assert!(diagnostic.contains("secondary failure"));
 }

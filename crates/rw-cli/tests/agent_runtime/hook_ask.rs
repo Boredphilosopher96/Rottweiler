@@ -63,7 +63,16 @@ fn configure_hook(root: &Path, run: &TestRun) {
 #[test]
 fn native_hook_ask_is_denied_by_actual_headless_print_without_mutation() {
     let root = tempdir().expect("fixture");
-    let mut run = TestRun::new(&root, "headless-hook-ask");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_native_ask(&root)));
+    if let Err(panic) = outcome {
+        let retained = root.keep();
+        eprintln!("native hook Ask failure evidence: {}", retained.display());
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn run_native_ask(root: &tempfile::TempDir) {
+    let mut run = TestRun::new(root, "headless-hook-ask");
     run.workspace = run.workspace.canonicalize().expect("canonical project");
     configure_hook(root.path(), &run);
     let script = root.path().join("provider.json");
