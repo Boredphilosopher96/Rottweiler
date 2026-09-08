@@ -26,8 +26,8 @@ pub use client::{
 };
 pub use manager::{CompactJsonEncoder, MAX_SERVERS, McpManager, StructuredResponseEncoder};
 pub use server::{
-    BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServer,
-    RottweilerMcpServerFactory, SessionSummary, MAX_SERVER_SESSIONS, serve_stdio,
+    BridgeError, EngineMcpBridge, EngineTool, MAX_SERVER_SESSIONS, McpServerAuthority,
+    RottweilerMcpServer, RottweilerMcpServerFactory, SessionSummary, serve_stdio,
 };
 pub use spool::{
     FilesystemSpool, OverflowSpool, PayloadRedactor, PayloadSource, RetainedPayloadWindow,
