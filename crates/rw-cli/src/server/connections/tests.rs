@@ -11,6 +11,7 @@ struct EffectEngine {
     entered: Notify,
     release: Semaphore,
     completed: AtomicBool,
+    panic_on_release: AtomicBool,
     retired: Arc<AtomicBool>,
 }
 impl Default for EffectEngine {
@@ -19,6 +20,7 @@ impl Default for EffectEngine {
             entered: Notify::new(),
             release: Semaphore::new(0),
             completed: AtomicBool::new(false),
+            panic_on_release: AtomicBool::new(false),
             retired: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -38,6 +40,10 @@ impl EffectEngine {
             .await
             .expect("effect release")
             .forget();
+        assert!(
+            !self.panic_on_release.load(Ordering::SeqCst),
+            "fixture handler panic"
+        );
         self.completed.store(true, Ordering::SeqCst);
     }
 }
@@ -244,6 +250,36 @@ async fn shutdown_and_waiter_loss_close_transport_but_settle_credential_and_comm
             }
         }
     }
+}
+
+#[tokio::test]
+async fn panicked_handler_retires_admission_and_reports_shutdown_failure() {
+    let fixture = Fixture::start();
+    fixture
+        .engine
+        .panic_on_release
+        .store(true, Ordering::SeqCst);
+    let mut stream = fixture.request(Effect::Credential).await;
+    fixture.shutdown.send(true).expect("stop");
+    transport_closed(&mut stream).await;
+    fixture.assert_effect_retained(Effect::Credential);
+    fixture.engine.release.add_permits(1);
+    let error = bounded(fixture.server)
+        .await
+        .expect("server owner")
+        .expect_err("handler panic is reported");
+    assert!(error.to_string().contains("engine request task failed"));
+    assert!(fixture.engine.retired.load(Ordering::SeqCst));
+    assert!(!fixture.engine.completed.load(Ordering::SeqCst));
+    assert_eq!(fixture.state.connections.available_permits(), 1);
+    assert!(
+        fixture
+            .state
+            .provider_api_key_attempts
+            .lock()
+            .expect("attempts")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

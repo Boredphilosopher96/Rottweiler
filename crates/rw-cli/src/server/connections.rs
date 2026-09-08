@@ -5,6 +5,7 @@ use tokio::{sync::OwnedSemaphorePermit, task::JoinSet};
 struct Requests {
     tasks: Mutex<JoinSet<()>>,
     permits: Arc<tokio::sync::Semaphore>,
+    failed: AtomicBool,
 }
 
 impl Default for Requests {
@@ -12,6 +13,7 @@ impl Default for Requests {
         Self {
             tasks: Mutex::new(JoinSet::new()),
             permits: Arc::new(tokio::sync::Semaphore::new(128)),
+            failed: AtomicBool::new(false),
         }
     }
 }
@@ -39,7 +41,7 @@ impl Requests {
         // Both request execution and retained task bookkeeping are bounded.
         // A request keeps its connection slot even after that transport closes.
         while let Some(result) = tasks.try_join_next() {
-            report_request(result);
+            self.report(result);
         }
         tasks.spawn(async move {
             let _permit = (permit, request_permit);
@@ -49,7 +51,7 @@ impl Requests {
         receive
     }
 
-    async fn settle(&self) {
+    async fn settle(&self) -> Result<()> {
         let mut tasks = std::mem::take(
             &mut *self
                 .tasks
@@ -57,14 +59,19 @@ impl Requests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         while let Some(result) = tasks.join_next().await {
-            report_request(result);
+            self.report(result);
         }
+        if self.failed.load(Ordering::Acquire) {
+            return Err(miette!("engine request task failed before server shutdown"));
+        }
+        Ok(())
     }
-}
 
-fn report_request(result: std::result::Result<(), tokio::task::JoinError>) {
-    if let Err(error) = result {
-        tracing::error!(reason = %error, "engine request failed while owned");
+    fn report(&self, result: std::result::Result<(), tokio::task::JoinError>) {
+        if let Err(error) = result {
+            self.failed.store(true, Ordering::Release);
+            tracing::error!(reason = %error, "engine request failed while owned");
+        }
     }
 }
 
@@ -134,8 +141,8 @@ pub(super) async fn serve_owned(
     // separate request owners retain admitted dispatch and credential effects.
     connections.abort_all();
     while connections.join_next().await.is_some() {}
-    requests.settle().await;
-    result
+    let settled = requests.settle().await;
+    result.and(settled)
 }
 
 pub(super) fn forward_events(
