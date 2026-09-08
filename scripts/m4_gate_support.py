@@ -19,6 +19,11 @@ import threading
 import time
 import termios
 from dataclasses import dataclass
+from perf_process_wait import observe_exit, signal_owned_group, require_group_disappearance
+from perf_process_scope import UnsettledScope
+from perf_process import run_sample, check_sample_cancellation
+from m4_output import EngineErrorLog
+
 
 FIRST_PAINT_MARKER = b"Rottweiler"
 
@@ -61,12 +66,41 @@ class Runtime:
     process: subprocess.Popen[bytes]
     socket_path: pathlib.Path
     token_path: pathlib.Path
-    stderr_path: pathlib.Path
+    stderr: EngineErrorLog
 
 @dataclass
 class PtyProcess:
     pid: int
     fd: int
+    reaped: bool = False
+    closed: bool = False
+    group_settled: bool = False
+
+    def exit_status(self) -> int | None:
+        if self.reaped:
+            raise RuntimeError("PTY process identity already released")
+        code = observe_exit(self.pid)
+        return None if code is None else (code << 8 if code >= 0 else -code)
+
+    def reap(self) -> None:
+        if self.reaped:
+            return
+        if self.exit_status() is None:
+            raise UnsettledScope(f"UNSETTLED PTY leader {self.pid}")
+        os.waitpid(self.pid, 0)
+        self.reaped = True
+
+    def prove_settled(self) -> None:
+        if not self.reaped:
+            raise RuntimeError("PTY leader must be reaped before group disappearance")
+        if not self.group_settled:
+            require_group_disappearance(self.pid)
+            self.group_settled = True
+
+    def close(self) -> None:
+        if not self.closed:
+            os.close(self.fd)
+            self.closed = True
 
 class GateEvidence:
     """Write observations before assertions; failed gates retain partial samples."""
@@ -475,8 +509,13 @@ def spawn_pty(
     if pid == 0:
         os.chdir(cwd)
         os.execve(str(executable), [str(executable), *(arguments or [])], env)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-    return PtyProcess(pid, fd)
+    process = PtyProcess(pid, fd)
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        return process
+    except BaseException:
+        stop_pty(process)
+        raise
 
 def spawn_wrapped_pty(
     executable: pathlib.Path,
@@ -494,8 +533,13 @@ def spawn_wrapped_pty(
         os.waitpid(child, 0)
         while True:
             signal.pause()
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-    return PtyProcess(pid, fd)
+    process = PtyProcess(pid, fd)
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        return process
+    except BaseException:
+        stop_pty(process)
+        raise
 
 def read_until(
     process: PtyProcess, marker: bytes, timeout: float = 5.0, *, phase: str = "render"
@@ -511,6 +555,7 @@ def read_until_all(
     deadline = time.monotonic() + timeout
     captured = bytearray()
     while time.monotonic() < deadline:
+        check_sample_cancellation()
         ready, _, _ = select.select([process.fd], [], [], min(0.05, deadline - time.monotonic()))
         if not ready:
             continue
@@ -526,10 +571,9 @@ def read_until_all(
         if len(captured) > 4 * 1024 * 1024:
             del captured[: len(captured) - 2 * 1024 * 1024]
     child_status = "still running"
-    with contextlib.suppress(ChildProcessError):
-        found, status = os.waitpid(process.pid, os.WNOHANG)
-        if found == process.pid:
-            child_status = f"exited with wait status {status}"
+    status = process.exit_status()
+    if status is not None:
+        child_status = f"exited with wait status {status}"
     terminal_tail = re.sub(
         r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))",
         "",
@@ -546,8 +590,8 @@ def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
     """Drain terminal teardown output while waiting for a PTY child to exit."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        found, status = os.waitpid(process.pid, os.WNOHANG)
-        if found == process.pid:
+        status = process.exit_status()
+        if status is not None:
             return status
         ready, _, _ = select.select(
             [process.fd], [], [], min(0.05, deadline - time.monotonic())
@@ -558,35 +602,63 @@ def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
     raise TimeoutError(f"PTY process {process.pid} did not exit within {timeout} seconds")
 
 def stop_pty(process: PtyProcess) -> None:
-    with contextlib.suppress(ProcessLookupError):
-        # OpenTUI owns raw-mode teardown and does not promise a SIGTERM exit.
-        # The measurement is already complete; SIGKILL avoids adding a fixed
-        # two-second cleanup penalty to every cold-start sample.
-        os.kill(process.pid, signal.SIGKILL)
-    with contextlib.suppress(ChildProcessError):
-        os.waitpid(process.pid, 0)
-    with contextlib.suppress(OSError):
-        os.close(process.fd)
+    if process.reaped:
+        process.prove_settled()
+        process.close()
+        return
+    try:
+        signal_owned_group(process.pid, signal.SIGKILL)
+        wait_for_pty_exit(process, 3)
+        process.reap()
+        process.prove_settled()
+    finally:
+        process.close()
 
-def terminate_process_tree(root_pid: int, timeout: float = 3.0) -> None:
-    descendants = descendant_pids(root_pid)
-    for pid in [*reversed(descendants), root_pid]:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        alive = [pid for pid in [root_pid, *descendants] if process_exists(pid)]
-        if not alive:
-            break
-        time.sleep(0.01)
-    for pid in [*reversed(descendants), root_pid]:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-    with contextlib.suppress(ChildProcessError):
-        os.waitpid(root_pid, 0)
+
+def terminate_process_tree(process: PtyProcess, timeout: float = 3.0) -> None:
+    if process.reaped:
+        process.prove_settled()
+        process.close()
+        return
+    # Observed descendants are diagnostics, never signal authority. Only this
+    # unreaped PTY leader anchors a process group we can safely signal.
+    diagnostic_failure = None
+    try:
+        descendants = descendant_pids(process.pid)
+    except BaseException as error:
+        # A failed/cancelled diagnostic must not abandon the owned group. The
+        # missing descendant proof still prevents successful gate closure.
+        descendants = []
+        diagnostic_failure = error
+    try:
+        signal_owned_group(process.pid, signal.SIGTERM)
+        try:
+            wait_for_pty_exit(process, timeout)
+        except TimeoutError:
+            pass
+        signal_owned_group(process.pid, signal.SIGKILL)
+        wait_for_pty_exit(process, timeout)
+        process.reap()
+        process.prove_settled()
+        deadline = time.monotonic() + timeout
+        while True:
+            alive = [pid for pid in descendants if process_exists(pid)]
+            if not alive:
+                break
+            if time.monotonic() >= deadline:
+                raise UnsettledScope(f"UNSETTLED PTY descendants after leader exit: {alive!r}")
+            time.sleep(.01)
+        if diagnostic_failure is not None:
+            raise diagnostic_failure
+    finally:
+        process.close()
 
 def descendant_pids(root_pid: int) -> list[int]:
-    output = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+    result = run_sample(["ps", "-axo", "pid=,ppid="], cwd=pathlib.Path.cwd(),
+                        env=dict(os.environ), timeout=2, output_limit=1024 * 1024)
+    if result.returncode:
+        raise RuntimeError("could not observe process descendants")
+    output = result.stdout.decode()
     by_parent: dict[int, list[int]] = {}
     for line in output.splitlines():
         fields = line.split()
@@ -596,6 +668,8 @@ def descendant_pids(root_pid: int) -> list[int]:
     pending = list(by_parent.get(root_pid, []))
     while pending:
         pid = pending.pop()
+        if len(descendants) == 256:
+            raise UnsettledScope("UNSETTLED process tree exceeds 256 observed descendants")
         descendants.append(pid)
         pending.extend(by_parent.get(pid, []))
     return descendants
@@ -608,12 +682,15 @@ def process_exists(pid: int) -> bool:
         return False
 
 def stop_runtime(runtime: Runtime) -> None:
-    if runtime.process.poll() is None:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(runtime.process.pid, signal.SIGTERM)
-        try:
-            runtime.process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(runtime.process.pid, signal.SIGKILL)
-            runtime.process.wait(timeout=2)
+    process = runtime.process
+    if process.returncode is not None:
+        raise UnsettledScope("UNSETTLED runtime group: leader identity was reaped outside its owner")
+    if observe_exit(process.pid) is None:
+        signal_owned_group(process.pid, signal.SIGTERM)
+        deadline = time.monotonic() + 2
+        while observe_exit(process.pid) is None and time.monotonic() < deadline:
+            time.sleep(.01)
+    signal_owned_group(process.pid, signal.SIGKILL)
+    process.wait(timeout=2)
+    require_group_disappearance(process.pid)
+    runtime.stderr.finish()

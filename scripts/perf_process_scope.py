@@ -98,8 +98,8 @@ class ScopeReader:
             }, sort_keys=True))
 
 
-class ScopeWriter:
-    def __init__(self, descriptor: int):
+class ProcessScope:
+    def __init__(self, descriptor: int | None):
         self.descriptor = descriptor
         self.counter = 0
         self.active: set[str] = set()
@@ -107,10 +107,11 @@ class ScopeWriter:
         self.cancelled = 0
         # The registration capability is for this Python owner, never its native
         # tools. Popen's default close_fds also prevents accidental inheritance.
-        os.set_inheritable(descriptor, False)
-        os.set_blocking(descriptor, False)
+        if descriptor is not None:
+            os.set_inheritable(descriptor, False)
+            os.set_blocking(descriptor, False)
         if threading.current_thread() is not threading.main_thread():
-            raise RuntimeError("delegated verification must initialize on its main thread")
+            raise RuntimeError("verification process ownership must initialize on its main thread")
         signal.signal(signal.SIGTERM, self._cancel)
         signal.signal(signal.SIGINT, self._cancel)
         atexit.register(self._close)
@@ -125,6 +126,8 @@ class ScopeWriter:
             raise ScopeCancelled(f"verification cancelled by signal {self.cancelled}")
 
     def _send(self, message: dict) -> None:
+        if self.descriptor is None:
+            return
         data = json.dumps(message, separators=(",", ":")).encode() + b"\n"
         try:
             if len(data) > MAX_RECORD or os.write(self.descriptor, data) != len(data):
@@ -156,14 +159,15 @@ class ScopeWriter:
                 self._send({"kind": "closed"})
             except (OSError, RuntimeError):
                 pass
-        os.close(self.descriptor)
+        if self.descriptor is not None:
+            os.close(self.descriptor)
 
 
-def inherited_scope() -> ScopeWriter | None:
+def inherited_scope() -> ProcessScope:
     raw = os.environ.pop(SCOPE_FD, None)
     if raw is None:
-        return None
+        return ProcessScope(None)
     descriptor = int(raw)
     if descriptor < 3 or not stat.S_ISFIFO(os.fstat(descriptor).st_mode):
         raise ValueError("verification settlement descriptor is not an owned pipe")
-    return ScopeWriter(descriptor)
+    return ProcessScope(descriptor)

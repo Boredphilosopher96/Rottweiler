@@ -5,6 +5,9 @@ from __future__ import annotations
 import http.client
 import importlib.util
 import json
+import shutil
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -20,6 +23,51 @@ SPEC.loader.exec_module(M4)
 
 
 class M4FixtureTests(unittest.TestCase):
+    def test_failed_engine_readiness_settles_the_launched_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            log = M4.EngineErrorLog(root / "stderr")
+            log.close_input()
+            runtime = M4.Runtime(child, root / "socket", root / "token", log)
+            try:
+                with mock.patch.object(M4, "spawn_engine", return_value=(runtime, 0)), \
+                        mock.patch.object(M4, "wait_for_health", side_effect=RuntimeError("readiness failure")):
+                    with self.assertRaisesRegex(RuntimeError, "readiness failure"):
+                        M4.start_engine(root / "rw", root, root, 1, "session")
+                self.assertIsNotNone(child.returncode)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(child.pid, 0)
+            finally:
+                if child.returncode is None:
+                    child.kill()
+                    child.wait()
+
+    def test_failed_gate_retains_scratch_and_reports_its_location(self) -> None:
+        evidence = M4.GateEvidence(None)
+        retained = None
+        try:
+            with self.assertRaisesRegex(M4.UnsettledScope, "UNSETTLED"):
+                with M4.gate_scratch(evidence) as directory:
+                    retained = Path(directory)
+                    (retained / "physical-owner").write_text("evidence")
+                    raise M4.UnsettledScope("UNSETTLED test owner")
+            self.assertTrue(retained.is_dir())
+            self.assertEqual(evidence.result["retained_scratch"], str(retained))
+        finally:
+            if retained is not None:
+                shutil.rmtree(retained)
+        with M4.gate_scratch(evidence) as directory:
+            settled = Path(directory)
+        self.assertFalse(settled.exists())
+
+    def test_live_detached_runtime_is_preserved_without_signalling_stale_pid(self) -> None:
+        with mock.patch.object(M4, "wait_for_detached_remote", return_value=(Path("/owned/runtime.json"), 123)), \
+                mock.patch.object(M4, "process_exists", return_value=True), \
+                mock.patch.object(M4.os, "kill", side_effect=AssertionError("unowned PID signal")):
+            with self.assertRaisesRegex(M4.UnsettledScope, "preserving descriptor"):
+                M4.cleanup_detached_remote("exact-session")
+
     def test_catalog_and_inference_share_the_configured_model(self) -> None:
         with M4.fixture_origin() as port:
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
@@ -68,7 +116,7 @@ class M4FixtureTests(unittest.TestCase):
             self.assertEqual(list(output.parent.glob(".evidence.json.*")), [])
 
     def test_pty_failure_names_the_phase_and_redacts_fixture_credentials(self) -> None:
-        with mock.patch.object(M4.select, "select", return_value=([1], [], [])), mock.patch.object(M4.os, "read", side_effect=[M4.SHELL_SECRET_VALUE.encode(), b""]), mock.patch.object(M4.os, "waitpid", return_value=(0, 0)):
+        with mock.patch.object(M4.select, "select", return_value=([1], [], [])), mock.patch.object(M4.os, "read", side_effect=[M4.SHELL_SECRET_VALUE.encode(), b""]), mock.patch.object(M4.PtyProcess, "exit_status", return_value=None):
             with self.assertRaises(RuntimeError) as failure:
                 M4.read_until(M4.PtyProcess(123, 1), b"missing", phase="initial_input_echo")
         self.assertIn("phase=initial_input_echo", str(failure.exception))

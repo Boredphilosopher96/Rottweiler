@@ -300,6 +300,20 @@ gates. Delegated PID records are diagnostic identities, never authority to kill
 a possibly reused process. This contract covers participating process owners;
 importing the helper does not cover unrelated raw subprocesses or detached
 processes. The measured native child does not inherit the settlement channel.
+Standalone and delegated Python gates use the same cooperative cancellation
+owner. A signal is observed after process creation transfers ownership; cleanup
+keeps scratch until the native child is reaped. The final real group signal
+precedes leader reaping, and bounded signal-zero checks then require group
+disappearance. Persistent zombies or reused group numbers fail as `UNSETTLED`;
+they never authorize another real signal.
+
+M4 observes PTY exits without reaping and retains each leader through its final
+group signal. A successful gate acknowledges closure only after local group and
+remote-runtime lifecycle checks finish. Failed or cancelled gates retain their
+scratch and unclosed obligation. Descendant PID snapshots and detached runtime
+descriptors are diagnostic evidence, not cleanup signal authority. Engine stderr
+is drained through a 2 MiB retained log; its worker must reach EOF and join before
+the engine owner settles.
 
 The required pull-request and `main` TUI smoke measures input dispatch through
 native frame capture with wall time, requiring every trial's median below 16ms.

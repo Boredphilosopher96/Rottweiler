@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 import sys
+import signal
+import time
 import tempfile
 import unittest
 
@@ -219,6 +221,32 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             "RUNNER_TEMP": str(root),
         }
         return fixture, gate, output, env
+
+    def test_standalone_sigterm_reaps_sample_before_scratch_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "sample.pid"
+            fixture, gate, output, env = self.prepared_gate(
+                f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nexec sleep 60\n"
+            )
+            owner = subprocess.Popen([str(gate), str(fixture.root)], cwd=fixture.repo, env=env,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     start_new_session=True)
+            try:
+                deadline = time.monotonic() + 3
+                while not pid_path.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(pid_path.exists())
+                os.kill(owner.pid, signal.SIGTERM)
+                self.assertNotEqual(owner.wait(timeout=5), 0)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(int(pid_path.read_text()), 0)
+                self.assertEqual(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*")), [])
+                evidence = json.loads(output.with_name("headless.evidence.json").read_text())
+                self.assertEqual(evidence["status"], "fail")
+            finally:
+                if owner.returncode is None:
+                    os.killpg(owner.pid, signal.SIGKILL)
+                    owner.wait()
 
     def test_cancelled_gate_reaps_sample_before_removing_private_scratch(self) -> None:
         from perf_process import run_sample

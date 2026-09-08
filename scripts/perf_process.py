@@ -17,14 +17,30 @@ from perf_process_wait import observe_exit, signal_owned_group, require_group_di
 _SCOPE = inherited_scope()
 
 
+def check_sample_cancellation() -> None:
+    _SCOPE.check()
+
+
+@contextlib.contextmanager
+def delegated_success_scope():
+    """A trusted gate acknowledges its raw owners only after successful closure.
+
+    Any failure leaves the obligation pending, even if some cleanup completed.
+    The outer supervisor must classify that run as UNSETTLED.
+    """
+    registration = _SCOPE.starting()
+    yield
+    if registration is not None:
+        _SCOPE.settled(registration)
+
+
 def wait_between_samples(seconds: float) -> None:
     """Fixed conditioning interval, interruptible without abandoning scratch."""
     if not math.isfinite(seconds) or seconds < 0:
         raise ValueError("sample conditioning interval must be finite and nonnegative")
     deadline = time.monotonic() + seconds
     while True:
-        if _SCOPE is not None:
-            _SCOPE.check()
+        _SCOPE.check()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
@@ -41,7 +57,7 @@ def run_sample(
         raise ValueError("sample time and output budgets must be positive")
     started = time.monotonic()
     deadline = started + timeout
-    registration = _SCOPE.starting() if _SCOPE is not None else None
+    registration = _SCOPE.starting()
     scope = None
     writer = None
     environment = dict(env)
@@ -92,8 +108,7 @@ def run_sample(
             if scope is not None:
                 selector.register(scope.descriptor, selectors.EVENT_READ, scope)
             while selector.get_map():
-                if _SCOPE is not None:
-                    _SCOPE.check()
+                _SCOPE.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise deadline_error(len(selector.get_map()))
@@ -120,8 +135,7 @@ def run_sample(
                     if len(key.data) > output_limit:
                         raise ValueError(f"performance sample exceeded {output_limit} output bytes per stream")
             while True:
-                if _SCOPE is not None:
-                    _SCOPE.check()
+                _SCOPE.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise deadline_error(0)

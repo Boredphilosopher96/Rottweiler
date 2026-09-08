@@ -26,6 +26,13 @@ if sys.platform == "darwin" and not hasattr(os, "waitid"):
     _waitid.restype = ctypes.c_int
 
 
+if sys.platform == "darwin":
+    _libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    _group_members = _libproc.proc_listpgrppids
+    _group_members.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    _group_members.restype = ctypes.c_int
+
+
 def observe_exit(pid: int) -> int | None:
     """Return the exit code, leaving this exact child waitable until final reap."""
     options = os.WEXITED | os.WNOHANG | os.WNOWAIT
@@ -58,12 +65,8 @@ def signal_owned_group(pid: int, number: int) -> None:
         # contains only our already-exited child with a bounded libproc query.
         if sys.platform != "darwin" or observe_exit(pid) is None:
             raise
-        library = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
         members = (ctypes.c_int * 2)()
-        query = library.proc_listpgrppids
-        query.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-        query.restype = ctypes.c_int
-        count = query(pid, members, ctypes.sizeof(members))
+        count = _group_members(pid, members, ctypes.sizeof(members))
         if count != 1 or members[0] != pid:
             raise
 

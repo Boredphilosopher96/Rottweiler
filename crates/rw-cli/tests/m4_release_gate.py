@@ -31,6 +31,10 @@ from dataclasses import dataclass
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 from journal_observer import observed_envelopes, session_journals
 from m4_transcript import fixture_turns
+from m4_output import EngineErrorLog
+from perf_process_wait import observe_exit
+from perf_process_scope import UnsettledScope
+from perf_process import run_sample, delegated_success_scope, check_sample_cancellation
 from release_contract import load_contract
 
 TUI_ROLE = load_contract(pathlib.Path(__file__).resolve().parents[3] / "contracts/release-contract.json").js_host_roles["tui"]
@@ -104,7 +108,11 @@ def start_engine(
     session_id: str,
 ) -> tuple[Runtime, float]:
     runtime, started = spawn_engine(rw, sample_root, workspace, port, session_id)
-    wait_for_health(runtime)
+    try:
+        wait_for_health(runtime)
+    except BaseException:
+        stop_runtime(runtime)
+        raise
     ready_ms = (time.perf_counter_ns() - started) / 1_000_000
     return runtime, ready_ms
 
@@ -123,44 +131,52 @@ def spawn_engine(
     socket_path = run / "engine.sock"
     token_path = run / "auth.token"
     stderr_path = sample_root / "engine.stderr"
-    stderr = stderr_path.open("wb")
+    stderr = EngineErrorLog(stderr_path)
     started = time.perf_counter_ns()
-    process = subprocess.Popen(
-        [
-            str(rw),
-            "serve",
-            "--socket",
-            str(socket_path),
-            "--token-file",
-            str(token_path),
-            "--session",
-            session_id,
-            "--workspace",
-            str(workspace),
-            "--permission-mode",
-            "strict",
-            "--model",
-            "fast",
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=stderr,
-        cwd=workspace,
-        env=isolated_env(home),
-        start_new_session=True,
-    )
-    stderr.close()
-    return Runtime(process, socket_path, token_path, stderr_path), started
+    try:
+        process = subprocess.Popen(
+            [
+                str(rw),
+                "serve",
+                "--socket",
+                str(socket_path),
+                "--token-file",
+                str(token_path),
+                "--session",
+                session_id,
+                "--workspace",
+                str(workspace),
+                "--permission-mode",
+                "strict",
+                "--model",
+                "fast",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr.write_fd,
+            cwd=workspace,
+            env=isolated_env(home),
+            start_new_session=True,
+        )
+    except BaseException:
+        stderr.close_input()
+        stderr.finish()
+        raise
+    finally:
+        stderr.close_input()
+    return Runtime(process, socket_path, token_path, stderr), started
 
 
 def wait_for_health(runtime: Runtime, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
-        if runtime.process.poll() is not None:
-            detail = runtime.stderr_path.read_text(encoding="utf-8", errors="replace")
+        check_sample_cancellation()
+        status = observe_exit(runtime.process.pid)
+        if status is not None:
+            detail = runtime.stderr.path.read_text(encoding="utf-8", errors="replace")
             raise RuntimeError(
-                f"release engine exited before readiness ({runtime.process.returncode}): {detail}"
+                f"release engine exited before readiness ({status}): {detail}"
             )
         try:
             token = runtime.token_path.read_text(encoding="ascii").strip()
@@ -342,13 +358,9 @@ def installed_first_launch_gate(
         shutil.copyfile(source_rw, version_rw)
         version_rw.chmod(0o700)
         started = time.perf_counter_ns()
-        result = subprocess.run(
-            [str(version_rw), "--version"],
-            cwd=workspace,
-            env=isolated_env(root / f"installed-first-version-home-{index}"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+        result = run_sample(
+            [str(version_rw), "--version"], cwd=workspace,
+            env=isolated_env(root / f"installed-first-version-home-{index}"), timeout=5,
         )
         version.append((time.perf_counter_ns() - started) / 1_000_000)
         if evidence is not None:
@@ -483,7 +495,11 @@ def socket_latency_gate(
 
 
 def child_processes(parent: int) -> list[tuple[int, str]]:
-    output = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
+    result = run_sample(["ps", "-axo", "pid=,ppid=,command="], cwd=pathlib.Path.cwd(),
+                        env=dict(os.environ), timeout=2, output_limit=1024 * 1024)
+    if result.returncode:
+        raise RuntimeError("could not observe supervised children")
+    output = result.stdout.decode()
     children: list[tuple[int, str]] = []
     for line in output.splitlines():
         fields = line.strip().split(maxsplit=2)
@@ -532,10 +548,9 @@ def model_discovery_gate(rw: pathlib.Path, root: pathlib.Path, workspace: pathli
     home = root / "discovery-home"
     write_config(home, port)
     before = discovery_request_count()
-    result = subprocess.run(
+    result = run_sample(
         [str(rw), "models", "list", "--refresh", "--output-format", "json"],
-        cwd=workspace, env=isolated_env(home), capture_output=True, text=True,
-        timeout=8, check=False,
+        cwd=workspace, env=isolated_env(home), timeout=8, output_limit=1024 * 1024,
     )
     if result.returncode != 0:
         raise RuntimeError(f"fixture model discovery exited {result.returncode}: {result.stderr[-2000:]}")
@@ -636,9 +651,8 @@ def supervisor_reattach_gate(
         )
     finally:
         if not closed_normally:
-            terminate_process_tree(process.pid)
-        with contextlib.suppress(OSError):
-            os.close(process.fd)
+            terminate_process_tree(process)
+        stop_pty(process)
 
 
 def supervisor_parent_death_gate(
@@ -686,9 +700,8 @@ def supervisor_parent_death_gate(
         process = spawn_pty(rw, env, workspace, ["--dangerously-trust"])
         read_until(process, DRIVER_READY_MARKER, timeout=20)
         owned_children = descendant_pids(process.pid)
-        terminate_process_tree(process.pid)
-        with contextlib.suppress(OSError):
-            os.close(process.fd)
+        terminate_process_tree(process)
+        stop_pty(process)
         process = None
 
         cleanup_deadline = time.monotonic() + 5
@@ -716,9 +729,8 @@ def supervisor_parent_death_gate(
         )
     finally:
         if process is not None:
-            terminate_process_tree(process.pid)
-            with contextlib.suppress(OSError):
-                os.close(process.fd)
+            terminate_process_tree(process)
+            stop_pty(process)
 
 
 def shell_handover_gate(
@@ -848,9 +860,8 @@ def shell_handover_gate(
             "the TUI resumed"
         )
     finally:
-        terminate_process_tree(process.pid)
-        with contextlib.suppress(OSError):
-            os.close(process.fd)
+        terminate_process_tree(process)
+        stop_pty(process)
 
 
 def durable_shell_events(home: pathlib.Path) -> list[dict[str, object]]:
@@ -865,26 +876,10 @@ def durable_shell_events(home: pathlib.Path) -> list[dict[str, object]]:
     return events
 
 
-def wait_pid(pid: int, timeout: float) -> int:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        found, status = os.waitpid(pid, os.WNOHANG)
-        if found == pid:
-            return status
-        time.sleep(0.01)
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGKILL)
-    return os.waitpid(pid, 0)[1]
-
-
 def ssh_preflight(host: str) -> None:
-    completed = subprocess.run(
+    completed = run_sample(
         ["/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "--", host, "true"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        timeout=5,
-        check=False,
+        cwd=pathlib.Path.cwd(), env=dict(os.environ), timeout=5,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -939,9 +934,8 @@ def ssh_loopback_gate(
         require_visible_markers(local_capture)
         local_transcript = wait_for_canonical_durable_transcript(home)
     finally:
-        terminate_process_tree(local.pid)
-        with contextlib.suppress(OSError):
-            os.close(local.fd)
+        terminate_process_tree(local)
+        stop_pty(local)
 
     session_id = "m4-ssh-loopback-gate"
     remote = spawn_pty(
@@ -980,7 +974,7 @@ def ssh_loopback_gate(
         )
         descriptor, remote_engine_pid = wait_for_detached_remote(session_id)
         os.write(remote.fd, b"\x03")
-        exit_code = os.waitstatus_to_exitcode(wait_pid(remote.pid, 8))
+        exit_code = os.waitstatus_to_exitcode(wait_for_pty_exit(remote, 8))
         if exit_code != 0:
             raise RuntimeError(f"attached remote close exited with {exit_code}")
         deadline = time.monotonic() + 5
@@ -1000,9 +994,8 @@ def ssh_loopback_gate(
         )
     finally:
         if not remote_closed_normally:
-            terminate_process_tree(remote.pid)
-        with contextlib.suppress(OSError):
-            os.close(remote.fd)
+            terminate_process_tree(remote)
+        stop_pty(remote)
         if not remote_closed_normally:
             cleanup_detached_remote(session_id)
 
@@ -1028,7 +1021,7 @@ def ssh_loopback_gate(
             raise RuntimeError("SIGTERM remote TUI became driver-ready without first paint")
         descriptor, remote_engine_pid = wait_for_detached_remote(term_session_id)
         os.kill(terminated.pid, signal.SIGTERM)
-        exit_code = os.waitstatus_to_exitcode(wait_pid(terminated.pid, 8))
+        exit_code = os.waitstatus_to_exitcode(wait_for_pty_exit(terminated, 8))
         if exit_code != 0:
             raise RuntimeError(f"attached remote SIGTERM exited with {exit_code}")
         deadline = time.monotonic() + 5
@@ -1048,9 +1041,8 @@ def ssh_loopback_gate(
         )
     finally:
         if not term_closed_normally:
-            terminate_process_tree(terminated.pid)
-        with contextlib.suppress(OSError):
-            os.close(terminated.fd)
+            terminate_process_tree(terminated)
+        stop_pty(terminated)
         if not term_closed_normally:
             cleanup_detached_remote(term_session_id)
 
@@ -1126,19 +1118,11 @@ def cleanup_detached_remote(session_id: str) -> None:
         descriptor, pid = wait_for_detached_remote(session_id, timeout=0.1)
     except RuntimeError:
         return
-    directory = descriptor.parent
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 2
-    while process_exists(pid) and time.monotonic() < deadline:
-        time.sleep(0.01)
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGKILL)
-    for path in [directory / "engine.sock", directory / "auth.token", descriptor]:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-    with contextlib.suppress(OSError):
-        directory.rmdir()
+    if process_exists(pid):
+        raise UnsettledScope(
+            f"UNSETTLED detached remote runtime: pid={pid} descriptor={descriptor}; "
+            "preserving descriptor for identity-qualified cleanup"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -1162,6 +1146,18 @@ def opentui_native_library_name() -> str:
     if sys.platform == "win32":
         return "opentui.dll"
     return "libopentui.so"
+
+
+@contextlib.contextmanager
+def gate_scratch(evidence: GateEvidence):
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rw4-", dir="/tmp"))
+    try:
+        yield str(root)
+    except BaseException:
+        evidence.update(retained_scratch=str(root))
+        raise
+    else:
+        shutil.rmtree(root)
 
 
 def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
@@ -1189,7 +1185,7 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
     # rooted at the short /tmp spelling so the production supervisor's nested
     # private runtime directory is testing startup rather than path overflow.
     metrics: dict[str, int] = {}
-    with tempfile.TemporaryDirectory(prefix="rw4-", dir="/tmp") as temporary:
+    with gate_scratch(evidence) as temporary:
         root = pathlib.Path(temporary)
         root.chmod(0o700)
         # Benchmark installed-artifact copies. Python's copyfile copies the
@@ -1260,8 +1256,9 @@ def main() -> int:
     evidence = GateEvidence(output)
     try:
         evidence.update()
-        result = run_gate(args, evidence)
-        evidence.update(status="pass", phase="complete")
+        with delegated_success_scope():
+            result = run_gate(args, evidence)
+            evidence.update(status="pass", phase="complete", physical_settlement="closed")
         return result
     except BaseException as error:
         try:
