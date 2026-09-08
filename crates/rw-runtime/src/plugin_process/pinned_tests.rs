@@ -61,24 +61,26 @@ fn fixture_with_executable(
 
 #[test]
 fn copied_code_contains_only_attested_files_and_rejects_precapture_replacement() {
+    let images = rw_tools::ApprovedExecutableImages::default();
     let (_directory, config) = fixture("printf approved");
-    let bytes = LaunchBytes::capture(&config, &profile()).expect("capture");
+    let bytes = LaunchBytes::capture(&config, &profile(), &images).expect("capture");
     let entry = PathBuf::from(&bytes.args(&config)[0]);
     assert_eq!(fs::read(&entry).expect("copy"), b"printf approved");
     assert!(!bytes.cwd(&config).join("unlisted").exists());
     fs::write(config.cwd().join("entry.data"), "printf replaced").expect("same-length replacement");
-    assert!(LaunchBytes::capture(&config, &profile()).is_err());
+    assert!(LaunchBytes::capture(&config, &profile(), &images).is_err());
     assert_eq!(fs::read(entry).expect("pinned copy"), b"printf approved");
 }
 
 #[test]
 fn primary_replacement_is_rejected_by_final_capture_without_duplicate_attestation() {
+    let images = rw_tools::ApprovedExecutableImages::default();
     let (_directory, config) = fixture("printf approved");
     assert_eq!(config.attested_files().len(), 1);
-    let approved = LaunchBytes::capture(&config, &profile()).expect("approved capture");
+    let approved = LaunchBytes::capture(&config, &profile(), &images).expect("approved capture");
     fs::write(config.executable(), b"replacement executable").expect("replace primary");
     assert!(config.validate_executable_identity().is_err());
-    assert!(LaunchBytes::capture(&config, &profile()).is_err());
+    assert!(LaunchBytes::capture(&config, &profile(), &images).is_err());
     assert_ne!(
         fs::read(approved.program(&config)).expect("retained executable"),
         b"replacement executable"
@@ -87,10 +89,11 @@ fn primary_replacement_is_rejected_by_final_capture_without_duplicate_attestatio
 
 #[tokio::test]
 async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execution() {
+    let images = rw_tools::ApprovedExecutableImages::default();
     let _admission = crate::native_fixture::admit().await;
     let (_directory, config) = native_fixture("approved\n");
     let profile = profile();
-    let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
+    let bytes = Arc::new(LaunchBytes::capture(&config, &profile, &images).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
     fs::write(config.executable(), b"not an executable anymore").expect("replace executable bytes");
     fs::write(config.cwd().join("entry.data"), "printf replaced").expect("replace code bytes");
@@ -158,10 +161,11 @@ async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execu
 
 #[tokio::test]
 async fn dropped_handoff_keeps_code_until_physical_retirement() {
+    let images = rw_tools::ApprovedExecutableImages::default();
     let _admission = crate::native_fixture::admit().await;
     let (_directory, config) = native_fixture("hold\n");
     let profile = profile();
-    let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
+    let bytes = Arc::new(LaunchBytes::capture(&config, &profile, &images).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
     let scratch = tempfile::tempdir().expect("scratch");
     let helper = helper_executable().expect("explicit immutable helper prerequisite");
@@ -202,8 +206,9 @@ async fn dropped_handoff_keeps_code_until_physical_retirement() {
 
 #[test]
 fn writable_scratch_cannot_include_or_replace_the_approved_code_view() {
+    let images = rw_tools::ApprovedExecutableImages::default();
     let (_directory, config) = fixture("printf approved");
-    let bytes = LaunchBytes::capture(&config, &profile()).expect("capture");
+    let bytes = LaunchBytes::capture(&config, &profile(), &images).expect("capture");
     let cwd = bytes.cwd(&config).to_path_buf();
     assert!(bytes.validate_write_roots(&[cwd]).is_err());
     assert!(bytes.validate_write_roots(&[std::env::temp_dir()]).is_err());
@@ -215,10 +220,11 @@ fn writable_scratch_cannot_include_or_replace_the_approved_code_view() {
 
 #[tokio::test]
 async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
+    let images = rw_tools::ApprovedExecutableImages::default();
     let _admission = crate::native_fixture::admit().await;
     let (_directory, config) = native_fixture("hold\n");
     let profile = profile();
-    let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
+    let bytes = Arc::new(LaunchBytes::capture(&config, &profile, &images).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
     let scratch = tempfile::tempdir().expect("scratch");
     let helper = helper_executable().expect("explicit immutable helper prerequisite");
@@ -271,10 +277,12 @@ async fn assert_ready(stdout: &mut (impl tokio::io::AsyncRead + Unpin)) {
 #[cfg(target_os = "macos")]
 #[test]
 fn preparation_read_view_is_distinct_from_immutable_executable_authority() {
+    let images = rw_tools::ApprovedExecutableImages::default();
     let (_directory, config) = fixture("preparation input");
     let mut policy = profile();
     policy.mode = rw_ext::PluginSandboxMode::Preparation {};
-    let bytes = LaunchBytes::capture(&config, &policy).expect("capture preparation executable");
+    let bytes =
+        LaunchBytes::capture(&config, &policy, &images).expect("capture preparation executable");
     bytes
         .validate_write_roots(&[config.cwd().to_path_buf()])
         .expect("preparation source view is governed by its existing output policy");
