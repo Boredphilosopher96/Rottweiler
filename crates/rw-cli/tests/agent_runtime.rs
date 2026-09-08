@@ -419,3 +419,6 @@ use process::TestProcess;
 
 #[path = "agent_runtime/print_output.rs"]
 mod print_output;
+
+#[cfg(unix)]
+mod host_restart;
