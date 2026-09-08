@@ -255,3 +255,34 @@ fn missing_inventory_rejects_special_or_oversized_authority_files() -> TestResul
     }
     Ok(())
 }
+
+#[test]
+fn first_publication_between_missing_lock_and_ledger_probe_is_not_corruption() -> TestResult {
+    let fixture = NamespaceFixture::new()?;
+    let store = fixture.open("first")?;
+    let mut observations = 0;
+    let lock = fixture.blobs.existing_read_lock_using(
+        &mut CheckpointOperation::default(),
+        |path| {
+            observations += 1;
+            let observed = File::open(path);
+            if observations == 1 {
+                assert!(
+                    matches!(&observed, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                );
+                // The syscall already observed absence; the first publisher
+                // commits its namespace before that observation is consumed.
+                let writer = fixture
+                    .blobs
+                    .reference_writer(&store.root, &mut CheckpointOperation::default())?;
+                drop(writer);
+            }
+            Ok(observed?)
+        },
+    )?;
+    assert!(lock.is_some());
+    assert_eq!(observations, 2);
+    drop(lock);
+    assert!(store.recover_rewinds()?.is_empty());
+    Ok(())
+}

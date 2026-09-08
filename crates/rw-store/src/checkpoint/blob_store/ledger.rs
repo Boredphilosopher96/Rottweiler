@@ -52,16 +52,35 @@ impl CheckpointBlobStore {
         &self,
         operation: &mut CheckpointOperation,
     ) -> Result<Option<AdvisoryFileLock>, CheckpointError> {
+        self.existing_read_lock_using(operation, regular_read)
+    }
+
+    pub(super) fn existing_read_lock_using(
+        &self,
+        operation: &mut CheckpointOperation,
+        mut read: impl FnMut(&Path) -> Result<File, CheckpointError>,
+    ) -> Result<Option<AdvisoryFileLock>, CheckpointError> {
         let path = self.root.join("writer.lock");
         loop {
             operation.check()?;
-            let file = match regular_read(&path) {
+            let file = match read(&path) {
                 Ok(file) => file,
                 Err(CheckpointError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                    if self.root.join("quota.sqlite").try_exists()? {
-                        return Err(CheckpointError::CorruptBlobQuota);
+                    if !self.root.join("quota.sqlite").try_exists()? {
+                        return Ok(None);
                     }
-                    return Ok(None);
+                    // Registration creates the lock before publishing its ledger.
+                    // Reopen after observing that ledger to distinguish a first
+                    // publisher from deletion of an established authority file.
+                    match read(&path) {
+                        Ok(file) => file,
+                        Err(CheckpointError::Io(error))
+                            if error.kind() == io::ErrorKind::NotFound =>
+                        {
+                            return Err(CheckpointError::CorruptBlobQuota);
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 Err(error) => return Err(error),
             };
