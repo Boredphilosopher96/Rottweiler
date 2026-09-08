@@ -16,7 +16,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use rw_core::{ClientCommand, CommandMeta, CommandOutcome, PROTOCOL_VERSION, RequestId, SessionId};
-use rw_types::PermissionModeDescriptor;
+use rw_types::{MAX_COMMAND_BODY_BYTES, PermissionModeDescriptor, json_encoding::JsonWriter};
 use tokio::net::UnixStream;
 
 use crate::server::{CLIENT_HEADER, ClientCredentials};
@@ -579,7 +579,7 @@ async fn shutdown_authenticated_host_inner(
             request_id: RequestId("remote-supervisor-shutdown".to_owned()),
         },
     };
-    let body = serde_json::to_vec(&command)
+    let body = encode_control_command(&command)
         .map_err(|_| "could not serialize remote shutdown command".to_owned())?;
     let shutdown = Request::builder()
         .method(Method::POST)
@@ -643,12 +643,52 @@ async fn collect_control_json<T: serde::de::DeserializeOwned>(body: Incoming) ->
     serde_json::from_slice(&bytes).map_err(|_| "remote control response was invalid".to_owned())
 }
 
+fn encode_control_command(command: &ClientCommand) -> serde_json::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    JsonWriter::buffer(&mut bytes, MAX_COMMAND_BODY_BYTES, 1024)
+        .map_err(serde_json::Error::io)?
+        .serialize(command)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
     use std::{collections::VecDeque, sync::Arc};
+
+    #[test]
+    fn shutdown_command_encoding_preserves_exact_compact_bytes() {
+        let command = ClientCommand::ShutdownHost {
+            meta: CommandMeta {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: rw_core::ClientId("client\n\"\\🦀".into()),
+                request_id: RequestId("remote-supervisor-shutdown".into()),
+            },
+        };
+        let expected = serde_json::to_vec(&command).expect("reference wire bytes");
+        let encoded = encode_control_command(&command).expect("bounded command");
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            serde_json::from_slice::<ClientCommand>(&encoded).expect("wire command"),
+            command
+        );
+    }
+
+    #[test]
+    fn control_command_rejects_encoded_overflow_as_an_io_error() {
+        let command = ClientCommand::ShutdownHost {
+            meta: CommandMeta {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: rw_core::ClientId("\0".repeat(MAX_COMMAND_BODY_BYTES / 6)),
+                request_id: RequestId("remote-supervisor-shutdown".into()),
+            },
+        };
+        let error = encode_control_command(&command).expect_err("escaped bytes exceed wire cap");
+        assert!(error.is_io());
+        assert_eq!(error.io_error_kind(), Some(std::io::ErrorKind::Other));
+    }
 
     fn config() -> RemoteConfig {
         RemoteConfig {

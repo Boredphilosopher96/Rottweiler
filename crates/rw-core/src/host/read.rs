@@ -463,7 +463,7 @@ impl HostReadChannel {
 
 pub(super) fn command_hash(command: &ClientCommand) -> Result<String, serde_json::Error> {
     let mut hasher = blake3::Hasher::new();
-    serde_json::to_writer(&mut hasher, command)?;
+    JsonWriter::stream(&mut hasher, usize::MAX).serialize(command)?;
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -474,6 +474,35 @@ mod channel_tests;
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_fingerprint_preserves_compact_wire_bytes_and_escaping() {
+        let command = ClientCommand::SendMessage {
+            meta: rw_types::CommandMeta {
+                protocol_version: rw_types::PROTOCOL_VERSION,
+                client_id: ClientId("client-🦀".into()),
+                request_id: RequestId("request\n\"\\".into()),
+            },
+            session_id: rw_types::SessionId("session".into()),
+            content: "\0\n🦀".into(),
+            attachments: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&command).expect("reference compact command");
+        let fingerprint = command_hash(&command).expect("streamed fingerprint");
+        assert_eq!(fingerprint, blake3::hash(&bytes).to_hex().as_str());
+        assert_eq!(
+            serde_json::from_slice::<ClientCommand>(&bytes).expect("wire command"),
+            command
+        );
+        let mut changed = command;
+        if let ClientCommand::SendMessage { content, .. } = &mut changed {
+            content.push('x');
+        }
+        assert_ne!(
+            command_hash(&changed).expect("changed command"),
+            fingerprint
+        );
+    }
 
     #[test]
     fn reply_writer_never_grows_beyond_its_owned_byte_budget() {
