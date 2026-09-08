@@ -77,10 +77,8 @@ pub(super) struct ReloadingHostedCatalogSource {
     pub(super) project_config_path: PathBuf,
 }
 
-/// Persists both full and provider-scoped live catalogs. Provider auth uses
-/// the scoped path, so omitting this wrapper would leave the process cache
-/// healthy while the next app launch fell back to an unauthenticated
-/// placeholder until the provider modal forced another refresh.
+/// Persists both full and provider-scoped live catalogs so authenticated model
+/// availability survives process restart without another catalog refresh.
 pub(super) struct PersistingHostedCatalogSource {
     pub(super) inner: Arc<dyn ModelCatalogSource>,
     pub(super) cache_path: PathBuf,
