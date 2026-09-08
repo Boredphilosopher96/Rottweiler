@@ -30,8 +30,13 @@ impl TypeVisitor for Types {
         }
         if T::output_path().is_some() {
             let config = ts_rs::Config::default();
+            let declaration = T::decl(&config)
+                .lines()
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n");
             self.declarations
-                .insert(T::ident(&config), format!("export {}\n", T::decl(&config)));
+                .insert(T::ident(&config), format!("export {declaration}\n"));
         }
         T::visit_dependencies(self);
     }
