@@ -112,3 +112,44 @@ fn discovered_grant_disappearance_is_optional_but_substitution_is_rejected()
     );
     Ok(())
 }
+
+#[test]
+fn carved_declared_read_root_is_required_independently_of_optional_children()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::read_grants::{collect_authorized_read_root, pin_carved_declared_roots};
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().canonicalize()?.join("home");
+    let safe = root.join("safe");
+    let secret = root.join(".ssh");
+    std::fs::create_dir_all(&safe)?;
+    std::fs::create_dir(&secret)?;
+    let mut grants = std::collections::BTreeMap::new();
+    collect_authorized_read_root(&root, RootKind::Directory, &[secret], &mut grants)?;
+    assert!(grants.contains_key(&safe));
+    assert!(
+        !grants.contains_key(&root),
+        "carved parent must not grant broad reads"
+    );
+    let roots = [root.clone()];
+    let kinds = [RootKind::Directory];
+    let pins = pin_carved_declared_roots(&roots, &kinds, &grants)?;
+    assert_eq!(pins.len(), 1);
+    let original = std::fs::metadata(&root)?;
+    let descriptor = rustix::fs::fstat(pins[0].as_fd())?;
+    assert_eq!(descriptor.st_ino, original.ino());
+    assert_eq!(descriptor.st_dev, original.dev());
+    std::fs::remove_dir_all(&root)?;
+    assert!(
+        grants
+            .get(&safe)
+            .ok_or("safe grant missing")?
+            .open(&safe)?
+            .is_none()
+    );
+    assert!(
+        pin_carved_declared_roots(&roots, &kinds, &grants).is_err(),
+        "missing declared root cannot be replaced by an empty optional snapshot"
+    );
+    assert_eq!(rustix::fs::fstat(pins[0].as_fd())?.st_ino, original.ino());
+    Ok(())
+}

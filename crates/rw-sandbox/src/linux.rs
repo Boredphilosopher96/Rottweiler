@@ -37,7 +37,7 @@ use super::{
 
 use read_grants::{
     absolute_existing_root, collect_authorized_read_root, collect_system_read_root,
-    open_landlock_root,
+    open_landlock_root, pin_carved_declared_roots,
 };
 
 /// Linux's default shell runtime roots. These are deliberately explicit:
@@ -277,6 +277,13 @@ fn install_landlock(policy: &SandboxPolicy, program: &OsString) -> Result<(), Sa
     for (root, kind) in policy.write_roots.iter().zip(&policy.write_root_kinds) {
         collect_authorized_read_root(root, *kind, &sensitive, &mut read_grants)?;
     }
+    // Carved roots receive no broad read rule. Keep their independently
+    // validated descriptors through enforcement, without reopening for a grant.
+    let declared_read_pins = match (&policy.read_roots, &policy.read_root_kinds) {
+        (Some(roots), Some(kinds)) => pin_carved_declared_roots(roots, kinds, &read_grants)?,
+        (None, None) => Vec::new(),
+        _ => return Err(SandboxError::MalformedHelper),
+    };
     for (root, grant) in read_grants {
         let Some(root) = grant.open(&root)? else {
             continue;
@@ -315,6 +322,7 @@ fn install_landlock(policy: &SandboxPolicy, program: &OsString) -> Result<(), Sa
             .map_err(sandbox_backend)?;
     }
     let status = ruleset.restrict_self().map_err(sandbox_backend)?;
+    drop(declared_read_pins);
     if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
         return Err(SandboxError::Unavailable(format!(
             "Landlock V3 is not fully enforced ({:?}); refusing unsandboxed execution",

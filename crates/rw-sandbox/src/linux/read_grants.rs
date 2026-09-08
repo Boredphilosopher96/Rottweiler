@@ -77,6 +77,25 @@ pub(super) fn collect_authorized_read_root(
     }
 }
 
+/// Pin declared roots that cannot themselves receive a read rule. These
+/// descriptors validate authority without granting access to excluded children.
+pub(super) fn pin_carved_declared_roots(
+    roots: &[PathBuf],
+    kinds: &[RootKind],
+    grants: &BTreeMap<PathBuf, ReadGrant>,
+) -> Result<Vec<OwnedFd>, SandboxError> {
+    if roots.len() != kinds.len() {
+        return Err(SandboxError::MalformedHelper);
+    }
+    let mut pins = Vec::new();
+    for (root, kind) in roots.iter().zip(kinds) {
+        if !matches!(grants.get(root), Some(ReadGrant::Required(_))) {
+            pins.push(open_landlock_root(root, *kind)?);
+        }
+    }
+    Ok(pins)
+}
+
 fn collect_directory_except(
     root: &Path,
     excluded: &[PathBuf],
