@@ -90,7 +90,26 @@ class CiEvidenceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertNotIn(secret, result.stdout.decode())
             self.assertNotIn(secret, output.read_text())
+            self.assertNotIn(secret, output.with_suffix(".log").read_text())
             self.assertIn("[REDACTED]", result.stdout.decode())
+
+    def test_early_failure_survives_later_output_and_log_size_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result.json"
+            child = "import sys; print('early failure'); print('x' * (9 * 1024 * 1024)); print('final marker'); sys.exit(7)"
+            result = subprocess.run([
+                sys.executable, str(SCRIPT), "--gate", "fixture", "--output", str(output), "--",
+                sys.executable, "-c", child,
+            ], stdout=subprocess.DEVNULL, check=False)
+            self.assertEqual(result.returncode, 7)
+            evidence = json.loads(output.read_text())
+            log = output.with_name(evidence["log_file"])
+            self.assertEqual(log.stat().st_size, MODULE.MAX_LOG_BYTES)
+            self.assertEqual(evidence["log_prefix_bytes"], MODULE.MAX_LOG_BYTES)
+            self.assertGreater(evidence["log_omitted_bytes"], 1024 * 1024)
+            with log.open("rb") as source:
+                self.assertTrue(source.read(128).startswith(b"early failure\n"))
+            self.assertIn("final marker", evidence["log_tail"])
 
     def test_failure_preserves_exit_status_and_bounded_tail(self):
         with tempfile.TemporaryDirectory() as directory:

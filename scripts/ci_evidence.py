@@ -14,6 +14,7 @@ import sys
 import time
 
 MAX_TAIL_BYTES = 128 * 1024
+MAX_LOG_BYTES = 8 * 1024 * 1024
 
 
 def group_has_live_members(group: int) -> bool:
@@ -82,6 +83,9 @@ def observe(command: list[str], gate: str, output: Path) -> int:
         },
     }
     write_result(output, result)
+    log_path = output.with_suffix(".log")
+    log = log_path.open("wb", buffering=0)
+    result.update(log_file=log_path.name, log_prefix_bytes=0, log_omitted_bytes=0)
     secret_values = [value.encode() for key, value in os.environ.items()
                      if any(word in key.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")) and len(value) >= 6]
     tail = bytearray()
@@ -96,6 +100,17 @@ def observe(command: list[str], gate: str, output: Path) -> int:
         safe = bytes(pending[:emit])
         del pending[:emit]
         return safe
+
+    def retain(chunk: bytes) -> None:
+        # Keep early failures even when later test binaries fill the rolling tail.
+        # Both artifacts receive only the stream after cross-read secret redaction.
+        available = MAX_LOG_BYTES - result["log_prefix_bytes"]
+        prefix = chunk[:available]
+        log.write(prefix)
+        result["log_prefix_bytes"] += len(prefix)
+        result["log_omitted_bytes"] += len(chunk) - len(prefix)
+        tail.extend(chunk)
+        del tail[:-MAX_TAIL_BYTES]
 
     process = None
     exit_code = 1
@@ -126,8 +141,7 @@ def observe(command: list[str], gate: str, output: Path) -> int:
                     chunk = redact(chunk)
                     sys.stdout.buffer.write(chunk)
                     sys.stdout.buffer.flush()
-                    tail.extend(chunk)
-                    del tail[:-MAX_TAIL_BYTES]
+                    retain(chunk)
                 if now - last_checkpoint >= 5:
                     result.update(elapsed_seconds=now - started, log_tail=tail.decode(errors="replace"))
                     write_result(output, result)
@@ -135,8 +149,7 @@ def observe(command: list[str], gate: str, output: Path) -> int:
         final = redact(b"", final=True)
         sys.stdout.buffer.write(final)
         sys.stdout.buffer.flush()
-        tail.extend(final)
-        del tail[:-MAX_TAIL_BYTES]
+        retain(final)
         exit_code = process.wait()
     except KeyboardInterrupt:
         exit_code = 130
@@ -160,6 +173,7 @@ def observe(command: list[str], gate: str, output: Path) -> int:
             exit_code = 128 - exit_code
         result.update(status="passed" if exit_code == 0 else "failed", exit_code=exit_code,
                       elapsed_seconds=time.monotonic() - started, log_tail=tail.decode(errors="replace"))
+        log.close()
         write_result(output, result)
         signal.signal(signal.SIGTERM, previous)
     return exit_code

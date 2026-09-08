@@ -131,6 +131,7 @@ jobs:
     timeout-minutes: 45
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_TEST_ACTIVATION_TRACE: "1"
     strategy:
       fail-fast: false
       matrix:
