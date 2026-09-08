@@ -57,7 +57,7 @@ impl PluginRendezvous {
             std::path::PathBuf::from(format!("/proc/self/fd/{}", pin.as_raw_fd()))
         };
         #[cfg(not(target_os = "linux"))]
-        let helper = plan._helper.launch_path().to_path_buf();
+        let helper = plan.helper.launch_path().to_path_buf();
         let mut args = vec![
             OsString::from(ENTRY),
             self.directory.path().join("owner.sock").into_os_string(),
@@ -81,7 +81,7 @@ impl PluginRendezvous {
                 Err(error)
                     if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
                 {
-                    std::thread::sleep(WAIT)
+                    std::thread::sleep(WAIT);
                 }
                 Err(error) => return Err(error),
             }

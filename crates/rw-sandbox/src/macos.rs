@@ -61,7 +61,7 @@ pub(super) fn launch_plan(
         program: PathBuf::from("/usr/bin/sandbox-exec"),
         args,
         warnings: Vec::new(),
-        _helper: helper_executable.clone(),
+        helper: helper_executable.clone(),
         single_process: !policy.allow_process_creation,
     })
 }
