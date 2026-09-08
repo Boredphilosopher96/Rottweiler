@@ -43,7 +43,9 @@ fn fixture_with_executable(
         .and_then(|config| config.with_cwd(&root))
         .and_then(|config| config.with_code_root(&root))
         .and_then(|config| config.with_argv(["entry.js"]))
-        .and_then(|config| config.with_attested_files([root.join("entry.js")]))
+        .and_then(|config| {
+            config.with_attested_files([root.join("interpreter"), root.join("entry.js")])
+        })
         .expect("approved fixture config");
     (directory, config)
 }

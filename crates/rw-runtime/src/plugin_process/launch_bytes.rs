@@ -60,7 +60,6 @@ impl LaunchBytes {
             let files = config
                 .attested_files()
                 .iter()
-                .filter(|identity| identity.canonical_path != config.executable())
                 .map(rw_ext::ExecutableIdentity::artifact_identity)
                 .collect::<Vec<_>>();
             CodeView::Attested(

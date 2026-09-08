@@ -284,49 +284,46 @@ impl PluginProcessConfig {
     }
 
     /// Pins interpreter entrypoints and adjacent dependency descriptors whose
-    /// contents affect the approved plugin process.
+    /// contents affect the approved plugin process. The primary executable has
+    /// its own identity and is omitted from this additional-file set. All pinned
+    /// files together are limited to 64 files and 256 MiB.
     ///
     /// # Errors
     ///
-    /// Returns an error for non-regular files, duplicates, or excessive
-    /// attestation work.
+    /// Returns an error for non-regular files or excessive attestation work.
+    /// Repeated paths share one identity; supplying the primary executable never
+    /// changes its original approval identity.
     pub fn with_attested_files(
         mut self,
         paths: impl IntoIterator<Item = impl Into<PathBuf>>,
     ) -> Result<Self, PluginProcessConfigError> {
         const MAX_ATTESTED_FILES: usize = 64;
         const MAX_ATTESTED_BYTES: u64 = 256 * 1024 * 1024;
-        let mut canonical = paths
-            .into_iter()
-            .map(Into::into)
-            .map(|path| {
-                if std::fs::symlink_metadata(&path)
-                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                {
-                    return Err(PluginProcessConfigError::InvalidAttestedFile);
-                }
-                let path = std::fs::canonicalize(path)
-                    .map_err(|_| PluginProcessConfigError::InvalidAttestedFile)?;
-                if !path.is_file() {
-                    return Err(PluginProcessConfigError::InvalidAttestedFile);
-                }
-                Ok(path)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        canonical.sort();
-        canonical.dedup();
-        if canonical.len() > MAX_ATTESTED_FILES {
-            return Err(PluginProcessConfigError::AttestationLimit);
+        let mut canonical = BTreeSet::new();
+        for path in paths {
+            let path = path.into();
+            if std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(PluginProcessConfigError::InvalidAttestedFile);
+            }
+            let path = std::fs::canonicalize(path)
+                .map_err(|_| PluginProcessConfigError::InvalidAttestedFile)?;
+            if !path.is_file() {
+                return Err(PluginProcessConfigError::InvalidAttestedFile);
+            }
+            if path != self.executable {
+                canonical.insert(path);
+            }
+            if canonical.len() >= MAX_ATTESTED_FILES {
+                return Err(PluginProcessConfigError::AttestationLimit);
+            }
         }
-        let mut total = 0_u64;
+        let mut total = self.executable_identity.length;
         let mut identities = Vec::with_capacity(canonical.len());
         for path in canonical {
             let identity = executable_identity(&path)?;
-            if path == self.executable && identity != self.executable_identity {
-                return Err(PluginProcessConfigError::InvalidAttestedFile);
-            }
             if let Some(root) = &self.code_root
-                && identity.canonical_path != self.executable
                 && !identity.canonical_path.starts_with(&root.canonical_path)
             {
                 return Err(PluginProcessConfigError::InvalidAttestedFile);
@@ -352,7 +349,6 @@ impl PluginProcessConfig {
                 && identities
                     .iter()
                     .any(|identity| identity.canonical_path == canonical)
-                && canonical != self.executable
             {
                 *argument = canonical.into_os_string();
             }

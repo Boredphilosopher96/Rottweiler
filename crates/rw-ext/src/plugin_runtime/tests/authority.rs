@@ -51,6 +51,77 @@ fn executable_substitution_invalidates_identity_and_approval() {
 }
 
 #[test]
+fn primary_executable_has_one_approval_identity_with_additional_files() {
+    let root = TempDir::new().expect("tempdir");
+    let entry = root.path().join("entry.js");
+    std::fs::write(&entry, b"approved entry").expect("entry");
+    let base = PluginProcessConfig::new(PathBuf::from("/bin/sh")).expect("shell");
+    let primary = base.executable().to_path_buf();
+    let additional = base
+        .clone()
+        .with_attested_files([entry.clone()])
+        .expect("additional");
+    let repeated = base
+        .with_attested_files([primary.clone(), entry.clone(), primary, entry])
+        .expect("one identity per file");
+    assert_eq!(additional, repeated);
+    assert_eq!(repeated.attested_files().len(), 1);
+    assert_eq!(
+        approval_identity(&manifest(), &additional, "project:identity").expect("identity"),
+        approval_identity(&manifest(), &repeated, "project:identity").expect("identity")
+    );
+    repeated
+        .validate_executable_identity()
+        .expect("unchanged bytes");
+}
+
+#[test]
+fn additional_attestation_cannot_rebind_a_changed_primary_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().expect("tempdir");
+    let executable = root.path().join("plugin");
+    std::fs::write(&executable, b"#!/bin/sh\nexit 0\n").expect("executable");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let original = PluginProcessConfig::new(&executable).expect("config");
+    let identity = original.executable_identity().clone();
+    std::fs::write(&executable, b"#!/bin/sh\nexit 1\n").expect("same-inode same-size mutation");
+    let config = original
+        .with_attested_files([executable.clone()])
+        .expect("primary remains bound to original approval");
+    assert!(config.attested_files().is_empty());
+    assert_eq!(config.executable_identity(), &identity);
+    assert!(config.validate_executable_identity().is_err());
+    let rediscovered = PluginProcessConfig::new(&executable).expect("rediscovery");
+    assert_ne!(
+        approval_identity(&manifest(), &config, "project:identity").expect("old identity"),
+        approval_identity(&manifest(), &rediscovered, "project:identity").expect("new identity")
+    );
+}
+
+#[test]
+fn primary_executable_consumes_one_of_the_aggregate_file_slots() {
+    let root = TempDir::new().expect("tempdir");
+    let files = (0..64)
+        .map(|index| {
+            let path = root.path().join(format!("entry-{index}"));
+            std::fs::write(&path, b"").expect("entry");
+            path
+        })
+        .collect::<Vec<_>>();
+    let config = PluginProcessConfig::new(PathBuf::from("/bin/sh")).expect("shell");
+    assert!(
+        config
+            .clone()
+            .with_attested_files(files.iter().take(63).cloned())
+            .is_ok()
+    );
+    assert!(matches!(
+        config.with_attested_files(files),
+        Err(crate::plugin::PluginProcessConfigError::AttestationLimit)
+    ));
+}
+
+#[test]
 fn interpreted_entrypoint_and_lock_mutation_require_rediscovery_and_reapproval() {
     let root = TempDir::new().expect("tempdir");
     let entrypoint = root.path().join("plugin.js");
