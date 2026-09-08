@@ -1069,21 +1069,15 @@ fn capped_result(
     operation: &str,
     response: rw_mcp::CappedResponse,
 ) -> ToolResult {
-    let rw_mcp::CappedResponse {
-        encoded,
-        format,
-        truncated,
-        overflow,
-        payloads,
-    } = response;
     let data = json!({
         "server": server,
         "operation": operation,
-        "format": format,
-        "truncated": truncated,
-        "overflow": overflow,
+        "format": response.format,
+        "truncated": response.truncated,
+        "overflow": response.overflow,
     });
-    untrusted_result(&encoded, data).with_payloads(payloads)
+    // Keep the source body ahead of its guard on every formatting/error path.
+    untrusted_result(&response.encoded, data).with_payloads(response.payloads)
 }
 
 fn untrusted_result(content: &str, data: Value) -> ToolResult {

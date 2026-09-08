@@ -218,11 +218,13 @@ pub async fn connect_http(
     start::start(server, transport, ingress, None).await
 }
 
-fn json_object(value: &Value) -> Result<JsonObject, McpError> {
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| McpError::Protocol("MCP arguments must be a JSON object".to_owned()))
+fn json_object(value: Value) -> Result<JsonObject, McpError> {
+    match value {
+        Value::Object(object) => Ok(object),
+        _ => Err(McpError::Protocol(
+            "MCP arguments must be a JSON object".to_owned(),
+        )),
+    }
 }
 
 fn protocol(_error: impl std::fmt::Display) -> McpError {
@@ -265,7 +267,7 @@ impl McpClient for RmcpClient {
         slot: McpResponseSlot,
     ) -> Result<McpResponse<Value>, McpError> {
         let params =
-            CallToolRequestParams::new(name.to_owned()).with_arguments(json_object(&arguments)?);
+            CallToolRequestParams::new(name.to_owned()).with_arguments(json_object(arguments)?);
         let request = rmcp::model::CallToolRequest::new(params);
         self.value_request(request.into(), calls::ResultKind::Tool, slot)
             .await
@@ -286,7 +288,7 @@ impl McpClient for RmcpClient {
         slot: McpResponseSlot,
     ) -> Result<McpResponse<Value>, McpError> {
         let request = rmcp::model::GetPromptRequest::new(
-            GetPromptRequestParams::new(name).with_arguments(json_object(&arguments)?),
+            GetPromptRequestParams::new(name).with_arguments(json_object(arguments)?),
         );
         self.value_request(request.into(), calls::ResultKind::Prompt, slot)
             .await
@@ -404,6 +406,20 @@ mod tests {
             defer_tools: true,
             tool_capabilities: crate::McpToolCapabilityOverrides::default(),
         }
+    }
+
+    #[test]
+    fn request_arguments_transfer_existing_backing_and_reject_non_objects() {
+        let text = "owned argument".repeat(8192);
+        let pointer = text.as_ptr();
+        let mut fields = JsonObject::new();
+        fields.insert("text".into(), Value::String(text));
+        let transferred = json_object(Value::Object(fields)).expect("object arguments");
+        assert_eq!(
+            transferred["text"].as_str().expect("text").as_ptr(),
+            pointer
+        );
+        assert!(json_object(Value::Array(vec![])).is_err());
     }
 
     #[cfg(unix)]

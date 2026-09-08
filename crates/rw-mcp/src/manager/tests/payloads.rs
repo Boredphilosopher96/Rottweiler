@@ -2,6 +2,39 @@ use super::*;
 use crate::{FilesystemSpool, McpResponseUse, PayloadRedactor};
 use std::io;
 struct Redactor;
+
+#[test]
+fn compact_response_rejects_malformed_spool_references_and_retires_its_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let spool = Arc::new(MemorySpool::default());
+    let manager = McpManager::new(
+        Arc::new(MockConnector {
+            clients: Mutex::new(BTreeMap::new()),
+        }),
+        spool.clone(),
+        Arc::new(CompactJsonEncoder),
+        McpLimits::default(),
+    );
+    let encoded = crate::EncodedPayload {
+        bytes: br#"{"truncated":true}"#.to_vec(),
+        retained: crate::payload_work::Allocation::new(4096)?,
+    };
+    let result = manager.compact_response(
+        encoded,
+        Some(rw_types::SessionPayloadReference {
+            digest: "invalid-digest".into(),
+            bytes: 1,
+        }),
+    );
+    assert!(matches!(result, Err(McpError::Spool(_))));
+    assert_eq!(
+        Arc::strong_count(&spool),
+        2,
+        "no failed attachment owner leaks"
+    );
+    Ok(())
+}
+
 impl PayloadRedactor for Redactor {
     fn redact(
         &self,

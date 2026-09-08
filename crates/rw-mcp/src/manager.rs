@@ -68,6 +68,11 @@ impl StructuredResponseEncoder for CompactJsonEncoder {
     }
 }
 
+struct CompactResponseSource {
+    text: String,
+    retained: Arc<dyn Send + Sync>,
+}
+
 struct ServerEntry {
     config: McpServerConfig,
     state: ServerState,
@@ -566,13 +571,19 @@ impl McpManager {
             .map_err(|error| McpError::Encoding(error.to_string()))?;
         let text = String::from_utf8(encoded.bytes)
             .map_err(|_| McpError::Encoding("MCP response is not UTF-8".into()))?;
+        // Attachment validation can reject a malformed reference supplied by
+        // a spool adapter. Its failure must destroy the text before its credit.
+        let source = CompactResponseSource {
+            text,
+            retained: Arc::new((encoded.retained, Arc::clone(&self.inner.spool))),
+        };
         let payloads = rw_tools::ToolResultPayloads::retained(
             overflow.iter().cloned().collect(),
-            Arc::new((encoded.retained, Arc::clone(&self.inner.spool))),
+            Arc::clone(&source.retained),
         )
         .map_err(|error| McpError::Spool(error.to_string()))?;
         Ok(CappedResponse {
-            encoded: text,
+            encoded: source.text,
             format: self.inner.encoder.format().to_owned(),
             truncated: overflow.is_some(),
             overflow,
