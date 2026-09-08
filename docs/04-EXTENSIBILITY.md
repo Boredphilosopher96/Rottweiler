@@ -616,3 +616,10 @@ recipe; the child supplies its own endpoints when constructing its lazy model.
 Its workspace roots remain fixed until close and rebind. Parent generation replacement
 requires all captured child leases retired. A dropped child construction or close
 caller cannot release that lease before the child's native cleanup owner settles.
+
+A native plugin helper must authenticate its private supervisor rendezvous before
+receiving permission to start the plugin. A rejected handshake retains the helper
+through actual reaping. Diagnostics distinguish its pre-kill exit observation
+from final wait status and include only complete stderr up to 4 KiB; incomplete
+or oversized stderr is omitted. The mandatory host redactor sanitizes these
+launch errors before reporting or tracing them.

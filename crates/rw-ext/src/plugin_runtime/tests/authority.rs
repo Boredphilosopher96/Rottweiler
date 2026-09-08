@@ -353,3 +353,24 @@ async fn approved_launch_rejects_substitution_at_the_launcher_before_execution()
     assert!(launcher.0.lock().expect("launcher record").is_none());
     assert!(!marker.exists(), "unapproved bytes must never execute");
 }
+
+#[test]
+fn launch_diagnostics_are_redacted_without_changing_settlement_classification() {
+    for original in [
+        PluginLaunchError::Rejected(PluginProcessError {
+            message: "helper exited 23: PLUGIN_CANARY_SECRET".to_owned(),
+        }),
+        PluginLaunchError::EffectsUnsettled {
+            message: "helper missing proof: PLUGIN_CANARY_SECRET".to_owned(),
+        },
+    ] {
+        let unsettled = matches!(original, PluginLaunchError::EffectsUnsettled { .. });
+        let sanitized = super::super::host::redact_launch_error(original, &CanaryRedactor);
+        assert_eq!(
+            matches!(sanitized, PluginLaunchError::EffectsUnsettled { .. }),
+            unsettled
+        );
+        assert!(!sanitized.to_string().contains("PLUGIN_CANARY_SECRET"));
+        assert!(sanitized.to_string().contains("[REDACTED]"));
+    }
+}

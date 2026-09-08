@@ -4,6 +4,7 @@ mod launch_bytes;
 mod proxy_settlement;
 use launch_bytes::LaunchBytes;
 mod lifeline;
+mod rejected_helper;
 mod retirement;
 use lifeline::ProcessControl;
 
@@ -252,20 +253,10 @@ fn spawn_pinned_plugin(
     let pid = child
         .id()
         .ok_or_else(|| error("missing plugin supervisor pid"))?;
+    tracing::debug!(target: "rw_performance", stage = "plugin.native_spawn", phase = "spawn_returned", pid);
     let control = match rendezvous.accept(pid) {
         Ok(stream) => ProcessControl::Lifeline(stream),
-        Err(cause) => {
-            // accept never grants launch. This helper cannot own an effect.
-            let _ = child.start_kill();
-            let runtime = tokio::runtime::Handle::current();
-            loop {
-                if runtime.block_on(child.wait()).is_ok() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            return Err(process_error(&cause));
-        }
+        Err(cause) => return Err(rejected_helper::retire(&mut child, pid, &cause)),
     };
     #[cfg(target_os = "linux")]
     drop(plan.take_helper_pin());

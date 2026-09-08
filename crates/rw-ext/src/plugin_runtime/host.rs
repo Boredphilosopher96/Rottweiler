@@ -141,7 +141,10 @@ impl PluginHost {
                 "plugin activation cancelled before launch",
             )));
         }
-        let child = launcher.launch(config, &profile).await?;
+        let child = launcher
+            .launch(config, &profile)
+            .await
+            .map_err(|error| redact_launch_error(error, redactor.as_ref()))?;
         if child.executable_identity != *config.executable_identity() {
             terminate_and_settle(child.process.as_ref()).await?;
             return Err(PluginHostError::Approval(
@@ -411,4 +414,35 @@ async fn verify_approved_launch(
     })
     .await
     .map_err(|error| PluginHostError::Protocol(format!("plugin verification worker: {error}")))?
+}
+
+/// Launch diagnostics can contain helper stderr, so sanitize before any trace or
+/// caller sees them. The same host reply pool bounds redaction scratch.
+pub(super) fn redact_launch_error(
+    mut error: PluginLaunchError,
+    redactor: &dyn PluginBoundaryRedactor,
+) -> PluginLaunchError {
+    let message = match &mut error {
+        PluginLaunchError::Rejected(error) => &mut error.message,
+        PluginLaunchError::EffectsUnsettled { message } => message,
+    };
+    let scratch = PushReplySlot::try_acquire(PushReplyLimits::ACKNOWLEDGEMENT);
+    let redacted = if scratch.is_ok() {
+        redactor.redact_reply_text(message, 16 * 1024, &mut |bytes| {
+            if bytes <= 64 * 1024 {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("launch diagnostic scratch exceeded"))
+            }
+        })
+    } else {
+        Err(rpc_error(
+            "reply_admission",
+            "launch diagnostic admission exhausted",
+        ))
+    };
+    *message = redacted
+        .unwrap_or_else(|_| "plugin launch failed; diagnostic redaction unavailable".to_owned());
+    tracing::debug!(target: "rw_performance", stage = "plugin.launch_rejected", message = %message);
+    error
 }
