@@ -462,3 +462,38 @@ async fn descriptor_relative_queries_do_not_escape_during_directory_swap_race() 
         }
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn failed_git_branch_query_does_not_launch_a_detached_head_fallback() {
+    let root = tempdir().expect("fixture root");
+    let git = root.path().join("git-query");
+    let calls = root.path().join("calls");
+    fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nprintf call >> '{}'\nexit 128\n",
+            calls.display()
+        ),
+    )
+    .expect("fixture query");
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).expect("fixture executable");
+    assert_eq!(
+        crate::session_host::git::read_git_branch_using(root.path(), &git),
+        None
+    );
+    assert_eq!(fs::read(&calls).expect("executed query"), b"call");
+    fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nprintf call >> '{}'\nkill -TERM $$\n",
+            calls.display()
+        ),
+    )
+    .expect("signalled query");
+    assert_eq!(
+        crate::session_host::git::read_git_branch_using(root.path(), &git),
+        None
+    );
+    assert_eq!(fs::read(&calls).expect("executed queries"), b"callcall");
+}

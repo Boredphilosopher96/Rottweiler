@@ -492,32 +492,40 @@ pub(super) fn read_git_branch(workspace: &Path) -> Result<Option<String>, HostEr
     let Some(git) = resolve_git_executable(workspace) else {
         return Ok(None);
     };
+    Ok(read_git_branch_using(workspace, &git))
+}
+
+#[cfg(unix)]
+pub(super) fn read_git_branch_using(workspace: &Path, git: &Path) -> Option<String> {
     let symbolic = [
         OsStr::new("symbolic-ref"),
         OsStr::new("--quiet"),
         OsStr::new("--short"),
         OsStr::new("HEAD"),
     ];
-    if let Some(output) = run_bounded_git(&git, workspace, &symbolic, 512, GIT_STATUS_DEADLINE)
-        && output.status.success()
-        && !output.overflow
-        && let Some(branch) = safe_git_label(&output.stdout)
-    {
-        return Ok(Some(branch));
+    let output = run_bounded_git(git, workspace, &symbolic, 512, GIT_STATUS_DEADLINE)?;
+    if output.overflow {
+        return None;
+    }
+    if output.status.success() {
+        return safe_git_label(&output.stdout);
+    }
+    // symbolic-ref exits 1 for a non-symbolic HEAD; 128 denotes other errors.
+    // Only the detached case warrants another process. A failed or timed-out
+    // repository lookup cannot become a successful detached-head lookup.
+    if output.status.code() != Some(1) {
+        return None;
     }
     let detached = [
         OsStr::new("rev-parse"),
         OsStr::new("--short=12"),
         OsStr::new("HEAD"),
     ];
-    if let Some(output) = run_bounded_git(&git, workspace, &detached, 64, GIT_STATUS_DEADLINE)
-        && output.status.success()
-        && !output.overflow
-        && let Some(revision) = safe_git_label(&output.stdout)
-    {
-        return Ok(Some(format!("detached@{revision}")));
+    let output = run_bounded_git(git, workspace, &detached, 64, GIT_STATUS_DEADLINE)?;
+    if output.status.success() && !output.overflow {
+        return safe_git_label(&output.stdout).map(|revision| format!("detached@{revision}"));
     }
-    Ok(None)
+    None
 }
 
 #[cfg(unix)]
