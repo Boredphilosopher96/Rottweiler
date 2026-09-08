@@ -683,14 +683,28 @@ def process_exists(pid: int) -> bool:
 
 def stop_runtime(runtime: Runtime) -> None:
     process = runtime.process
-    if process.returncode is not None:
-        raise UnsettledScope("UNSETTLED runtime group: leader identity was reaped outside its owner")
-    if observe_exit(process.pid) is None:
-        signal_owned_group(process.pid, signal.SIGTERM)
-        deadline = time.monotonic() + 2
-        while observe_exit(process.pid) is None and time.monotonic() < deadline:
-            time.sleep(.01)
-    signal_owned_group(process.pid, signal.SIGKILL)
-    process.wait(timeout=2)
-    require_group_disappearance(process.pid)
-    runtime.stderr.finish()
+    failure = None
+    try:
+        if process.returncode is not None:
+            raise UnsettledScope("UNSETTLED runtime group: leader identity was reaped outside its owner")
+        if observe_exit(process.pid) is None:
+            signal_owned_group(process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + 2
+            while observe_exit(process.pid) is None and time.monotonic() < deadline:
+                time.sleep(.01)
+        signal_owned_group(process.pid, signal.SIGKILL)
+        process.wait(timeout=2)
+        require_group_disappearance(process.pid)
+    except BaseException as error:
+        failure = error
+    try:
+        runtime.stderr.finish()
+    except BaseException as error:
+        if failure is not None:
+            raise UnsettledScope(
+                f"UNSETTLED runtime shutdown: primary={str(failure)[-2000:]} "
+                f"stderr_cleanup={str(error)[-2000:]}"
+            ) from BaseExceptionGroup("runtime and stderr settlement failures", [failure, error])
+        raise
+    if failure is not None:
+        raise failure

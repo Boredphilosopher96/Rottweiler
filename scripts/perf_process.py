@@ -30,8 +30,7 @@ def delegated_success_scope():
     """
     registration = _SCOPE.starting()
     yield
-    if registration is not None:
-        _SCOPE.settled(registration)
+    _SCOPE.settled(registration)
 
 
 def wait_between_samples(seconds: float) -> None:
@@ -76,8 +75,7 @@ def run_sample(
     except BaseException:
         if scope is not None:
             os.close(scope.descriptor)
-        if registration is not None:
-            _SCOPE.settled(registration)
+        _SCOPE.settled(registration)
         raise
     finally:
         if writer is not None:
@@ -98,8 +96,7 @@ def run_sample(
         for stream in (process.stdout, process.stderr):
             assert stream is not None
             os.set_blocking(stream.fileno(), False)
-        if registration is not None:
-            _SCOPE.started(registration, process.pid)
+        _SCOPE.started(registration, process.pid)
         with selectors.DefaultSelector() as selector:
             for stream, captured in ((process.stdout, stdout), (process.stderr, stderr)):
                 assert stream is not None
@@ -166,8 +163,7 @@ def run_sample(
             require_group_disappearance(process.pid)
             if scope is not None:
                 scope.require_closed()
-            if registration is not None:
-                _SCOPE.settled(registration)
+            _SCOPE.settled(registration)
         finally:
             for stream in (process.stdout, process.stderr):
                 if stream is not None:

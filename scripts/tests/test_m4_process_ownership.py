@@ -62,6 +62,26 @@ class M4ProcessOwnershipTests(unittest.TestCase):
                     os.kill(child.pid, signal.SIGKILL)
                     child.wait()
 
+    def test_failed_runtime_group_proof_still_retires_stderr_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = support.EngineErrorLog(root / "stderr")
+            child = subprocess.Popen([sys.executable, "-c", "pass"], stderr=output.write_fd,
+                                     start_new_session=True)
+            output.close_input()
+            runtime = support.Runtime(child, root / "socket", root / "token", output)
+            try:
+                with patch.object(support, "require_group_disappearance", side_effect=UnsettledScope("persistent group")):
+                    with self.assertRaisesRegex(UnsettledScope, "persistent group"):
+                        support.stop_runtime(runtime)
+                self.assertFalse(output.worker.is_alive())
+                self.assertTrue(output.output.closed)
+                self.assertIsNotNone(child.returncode)
+            finally:
+                if child.returncode is None:
+                    child.kill()
+                    child.wait()
+
     def test_successful_gate_acknowledges_only_after_actual_pty_group_closes(self):
         from perf_process import run_sample
         module = Path(__file__).resolve().parents[2] / "crates/rw-cli/tests/m4_release_gate.py"
