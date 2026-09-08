@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "bun run ../js-host/src/index.ts tui",
     "diagnose:rss": "bun run scripts/opentui-rss-harness.ts",
-    "test": "bun test --max-concurrency=1 --path-ignore-patterns='test/perf/**'",
-    "test:perf": "bun test test/perf/m4-transport-performance.test.ts && bun test test/perf/performance.test.ts",
+    "test": "python3 ../../scripts/tui_tests.py test",
+    "test:perf": "python3 ../../scripts/tui_tests.py test:perf",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

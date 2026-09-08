@@ -92,7 +92,10 @@ jobs:
           python3 scripts/ci_inventory.py install tui --build-dependencies
           library=$(python3 scripts/build-opentui-native.py)
           echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
-      - run: python3 scripts/ci_evidence.py --gate package --output ci-results/package.json -- python3 scripts/ci_inventory.py package "${{ matrix.package }}"
+      - run: |
+          ownership=
+          if [ "${{ matrix.package }}" = tui ]; then ownership=--delegated; fi
+          python3 scripts/ci_evidence.py $ownership --gate package --output ci-results/package.json -- python3 scripts/ci_inventory.py package "${{ matrix.package }}"
       - name: Retain gate evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -408,7 +411,7 @@ jobs:
       - name: Enforce TUI transport and render-loop budgets
         env:
           ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/ci-results/tui-metrics.json
-        run: python3 scripts/ci_evidence.py --gate tui-smoke --output ci-results/tui.json -- bun run --cwd packages/tui test:perf
+        run: python3 scripts/ci_evidence.py --delegated --gate tui-smoke --output ci-results/tui.json -- python3 scripts/tui_tests.py test:perf
       - name: Retain gate evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

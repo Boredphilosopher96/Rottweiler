@@ -185,7 +185,13 @@ def main() -> int:
                 raise ValueError("package verification requires exactly one package")
             package = next(p for p in inventory(ROOT)["packages"] if p["id"] == args.packages[0])
             for script in package["checks"]:
-                subprocess.run(["bun", "run", script], cwd=ROOT / package["directory"], check=True)
+                if package["id"] == "tui" and script == "test":
+                    # Direct Python/Bun invocation preserves the explicitly passed
+                    # settlement descriptor; bun run's shell does not preserve it.
+                    import tui_tests
+                    tui_tests.run(script)
+                else:
+                    subprocess.run(["bun", "run", script], cwd=ROOT / package["directory"], check=True)
     for error in errors:
         print(error, file=sys.stderr)
     return int(bool(errors))
