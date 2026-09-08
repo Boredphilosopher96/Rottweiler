@@ -34,6 +34,7 @@ def validate_handoff(data: dict, cycles: int) -> None:
     if (history.get("initialRows") != 10_000 or history.get("finalRows") != 10_001
             or history.get("mixedKinds") != ["user", "assistant-markdown-code", "tool"]
             or [(item.get("stage"), item.get("anchor")) for item in observations] != expected
+            or [item.get("through") for item in observations] != ["20000"] * 2 + ["20001"] * 6
             or any(not 0 < item.get("mounted", 0) <= 16 or item.get("cacheBytes", 0) <= 0 for item in observations)):
         raise ValueError("compiled probe lacks exact mixed-history navigation proof")
     destroyed = [sample for sample in data.get("samples", []) if sample.get("stage") == "destroyed"]

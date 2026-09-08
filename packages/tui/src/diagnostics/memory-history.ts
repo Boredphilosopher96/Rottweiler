@@ -35,29 +35,54 @@ function mixedItem(ordinal: number): TranscriptItem {
 
 export async function exerciseHistory(app: RottweilerApp, fixture: MemoryFixture,
   setup: Awaited<ReturnType<typeof createMemoryRenderer>>["setup"]) {
-  const observations: { stage: string; anchor: string | null; mounted: number; cacheBytes: number }[] = []
+  const observations: { stage: string; anchor: string | null; through: string | null; mounted: number; cacheBytes: number }[] = []
   const render = async () => { await setup.renderOnce(); await setup.flush() }
   const requireThat = (value: unknown, message: string) => { if (!value) throw new Error(message) }
   const record = (stage: string) => {
     const mounted = app.transcript.mountedEntryCount
     requireThat(mounted > 0 && mounted <= 16, "historical viewport exceeded its mounted window")
     requireThat(app.historyCache.usage.bytes <= app.historyCache.capacityBytes, "history cache exceeded byte capacity")
-    observations.push({ stage, anchor: app.transcript.captureHistoryViewport()?.anchor?.id ?? null, mounted, cacheBytes: app.historyCache.usage.bytes })
+    observations.push({ stage, anchor: app.transcript.captureHistoryViewport()?.anchor?.id ?? null, through: app.transcript.historyView?.through ?? null, mounted, cacheBytes: app.historyCache.usage.bytes })
   }
   const reveal = async (id: string, stage: string) => {
     const selected = await app.transcript.revealHistorySource(id)
     await render()
+    const deadline = performance.now() + 10_000
+    while (app.transcript.captureHistoryViewport() === null) {
+      requireThat(performance.now() < deadline, `historical source ${id} did not settle during ${stage}`)
+      await Bun.sleep(1); await render()
+    }
+    requireThat(app.transcript.historyView?.through === fixture.historyThrough, "navigation did not apply its exact source prefix")
     requireThat(selected?.type === "exact" && selected.item === id && app.transcript.mountedCards.has(id), `historical source ${id} is unreachable during ${stage}: ${JSON.stringify({ selected, mounted: app.transcript.mountedKeys })}`)
-    requireThat(app.transcript.captureHistoryViewport()?.anchor?.id === id, `historical source ${id} is not the visible anchor`)
+    requireThat(app.transcript.captureHistoryViewport()?.anchor?.id === id, `historical source ${id} is not the visible anchor during ${stage}: ${JSON.stringify(app.transcript.captureHistoryViewport())}`)
     record(stage)
   }
   await reveal("0", "earliest")
   await reveal("5000", "middle")
   const before = app.transcript.captureHistoryViewport()
+  const physicalAnchor = () => {
+    const top = app.transcript.scroller.viewport.y
+    const bottom = top + app.transcript.scroller.viewport.height
+    const visible = [...app.transcript.mountedCards.values()]
+      .filter(card => card.visible && card.y + card.height > top && card.y < bottom)
+      .sort((left, right) => left.y - right.y)[0]
+    return visible === undefined ? null : { id: visible.item.id, offset: visible.y - top }
+  }
   fixture.appendHistory()
   app.handleEvent(fixture.historyReady())
-  await render()
-  requireThat(JSON.stringify(app.transcript.captureHistoryViewport()) === JSON.stringify(before), "append while scrolled away moved the anchor")
+  const appendDeadline = performance.now() + 10_000
+  for (;;) {
+    await render()
+    requireThat(JSON.stringify(physicalAnchor()) === JSON.stringify(before?.anchor),
+      `append while scrolled away moved the physical anchor: ${JSON.stringify({ before, after: physicalAnchor() })}`)
+    // Refresh is coalesced and crosses HTTP: rendering one frame is not read completion.
+    // The pending-read viewport remains unavailable to handoff until its source is applied.
+    if (app.transcript.historyView?.through === fixture.historyThrough && app.transcript.captureHistoryViewport() !== null) break
+    requireThat(performance.now() < appendDeadline, `appended history prefix ${fixture.historyThrough} was not applied`)
+    await Bun.sleep(1)
+  }
+  requireThat(JSON.stringify(app.transcript.captureHistoryViewport()) === JSON.stringify(before),
+    `append while scrolled away moved the settled anchor: ${JSON.stringify({ before, after: app.transcript.captureHistoryViewport() })}`)
   record("append-away")
   setup.resize(72, 30); await render()
   requireThat(JSON.stringify(app.transcript.captureHistoryViewport()) === JSON.stringify(before), `resize changed the stable source/offset anchor: ${JSON.stringify({ before, after: app.transcript.captureHistoryViewport() })}`)

@@ -353,6 +353,9 @@ export class TranscriptRenderable extends BoxRenderable {
     }
   }
 
+  /** Exact source fence of the currently applied page, including during a refresh. */
+  get historyView(): import("../protocol").TranscriptView | null { return this.#history?.page?.view ?? null }
+
   captureHistoryViewport(): HistoryViewport | null {
     if (this.#history === null || this.#history.following) return { following: true, anchor: null }
     // An in-flight navigation has not selected a physical source row yet.
@@ -446,6 +449,9 @@ export class TranscriptRenderable extends BoxRenderable {
       const changed = this.#history?.page !== history.page || selected
       const anchor = this.#requestedAnchor ?? this.#captureAnchor() ?? history.anchor
       this.#history = history
+      // Physical window boundaries are not the logical end of history. A page
+      // replacement must not re-enable OpenTUI's bottom stickiness while browsing.
+      if (this.scroller.stickyScroll !== history.following) this.scroller.stickyScroll = history.following
       if (changed) {
         this.#finalHistoryInvocations.clear()
         for (const item of history.page?.items ?? []) {

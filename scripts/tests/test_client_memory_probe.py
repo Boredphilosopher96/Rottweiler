@@ -25,13 +25,14 @@ class ClientMemoryProbeTests(unittest.TestCase):
                  "resolvedChildControls": 0, "handoffAttachmentBytes": 4_980_736,
                  "history": {"initialRows": 10_000, "finalRows": 10_001,
                              "mixedKinds": ["user", "assistant-markdown-code", "tool"],
-                             "observations": [{"stage": stage, "anchor": anchor, "mounted": 16,
-                                               "cacheBytes": 1000} for stage, anchor in expected]},
+                             "observations": [{"stage": stage, "anchor": anchor, "mounted": 16, "through": "20000" if index < 2 else "20001",
+                                               "cacheBytes": 1000} for index, (stage, anchor) in enumerate(expected)]},
                  "samples": [{"stage": "destroyed", "cycle": cycle, "allocation": {"bytes": 0}}
                              for cycle in range(2)]}
         PROBE.validate_handoff(valid, 2)
         for field, replacement in (("history", {}), ("handoffAttachmentBytes", 1024),
-                                   ("samples", []), ("resolvedChildControls", 1)):
+                                   ("samples", []), ("resolvedChildControls", 1),
+                                   ("history", {**valid["history"], "observations": [{**item, "through": "20000"} for item in valid["history"]["observations"]]})):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 PROBE.validate_handoff(dict(valid, **{field: replacement}), 2)
 

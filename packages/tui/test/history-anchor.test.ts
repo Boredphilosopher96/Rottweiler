@@ -60,3 +60,49 @@ test("visible source row and pixel offset survive page replacement and rewrappin
     expect(visibleAnchor(transcript)).toEqual({ id: "405", offset: 0 })
   } finally { controller.dispose(); transcript.destroy(); style.destroy(); harness.renderer.destroy() }
 })
+
+test("pending refresh preserves the physical anchor until the exact appended page is applied", async () => {
+  const harness = await createTestRenderer({ width: 80, height: 20, useThread: false })
+  const style = createSyntaxStyle(kennelTheme)
+  const release = Promise.withResolvers<void>()
+  let held = false
+  const reader = {
+    page: async ({ sessionId: session }: SessionReadTarget, read: Parameters<typeof fixturePage>[1]) => {
+      if (held) await release.promise
+      const page = fixturePage(session, read)
+      if (held) { page.view.through = "2001"; page.total_items = "1001" }
+      for (const item of page.items) if (item.content.type === "command") item.content.message.text += " wrapped content".repeat(30)
+      return { type: "ready" as const, page }
+    },
+    content: async () => { throw new Error("unused") },
+  }
+  const controller = new HistoryController(reader, () => transcript.setHistory(controller.snapshot))
+  const transcript = new TranscriptRenderable(harness.renderer, kennelTheme, {
+    syntaxStyle: style, treeSitterClient: new MockTreeSitterClient({ autoResolveTimeout: 0 }),
+    onHistoryAnchor: anchor => controller.setAnchor(anchor),
+  })
+  transcript.update(createInitialState())
+  harness.renderer.root.add(transcript)
+  try {
+    await controller.open(directSessionRead("session"))
+    await controller.seek(400n)
+    await harness.flush()
+    transcript.setScrollOffset(transcript.scroller.scrollTop + 2)
+    await harness.flush()
+    const before = visibleAnchor(transcript)
+    expect(before.offset).toBeLessThan(0)
+    held = true
+    const refresh = controller.refresh()
+    await harness.flush()
+    expect(controller.snapshot.loading).toBe(true)
+    expect(transcript.captureHistoryViewport()).toBeNull()
+    expect(transcript.historyView?.through).toBe("2000")
+    expect(visibleAnchor(transcript)).toEqual(before)
+    release.resolve()
+    await refresh
+    await harness.flush()
+    expect(transcript.historyView?.through).toBe("2001")
+    expect(transcript.captureHistoryViewport()).toEqual({ following: false, anchor: before })
+    expect(visibleAnchor(transcript)).toEqual(before)
+  } finally { release.resolve(); controller.dispose(); transcript.destroy(); style.destroy(); harness.renderer.destroy() }
+})

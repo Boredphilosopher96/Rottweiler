@@ -28,6 +28,11 @@ export async function exerciseLiveOwners(app: RottweilerApp, fixture: MemoryFixt
   await render()
   if (Object.keys(app.state.questions).length !== MEMORY_LOAD.questions) throw new Error("pending questions were dropped")
   sample("mounted-controls-live-tool-previews")
+  const handoffDeadline = performance.now() + 10_000
+  while (app.transcript.captureHistoryViewport() === null) {
+    if (performance.now() >= handoffDeadline) throw new Error("history refresh did not settle before interaction handoff")
+    await Bun.sleep(1); await render()
+  }
   if (app.recycleState()?.interaction == null) throw new Error("pending interaction has no bounded handoff")
 
   const document = new DocumentController(fixture.reader, app.historyCache, snapshot => {
