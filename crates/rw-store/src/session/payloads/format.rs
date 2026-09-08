@@ -62,16 +62,15 @@ impl Manifest {
         );
         let bytes = usize::try_from(bytes).map_err(|_| corrupt("payload length overflow"))?;
         let count = bytes.div_ceil(CHUNK_BYTES);
-        if bytes > MAX_SESSION_PAYLOAD_BYTES
-            || count > MAX_CHUNKS
-            || count != bytes.div_ceil(CHUNK_BYTES)
-        {
+        if bytes > MAX_SESSION_PAYLOAD_BYTES || count > MAX_CHUNKS {
             return Err(corrupt("invalid payload manifest bounds"));
         }
+        let mut encoded = vec![0_u8; count * 32];
+        file.read_exact_at(&mut encoded, HEADER_BYTES as u64)?;
         let mut chunks = Vec::with_capacity(count);
-        for index in 0..count {
+        for encoded_hash in encoded.chunks_exact(32) {
             let mut hash = [0_u8; 32];
-            file.read_exact_at(&mut hash, (HEADER_BYTES + index * 32) as u64)?;
+            hash.copy_from_slice(encoded_hash);
             chunks.push(hash);
         }
         Ok(Self { bytes, chunks })
