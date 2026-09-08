@@ -60,3 +60,12 @@ fn main() -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "paired optimized journal tracing measurement"]
+    fn paired_journal_trace_overhead() -> super::Result<()> {
+        super::main()
+    }
+}
