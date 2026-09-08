@@ -1,13 +1,12 @@
 use super::{
     AdapterKind, BTreeMap, BUILTIN_PROVIDER_PROFILES, CacheBreakpointSupport, Capabilities, Config,
-    Cost, CredentialEnvironment, CredentialStore, MAX_CATALOG_ALIAS_CANDIDATES,
-    MAX_CATALOG_ALIASES, MAX_CATALOG_ID_BYTES, MAX_CATALOG_MODELS, MAX_CATALOG_PROVIDERS,
-    MAX_CATALOG_TEXT_BYTES, MAX_CATALOG_WIRE_BYTES, ModelAlias, ModelAliasDescriptor,
-    ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, ModelPricing,
-    ModelPricingSource, PricingTable, Provider, ProviderAuthKind, ProviderDescriptor,
-    ProviderError, ProviderErrorKind, ProviderFactoryError, ProviderModelMetadata,
-    ProviderModelPricingConfig, ProviderNextAction, ResolvedModel, ThinkingLevel, UsageAccounting,
-    WireMode,
+    Cost, MAX_CATALOG_ALIAS_CANDIDATES, MAX_CATALOG_ALIASES, MAX_CATALOG_ID_BYTES,
+    MAX_CATALOG_MODELS, MAX_CATALOG_PROVIDERS, MAX_CATALOG_TEXT_BYTES, MAX_CATALOG_WIRE_BYTES,
+    ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot,
+    ModelDescriptor, ModelPricing, ModelPricingSource, PricingTable, ProviderAuthKind,
+    ProviderDescriptor, ProviderError, ProviderErrorKind, ProviderFactoryError,
+    ProviderModelMetadata, ProviderModelPricingConfig, ProviderNextAction, ResolvedModel,
+    ThinkingLevel, UsageAccounting, WireMode,
 };
 
 pub(super) fn find_pricing(
