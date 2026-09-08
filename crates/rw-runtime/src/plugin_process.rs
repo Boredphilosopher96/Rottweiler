@@ -189,6 +189,7 @@ fn spawn_pinned_plugin(
     bytes: Arc<LaunchBytes>,
     roots: &[PathBuf],
 ) -> Result<SpawnedPlugin, PluginProcessError> {
+    let started = std::time::Instant::now();
     bytes.validate_write_roots(roots)?;
     let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, roots, &bytes)?;
     #[allow(unused_mut)]
@@ -197,6 +198,8 @@ fn spawn_pinned_plugin(
     if !plan.warnings.is_empty() {
         return Err(error("plugin sandbox produced a degradation warning"));
     }
+    tracing::debug!(target: "rw_performance", stage = "plugin.sandbox_plan",
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
     let mut command = tokio::process::Command::new(&plan.program);
     command
         .args(&plan.args)
@@ -221,6 +224,9 @@ fn spawn_pinned_plugin(
     }
     #[cfg(unix)]
     command.process_group(0);
+    tracing::debug!(target: "rw_performance", stage = "plugin.native_spawn", phase = "begin");
+    // The aggregate verify_and_spawn completion is emitted only after the
+    // physical supervisor owns the child, so tracing cannot strand raw effects.
     let child = command.spawn().map_err(|error| process_error(&error))?;
     #[cfg(target_os = "linux")]
     drop(plan.take_helper_pin());

@@ -42,10 +42,14 @@ impl LaunchBytes {
                 _layout: filesystem.as_ref().clone(),
             });
         }
+        let started = std::time::Instant::now();
         let executable =
             ApprovedExecutable::from_artifact(&config.executable_identity().artifact_identity())
                 .and_then(|approved| approved.launch())
                 .map_err(|cause| error(&cause.to_string()))?;
+        tracing::debug!(target: "rw_performance", stage = "plugin.executable_capture",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
+        let started = std::time::Instant::now();
         let code = if matches!(profile.mode, PluginSandboxMode::Preparation { .. }) {
             CodeView::Preparation {
                 root: config
@@ -67,6 +71,8 @@ impl LaunchBytes {
                     .map_err(|cause| error(&cause.to_string()))?,
             )
         };
+        tracing::debug!(target: "rw_performance", stage = "plugin.code_capture",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
         Ok(Self::Native { executable, code })
     }
 
