@@ -13,6 +13,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 import native_candidate
 from perf_process import run_sample
+from perf_report import read_report, MEMORY_REPORT_BYTES
 from release_contract import load_contract
 
 TUI_ROLE = load_contract(REPO / "contracts/release-contract.json").js_host_roles["tui"]
@@ -66,7 +67,7 @@ def run(candidate: Path, output: Path, cycles: int, generations: int, collect: b
                     raise ValueError("candidate changed during compiled memory probe")
             if result.returncode != (75 if recycle else 0):
                 raise ValueError(f"compiled memory probe generation {generation} exited {result.returncode}; see its log")
-            data = json.loads(report.read_text())
+            data = read_report(report, MEMORY_REPORT_BYTES)
             if data.get("collection") != ("forced-after-cycle" if collect else "production-policy"):
                 raise ValueError("probe garbage collection mode differs")
             validate_handoff(data, cycles)
@@ -106,7 +107,7 @@ def run_held(candidate: Path, output: Path, cycles: int, view: str, collect: boo
                 raise ValueError("candidate changed during held-view probe")
         if result.returncode != 0:
             raise ValueError(f"held {view} probe exited {result.returncode}; see its log")
-        data = json.loads(report.read_text())
+        data = read_report(report, MEMORY_REPORT_BYTES)
         if data.get("collection") != ("forced-every-ten-cycles" if collect else "production-policy"):
             raise ValueError("held probe garbage collection mode differs")
         if data["cycles"] != cycles or data["view"] != view or data["finalAllocationBytes"] != 0:

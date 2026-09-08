@@ -39,13 +39,26 @@ class ClientInputProbeTests(unittest.TestCase):
                 bad["trials"][1][field] = value
                 with self.assertRaises(ValueError):
                     PROBE.validate(bad)
-        for field, value in (("budgetMs", 20), ("finalAllocationBytes", 1), ("failure", "lost state"),
+        for field, value in (("budgetMs", 20), ("maximumComposerUtf8Bytes", 1024), ("finalAllocationBytes", 1), ("failure", "lost state"),
                              ("terminal", {"queuedBytes": 1, "bytes": 100}), ("trials", [])):
             with self.subTest(field=field):
                 bad = copy.deepcopy(good)
                 bad[field] = value
                 with self.assertRaises(ValueError):
                     PROBE.validate(bad)
+
+    def test_timeout_still_revalidates_candidate_after_physical_settlement(self):
+        receipt = {"identity_sha256": "identity", "identity": {"source": {"commit": "exact"}},
+                   "components": {"js_host": {"path": "host", "sha256": "original"}}}
+        changed = copy.deepcopy(receipt)
+        changed["components"]["js_host"]["sha256"] = "changed"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(PROBE.native_candidate, "verify", side_effect=[receipt, changed]) as verify, \
+                    patch.object(PROBE, "run_sample", side_effect=TimeoutError("settled")):
+                with self.assertRaisesRegex(ValueError, "candidate changed"):
+                    PROBE.run(root, root / "evidence")
+                self.assertEqual(verify.call_count, 2)
 
     def test_changed_artifact_receipt_cannot_qualify(self):
         receipt = {"identity_sha256": "identity", "identity": {"source": {"commit": "exact"}},

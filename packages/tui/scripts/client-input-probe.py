@@ -15,6 +15,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 import native_candidate
 from perf_process import run_sample
+from perf_report import read_report, INPUT_REPORT_BYTES
 from release_contract import load_contract
 
 TUI_ROLE = load_contract(REPO / "contracts/release-contract.json").js_host_roles["tui"]
@@ -30,8 +31,8 @@ def validate(data: dict) -> None:
     if len(trials) != 3:
         raise ValueError("input probe requires three complete raw trials")
     maximum = data.get("maximumComposerUtf8Bytes")
-    if type(maximum) is not int or maximum < 256:
-        raise ValueError("input probe has no admitted composer limit")
+    if type(maximum) is not int or maximum != 128 * 1024:
+        raise ValueError("input probe must measure the declared 128 KiB interactive composer limit")
     for trial in trials:
         samples = trial.get("samplesMs", [])
         if len(samples) != 128 or any(type(value) not in (int, float)
@@ -63,12 +64,14 @@ def run(candidate: Path, output: Path) -> None:
         environment.update(ROTTWEILER_HOME=str(private / "home"),
                            ROTTWEILER_CLIENT_INPUT_PROBE_REPORT=str(report),
                            ROTTWEILER_CLIENT_INPUT_PROBE_DIRECTORY=str(private))
-        with (output / "input.log").open("wb") as log:
-            result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
+        try:
+            with (output / "input.log").open("wb") as log:
+                result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
                                     log=log, output_limit=2 * 1024 * 1024, timeout=120)
-    if native_candidate.verify(candidate, REPO) != receipt:
-        raise ValueError("candidate changed during compiled input probe")
-    data = json.loads(report.read_text()) if report.exists() else None
+        finally:
+            if native_candidate.verify(candidate, REPO) != receipt:
+                raise ValueError("candidate changed during compiled input probe")
+    data = read_report(report, INPUT_REPORT_BYTES) if report.exists() else None
     summary = {"schema_version": 1, "candidate_identity": receipt["identity_sha256"],
                "source": receipt["identity"]["source"], "exit_code": result.returncode,
                "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
