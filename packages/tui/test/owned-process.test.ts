@@ -137,11 +137,20 @@ test("VM death closes its lifeline and the Python owner reaps native work", asyn
   const owner = await scope()
   const pidFile = join(owner.directory, "orphan.pid")
   const directoryFile = join(owner.directory, "orphan.directory")
-  const native = `import os,time;open(${JSON.stringify(pidFile)},'w').write(str(os.getpid()));time.sleep(30)`
+  const publishFile = join(owner.directory, "publish-pid")
+  // Publication is deliberately split: an empty file is never a ready PID.
+  const native = `import os,time
+open(${JSON.stringify(pidFile)},'w').close()
+deadline=time.monotonic()+3
+while not os.path.exists(${JSON.stringify(publishFile)}):
+ if time.monotonic()>=deadline: raise RuntimeError("PID publication was not released")
+ time.sleep(.005)
+open(${JSON.stringify(pidFile)},'w').write(str(os.getpid())+'\\n')
+time.sleep(30)`
   const victim = `
 import {TestProcessScope} from ${JSON.stringify(new URL("./support/owned-process.ts", import.meta.url).pathname)};
 const owner=await TestProcessScope.create("rw-vm-loss-");
-await Bun.write(${JSON.stringify(directoryFile)}, owner.directory);
+await Bun.write(${JSON.stringify(directoryFile)}, owner.directory+"\\n");
 await owner.run(["python3","-c",${JSON.stringify(native)}],{timeoutMs:5000});
 `
   // This controller remains alive while its child VM dies. It explicitly waits
@@ -150,14 +159,24 @@ await owner.run(["python3","-c",${JSON.stringify(native)}],{timeoutMs:5000});
 import {readFile,rm} from "node:fs/promises";
 const child=Bun.spawn([process.execPath,"-e",${JSON.stringify(victim)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
 const deadline=Date.now()+8000;
-async function file(path){while(Date.now()<deadline){try{return await readFile(path,"utf8")}catch{}await Bun.sleep(5)}throw new Error("missing physical evidence: "+path)}
+async function file(path,decode){while(Date.now()<deadline){
+ try{const body=await readFile(path,"utf8");const value=await decode(body);if(value!==null)return value}catch{}
+ await Bun.sleep(5)
+}throw new Error("missing complete physical evidence: "+path)}
 async function absent(pid){while(Date.now()<deadline){try{process.kill(pid,0)}catch{return}await Bun.sleep(5)}throw new Error("process still present: "+pid)}
 let result;
 try{
- const pid=Number(await file(${JSON.stringify(pidFile)}));
- const directory=await file(${JSON.stringify(directoryFile)});
+ const pid=await file(${JSON.stringify(pidFile)},async body=>{
+  if(body===""){await Bun.write(${JSON.stringify(publishFile)},"publish");return null}
+  const value=Number(body);return /^[1-9][0-9]*\\n$/.test(body)&&Number.isSafeInteger(value)?value:null;
+ });
+ const directory=await file(${JSON.stringify(directoryFile)},body=>body.startsWith("/")&&body.endsWith("\\n")&&body.trim()===body.slice(0,-1)?body.slice(0,-1):null);
  child.kill("SIGKILL");await child.exited;
- result=JSON.parse(await file(directory+"/process.result.json"));
+ result=await file(directory+"/process.result.json",body=>{
+  const value=JSON.parse(body);
+  return value!==null&&typeof value==="object"&&typeof value.settled==="boolean"&&
+   Number.isSafeInteger(value.supervisor_pid)&&value.supervisor_pid>0?value:null;
+ });
  if(result.settled!==true)throw new Error("UNSETTLED "+directory);
  await absent(result.supervisor_pid);await absent(pid);
  await rm(directory,{recursive:true});
@@ -166,6 +185,6 @@ try{
 }finally{if(child.exitCode===null){child.kill("SIGTERM");await child.exited}}
 `
   const result = await owner.run([process.execPath, "-e", controller], { timeoutMs: 12_000 })
-  expect(result.code).toBe(0)
+  expect(result.code, result.stderr + result.stdout).toBe(0)
   expect(result.stdout).toContain("physical parent-loss settlement")
 }, 20_000)
