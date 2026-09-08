@@ -90,11 +90,10 @@ impl SessionPayloadStore {
             .map_err(|_| corrupt("payload quota poisoned"))?;
         if records.contains_key(&reference.digest) {
             self.reader(&reference)?.verify_all(cancelled)?;
+            self.0.root.sync_all()?;
             return Ok(reference);
         }
-        admit(&records, reference.bytes)?;
-        records.insert(reference.digest.clone(), reference.bytes);
-        self.publish(&manifest, cancelled, |file| {
+        self.publish_reserved(&manifest, &mut records, cancelled, |file| {
             for chunk in bytes.chunks(format::CHUNK_BYTES) {
                 check_cancelled(cancelled)?;
                 file.write_all(chunk)?;
@@ -115,7 +114,8 @@ impl SessionPayloadStore {
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<()> {
         if Arc::ptr_eq(&self.0, &target.0) {
-            return self.reader(reference)?.verify_all(cancelled);
+            self.reader(reference)?.verify_all(cancelled)?;
+            return self.0.root.sync_all();
         }
         let mut reader = self.reader(reference)?;
         target.validate_namespace()?;
@@ -126,12 +126,11 @@ impl SessionPayloadStore {
             .map_err(|_| corrupt("payload quota poisoned"))?;
         if records.contains_key(&reference.digest) {
             target.reader(reference)?.verify_all(cancelled)?;
+            target.0.root.sync_all()?;
             return Ok(());
         }
-        admit(&records, reference.bytes)?;
         let manifest = reader.manifest.clone();
-        records.insert(reference.digest.clone(), reference.bytes);
-        target.publish(&manifest, cancelled, |file| {
+        target.publish_reserved(&manifest, &mut records, cancelled, |file| {
             for index in 0..manifest.chunks.len() {
                 check_cancelled(cancelled)?;
                 file.write_all(reader.chunk(index)?)?;
@@ -183,10 +182,42 @@ impl SessionPayloadStore {
         Ok(())
     }
 
+    fn publish_reserved(
+        &self,
+        manifest: &Manifest,
+        records: &mut BTreeMap<String, usize>,
+        cancelled: &dyn Fn() -> bool,
+        write: impl FnOnce(&mut File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let reference = manifest.reference();
+        admit(records, reference.bytes)?;
+        records.insert(reference.digest.clone(), reference.bytes);
+        let mut publication_attempted = false;
+        let result = self.publish(manifest, cancelled, &mut publication_attempted, write);
+        if result.is_err() && !publication_attempted && self.prove_unpublished(&reference) {
+            records.remove(&reference.digest);
+        }
+        result
+    }
+
+    fn prove_unpublished(&self, reference: &SessionPayloadReference) -> bool {
+        let absent = |name: &str| {
+            matches!(
+                rustix::fs::statat(&self.0.root, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW),
+                Err(rustix::io::Errno::NOENT)
+            )
+        };
+        self.validate_namespace().is_ok()
+            && absent(STAGING)
+            && absent(&format!("{}.payload", reference.digest))
+            && self.0.root.sync_all().is_ok()
+    }
+
     fn publish(
         &self,
         manifest: &Manifest,
         cancelled: &dyn Fn() -> bool,
+        publication_attempted: &mut bool,
         write: impl FnOnce(&mut File) -> io::Result<()>,
     ) -> io::Result<()> {
         check_cancelled(cancelled)?;
@@ -205,6 +236,7 @@ impl SessionPayloadStore {
             check_cancelled(cancelled)?;
             self.validate_namespace()?;
             let name = format!("{}.payload", manifest.reference().digest);
+            *publication_attempted = true;
             rustix::fs::renameat_with(
                 &self.0.root,
                 STAGING,
@@ -212,6 +244,8 @@ impl SessionPayloadStore {
                 name,
                 rustix::fs::RenameFlags::NOREPLACE,
             )?;
+            #[cfg(test)]
+            tests::publication_sync_fault()?;
             self.0.root.sync_all()
         })();
         if result.is_err() {

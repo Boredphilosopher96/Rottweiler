@@ -193,3 +193,70 @@ fn cancelled_query_stops_without_retaining_scan_or_matching_line_buffers() -> io
     assert!(owner.window(&reference, 0, None, &|| false).is_ok());
     Ok(())
 }
+
+thread_local! {
+    static FAIL_PUBLICATION_SYNC: Cell<bool> = const { Cell::new(false) };
+}
+pub(super) fn publication_sync_fault() -> io::Result<()> {
+    if FAIL_PUBLICATION_SYNC.replace(false) {
+        Err(io::Error::other("injected publication sync failure"))
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
+fn cancelled_publication_refunds_only_proven_unpublished_reservations() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let owner = store(&root, "session")?;
+    for index in 0..=MAX_SESSION_PAYLOADS {
+        let body = index.to_string();
+        let calls = Cell::new(0);
+        let result = owner.write(body.as_bytes(), &|| {
+            calls.set(calls.get() + 1);
+            calls.get() == 3 // after staging header creation, before body write
+        });
+        assert!(result.is_err());
+        assert!(
+            owner
+                .0
+                .records
+                .lock()
+                .map_err(|_| io::Error::other("quota lock"))?
+                .is_empty()
+        );
+    }
+    let reference = owner.write(b"0", &|| false)?;
+    assert_eq!(owner.window(&reference, 0, None, &|| false)?.content, "0");
+    Ok(())
+}
+
+#[test]
+fn post_rename_sync_failure_keeps_charge_and_retry_verifies_published_identity() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let owner = store(&root, "session")?;
+    FAIL_PUBLICATION_SYNC.set(true);
+    assert!(owner.write(b"retained after rename", &|| false).is_err());
+    assert_eq!(
+        owner
+            .0
+            .records
+            .lock()
+            .map_err(|_| io::Error::other("quota lock"))?
+            .len(),
+        1
+    );
+    let reference = owner.write(b"retained after rename", &|| false)?;
+    assert_eq!(
+        owner.window(&reference, 0, None, &|| false)?.content,
+        "retained after rename"
+    );
+    drop(owner);
+    assert_eq!(
+        store(&root, "session")?
+            .window(&reference, 0, None, &|| false)?
+            .content,
+        "retained after rename"
+    );
+    Ok(())
+}
