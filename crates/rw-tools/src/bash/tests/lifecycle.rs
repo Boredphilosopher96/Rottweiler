@@ -569,8 +569,9 @@ async fn watchdog_lease_blocks_resumer_until_killed_group_is_absent() {
         "paused watchdog killed command group too early"
     );
 
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     std::fs::remove_file(&pause).expect("release watchdog");
-    let resumed_lease = tokio::time::timeout(Duration::from_secs(3), acquired_rx.recv())
+    let resumed_lease = tokio::time::timeout_at(deadline, acquired_rx.recv())
         .await
         .expect("resumer barrier timeout")
         .expect("resumer lease channel");
@@ -578,12 +579,18 @@ async fn watchdog_lease_blocks_resumer_until_killed_group_is_absent() {
         rustix::process::test_kill_process_group(command_pid).is_err(),
         "lease released before command group disappearance"
     );
-    assert!(
-        !test_process_is_running(watchdog_pid),
-        "lease released before watchdog exit"
-    );
     drop(resumed_lease);
     resumer.await.expect("resumer task");
+    // Exit closes the lease descriptor before the orphan's PID disappears.
+    // The immediate exclusion proof above concerns the command group; require
+    // watchdog retirement separately within the same settlement deadline.
+    while test_process_is_running(watchdog_pid) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "watchdog did not retire after releasing the command group's lease"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(!sentinel.exists(), "orphan command wrote delayed sentinel");
 }
 
