@@ -6,9 +6,9 @@ use rw_resources::{ResourceClass, process::BlockingProcess, try_acquire};
 
 #[test]
 fn process_admission_is_retained_until_reaping_and_drop_retires_the_child() {
-    let mut process = BlockingProcess::spawn(Command::new("sh").args(["-c", "exec sleep 30"]))
+    let process = BlockingProcess::spawn(Command::new("sh").args(["-c", "exec sleep 30"]))
         .expect("owned process");
-    let id = process.child_mut().expect("child").id();
+    let id = process.id().expect("child");
     let leases = (0..63)
         .map(|_| try_acquire(ResourceClass::Process).expect("remaining group"))
         .collect::<Vec<_>>();
@@ -30,6 +30,6 @@ fn process_admission_is_retained_until_reaping_and_drop_retires_the_child() {
         .expect("failed spawn returned capacity");
     process.settle();
     process.settle();
-    assert!(process.child_mut().is_err());
+    assert!(process.try_status().is_err());
     drop(leases);
 }

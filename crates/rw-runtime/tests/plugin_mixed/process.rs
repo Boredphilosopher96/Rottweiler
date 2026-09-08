@@ -20,12 +20,7 @@ pub fn run(mut command: Command) -> Output {
     let mut process =
         rw_resources::process::BlockingProcess::spawn(&mut command).expect("native candidate");
     let status = loop {
-        if let Some(status) = process
-            .child_mut()
-            .expect("child owner")
-            .try_wait()
-            .expect("status")
-        {
+        if let Some(status) = process.try_status().expect("status") {
             break Some(status);
         }
         if started.elapsed() > Duration::from_secs(40)

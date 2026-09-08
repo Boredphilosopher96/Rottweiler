@@ -60,7 +60,7 @@ fn capture_git_output(
     maximum: usize,
     deadline: Duration,
 ) -> Option<(ExitStatus, Vec<u8>, bool)> {
-    let mut stdout = child.child_mut().ok()?.stdout.take()?;
+    let mut stdout = child.take_pipes().ok()?.stdout?;
     let flags = rustix::fs::fcntl_getfl(&stdout).ok()?;
     rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK).ok()?;
     let started = Instant::now();
@@ -90,7 +90,7 @@ fn capture_git_output(
         captured.extend_from_slice(&buffer[..retained]);
         overflow |= retained < read;
         if status.is_none() {
-            if let Some(exited) = child.child_mut().ok()?.try_wait().ok()? {
+            if let Some(exited) = child.try_status().ok()? {
                 status = Some(exited);
                 exited_at = Some(Instant::now());
             } else if started.elapsed() >= deadline {

@@ -67,15 +67,15 @@ fn communicate(
     cancellation: &CancellationToken,
     abandoned: &CancellationToken,
 ) -> Result<GitOutput, ToolError> {
-    let child = process.child_mut().map_err(|error| command_error(&error))?;
-    let mut stdin = child.stdin.take();
-    let mut stdout = child
+    let pipes = process
+        .take_pipes()
+        .map_err(|error| command_error(&error))?;
+    let mut stdin = pipes.stdin;
+    let mut stdout = pipes
         .stdout
-        .take()
         .ok_or_else(|| command_error(&io::Error::other("missing stdout")))?;
-    let mut stderr = child
+    let mut stderr = pipes
         .stderr
-        .take()
         .ok_or_else(|| command_error(&io::Error::other("missing stderr")))?;
     nonblocking(&stdout).map_err(|error| command_error(&error))?;
     nonblocking(&stderr).map_err(|error| command_error(&error))?;
@@ -115,9 +115,7 @@ fn communicate(
         }
         if exited.is_none()
             && let Some(status) = process
-                .child_mut()
-                .map_err(|error| command_error(&error))?
-                .try_wait()
+                .try_status()
                 .map_err(|error| command_error(&error))?
         {
             process.settle();

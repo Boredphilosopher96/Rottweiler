@@ -1,7 +1,7 @@
 //! Synchronous process-group ownership for finite, nonblocking-pipe workers.
 use std::{
     io,
-    process::{Child, Command},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus},
     thread,
     time::{Duration, Instant},
 };
@@ -17,7 +17,15 @@ pub struct BlockingProcess {
 struct State {
     child: Child,
     group: Option<rustix::process::Pid>,
+    signalled: bool,
     _lease: ResourceLease,
+}
+
+/// Pipe custody may move to a worker; reaping authority stays with the owner.
+pub struct ProcessPipes {
+    pub stdin: Option<ChildStdin>,
+    pub stdout: Option<ChildStdout>,
+    pub stderr: Option<ChildStderr>,
 }
 
 impl BlockingProcess {
@@ -36,20 +44,63 @@ impl BlockingProcess {
             state: Some(State {
                 child,
                 group,
+                signalled: false,
                 _lease: lease,
             }),
         })
     }
 
-    /// Access pipes and poll the child while its group remains owned.
+    /// Transfer captured pipes without exposing the child's reaping authority.
     ///
     /// # Errors
     /// Rejects access after retirement.
-    pub fn child_mut(&mut self) -> io::Result<&mut Child> {
-        self.state
+    pub fn take_pipes(&mut self) -> io::Result<ProcessPipes> {
+        let state = self
+            .state
             .as_mut()
-            .map(|state| &mut state.child)
+            .ok_or_else(|| io::Error::other("process has retired"))?;
+        Ok(ProcessPipes {
+            stdin: state.child.stdin.take(),
+            stdout: state.child.stdout.take(),
+            stderr: state.child.stderr.take(),
+        })
+    }
+
+    /// Return the owned child's identifier for observation, never external reaping.
+    ///
+    /// # Errors
+    /// Rejects access after retirement.
+    pub fn id(&self) -> io::Result<u32> {
+        self.state
+            .as_ref()
+            .map(|state| state.child.id())
             .ok_or_else(|| io::Error::other("process has retired"))
+    }
+
+    /// Observe exit while leaving the child waitable to anchor final signalling.
+    ///
+    /// # Errors
+    /// Reports failed exit observation or access after retirement.
+    pub fn try_status(&self) -> io::Result<Option<ExitStatus>> {
+        use rustix::process::{Pid, WaitId, WaitIdOptions};
+        use std::os::unix::process::ExitStatusExt;
+        let pid = Pid::from_raw(i32::try_from(self.id()?).map_err(io::Error::other)?)
+            .ok_or_else(|| io::Error::other("invalid child identifier"))?;
+        let Some(status) = rustix::process::waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        )?
+        else {
+            return Ok(None);
+        };
+        let raw = if let Some(code) = status.exit_status() {
+            code << 8
+        } else if let Some(signal) = status.terminating_signal() {
+            signal | if status.dumped() { 0x80 } else { 0 }
+        } else {
+            return Err(io::Error::other("unexpected child wait status"));
+        };
+        Ok(Some(ExitStatus::from_raw(raw)))
     }
 
     /// Kill remaining group members and wait for terminal proof.
@@ -68,6 +119,11 @@ impl BlockingProcess {
 
 impl State {
     fn signal(&mut self) {
+        if self.signalled {
+            return;
+        }
+        // Never repeat a numeric signal after retirement has begun reaping.
+        self.signalled = true;
         if let Some(group) = self.group {
             let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         }

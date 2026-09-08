@@ -30,7 +30,7 @@ impl GitPipe {
             command.process_group(0);
         }
         let mut child = rw_resources::process::BlockingProcess::spawn(command)?;
-        let Some(stdout) = child.child_mut()?.stdout.take() else {
+        let Some(stdout) = child.take_pipes()?.stdout else {
             child.settle();
             return Err(io::Error::other("Git stdout was not captured"));
         };
@@ -71,7 +71,7 @@ impl GitPipe {
     pub(super) fn finish(mut self) -> io::Result<bool> {
         loop {
             self.check()?;
-            if let Some(status) = self.child.child_mut()?.try_wait()? {
+            if let Some(status) = self.child.try_status()? {
                 self.child.settle();
                 return Ok(status.success());
             }
@@ -131,7 +131,7 @@ mod tests {
         )
         .expect("child");
         let pid = rustix::process::Pid::from_raw(
-            i32::try_from(pipe.child.child_mut().expect("owned child").id()).expect("native pid"),
+            i32::try_from(pipe.child.id().expect("owned child")).expect("native pid"),
         )
         .expect("pid");
         pipe.read_exact(&mut [0]).expect("child started");
