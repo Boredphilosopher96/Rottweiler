@@ -1376,3 +1376,6 @@ mod proof_tests;
 
 #[cfg(test)]
 mod telemetry_tests;
+
+#[cfg(all(test, unix))]
+mod disk_full_tests;

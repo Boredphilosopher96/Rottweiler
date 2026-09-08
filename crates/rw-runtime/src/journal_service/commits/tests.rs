@@ -196,3 +196,44 @@ async fn panicked_worker_returns_failed_proof_and_retains_its_session() {
     assert!(weak.upgrade().is_some());
     assert_eq!(queue.batches.available_permits(), MAX_BATCHES - 1);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn enospc_outcome_never_acknowledges_and_retains_commit_admission() {
+    let queue = JournalCommits::new();
+    let order = Arc::new(Mutex::new(()));
+    let owner = Arc::new(String::from("disk-full session"));
+    let weak = Arc::downgrade(&owner);
+    let batch = admitted(&queue);
+    let held_bytes = super::MAX_BYTES as usize - queue.bytes.available_permits();
+    let guard = queue
+        .enter(Arc::clone(&order))
+        .await
+        .expect("session order");
+    let error = std::io::Error::from_raw_os_error(rustix::io::Errno::NOSPC.raw_os_error());
+    let expected = error.to_string();
+    let outcome = queue
+        .execute(owner, batch, guard, async move {
+            // Canonical ENOSPC injection and rollback/replay are tested inside
+            // rw-store, whose test-only I/O hooks do not ship to dependencies.
+            // Exercise the exact Persistence outcome used by DurableEventSink.
+            Err(failure(error.to_string()))
+        })
+        .await;
+    assert!(
+        matches!(outcome, Err(rw_core::AgentLoopError::Persistence(message)) if message == expected)
+    );
+    assert!(
+        queue.shutdown().await.is_err(),
+        "no successful settlement acknowledgement"
+    );
+    assert!(weak.upgrade().is_some(), "unproven source owner retained");
+    assert!(order.try_lock().is_err(), "no following conflicting commit");
+    assert_eq!(queue.batches.available_permits(), MAX_BATCHES - 1);
+    assert_eq!(
+        super::MAX_BYTES as usize - queue.bytes.available_permits(),
+        held_bytes
+    );
+    assert!(queue.reserve(&plan()).is_err(), "failed queue stays closed");
+    assert!(queue.enter(order).await.is_err());
+}

@@ -19,10 +19,11 @@ pub(super) fn truncate_and_sync_event_file(file: &File, len: u64) -> std::io::Re
 
 pub(super) fn write_event_bytes(file: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(test)]
-    if let Some(fail_after) = take_partial_append_write_fault() {
+    if let Some((fail_after, errno)) = take_partial_append_write_fault() {
         file.write_all(&bytes[..bytes.len().min(fail_after)])?;
-        return Err(std::io::Error::other(
-            "injected partial event-log append failure",
+        return Err(errno.map_or_else(
+            || std::io::Error::other("injected partial event-log append failure"),
+            std::io::Error::from_raw_os_error,
         ));
     }
     file.write_all(bytes)
@@ -41,6 +42,8 @@ pub(super) fn set_event_file_len(file: &File, len: u64) -> std::io::Result<()> {
 pub(super) struct AppendFault {
     partial_write_after: Option<usize>,
     fail_truncate: bool,
+    errno: Option<i32>,
+    sync_failures: u8,
 }
 
 #[cfg(test)]
@@ -71,9 +74,42 @@ pub(super) fn install_append_fault(
         fault.set(Some(AppendFault {
             partial_write_after: Some(partial_write_after),
             fail_truncate,
+            errno: None,
+            sync_failures: 0,
         }));
     });
     AppendFaultGuard
+}
+
+/// Injects the platform's ENOSPC at the actual canonical write/sync boundary.
+#[cfg(all(test, unix))]
+pub(super) fn install_disk_full_fault(
+    partial_write_after: Option<usize>,
+    sync_failures: u8,
+) -> AppendFaultGuard {
+    APPEND_FAULT.with(|fault| {
+        assert!(fault.get().is_none(), "append fault already installed");
+        fault.set(Some(AppendFault {
+            partial_write_after,
+            fail_truncate: false,
+            errno: Some(rustix::io::Errno::NOSPC.raw_os_error()),
+            sync_failures,
+        }));
+    });
+    AppendFaultGuard
+}
+
+#[cfg(all(test, unix))]
+fn take_append_sync_fault() -> Option<i32> {
+    APPEND_FAULT.with(|fault| {
+        let mut state = fault.get()?;
+        if state.sync_failures == 0 {
+            return None;
+        }
+        state.sync_failures -= 1;
+        fault.set(Some(state));
+        state.errno
+    })
 }
 
 #[cfg(test)]
@@ -87,12 +123,12 @@ impl Drop for AppendFaultGuard {
 }
 
 #[cfg(test)]
-pub(super) fn take_partial_append_write_fault() -> Option<usize> {
+pub(super) fn take_partial_append_write_fault() -> Option<(usize, Option<i32>)> {
     APPEND_FAULT.with(|fault| {
         let mut state = fault.get()?;
         let fail_after = state.partial_write_after.take();
         fault.set(Some(state));
-        fail_after
+        fail_after.map(|after| (after, state.errno))
     })
 }
 
@@ -322,6 +358,10 @@ pub(super) fn create_checked_directory_portable(path: &Path) -> Result<(), Sessi
 
 #[cfg(unix)]
 pub(super) fn sync_event_file(file: &File) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(errno) = take_append_sync_fault() {
+        return Err(std::io::Error::from_raw_os_error(errno));
+    }
     rustix::fs::fsync(file).map_err(std::io::Error::from)
 }
 
