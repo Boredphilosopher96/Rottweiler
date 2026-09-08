@@ -102,7 +102,8 @@ pub use worktree::{
 
 pub use rw_sandbox::{
     ApprovedCode, ApprovedExecutable, ApprovedExecutableImages, ExecutableArtifactIdentity,
-    ExecutableDigest, ExecutableImageLimits, ExecutableLaunch, PluginRendezvous, SandboxHelper,
+    ExecutableDigest, ExecutableImageLimits, ExecutableLaunch, PluginLifeline, PluginRendezvous,
+    SandboxHelper,
 };
 
 #[cfg(test)]

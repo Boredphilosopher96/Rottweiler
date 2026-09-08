@@ -1,8 +1,9 @@
 //! Shared admission belongs to the physical operation, through its actual settlement.
 //!
-//! Every session in this process competes for these pools. A process lease counts
-//! one supervised process group, including helpers that exec into its worker; it
-//! does not claim to count arbitrary descendants created inside that group.
+//! Every session in this process competes for these pools. Process admission units
+//! reserve known owned process capacity: native plugin launchers include their
+//! supervisor and namespace launcher. Other execution owners reserve a process
+//! group; this does not claim to count arbitrary descendants inside that group.
 //! Resource acquisition never authorizes an effect or replaces a caller's deadline.
 
 mod blocking;

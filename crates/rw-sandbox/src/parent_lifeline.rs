@@ -1,5 +1,7 @@
 //! Single-process plugin supervision with unreaped child and parent authority.
+mod control;
 use crate::{LaunchPlan, SandboxError};
+pub use control::PluginLifeline;
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 use std::{
     ffi::OsString,
@@ -69,11 +71,11 @@ impl PluginRendezvous {
         Ok(())
     }
     /// Verify the spawned supervisor and remove its private socket pathname.
-    /// The returned stream must receive one byte (`1`) to grant launch; dropping
-    /// it before that grant cannot start the effect process.
+    /// The returned control must grant launch explicitly; dropping it before
+    /// that grant cannot start the effect process.
     /// # Errors
     /// Rejects a missing, malformed, or late supervisor handshake.
-    pub fn accept(self, pid: u32) -> io::Result<UnixStream> {
+    pub fn accept(self, pid: u32) -> io::Result<PluginLifeline> {
         let deadline = Instant::now() + HANDSHAKE;
         let mut stream = loop {
             match self.listener.accept() {
@@ -108,7 +110,7 @@ impl PluginRendezvous {
             return Err(io::Error::other("invalid plugin supervisor identity"));
         }
         std::fs::remove_file(self.directory.path().join("owner.sock"))?;
-        Ok(stream)
+        PluginLifeline::new(stream)
     }
 }
 
@@ -154,6 +156,7 @@ pub(crate) fn run(args: &[OsString]) -> io::Result<std::convert::Infallible> {
         }
     }
     let status = owner.retire();
+    stream.write_all(control::DONE)?;
     std::process::exit(
         status
             .code()

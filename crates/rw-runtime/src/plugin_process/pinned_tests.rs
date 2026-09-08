@@ -303,7 +303,7 @@ async fn closing_parent_lifeline_retires_a_plugin_that_ignores_stdin() {
 }
 
 #[tokio::test]
-async fn killed_supervisor_keeps_group_anchored_until_effects_are_killed() {
+async fn killed_supervisor_cannot_claim_settlement_without_its_receipt() {
     assert_lifeline_retirement(true).await;
 }
 
@@ -349,17 +349,29 @@ async fn assert_lifeline_retirement(kill_supervisor: bool) {
     } else {
         launched.process.kill_tree().expect("close parent lifeline");
     }
-    tokio::time::timeout(Duration::from_secs(5), launched.process.settle_effects())
-        .await
-        .expect("bounded physical settlement")
-        .expect("settled");
-    assert_eq!(
-        rustix::process::test_kill_process_group(pid),
-        Err(rustix::io::Errno::SRCH)
-    );
-    launched
-        .process
-        .settle_effects()
-        .await
-        .expect("settlement stays idempotent");
+    let settlement =
+        tokio::time::timeout(Duration::from_secs(5), launched.process.settle_effects())
+            .await
+            .expect("bounded settlement observation");
+    if kill_supervisor {
+        assert!(
+            settlement.is_err(),
+            "helper death has no retirement receipt"
+        );
+        assert!(
+            launched.process.settle_effects().await.is_err(),
+            "missing proof stays unsettled"
+        );
+    } else {
+        settlement.expect("receipt proves settlement");
+        assert_eq!(
+            rustix::process::test_kill_process_group(pid),
+            Err(rustix::io::Errno::SRCH)
+        );
+        launched
+            .process
+            .settle_effects()
+            .await
+            .expect("settlement stays idempotent");
+    }
 }

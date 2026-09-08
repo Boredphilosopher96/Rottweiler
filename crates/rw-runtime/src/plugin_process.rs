@@ -123,7 +123,7 @@ async fn handoff_in_worker(
         tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn", phase = "admitted",
             admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
         let started = std::time::Instant::now();
-        let SpawnedPlugin { child, proxy, bytes, control } = spawn()?;
+        let SpawnedPlugin { control, child, proxy, bytes } = spawn()?;
         // Establish the complete physical owner synchronously before any
         // callback, tracing subscriber or async handoff can fail or be dropped.
         let handoff = attach_supervisor(child, proxy, &config, helper, admission, bytes, control);
@@ -270,10 +270,10 @@ fn spawn_pinned_plugin(
     #[cfg(target_os = "linux")]
     drop(plan.take_helper_pin());
     Ok(SpawnedPlugin {
+        control,
         child,
         proxy,
         bytes,
-        control,
     })
 }
 
@@ -374,17 +374,7 @@ fn attach_supervisor(
                 }
             }
         };
-        let granted = process
-            .control
-            .lock()
-            .map_err(|_| PluginLaunchError::EffectsUnsettled {
-                message: "plugin control lock poisoned".into(),
-            })?
-            .as_ref()
-            .ok_or_else(|| PluginLaunchError::EffectsUnsettled {
-                message: "plugin control missing".into(),
-            })?
-            .grant();
+        let granted = process.grant();
         if let Err(cause) = granted {
             let _ = process.kill_tree();
             return match process.settle_effects().await {
@@ -488,6 +478,7 @@ impl SupervisedPluginProcess for PluginChild {
         let (process, proxy) = tokio::join!(
             async {
                 self.wait_for_exit().await?;
+                self.verify_receipt()?;
                 let group = *self
                     .process_group
                     .lock()

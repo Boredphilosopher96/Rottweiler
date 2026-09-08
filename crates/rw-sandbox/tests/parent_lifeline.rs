@@ -5,7 +5,7 @@ mod common;
 use rw_sandbox::{NetworkPolicy, PluginRendezvous, SandboxPolicy, shell_launch_plan};
 use std::{
     fs,
-    io::{BufRead as _, BufReader, Write as _},
+    io::{BufRead as _, BufReader},
     os::unix::process::CommandExt as _,
     path::Path,
     process::{Child, Command, Stdio},
@@ -51,7 +51,7 @@ fn controller() {
         assert!(output.stdout.is_empty(), "effect ran before grant");
         return;
     }
-    control.write_all(&[1]).expect("grant");
+    control.grant().expect("grant");
     let mut pid = String::new();
     BufReader::new(child.stdout.take().expect("stdout"))
         .read_line(&mut pid)
@@ -164,7 +164,7 @@ fn normal_child_exit_preserves_nonzero_status() {
         .expect("helper");
     let mut owner = Controller(child);
     let mut control = rendezvous.accept(owner.0.id()).expect("connection");
-    control.write_all(&[1]).expect("grant");
+    control.grant().expect("grant");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(status) = owner.0.try_wait().expect("child status") {

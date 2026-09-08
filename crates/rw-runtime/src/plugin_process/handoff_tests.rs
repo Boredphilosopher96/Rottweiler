@@ -187,10 +187,10 @@ async fn dropped_launch_waiter_retires_the_child_returned_by_its_blocking_worker
         let child = command.spawn().expect("physical child");
         let _ = spawned.send(child.id().expect("child pid"));
         Ok(SpawnedPlugin {
+            control: ProcessControl::TestGroup,
             child,
             proxy: None,
             bytes: fixture_launch_bytes(),
-            control: ProcessControl::TestGroup,
         })
     }));
     entered.await.expect("worker owns launch");

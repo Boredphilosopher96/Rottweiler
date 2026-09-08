@@ -18,7 +18,7 @@ mod macos;
 #[cfg(unix)]
 mod parent_lifeline;
 #[cfg(unix)]
-pub use parent_lifeline::PluginRendezvous;
+pub use parent_lifeline::{PluginLifeline, PluginRendezvous};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -335,7 +335,10 @@ pub struct LaunchPlan {
     /// User-visible degradation warnings.  An enforceable plan never carries a
     /// warning; unsupported configurations return an error instead.
     pub warnings: Vec<String>,
+    #[cfg(target_os = "macos")]
     helper: SandboxHelper,
+    #[cfg(not(target_os = "macos"))]
+    _helper: SandboxHelper,
     single_process: bool,
     /// Open descriptor pinning the approved immutable Linux helper executable
     /// until the namespace launcher crosses `exec(2)`.
@@ -752,7 +755,7 @@ pub fn shell_launch_plan(
                 program: unshare,
                 args: unshare_args,
                 warnings: Vec::new(),
-                helper: helper_owner.clone(),
+                _helper: helper_owner.clone(),
                 single_process: !policy.allow_process_creation,
                 helper_pin: Some(helper_pin),
             });
@@ -767,7 +770,7 @@ pub fn shell_launch_plan(
             program: unshare,
             args: unshare_args,
             warnings: Vec::new(),
-            helper: helper_owner.clone(),
+            _helper: helper_owner.clone(),
             single_process: !policy.allow_process_creation,
             helper_pin: Some(helper_pin),
         })

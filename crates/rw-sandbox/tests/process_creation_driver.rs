@@ -2,6 +2,9 @@
 //! Exercise the actual native sandbox, including the Linux proxy worker bootstrap.
 #[cfg(unix)]
 mod common;
+#[cfg(target_os = "macos")]
+#[path = "process_creation_driver/lifeline.rs"]
+mod lifeline;
 use rw_sandbox::{
     EgressPolicy, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
     maybe_run_helper, probe, shell_launch_plan,
@@ -13,6 +16,11 @@ fn main() {
         return;
     }
     match std::env::args().nth(1).as_deref() {
+        #[cfg(target_os = "macos")]
+        Some("--lifeline-escape") => {
+            lifeline::escape();
+            return;
+        }
         #[cfg(target_os = "macos")]
         Some("--replace-running-image") => {
             replaced_running_image();
@@ -36,6 +44,8 @@ fn main() {
     }
     #[cfg(target_os = "macos")]
     verify_running_image_replacement();
+    #[cfg(target_os = "macos")]
+    lifeline::verify();
     let workspace = tempfile::tempdir().expect("workspace");
     let proxy =
         SupervisedEgressProxy::start(EgressPolicy::new(std::iter::empty::<&str>())).expect("proxy");
