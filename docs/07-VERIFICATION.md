@@ -291,6 +291,14 @@ the leader before the gate returns. Evidence records the active phase and each
 completed sample as it runs, including failures during warmup or sampling.
 Malformed, duplicate, negative, and out-of-interval timing markers fail the gate.
 
+TUI visual and memory tests launch their executables through the shared Python
+process owner, with one active child and a bounded combined output log per test
+directory. An owned worker thread isolates supervisor startup from Bun's test
+timeout process killer. Test cleanup awaits both the supervisor's group-closure
+acknowledgement and worker exit before deleting scratch. Missing closure retains
+the directory and prevents another launch through that owner. Functional test
+deadlines cover their serial proofs and cleanup; product latency gates are separate.
+
 Nested Python verification owners opt into a bounded settlement channel. Each
 child is registered before launch and released after its actual process owner
 reaps it; only then may the wrapper acknowledge closure. Cancellation gives the

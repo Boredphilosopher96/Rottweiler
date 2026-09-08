@@ -1,44 +1,81 @@
-/** Own a test child and its bounded pipes until it has exited, including failures. */
-export async function runOwnedProcess(
-  command: string[],
-  options: { cwd?: string; timeoutMs: number; maxOutputBytes?: number },
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn(command, {
-    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-    stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  })
-  let failure: Error | undefined
-  let outputBytes = 0
-  const fail = (error: Error) => {
-    failure ??= error
-    // This test executable owns only worker threads, not descendant processes.
-    // A forced stop cannot leave renderer signal handlers running after disposal.
-    child.kill("SIGKILL")
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Worker } from "node:worker_threads"
+
+interface ProcessResult { code: number; stdout: string; stderr: string }
+interface ProcessOptions { cwd?: string; env?: Record<string, string>; timeoutMs: number; maxOutputBytes?: number }
+
+/** A test directory remains owned until its Python supervisor proves group closure. */
+export class TestProcessScope {
+  readonly directory: string
+  #pending: Promise<ProcessResult> | null = null
+  #closing = false
+  #unsettled = false
+
+  private constructor(directory: string) { this.directory = directory }
+
+  static async create(prefix: string): Promise<TestProcessScope> {
+    return new TestProcessScope(await mkdtemp(join(tmpdir(), prefix)))
   }
-  const read = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
-    const chunks: Uint8Array[] = []
+
+  run(command: string[], options: ProcessOptions): Promise<ProcessResult> {
+    if (this.#closing || this.#pending !== null || this.#unsettled) throw new Error("Test process scope is closed, busy, or UNSETTLED")
+    const pending = this.#run(command, options)
+    this.#pending = pending
+    // Keep the actual physical promise reachable even if the test runner times out.
+    void pending.finally(() => { if (this.#pending === pending) this.#pending = null }).catch(() => {})
+    return pending
+  }
+
+  async #run(command: string[], options: ProcessOptions): Promise<ProcessResult> {
+    const request = join(this.directory, "process.request.json")
+    const result = join(this.directory, "process.result.json")
+    const encoded = JSON.stringify({ command, cwd: options.cwd ?? process.cwd(), env: options.env ?? {},
+      timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024 })
+    if (Buffer.byteLength(encoded) > 1024 * 1024) throw new Error("Oversized test process request")
+    // One reusable result slot; no old acknowledgement may survive a new launch.
+    await rm(result, { force: true })
+    await writeFile(request, encoded)
+    // This supervisor's own bounded deadline owns termination. Killing it could
+    // abandon a native preload child; missing acknowledgement preserves evidence.
+    this.#unsettled = true
+    // Bun's test VM automatically signals its subprocesses on test timeout,
+    // including before Python installs its cooperative cancellation handler.
+    // The owned worker VM keeps that startup handoff outside the test auto-killer.
+    const code = await new Promise<number>((resolve) => {
+      let bridgeCode = 125
+      const worker = new Worker(new URL("./owned-process-worker.ts", import.meta.url), {
+        workerData: { bridge: join(import.meta.dir, "owned-process.py"), request, result },
+      })
+      worker.on("message", (message: unknown) => {
+        if (typeof message === "number" && Number.isInteger(message)) bridgeCode = message
+      })
+      worker.on("error", () => { bridgeCode = 125 })
+      worker.on("exit", (status) => resolve(status === 0 ? bridgeCode : 125))
+    })
+    let payload: unknown
     try {
-      for await (const chunk of stream) {
-        outputBytes += chunk.byteLength
-        if (outputBytes > (options.maxOutputBytes ?? 1024 * 1024)) {
-          fail(new Error(`Test child output exceeded its byte limit: ${command.join(" ")}`))
-        }
-        if (failure === undefined) chunks.push(chunk)
+      if (code !== 0 || (await stat(result)).size > 6 * 1024 * 1024 + 8192) throw new Error("Missing bounded acknowledgement")
+      payload = JSON.parse(await readFile(result, "utf8"))
+      if (typeof payload !== "object" || payload === null || !("settled" in payload) || payload.settled !== true) {
+        throw new Error("Missing physical-settlement acknowledgement")
       }
-      return Buffer.concat(chunks).toString("utf8")
     } catch (error) {
-      fail(error instanceof Error ? error : new Error(String(error)))
-      return ""
+      throw new Error(`UNSETTLED test process; retained ${this.directory}`, { cause: error })
     }
+    this.#unsettled = false
+    if ("error" in payload) throw new Error(String(payload.error))
+    if (!("code" in payload) || !Number.isInteger(payload.code) || !("stdout" in payload) || typeof payload.stdout !== "string" ||
+        !("stderr" in payload) || typeof payload.stderr !== "string") throw new Error("Invalid test process result")
+    return { code: payload.code as number, stdout: payload.stdout, stderr: payload.stderr }
   }
-  const timer = setTimeout(() => fail(new Error(`Test child exceeded ${options.timeoutMs}ms: ${command.join(" ")}`)), options.timeoutMs)
-  try {
-    const [code, stdout, stderr] = await Promise.all([child.exited, read(child.stdout), read(child.stderr)])
-    if (failure !== undefined) throw failure
-    return { code, stdout, stderr }
-  } finally {
-    clearTimeout(timer)
-    if (child.exitCode === null) child.kill("SIGKILL")
-    await child.exited
+
+  async close(): Promise<void> {
+    this.#closing = true
+    // Test timeout cleanup waits the same physical owner; no competing kill path.
+    await this.#pending?.catch(() => {})
+    if (this.#unsettled) throw new Error(`UNSETTLED test process; retained ${this.directory}`)
+    await rm(this.directory, { recursive: true, force: true })
   }
 }

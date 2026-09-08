@@ -153,6 +153,11 @@ class ProcessScope:
         self.active.remove(token)
         self._send({"kind": "settled", "token": token})
 
+    def require_settled(self) -> None:
+        """Prove current work is settled without closing this reusable scope."""
+        if self.failed or self.active:
+            raise UnsettledScope(f"UNSETTLED verification scope: active={sorted(self.active)}, failed={self.failed}")
+
     def _close(self) -> None:
         if not self.failed and not self.active:
             try:

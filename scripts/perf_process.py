@@ -17,6 +17,11 @@ from perf_process_wait import observe_exit, signal_owned_group, require_group_di
 _SCOPE = inherited_scope()
 
 
+def require_sample_settlement() -> None:
+    """Check physical closure before transferring a sample result to its caller."""
+    _SCOPE.require_settled()
+
+
 def check_sample_cancellation() -> None:
     _SCOPE.check()
 

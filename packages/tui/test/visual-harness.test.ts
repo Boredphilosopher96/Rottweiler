@@ -1,27 +1,27 @@
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { runOwnedProcess } from "./support/owned-process"
+import { TestProcessScope } from "./support/owned-process"
 
 const HARNESS_DEADLINE_MS = 20_000
 // Two serial renderers plus artifact comparison; product latency has separate gates.
 const PROOF_DEADLINE_MS = 60_000
 
 describe("TUI visual evidence", () => {
-  const evidenceDirectories: string[] = []
+  const owners: TestProcessScope[] = []
 
+  // A 20s child deadline plus bounded group teardown and supervisor startup.
   afterEach(async () => {
-    for (const directory of evidenceDirectories.splice(0)) {
-      await rm(directory, { recursive: true, force: true })
+    for (const owner of owners.splice(0)) {
+      await owner.close()
     }
-  })
+  }, 40_000)
 
   async function render(scenario: string): Promise<string> {
-    const directory = await mkdtemp(join(tmpdir(), `rottweiler-${scenario}-test-`))
-    evidenceDirectories.push(directory)
-    const { code, stderr } = await runOwnedProcess(
+    const owner = await TestProcessScope.create(`rottweiler-${scenario}-test-`)
+    owners.push(owner)
+    const directory = owner.directory
+    const { code, stderr } = await owner.run(
       [process.execPath, "run", resolve(import.meta.dir, "../scripts/tui-visual-harness.ts"), scenario, directory],
       { cwd: resolve(import.meta.dir, ".."), timeoutMs: HARNESS_DEADLINE_MS },
     )
