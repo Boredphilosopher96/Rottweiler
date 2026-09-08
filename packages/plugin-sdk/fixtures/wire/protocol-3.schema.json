@@ -282,12 +282,19 @@
     "model_capabilities": {
       "type": "object",
       "required": [
+        "structured_output",
         "tool_calling",
         "vision",
         "thinking",
         "cache_breakpoints"
       ],
       "properties": {
+        "structured_output": {
+          "enum": [
+            "unsupported",
+            "json_schema"
+          ]
+        },
         "tool_calling": {
           "type": "boolean"
         },

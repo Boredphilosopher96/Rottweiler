@@ -26,6 +26,10 @@
       "description": "Whether the model may, must, must not, or must specifically call a tool.",
       "$ref": "#/$defs/ToolChoice"
     },
+    "output": {
+      "description": "Required final-output semantics; structured mode forbids tool calls.",
+      "$ref": "#/$defs/OutputContract"
+    },
     "max_output_tokens": {
       "description": "Maximum number of output tokens.",
       "type": "integer",
@@ -62,6 +66,7 @@
     "turns",
     "tools",
     "tool_choice",
+    "output",
     "max_output_tokens",
     "temperature",
     "thinking",
@@ -525,6 +530,188 @@
             "name"
           ]
         }
+      ]
+    },
+    "OutputContract": {
+      "description": "Required output semantics for one provider request.",
+      "oneOf": [
+        {
+          "description": "Ordinary streaming prose, reasoning and tool workflows.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "One complete JSON object satisfying the finite schema.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "ASCII schema identifier, one to 64 letters, digits, underscores or hyphens.",
+              "type": "string"
+            },
+            "schema": {
+              "$ref": "#/$defs/OutputSchema"
+            },
+            "mode": {
+              "type": "string",
+              "const": "json_schema"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "name",
+            "schema"
+          ]
+        }
+      ]
+    },
+    "OutputSchema": {
+      "description": "A closed schema: every object field is required and extra keys are forbidden.\nNullable values represent optional data without omitting its field.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "null"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "$ref": "#/$defs/OutputSchema"
+            },
+            "type": {
+              "type": "string",
+              "const": "array"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OutputField"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "object"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "fields"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "$ref": "#/$defs/OutputSchema"
+            },
+            "type": {
+              "type": "string",
+              "const": "nullable"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ]
+        }
+      ]
+    },
+    "OutputField": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "schema": {
+          "$ref": "#/$defs/OutputSchema"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "schema"
       ]
     },
     "ThinkingLevel": {

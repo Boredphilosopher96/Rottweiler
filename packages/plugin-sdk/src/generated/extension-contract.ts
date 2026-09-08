@@ -22,7 +22,7 @@ export type ExtensionSessionSnapshot = { session_id: SessionId, title: string | 
 export type ExtensionStateCommitOutcome = { "outcome": "committed", revision: SequenceId, } | { "outcome": "conflict", actual_revision: SequenceId | null, };
 export type ExtensionStateEntry = { key: string, value: JsonValue, };
 export type ExtensionStateMutation = { "action": "set", key: string, value: JsonValue, } | { "action": "delete", key: string, };
-export type ExtensionStateSnapshot = { revision: SequenceId | null, entries: Array<ExtensionStateEntry>, acknowledged: ExtensionDeliveryCursor | null, 
+export type ExtensionStateSnapshot = { revision: SequenceId | null, entries: Array<ExtensionStateEntry>, acknowledged: ExtensionDeliveryCursor | null,
 /**
  * Host-selected lower bound of this session's delivery stream. A fork
  * starts after its inherited prefix instead of redelivering parent effects.

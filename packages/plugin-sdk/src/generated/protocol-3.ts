@@ -154,7 +154,10 @@ export interface ProviderModelsParams {
 
 export type ProviderCacheBreakpoints = "none" | "explicit" | "automatic"
 
+export type ProviderStructuredOutputSupport = "unsupported" | "json_schema"
+
 export interface ProviderModelCapabilities {
+  readonly structured_output: ProviderStructuredOutputSupport
   readonly tool_calling: boolean
   readonly vision: boolean
   readonly thinking: boolean
@@ -208,7 +211,7 @@ export interface CommandExecuteParams {
 }
 
 import type { ProviderRequest, ProviderEvent } from "./provider-contract"
-export type { ProviderRequest, ProviderEvent, Turn, TurnMeta, Role, Block, ToolOutput, ToolOutputPart, ImageRef, ToolDefinition, ToolChoice, CacheHint, TokenUsage, FinishReason, ThinkingLevel } from "./provider-contract"
+export type { OutputContract, OutputSchema, OutputField, ProviderRequest, ProviderEvent, Turn, TurnMeta, Role, Block, ToolOutput, ToolOutputPart, ImageRef, ToolDefinition, ToolChoice, CacheHint, TokenUsage, FinishReason, ThinkingLevel } from "./provider-contract"
 
 export interface ProviderCompleteParams {
   readonly alias: string
