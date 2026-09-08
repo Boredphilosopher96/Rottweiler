@@ -7,6 +7,7 @@ use std::{
     ffi::OsString,
     io::{self, Read, Write},
     os::unix::{
+        fs::PermissionsExt as _,
         net::{UnixListener, UnixStream},
         process::ExitStatusExt as _,
     },
@@ -32,6 +33,7 @@ impl PluginRendezvous {
     pub fn bind() -> io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix("rw-plugin-owner-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
             // Unix socket addresses have a small fixed path capacity. The
             // private namespace uses /tmp independently of ambient TMPDIR.
             .tempdir_in("/tmp")?;
