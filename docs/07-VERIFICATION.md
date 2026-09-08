@@ -388,15 +388,15 @@ maintainer applies the `perf-waiver` label **and** the PR body contains a
 describing the evidence and tradeoff. Nightly and release jobs never accept
 waivers.
 
-The initial checked-in values are explicitly `bootstrap`: core ceilings are
-derived from the absolute budgets and the RSS value preserves the
-pre-baseline guard. They are not empirical measurements and do not satisfy the
-v1 regression gate. Pull-request jobs may use them only as an
-absolute-equivalent smoke comparison. Nightly and exact-tag core and soak jobs
-pass `--require-measured`, retain their real per-platform JSON observations,
-and fail closed until maintainers review that evidence and replace each suite
-with `baseline_kind: measured` plus its runner/run provenance. The 10% ceiling
-and fixed absolute budgets remain unchanged after calibration.
+Bootstrap suites identify which values are observations and which are derived
+from absolute ceilings. Ceiling-derived values are not empirical measurements
+and do not satisfy measured qualification. Pull-request jobs may use bootstrap
+suites for smoke comparison. Nightly and exact-tag core and soak jobs pass
+`--require-measured`, retain their real per-platform JSON observations, and
+require reviewed runner, artifact, profile and workload provenance. A
+`measured` label alone does not establish comparability between different
+workloads or unidentified source trees. The 10% ceiling and fixed absolute
+budgets remain unchanged after calibration.
 
 The memory budget is executable, not an idle sleep. `scripts/run-soak.py`
 launches the production supervisor, Rust engine, and compiled OpenTUI together
