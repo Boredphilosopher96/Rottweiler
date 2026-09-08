@@ -291,12 +291,31 @@ pub(super) async fn run_history_replay_with_tui(
     session: &str,
     tui: &Path,
 ) -> Result<()> {
+    let storage_root = storage_root.to_owned();
+    let session = session.to_owned();
+    let tui = tui.to_owned();
+    crate::tui_session::run(move |stop| {
+        Box::pin(run_history_session(storage_root, session, tui, stop))
+    })
+    .await
+}
+
+async fn run_history_session(
+    storage_root: std::path::PathBuf,
+    session: String,
+    tui: std::path::PathBuf,
+    mut stop: crate::tui_session::Stop,
+) -> Result<()> {
+    if stop.requested() {
+        return Ok(());
+    }
+    let session = session.as_str();
     let (user_home, user_rottweiler) =
         session::extension_user_roots(&storage_root.join("credentials.toml"));
     let keybindings = tui_config::load_keybindings(None, None, &user_home, &user_rottweiler)
         .map_err(|error| miette!(error.to_string()))?;
     let engine = Arc::new(
-        HistoricalReplayEngine::open(storage_root, SessionId(session.to_owned()))
+        HistoricalReplayEngine::open(&storage_root, SessionId(session.to_owned()))
             .map_err(|error| miette!(error.to_string()))?,
     );
     engine
@@ -304,12 +323,15 @@ pub(super) async fn run_history_replay_with_tui(
         .bootstrap(engine.session_id.clone())
         .await
         .map_err(|error| miette!(error.to_string()))?;
-    let paths = allocate_runtime_paths(storage_root)?;
-    let _runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
+    if stop.requested() {
+        return Ok(());
+    }
+    let paths = allocate_runtime_paths(&storage_root)?;
+    let mut runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
     let (runtime, listener) = server::ServerRuntime::create_for_session(paths, Some(session))?;
     let state = server::ServerState::new(engine, &runtime);
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
-    let server_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
+    let mut server_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
     let cursor = runtime.paths.directory.join("last-seen");
     let fork_operation_directory = storage_root.join("control/pending-forks");
     let mut client = crate::tui_launch::TuiProcess::start(&crate::tui_launch::TuiLaunch {
@@ -323,17 +345,40 @@ pub(super) async fn run_history_replay_with_tui(
         theme: "",
         replay: true,
     });
+    let mut server_finished = false;
     let result = tokio::select! {
         result = client.wait() => result.into_diagnostic(),
-        signal = crate::remote_session::wait_for_remote_shutdown_signal() => signal.into_diagnostic(),
+        () = stop.cancelled() => Ok(()),
+        result = &mut server_task => {
+            server_finished = true;
+            match result {
+                Ok(Ok(())) => Err(miette!("historical replay server stopped unexpectedly")),
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(error).into_diagnostic(),
+            }
+        }
     };
     let cleanup = client.shutdown().await.into_diagnostic();
     let _ = shutdown.send(true);
-    server_task.await.into_diagnostic()??;
+    let server_cleanup = if server_finished {
+        Ok(())
+    } else {
+        server_task
+            .await
+            .into_diagnostic()
+            .and_then(|result| result)
+    };
+    if cleanup.is_err() || server_cleanup.is_err() {
+        runtime_directory.preserve();
+        tracing::warn!(path = %runtime.paths.directory.display(), "retained replay runtime because cleanup failed");
+    }
     drop(runtime);
-    result.and(cleanup)?;
+    result.and(cleanup).and(server_cleanup)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lifecycle_tests;

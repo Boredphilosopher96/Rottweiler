@@ -444,7 +444,7 @@ pub enum WatchdogCommand {
 }
 
 pub async fn run_controlled_watchdog<R: RemoteRecoveryRuntime>(
-    mut runtime: R,
+    runtime: &mut R,
     mut control: tokio::sync::mpsc::Receiver<WatchdogCommand>,
     policy: WatchdogPolicy,
 ) -> Result<(), String> {
@@ -470,7 +470,7 @@ pub async fn run_controlled_watchdog<R: RemoteRecoveryRuntime>(
                 Some(WatchdogCommand::Shutdown) | None => return Ok(()),
             },
             () = tokio::time::sleep(policy.interval) => {
-                match recover_remote(&mut runtime).await {
+                match recover_remote(runtime).await {
                     Ok(_) => failures = 0,
                     Err(error) => {
                         failures = failures.saturating_add(1);
@@ -1089,14 +1089,18 @@ mod tests {
     async fn controlled_watchdog_acknowledges_a_quiescent_pause_before_shutdown() {
         let runtime = MockRecovery::new(MockRecoveryState::default());
         let (control, commands) = tokio::sync::mpsc::channel(2);
-        let watchdog = tokio::spawn(run_controlled_watchdog(
-            runtime.clone(),
-            commands,
-            WatchdogPolicy {
-                interval: Duration::from_millis(50),
-                maximum_consecutive_failures: 2,
-            },
-        ));
+        let mut owned_runtime = runtime.clone();
+        let watchdog = tokio::spawn(async move {
+            run_controlled_watchdog(
+                &mut owned_runtime,
+                commands,
+                WatchdogPolicy {
+                    interval: Duration::from_millis(50),
+                    maximum_consecutive_failures: 2,
+                },
+            )
+            .await
+        });
         let (acknowledged, paused) = tokio::sync::oneshot::channel();
         control
             .send(WatchdogCommand::Pause(acknowledged))

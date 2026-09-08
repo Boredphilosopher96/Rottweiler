@@ -67,6 +67,7 @@ mod supervisor;
 mod tty;
 mod tui_config;
 mod tui_launch;
+mod tui_session;
 mod upgrade;
 
 fn main() -> Result<()> {

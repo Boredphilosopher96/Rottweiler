@@ -131,12 +131,43 @@ pub(super) fn append_execution_lease_restart_flag(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+struct RemoteTuiRequest {
+    remote_workspace: Option<PathBuf>,
+    resume: Option<String>,
+    add_dirs: Vec<PathBuf>,
+    dangerously_trust: bool,
+    model: Option<String>,
+    permission_mode: Option<PermissionMode>,
+    detach: bool,
+}
+
 pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
     if cli.continue_latest {
         return Err(miette!(
             "--continue is ambiguous for a remote host; use --resume <session> or the session picker"
         ));
+    }
+    let request = RemoteTuiRequest {
+        remote_workspace: cli.remote_workspace.clone(),
+        resume: cli.resume.clone(),
+        add_dirs: cli.add_dirs.clone(),
+        dangerously_trust: cli.dangerously_trust,
+        model: cli.model.clone(),
+        permission_mode: cli.permission_mode,
+        detach: cli.detach,
+    };
+    let host = host.to_owned();
+    crate::tui_session::run(move |stop| Box::pin(run_remote_session(host, request, stop))).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_remote_session(
+    host: String,
+    cli: RemoteTuiRequest,
+    mut stop: crate::tui_session::Stop,
+) -> Result<()> {
+    if stop.requested() {
+        return Ok(());
     }
     let local_workspace =
         fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
@@ -147,7 +178,7 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         .map_or_else(session::new_session_id, Ok)?;
     let storage_root = configuration_root()?;
     let local_paths = allocate_runtime_paths(&storage_root)?;
-    let _runtime_directory = RuntimeDirectoryGuard::capture(&local_paths.directory)?;
+    let mut runtime_directory = RuntimeDirectoryGuard::capture(&local_paths.directory)?;
     let uid = rustix::process::geteuid().as_raw();
     let session_key = blake3::hash(session_id.as_bytes()).to_hex();
     let remote_socket = PathBuf::from(format!(
@@ -191,14 +222,14 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         {
             tracing::warn!(reason = %shutdown_error, "failed to roll back owned remote startup");
         }
+        if let Err(cleanup) = remote_runtime.stop_tunnel().await {
+            preserve_failed_runtime(&mut runtime_directory);
+            return Err(miette!("{}; {cleanup}", error.message));
+        }
         return Err(miette!(error.message));
     }
     let (watchdog_control, watchdog_commands) = tokio::sync::mpsc::channel(2);
-    let mut watchdog = tokio::spawn(remote::run_controlled_watchdog(
-        remote_runtime,
-        watchdog_commands,
-        remote::WatchdogPolicy::default(),
-    ));
+    let mut watchdog = RemoteWatchdog::start(remote_runtime, watchdog_commands);
     let (broker_ready, broker_ready_rx) = tokio::sync::oneshot::channel();
     let mut broker = tokio::spawn(shell_broker::run(
         shell_broker::ShellBrokerConfig {
@@ -212,22 +243,21 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         broker_ready,
     ));
     let broker_readiness = tokio::select! {
+        biased;
+        () = stop.cancelled() => Ok(false),
         readiness = broker_ready_rx => match readiness {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => Ok(true),
             Ok(Err(error)) => Err(miette!(error)),
             Err(error) => Err(error).into_diagnostic(),
         },
-        result = &mut watchdog => {
-            broker.abort();
-            match result {
-                Ok(Ok(())) => Err(miette!("remote connection watchdog stopped before broker readiness")),
-                Ok(Err(error)) => Err(miette!(error)),
-                Err(error) => Err(miette!(error.to_string())),
-            }
-        }
+        result = watchdog.wait() => match result {
+            Ok(()) => Err(miette!("remote connection watchdog stopped before broker readiness")),
+            Err(error) => Err(miette!(error)),
+        },
     };
-    if let Err(error) = broker_readiness {
+    if !matches!(broker_readiness, Ok(true)) {
         broker.abort();
+        let _ = broker.await;
         let remote_shutdown = finish_remote_watchdog(
             &watchdog_control,
             &mut watchdog,
@@ -236,10 +266,10 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
             (!cli.detach).then_some(owned_engine.as_ref()),
         )
         .await;
-        if let Err(shutdown_error) = remote_shutdown {
-            tracing::warn!(reason = %shutdown_error, "attached remote cleanup also failed");
+        if remote_shutdown.is_err() {
+            preserve_failed_runtime(&mut runtime_directory);
         }
-        return Err(error);
+        return broker_readiness.map(|_| ()).and(remote_shutdown);
     }
     let cursor = local_paths.directory.join("last-seen");
     let mut tui = crate::tui_launch::TuiProcess::start(&crate::tui_launch::TuiLaunch {
@@ -253,23 +283,29 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         theme: "",
         replay: false,
     });
+    let mut broker_finished = false;
     let result = tokio::select! {
         result = tui.wait() => result.into_diagnostic(),
-        signal = wait_for_remote_shutdown_signal() => signal.into_diagnostic(),
-        result = &mut broker => match result {
+        () = stop.cancelled() => Ok(()),
+        result = &mut broker => { broker_finished = true; match result {
             Ok(Ok(())) => Err(miette!("foreground-shell broker stopped unexpectedly")),
             Ok(Err(error)) => Err(miette!(error.to_string())),
             Err(error) => Err(miette!(error.to_string())),
-        },
-        result = &mut watchdog => match result {
-            Ok(Ok(())) => Err(miette!("remote connection watchdog stopped unexpectedly")),
-            Ok(Err(error)) => Err(miette!(error)),
-            Err(error) => Err(miette!(error.to_string())),
+        }},
+        result = watchdog.wait() => match result {
+            Ok(()) => Err(miette!("remote connection watchdog stopped unexpectedly")),
+            Err(error) => Err(miette!(error)),
         },
     };
     let tui_cleanup = tui.shutdown().await.into_diagnostic();
+    if tui_cleanup.is_err() {
+        preserve_failed_runtime(&mut runtime_directory);
+    }
     let result = result.and(tui_cleanup);
-    broker.abort();
+    if !broker_finished {
+        broker.abort();
+        let _ = broker.await;
+    }
     let remote_shutdown = finish_remote_watchdog(
         &watchdog_control,
         &mut watchdog,
@@ -278,6 +314,9 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         (!cli.detach).then_some(owned_engine.as_ref()),
     )
     .await;
+    if remote_shutdown.is_err() {
+        preserve_failed_runtime(&mut runtime_directory);
+    }
     match (result, remote_shutdown) {
         (Err(error), Err(shutdown_error)) => {
             tracing::warn!(reason = %shutdown_error, "attached remote cleanup also failed");
@@ -285,6 +324,47 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         }
         (Err(error), Ok(())) => Err(error),
         (Ok(()), shutdown) => shutdown,
+    }
+}
+
+fn preserve_failed_runtime(directory: &mut RuntimeDirectoryGuard) {
+    directory.preserve();
+    tracing::warn!(path = %directory.path.display(), "retained remote runtime because cleanup failed");
+}
+
+pub(super) struct RemoteWatchdog {
+    task: Option<tokio::task::JoinHandle<std::result::Result<(), String>>>,
+}
+impl RemoteWatchdog {
+    fn start(
+        mut runtime: TokioRemoteRecoveryRuntime,
+        commands: tokio::sync::mpsc::Receiver<remote::WatchdogCommand>,
+    ) -> Self {
+        Self {
+            task: Some(tokio::spawn(async move {
+                let result = remote::run_controlled_watchdog(
+                    &mut runtime,
+                    commands,
+                    remote::WatchdogPolicy::default(),
+                )
+                .await;
+                let cleanup = runtime.stop_tunnel().await;
+                result.and(cleanup)
+            })),
+        }
+    }
+    fn is_finished(&self) -> bool {
+        self.task
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+    async fn wait(&mut self) -> std::result::Result<(), String> {
+        let Some(task) = self.task.as_mut() else {
+            return Ok(());
+        };
+        let result = task.await;
+        self.task = None;
+        result.map_err(|error| error.to_string())?
     }
 }
 
@@ -308,7 +388,7 @@ pub(super) async fn pause_remote_watchdog(
 
 pub(super) async fn finish_remote_watchdog(
     watchdog_control: &tokio::sync::mpsc::Sender<remote::WatchdogCommand>,
-    watchdog: &mut tokio::task::JoinHandle<std::result::Result<(), String>>,
+    watchdog: &mut RemoteWatchdog,
     config: &remote::RemoteConfig,
     paths: &server::ServerRuntimePaths,
     shutdown_if_owned: Option<&AtomicBool>,
@@ -336,19 +416,18 @@ pub(super) async fn finish_remote_watchdog(
         let _ = watchdog_control
             .send(remote::WatchdogCommand::Shutdown)
             .await;
-        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut *watchdog)
-            .await
-            .is_err()
-        {
-            watchdog.abort();
-            let _ = watchdog.await;
-        }
     }
+    // An active recovery step owns bounded attach (15s), tunnel startup (5s),
+    // and health (1s) work. Its task must reach explicit tunnel reap; aborting a
+    // join after an unrelated shorter timeout would abandon that settlement.
+    let settled = watchdog.wait().await.map_err(|error| miette!(error));
 
     if shutdown_owned_engine && direct_shutdown.is_err() {
-        shutdown_remote_with_fresh_tunnel(config, paths).await
+        shutdown_remote_with_fresh_tunnel(config, paths)
+            .await
+            .and(settled)
     } else {
-        direct_shutdown
+        direct_shutdown.and(settled)
     }
 }
 
@@ -388,8 +467,8 @@ pub(super) async fn shutdown_remote_using_runtime(
         .await
         .map_err(|error| miette!(error))
     };
-    runtime.stop_tunnel().await;
-    result
+    let cleanup = runtime.stop_tunnel().await.map_err(|error| miette!(error));
+    result.and(cleanup)
 }
 
 pub(super) async fn shutdown_remote_with_fresh_tunnel(
@@ -425,11 +504,15 @@ impl TokioRemoteRecoveryRuntime {
         Arc::clone(&self.owned_engine)
     }
 
-    pub(super) async fn stop_tunnel(&mut self) {
+    pub(super) async fn stop_tunnel(&mut self) -> std::result::Result<(), String> {
         if let Some(mut child) = self.tunnel.take() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let _ = child.start_kill();
+            child
+                .wait()
+                .await
+                .map_err(|error| format!("SSH tunnel reap failed: {error}"))?;
         }
+        Ok(())
     }
 }
 
@@ -471,7 +554,7 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
     async fn restart_tunnel(&mut self) -> std::result::Result<(), String> {
         use std::process::Stdio;
 
-        self.stop_tunnel().await;
+        self.stop_tunnel().await?;
         remove_stale_forward_socket(&self.paths.socket)?;
         let forward = self
             .config
@@ -519,10 +602,7 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
-        let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
-            .await
-            .map_err(|_| "remote attach-or-start command timed out".to_owned())?
-            .map_err(|error| format!("could not run remote attach-or-start command: {error}"))?;
+        let output = read_remote_readiness(&mut command).await?;
         if !output.status.success() {
             return Err(format!(
                 "remote engine attach-or-start failed with SSH status {}",
@@ -589,19 +669,61 @@ pub(super) async fn wait_for_socket_or_child(
     }
 }
 
-#[cfg(unix)]
-pub(super) async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    tokio::select! {
-        _ = interrupt.recv() => Ok(()),
-        _ = terminate.recv() => Ok(()),
-        _ = hangup.recv() => Ok(()),
+// Readiness contains only the bounded session/socket/token descriptor. It is not
+// an SSH transcript and must not collect arbitrary remote stdout.
+const MAX_REMOTE_READINESS_BYTES: u64 = 64 * 1024;
+
+async fn read_remote_readiness(
+    command: &mut tokio::process::Command,
+) -> std::result::Result<std::process::Output, String> {
+    use tokio::io::AsyncReadExt as _;
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run remote attach-or-start command: {error}"))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.start_kill();
+        child
+            .wait()
+            .await
+            .map_err(|error| format!("remote startup reap failed: {error}"))?;
+        return Err("remote startup stdout was not captured".into());
+    };
+    let mut bytes = Vec::new();
+    let operation = async {
+        stdout
+            .take(MAX_REMOTE_READINESS_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| format!("remote readiness read failed: {error}"))?;
+        if bytes.len() as u64 > MAX_REMOTE_READINESS_BYTES {
+            return Err("remote readiness exceeds 64KiB descriptor limit".into());
+        }
+        child
+            .wait()
+            .await
+            .map_err(|error| format!("remote startup wait failed: {error}"))
+    };
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(15), operation).await {
+        Ok(result) => result,
+        Err(_) => Err("remote attach-or-start command timed out".into()),
+    };
+    match result {
+        Ok(status) => Ok(std::process::Output {
+            status,
+            stdout: bytes,
+            stderr: Vec::new(),
+        }),
+        Err(error) => {
+            let _ = child.start_kill();
+            child
+                .wait()
+                .await
+                .map_err(|reap| format!("{error}; remote startup reap failed: {reap}"))?;
+            Err(error)
+        }
     }
 }
 
-#[cfg(not(unix))]
-pub(super) async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
-    tokio::signal::ctrl_c().await
-}
+#[cfg(test)]
+mod lifecycle_tests;
