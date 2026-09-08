@@ -68,10 +68,9 @@ pub(super) async fn activate(
 ) -> Result<Arc<PluginHost>, PluginRpcError> {
     let recipe = &generation.recipe;
     reserve_activation(generation, deadline).await?;
-    let owner = Arc::clone(generation);
-    let (scratch, launcher) = blocking_stage("plugin.launch_authority", move || {
+    let (scratch, launcher) = with_launch_authority(generation, |recipe| {
         let scratch = Arc::new(PrivateMcpScratch::create().map_err(diagnostic)?);
-        let launcher = launcher(&owner.recipe, &scratch)?;
+        let launcher = launcher(recipe, &scratch)?;
         Ok((scratch, launcher))
     })
     .await?;
@@ -81,10 +80,6 @@ pub(super) async fn activate(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         resources.scratch = Some(Arc::clone(&scratch));
-        resources.effects_started = true;
-        if let Some(lease) = &mut resources.lease {
-            lease.begin_effects();
-        }
     }
     let process = prepare_process(generation, Arc::clone(&launcher), scratch).await?;
     if generation.cancellation.is_cancelled() {
@@ -139,6 +134,35 @@ pub(super) async fn activate(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .host = Some(Arc::clone(&host));
     Ok(host)
+}
+
+/// Claims filesystem effects only after a physical worker is admitted. The
+/// resource lock is also the operation owner's destruction fence: either this
+/// worker claims custody first, or cancellation prevents all of its effects.
+pub(super) async fn with_launch_authority<T: Send + 'static>(
+    generation: &Arc<Generation>,
+    work: impl FnOnce(&ActivationRecipe) -> Result<T, PluginRpcError> + Send + 'static,
+) -> Result<T, PluginRpcError> {
+    let owner = Arc::clone(generation);
+    blocking_stage("plugin.launch_authority", move || {
+        {
+            let mut resources = owner
+                .resources
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if owner.cancellation.is_cancelled() {
+                return Err(cancelled());
+            }
+            let lease = resources
+                .lease
+                .as_mut()
+                .ok_or_else(|| unsettled("plugin launch authority has no admission owner"))?;
+            lease.begin_effects();
+            resources.effects_started = true;
+        }
+        work(&owner.recipe)
+    })
+    .await
 }
 
 async fn reserve_activation(

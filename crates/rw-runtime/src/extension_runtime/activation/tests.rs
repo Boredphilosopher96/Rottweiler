@@ -459,3 +459,6 @@ async fn rejected_activation_does_not_close_another_ready_generation() {
     first.endpoint.close().await.expect("first retired");
     budget.close().await.expect("all capacity returned");
 }
+
+#[path = "launch_authority_tests.rs"]
+mod launch_authority;
