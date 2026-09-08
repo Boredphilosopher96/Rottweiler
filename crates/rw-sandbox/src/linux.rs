@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto as _;
 use std::io;
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
