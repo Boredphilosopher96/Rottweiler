@@ -102,6 +102,8 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   readonly select: SelectRenderable
   #items: readonly PickerItem<T>[] = []
   #filtered: readonly PickerItem<T>[] = []
+  #clientStateRevision = 0
+  get clientStateRevision(): number { return this.#clientStateRevision }
   #onSelect: ((item: PickerItem<T>) => void) | undefined
   #onQuery: ((query: string) => void) | undefined
   #query = ""
@@ -386,7 +388,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#configurePresentation(false, 0)
     this.title = ` ${title} `
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.select.options = []
     this.select.visible = false
     this.status.visible = false
@@ -408,7 +410,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#configurePresentation(false, 0)
     this.title = ` ${title} `
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.select.options = []
     this.select.visible = false
     this.status.visible = false
@@ -426,7 +428,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#anchored = anchored
     this.title = ` ${title} `
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.#onSelect = undefined
     this.input.blur()
     this.select.options = []
@@ -562,7 +564,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#onSelect = undefined
     this.#clearInputModes()
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.#query = ""
     this.select.options = []
     this.input.value = ""
@@ -576,7 +578,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   override destroy(): void {
     if (this.isDestroyed) return
     if (!this.select.isDestroyed) this.close()
-    this.#items = []; this.#filtered = []; this.#onSelect = undefined
+    this.#items = []; this.#replaceFiltered([]); this.#onSelect = undefined
     this.#onQuery = undefined; this.#onSecretSubmit = undefined; this.#onTextSubmit = undefined
     this.ctx.keyInput.off("keypress", this.#onKey)
     this.ctx.keyInput.off("paste", this.#onPaste)
@@ -627,6 +629,14 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.height = this.#desiredHeight
   }
 
+  #replaceFiltered(items: readonly PickerItem<T>[]): void {
+    if (items.length !== this.#filtered.length || items.some((item, index) => {
+      const before = this.#filtered[index]
+      return item.id !== before?.id || item.selectable !== before.selectable
+    })) this.#clientStateRevision++
+    this.#filtered = items
+  }
+
   #filter(query: string, preserveSelection = false): void {
     const selectedId = preserveSelection ? this.select.getSelectedOption()?.value : undefined
     const selectedIndex = preserveSelection ? this.select.getSelectedIndex() : 0
@@ -642,7 +652,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       .filter((entry) => entry.score !== null)
       .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.index - right.index)
     const noMatches = query.trim().length > 0 && ranked.length === 0
-    this.#filtered = noMatches
+    this.#replaceFiltered(noMatches
       ? [{
           id: "picker.no-matches",
           label: `No matches for “${query.trim()}”`,
@@ -650,7 +660,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
           value: null as T,
           selectable: false,
         }]
-      : ranked.map((entry) => entry.item)
+      : ranked.map((entry) => entry.item))
     const selected = pickerSelectionColors(this.#theme)
     this.select.textColor = noMatches ? this.#theme.textMuted : this.#theme.text
     this.select.selectedTextColor = noMatches ? this.#theme.textMuted : selected.foreground

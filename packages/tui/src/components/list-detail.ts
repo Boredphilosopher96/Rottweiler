@@ -285,8 +285,11 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     const previousSelectedId = this.#selectedId
     this.heading.content = presentation.title
     if (this.input.value !== presentation.query) this.input.value = presentation.query
+    if (this.#rows.length !== presentation.rows.length || this.#rows.some((row, index) => {
+      const next = presentation.rows[index]
+      return row.id !== next?.id || row.kind !== next.kind
+    })) this.#clientStateRevision++
     this.#rows = presentation.rows
-    this.#clientStateRevision++
     this.#emptyCopy = presentation.emptyCopy
     if (!this.#rows.some((row) => row.kind === "item" && row.id === this.#pressedRowId)) {
       this.#pressedRowId = null

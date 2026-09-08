@@ -74,7 +74,12 @@ interface ClientRestoreHost {
   setPrimaryView(view: PrimaryView): void
   updateToolsWorkspace(state: RottweilerState, restoreHidden: boolean): void
 }
-type MountedClientState = Pick<AppClientState, "transcript" | "tools" | "toolsScrollTop" | "picker">
+interface MountedClientState {
+  transcript: AppClientState["transcript"] | null
+  tools: AppClientState["tools"] | null
+  toolsScrollTop: number
+  picker: AppClientState["picker"]
+}
 
 export class ClientRestoreController {
   #pendingClientState: AppClientState | null = null
@@ -82,14 +87,10 @@ export class ClientRestoreController {
   #mountedState: MountedClientState | null = null
   #mountedAllocation: ClientAllocationLease | null = null
   #pendingMounted = false
-  #transcriptRestored = false
-  #toolsRestored = false
-  #pickerRestored = false
   #transcriptAttempt: string | null = null
   #toolsAttempt: string | null = null
   #pickerAttempt: string | null = null
   #toolsState: WeakRef<RottweilerState> | null = null
-  #pickerOptions: WeakRef<object> | null = null
   #interactionAllocation: ClientAllocationLease | null = null
   #answerGuard: { readonly session: string; readonly control: string; readonly text: string; readonly child: string } | null = null
   #interaction: InteractionSelection | null = null
@@ -97,9 +98,8 @@ export class ClientRestoreController {
   #discardMountedState(): void {
     this.#pendingClientState = null; this.#mountedState = null
     this.#mountedAllocation?.release(); this.#mountedAllocation = null
-    this.#transcriptRestored = false; this.#toolsRestored = false; this.#pickerRestored = false
     this.#transcriptAttempt = null; this.#toolsAttempt = null; this.#pickerAttempt = null
-    this.#toolsState = null; this.#pickerOptions = null
+    this.#toolsState = null
     this.#pendingAllocation?.release(); this.#pendingAllocation = null
   }
   discard(): void {
@@ -282,7 +282,7 @@ export class ClientRestoreController {
     this.#restoreInteraction()
     const transcriptReady = !this.host.history.snapshot.loading
       && this.host.history.snapshot.page !== null
-    if (!this.#toolsRestored && (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0)) {
+    if (state.tools !== null && (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0)) {
       const presented = this.host.children.presentedState()
       if (this.#toolsState?.deref() !== presented) {
         this.host.updateToolsWorkspace(presented, true)
@@ -292,18 +292,19 @@ export class ClientRestoreController {
     const toolsReady = state.toolsScrollTop === 0 || this.host.ui.toolsWorkspace.mountedRowCount > 0
     const transcript = this.host.ui.transcript, tools = this.host.ui.toolsWorkspace
     const transcriptRevision = `${transcript.clientStateRevision}:${transcript.width}:${transcript.height}`
-    if (!this.#transcriptRestored && transcriptReady && this.#transcriptAttempt !== transcriptRevision) {
+    if (state.transcript !== null && transcriptReady && this.#transcriptAttempt !== transcriptRevision) {
       this.#transcriptAttempt = transcriptRevision
-      this.#transcriptRestored = transcript.restoreClientState(state.transcript)
+      if (transcript.restoreClientState(state.transcript)) this.#retireSurface("transcript")
     }
     const toolsRevision = `${tools.clientStateRevision}:${tools.width}:${tools.height}`
-    if (!this.#toolsRestored && toolsReady && this.#toolsAttempt !== toolsRevision) {
+    if (state.tools !== null && toolsReady && this.#toolsAttempt !== toolsRevision) {
       this.#toolsAttempt = toolsRevision
-      this.#toolsRestored = tools.restoreClientState(state.tools)
+      const restored = tools.restoreClientState(state.tools)
       tools.activityScroller.scrollTo(state.toolsScrollTop)
+      if (restored) this.#retireSurface("tools")
     }
     let pickerReady = true
-    if (!this.#pickerRestored && state.picker !== null && this.host.pickerController.kind === state.picker.kind) {
+    if (state.picker !== null && this.host.pickerController.kind === state.picker.kind) {
       const surface = this.clientPickerSurface()
       if (surface !== null) {
         const revision = `${surface.clientStateRevision}:${surface.width}:${surface.height}`
@@ -314,15 +315,24 @@ export class ClientRestoreController {
         surface.restoreViewport(state.picker.scrollOffset)
       } else {
         const options = this.host.ui.picker.select.options
-        if (this.#pickerOptions?.deref() === options) return
-        this.#pickerOptions = new WeakRef(options)
+        const revision = `${this.host.ui.picker.clientStateRevision}:${this.host.ui.picker.width}:${this.host.ui.picker.height}`
+        if (this.#pickerAttempt === revision) return
+        this.#pickerAttempt = revision
         const index = options.findIndex((item) => item.value === state.picker?.selectedId)
         if (index >= 0) this.host.ui.picker.select.setSelectedIndex(index)
         pickerReady = state.picker.selectedId === null || index >= 0
       }
     }
-    this.#pickerRestored ||= pickerReady
-    if (this.#transcriptRestored && this.#toolsRestored && this.#pickerRestored) this.#discardMountedState()
+    if (pickerReady) this.#retireSurface("picker")
+    if (state.transcript === null && state.tools === null && state.picker === null) this.#discardMountedState()
+  }
+
+  #retireSurface(surface: "transcript" | "tools" | "picker"): void {
+    const state = this.#mountedState
+    if (state === null || state[surface] === null) return
+    state[surface] = null
+    if (surface === "tools") state.toolsScrollTop = 0
+    this.#mountedAllocation?.resize(retainedJsonBytes(state, 64 * 1024 * 1024))
   }
 
   #restoreInteraction(): void {

@@ -5,7 +5,7 @@ import { retainedJsonBytes } from "../../src/retained-json"
 import { ClientAllocationError } from "../../src/client-allocation"
 import { emptySessionReader, sessionReaderFor, toolItem, waitForHistory } from "../fixtures/history"
 
-for (const surface of ["transcript", "picker"] as const) {
+for (const surface of ["transcript", "picker", "generic-picker"] as const) {
   test(`absent ${surface} restoration retains hints without the adopted composer envelope`, async () => {
     const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
     const app = createRottweilerApp(setup.renderer, { sessionId: "s", sessionReader: emptySessionReader })
@@ -13,26 +13,35 @@ for (const surface of ["transcript", "picker"] as const) {
     try {
       app.composer.value = "retained draft ".repeat(1024)
       if (surface === "picker") app.openCommandPicker()
+      if (surface === "generic-picker") app.openKeyboardHelpPicker()
       await setup.flush()
       const saved = app.recycleState()!
       const state = surface === "transcript"
         ? { ...saved, transcript: { ...saved.transcript, blocks: { selectedId: "removed", expanded: [{ id: "removed", expanded: true }] } } }
-        : { ...saved, picker: { ...saved.picker!, selectedId: "removed" } }
+        : { ...saved, picker: { ...saved.picker!, selectedId: "removed" }, transcript: { ...saved.transcript,
+            tools: Array.from({ length: 64 }, (_, index) => ({ id: `remembered-${index}-${"x".repeat(64)}`, expanded: false })),
+          } }
       let attempts = 0
       if (surface === "transcript") {
         const restore = app.transcript.restoreClientState.bind(app.transcript)
         app.transcript.restoreClientState = value => { attempts++; return restore(value) }
-      } else {
+      } else if (surface === "picker") {
         const restore = app.commandPalette.restoreViewport.bind(app.commandPalette)
         app.commandPalette.restoreViewport = value => { attempts++; restore(value) }
       }
       expect(app.restoreRecycleState(state)).toBe(true)
       const pendingBytes = app.historyCache.allocations.usage.bytes
       await setup.flush()
-      for (let frame = 0; frame < 5; frame++) { app.applyPendingRecycleScroll(); await setup.renderOnce() }
-      expect(attempts).toBe(1)
+      const pickerRevision = app.picker.clientStateRevision
+      for (let frame = 0; frame < 5; frame++) {
+        app.setState({ ...app.state }); app.applyPendingRecycleScroll(); await setup.renderOnce()
+      }
+      if (surface !== "generic-picker") expect(attempts).toBe(1)
+      else expect(app.picker.clientStateRevision).toBe(pickerRevision)
       expect(app.composer.value).toBe(saved.composer.content)
-      expect(pendingBytes - app.historyCache.allocations.usage.bytes).toBeGreaterThan(Buffer.byteLength(saved.composer.content))
+      const retired = pendingBytes - app.historyCache.allocations.usage.bytes
+      expect(retired).toBeGreaterThan(Buffer.byteLength(saved.composer.content))
+      if (surface !== "transcript") expect(retired).toBeGreaterThan(retainedJsonBytes(state, 64 * 1024 * 1024) + 1024)
     } finally { app.destroy(); setup.renderer.destroy() }
     expect(app.historyCache.allocations.usage.bytes).toBe(0)
   })
