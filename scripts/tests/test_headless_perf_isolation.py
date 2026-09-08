@@ -223,21 +223,47 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         return fixture, gate, output, env
 
     def test_standalone_sigterm_reaps_sample_and_retains_failed_scratch(self) -> None:
+        self.assert_cancelled_gate(delegated=False)
+
+    def test_cancelled_gate_reaps_sample_and_retains_failed_scratch(self) -> None:
+        self.assert_cancelled_gate(delegated=True)
+
+    def assert_cancelled_gate(self, *, delegated: bool) -> None:
+        from perf_process_scope import SCOPE_FD, ScopeReader
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "sample.pid"
             fixture, gate, output, env = self.prepared_gate(
                 f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nexec sleep 60\n"
             )
-            owner = subprocess.Popen([str(gate), str(fixture.root)], cwd=fixture.repo, env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     start_new_session=True)
+            scope = None
+            writer = None
+            env.pop(SCOPE_FD, None)
+            if delegated:
+                descriptor, writer = os.pipe()
+                self.addCleanup(os.close, descriptor)
+                os.set_blocking(descriptor, False)
+                scope = ScopeReader(descriptor)
+                env[SCOPE_FD] = str(writer)
+            try:
+                owner = subprocess.Popen([str(gate), str(fixture.root)], cwd=fixture.repo, env=env,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         start_new_session=True,
+                                         pass_fds=() if writer is None else (writer,))
+            finally:
+                if writer is not None:
+                    os.close(writer)
             try:
                 deadline = time.monotonic() + 3
                 while not pid_path.exists() and time.monotonic() < deadline:
                     time.sleep(.01)
                 self.assertTrue(pid_path.exists())
+                # Cancel actual warmup work. Candidate verification and Python
+                # startup are outside this cancellation oracle; the process
+                # supervisor has separate deadline and forced-death tests.
                 os.kill(owner.pid, signal.SIGTERM)
                 self.assertNotEqual(owner.wait(timeout=5), 0)
+                if scope is not None:
+                    scope.require_closed()
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(int(pid_path.read_text()), 0)
                 retained = list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*"))
@@ -245,28 +271,11 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertEqual(json.loads(output.with_suffix(".failed-scratch.json").read_text())["retained_scratch"], str(retained[0]))
                 evidence = json.loads(output.with_name("headless.evidence.json").read_text())
                 self.assertEqual(evidence["status"], "fail")
+                self.assertEqual(evidence["phase"], "warmup")
             finally:
                 if owner.returncode is None:
                     os.killpg(owner.pid, signal.SIGKILL)
                     owner.wait()
-
-    def test_cancelled_gate_reaps_sample_and_retains_failed_scratch(self) -> None:
-        from perf_process import run_sample
-        with tempfile.TemporaryDirectory() as directory:
-            pid_path = Path(directory) / "sample.pid"
-            fixture, gate, output, env = self.prepared_gate(
-                f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nexec sleep 60\n"
-            )
-            with self.assertRaises(TimeoutError):
-                run_sample([str(gate), str(fixture.root)], cwd=fixture.repo,
-                           env=env, timeout=2, delegated=True)
-            pid = int(pid_path.read_text())
-            with self.assertRaises(ProcessLookupError):
-                os.kill(pid, 0)
-            self.assertEqual(len(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*"))), 1)
-            evidence = json.loads(output.with_name("headless.evidence.json").read_text())
-            self.assertEqual(evidence["status"], "fail")
-            self.assertEqual(evidence["phase"], "warmup")
 
     def test_unproven_sample_closure_retains_headless_storage(self):
         fixture, gate, output, env = self.prepared_gate("#!/bin/sh\nexit 99\n")
