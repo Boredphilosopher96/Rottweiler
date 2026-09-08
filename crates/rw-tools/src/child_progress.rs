@@ -68,7 +68,7 @@ impl ChildProgressBudget {
                 };
             }
         }
-        let shape = match preflight_json(
+        let Ok(shape) = preflight_json(
             &bytes,
             JsonStructureLimits {
                 max_encoded_bytes: MAX_CHILD_PROGRESS_BYTES,
@@ -76,9 +76,8 @@ impl ChildProgressBudget {
                 max_string_bytes: MAX_CHILD_PROGRESS_BYTES,
                 max_depth: 62,
             },
-        ) {
-            Ok(shape) => shape,
-            Err(_) => return invalidation(sequence).map(Some),
+        ) else {
+            return invalidation(sequence).map(Some);
         };
         let decoded = shape
             .direct_value_decode_bytes()
