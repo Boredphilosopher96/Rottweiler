@@ -116,7 +116,7 @@ def verify_bundle(generation: Path, digests: dict[str, str]) -> None:
 
 
 def write_receipt(executable: Path, fixture: Path) -> Path:
-    """The flat helper receipt stays stable; its sibling belongs to the same bundle."""
+    """Publish helper and fixture bytes with flat receipts in one atomic bundle."""
     inputs = {BINARY: executable.resolve(strict=True), FIXTURE: fixture.resolve(strict=True)}
     base = inputs[BINARY].parent / ".rw-test-helpers"
     base.mkdir(mode=0o700, exist_ok=True)
@@ -126,8 +126,8 @@ def write_receipt(executable: Path, fixture: Path) -> Path:
     temporary = Path(tempfile.mkdtemp(prefix=".building-", dir=base))
     try:
         digests = {name: copy_artifact(inputs[name], temporary / name) for name in BINARIES}
-        # Ordered fixed-width digests bind both members, without changing either
-        # flat artifact receipt consumed by the runtime and native acceptance.
+        # Ordered fixed-width digests bind both images in one generation.
+        # Each flat receipt names its independently verified image identity.
         generation = base / (digests[BINARY] + "-" + digests[FIXTURE])
         for name in BINARIES:
             encoded = identity_body(temporary / name, generation / name, digests[name])
