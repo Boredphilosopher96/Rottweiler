@@ -50,6 +50,11 @@ incremental = false
 debug = "line-tables-only"
 incremental = false
 
+# Executable admission hashes complete native images before sandbox startup.
+# Keep cryptographic compression at native speed in debug/test service lifecycles.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 strip = true
 # Official release builds route through scripts/cargo-release.sh. Its native
