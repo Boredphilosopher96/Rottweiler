@@ -543,7 +543,10 @@ bounds within the outer cooperative settlement window.
 `scripts/ci_evidence.py` preserves command exit status and writes bounded partial
 and final diagnostics with source/run/lock identity. Each gate retains an 8 MiB
 redacted log prefix and a 128 KiB rolling tail, with explicit omitted-byte counts,
-so later successful test binaries do not erase an earlier failure. Native fixture
+so later successful test binaries do not erase an earlier failure. Console forwarding
+is a nonblocking projection with no pending byte queue; stalled or closed sinks
+increment a separate console-omission count while retained evidence and physical
+cancellation continue. Native fixture
 activation records stage timing without arguments or credential values. CI uploads
 these results on failure. Long soaks periodically replace an atomic progress checkpoint and
 retain counters and process generations on setup, workload or interruption

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 
+from ci_console import ConsoleRelay
 from perf_process_owner import OwnedProcess, SCOPE
 from perf_process_scope import ScopeCancelled, UnsettledScope
 
@@ -77,7 +78,9 @@ def observe(command: list[str], gate: str, output: Path, *, delegated: bool = Fa
 
     owner = None
     exit_code = 1
+    console = None
     try:
+        console = ConsoleRelay(sys.stdout.fileno())
         owner = OwnedProcess(command, cwd=Path.cwd(), env=dict(os.environ),
                              delegated=delegated, output="combined")
         process = owner.process
@@ -101,17 +104,15 @@ def observe(command: list[str], gate: str, output: Path, *, delegated: bool = Fa
                     if not chunk:
                         break
                     chunk = redact(chunk)
-                    sys.stdout.buffer.write(chunk)
-                    sys.stdout.buffer.flush()
                     retain(chunk)
+                    console.write(chunk)
                 if now - last_checkpoint >= 5:
                     result.update(elapsed_seconds=now - started, log_tail=tail.decode(errors="replace"))
                     write_result(output, result)
                     last_checkpoint = now
         final = redact(b"", final=True)
-        sys.stdout.buffer.write(final)
-        sys.stdout.buffer.flush()
         retain(final)
+        console.write(final)
         while (status := owner.observe_exit()) is None:
             SCOPE.check()
             if owner.scope is not None:
@@ -130,6 +131,14 @@ def observe(command: list[str], gate: str, output: Path, *, delegated: bool = Fa
                 result["cleanup_error"] = str(error)
                 if exit_code == 0:
                     exit_code = 1
+        if console is not None:
+            result["console_omitted_bytes"] = console.omitted
+            if console.failure is not None:
+                result["console_error"] = console.failure
+            try:
+                console.close()
+            except OSError as error:
+                result["console_error"] = str(error)[:512]
         if exit_code < 0:
             exit_code = 128 - exit_code
         result.update(status="passed" if exit_code == 0 else "failed", exit_code=exit_code,
