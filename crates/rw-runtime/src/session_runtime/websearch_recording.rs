@@ -370,20 +370,8 @@ impl ReplayingConfiguredWebSearcher {
         let Some(bytes) = directory.read_fixture()? else {
             return Ok(None);
         };
-        let encoded: BTreeMap<String, serde_json::Value> = serde_json::from_slice(&bytes)
-            .map_err(|error| miette!("web-search fixture could not parse: {error}"))?;
-        let fixtures = encoded
-            .into_iter()
-            .map(|(key, value)| {
-                let responses = if value.is_array() {
-                    serde_json::from_value(value)
-                } else {
-                    serde_json::from_value(value).map(|response| vec![response])
-                }
-                .map_err(|error| miette!("web-search fixture response could not parse: {error}"))?;
-                Ok((key, responses))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
+        let fixtures: BTreeMap<String, Vec<WebSearchResponse>> = serde_json::from_slice(&bytes)
+            .map_err(|error| miette!("web-search fixture occurrences could not parse: {error}"))?;
         Ok(Some(Self {
             fixtures,
             occurrences: Mutex::new(BTreeMap::new()),

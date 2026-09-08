@@ -238,3 +238,63 @@ async fn configured_websearch_replay_preserves_repeated_request_occurrences() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn configured_websearch_reader_rejects_scalar_occurrences() {
+    let fixtures = tempdir().expect("fixtures");
+    let writer = RecordingConfiguredWebSearcher::new(
+        Arc::new(FixtureWebSearcher(WebSearchResponse {
+            source: WebSearchSource::ConfiguredApi,
+            results: vec![WebSearchResult {
+                title: "recorded title".into(),
+                url: "https://example.com/source".into(),
+                snippet: "recorded snippet".into(),
+            }],
+        })),
+        fixtures.path(),
+        FixtureRedactor::default(),
+    )
+    .expect("recorder");
+    let request = WebSearchRequest {
+        model_alias: None,
+        query: "occurrence contract".into(),
+        max_results: 1,
+        recency_days: None,
+        allowed_domains: vec![],
+    };
+    let expected = writer
+        .search(request.clone(), CancellationToken::default())
+        .await
+        .expect("producer response");
+    let path = fixtures.path().join(WEBSEARCH_REPLAY_FILE);
+    let bytes = std::fs::read(&path).expect("producer bytes");
+    let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).expect("fixture JSON");
+    let entries = invalid.as_object_mut().expect("occurrence catalog");
+    assert_eq!(entries.len(), 1);
+    let occurrence = entries
+        .values_mut()
+        .next()
+        .expect("recorded occurrence list");
+    assert_eq!(occurrence.as_array().expect("producer array").len(), 1);
+    *occurrence = occurrence[0].clone();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&invalid).expect("scalar fixture bytes"),
+    )
+    .expect("persist scalar response");
+    let Err(error) = ReplayingConfiguredWebSearcher::load(fixtures.path()) else {
+        panic!("a response must be in its explicit occurrence array");
+    };
+    assert!(error.to_string().contains("expected a sequence"), "{error}");
+    std::fs::write(&path, bytes).expect("restore exact recorder output");
+    let replay = ReplayingConfiguredWebSearcher::load(fixtures.path())
+        .expect("canonical catalog")
+        .expect("existing recording");
+    assert_eq!(
+        replay
+            .search(request, CancellationToken::default())
+            .await
+            .expect("one occurrence"),
+        expected
+    );
+}
