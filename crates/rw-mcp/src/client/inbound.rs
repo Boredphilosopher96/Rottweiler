@@ -47,12 +47,16 @@ impl McpInboundRouter {
     pub(super) fn request(request: &ServerRequest) -> Result<ClientResult, ErrorData> {
         match request {
             ServerRequest::PingRequest(_) => Ok(ClientResult::empty(())),
-            _ => Err(ErrorData::new(
-                ErrorCode::METHOD_NOT_FOUND,
-                "MCP server-initiated host capabilities are unavailable",
-                None,
-            )),
+            _ => Err(Self::unsupported_request()),
         }
+    }
+
+    pub(super) fn unsupported_request() -> ErrorData {
+        ErrorData::new(
+            ErrorCode::METHOD_NOT_FOUND,
+            "MCP server-initiated host capabilities are unavailable",
+            None,
+        )
     }
 
     pub(super) fn notification(&self, notification: &ServerNotification) {

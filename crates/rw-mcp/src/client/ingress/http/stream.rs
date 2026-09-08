@@ -4,6 +4,7 @@ use super::{
     worker::Response,
 };
 use crate::client::ingress::{
+    decode::DecodedMessage,
     frame::RawFrame,
     sse::{SseMetadata, SseParser},
 };
@@ -153,7 +154,12 @@ impl Shared {
         error_only: bool,
     ) -> Result<bool, McpError> {
         let mut packet = Arc::clone(&self.ingress).decode(frame).await?;
-        if error_only && !matches!(packet.message, ServerJsonRpcMessage::Error(_)) {
+        if error_only
+            && !matches!(
+                packet.message,
+                DecodedMessage::Protocol(ServerJsonRpcMessage::Error(_))
+            )
+        {
             return Err(invalid());
         }
         let shared = Arc::clone(self);
@@ -171,7 +177,9 @@ impl Shared {
             .await??;
         let terminal = matches!(
             packet.message,
-            ServerJsonRpcMessage::Response(_) | ServerJsonRpcMessage::Error(_)
+            DecodedMessage::Protocol(
+                ServerJsonRpcMessage::Response(_) | ServerJsonRpcMessage::Error(_)
+            )
         );
         tokio::select! { result = self.sender.send(packet) => result.map_err(|_| invalid())?, () = self.stopped.cancelled() => return Err(invalid()) }
         Ok(terminal)

@@ -1,5 +1,5 @@
 //! Inbound host work is consumed under its physical decoded-body owner.
-use super::requests::RequestState;
+use super::{decode::DecodedMessage, requests::RequestState};
 use crate::{McpInboundRouter, payload_work::Allocation};
 use rmcp::{
     ErrorData,
@@ -14,7 +14,7 @@ pub(super) struct DeliveryRetention {
 }
 
 pub(super) struct InboundPacket {
-    pub(super) message: ServerJsonRpcMessage,
+    pub(super) message: DecodedMessage,
     pub(super) retained: Arc<DeliveryRetention>,
 }
 
@@ -27,7 +27,11 @@ pub(super) enum Delivery {
 impl InboundPacket {
     pub(super) fn dispatch(self) -> Delivery {
         match self.message {
-            ServerJsonRpcMessage::Request(request) => {
+            DecodedMessage::DeniedRequest(id) => Delivery::Reply(
+                ClientJsonRpcMessage::error(McpInboundRouter::unsupported_request(), Some(id)),
+                self.retained,
+            ),
+            DecodedMessage::Protocol(ServerJsonRpcMessage::Request(request)) => {
                 let reply = match McpInboundRouter::request(&request.request) {
                     Ok(result) => ClientJsonRpcMessage::response(result, request.id),
                     Err(error) => ClientJsonRpcMessage::error(error, Some(request.id)),
@@ -35,7 +39,7 @@ impl InboundPacket {
                 drop(request.request);
                 Delivery::Reply(reply, self.retained)
             }
-            ServerJsonRpcMessage::Notification(notification) => {
+            DecodedMessage::Protocol(ServerJsonRpcMessage::Notification(notification)) => {
                 let mut reply = None;
                 if let ServerNotification::CancelledNotification(cancelled) =
                     &notification.notification
@@ -60,7 +64,9 @@ impl InboundPacket {
                     Delivery::Response(reply, self.retained)
                 })
             }
-            message @ (ServerJsonRpcMessage::Response(_) | ServerJsonRpcMessage::Error(_)) => {
+            DecodedMessage::Protocol(
+                message @ (ServerJsonRpcMessage::Response(_) | ServerJsonRpcMessage::Error(_)),
+            ) => {
                 // The last-packet guard fences route-or-drop. The owned request
                 // task independently retains the same request state through its
                 // oneshot result and conversion to the public response carrier.

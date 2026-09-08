@@ -190,6 +190,15 @@ access through a library default handler.
 | Cancellation | RPC request owner handles the cancellation token; physical operation settlement remains independently owned |
 | Progress, logging, task/subscription/custom observations | No subscription or authority is granted; discard payloads without a retained queue or user-visible secret channel |
 
+The MCP client accepts only inbound `ping` requests. For every other request
+method, it validates JSON syntax, envelope selectors, scalar request identity,
+and the shared byte/depth/node limits, then returns `METHOD_NOT_FOUND`. Unsupported
+parameters remain opaque, even when they do not match that method's external
+schema; no sampling, elicitation, or custom parameter graph is allocated. The
+exact request ID and denial stay admitted through physical reply transmission.
+Supported ping parameters and correlated server results retain their typed
+validation, including task and input-required results.
+
 Catalog invalidation uses one shared atomic flag per connection. Disconnection
 also revokes the snapshot. Reconnection waits for prior invocation ownership and
 settles the exact prior client before opening a replacement; changed tool schemas

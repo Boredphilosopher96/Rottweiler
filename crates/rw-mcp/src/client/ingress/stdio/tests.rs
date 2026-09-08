@@ -124,3 +124,30 @@ async fn remote_cancel_settles_only_its_exact_owned_request() -> TestResult {
     transport.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn unsupported_request_denial_preserves_the_active_response_and_exact_id() -> TestResult {
+    let (mut transport, server, ingress) = fixture()?;
+    let mut server = BufReader::new(server);
+    let (request, state) = ping(&ingress, 7)?;
+    transport.send(request).await?;
+    let mut line = String::new();
+    server.read_line(&mut line).await?;
+    server.get_mut().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"007\",\"method\":\"sampling/createMessage\",\"params\":{\"messages\":\"private invalid schema\"}}\n{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n").await?;
+    let response = tokio::time::timeout(Duration::from_secs(2), transport.receive())
+        .await?
+        .ok_or("active response missing")?;
+    assert!(
+        matches!(&response, ServerJsonRpcMessage::Response(value) if value.id == RequestId::Number(7))
+    );
+    line.clear();
+    tokio::time::timeout(Duration::from_secs(2), server.read_line(&mut line)).await??;
+    let denial: serde_json::Value = serde_json::from_str(&line)?;
+    assert_eq!(denial["id"], "007");
+    assert_eq!(denial["error"]["code"], -32601);
+    assert!(!line.contains("private invalid schema"));
+    drop(response);
+    drop(state);
+    transport.close().await?;
+    Ok(())
+}

@@ -14,6 +14,9 @@ fn accepted(value: &Value, method: Option<&str>) -> ServerJsonRpcMessage {
     })
     .expect("admitted typed message");
     assert!(admitted);
+    let DecodedMessage::Protocol(result) = result else {
+        panic!("expected supported protocol message");
+    };
     result
 }
 

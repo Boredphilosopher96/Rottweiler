@@ -30,6 +30,9 @@ impl BorrowedId<'_> {
     pub fn numeric_value(&self) -> io::Result<Option<i64>> {
         header::numeric_id(self.0.get())
     }
+    pub(crate) fn encoded_bytes(self) -> usize {
+        self.0.get().len()
+    }
     pub(crate) fn owned(self) -> io::Result<RequestId> {
         header::id(self.0.get())
     }

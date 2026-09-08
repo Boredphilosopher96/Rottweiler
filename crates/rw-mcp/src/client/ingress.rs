@@ -9,6 +9,7 @@ mod sse;
 pub(super) mod stdio;
 
 use crate::{McpError, McpInboundRouter, payload_work::Allocation};
+use decode::DecodedMessage;
 use frame::RawFrame;
 use message::{DeliveryRetention, InboundPacket};
 use requests::{RequestRegistry, RequestState};
@@ -98,7 +99,8 @@ impl Ingress {
             message,
             body: Arc::new(retained.ok_or_else(protocol_error)?),
         };
-        if let ServerJsonRpcMessage::Notification(notification) = &decoded.message
+        if let DecodedMessage::Protocol(ServerJsonRpcMessage::Notification(notification)) =
+            &decoded.message
             && let ServerNotification::CancelledNotification(cancelled) = &notification.notification
             && let Some(id) = &cancelled.params.request_id
         {
@@ -140,6 +142,6 @@ fn protocol_error() -> McpError {
 
 // All later correlation/publication errors destroy typed payloads before credit.
 struct Decoded {
-    message: ServerJsonRpcMessage,
+    message: DecodedMessage,
     body: Arc<Allocation>,
 }

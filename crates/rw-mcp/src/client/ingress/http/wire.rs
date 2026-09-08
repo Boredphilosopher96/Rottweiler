@@ -4,6 +4,7 @@ use super::{
     worker::Response,
 };
 use crate::client::ingress::{
+    decode::DecodedMessage,
     http_headers::{self, ToolHeaderAnnotations},
     message::InboundPacket,
 };
@@ -116,7 +117,9 @@ impl Shared {
         Ok(())
     }
     pub(super) fn observe(&self, packet: &mut InboundPacket) -> Result<(), McpError> {
-        let ServerJsonRpcMessage::Response(response) = &mut packet.message else {
+        let DecodedMessage::Protocol(ServerJsonRpcMessage::Response(response)) =
+            &mut packet.message
+        else {
             return Ok(());
         };
         match &mut response.result {

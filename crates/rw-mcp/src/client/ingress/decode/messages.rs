@@ -160,16 +160,10 @@ fn result(input: &RawValue, method: &str) -> io::Result<ServerResult> {
     }
 }
 
-#[allow(deprecated)] // Preserve external sampling requests for explicit capability rejection.
 fn request(input: &[u8], method: &str) -> io::Result<ServerRequest> {
     match method {
         "ping" => parse::<m::PingRequest>(input).map(ServerRequest::PingRequest),
-        "sampling/createMessage" => {
-            parse::<m::CreateMessageRequest>(input).map(ServerRequest::CreateMessageRequest)
-        }
-        "roots/list" => parse::<m::ListRootsRequest>(input).map(ServerRequest::ListRootsRequest),
-        "elicitation/create" => parse::<m::ElicitRequest>(input).map(ServerRequest::ElicitRequest),
-        _ => parse::<m::CustomRequest>(input).map(ServerRequest::CustomRequest),
+        _ => Err(invalid("unsupported MCP request requires local denial")),
     }
 }
 #[allow(deprecated)] // External logging notifications remain accepted observations.
