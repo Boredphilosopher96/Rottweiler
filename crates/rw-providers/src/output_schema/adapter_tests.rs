@@ -97,7 +97,12 @@ async fn direct_openai_http_projects_and_validates_both_supported_wire_dialects(
                     OpenAiWireMode::ChatCompletions=>vec![serde_json::json!({"model":"fixture","choices":[{"index":0,"delta":{"content":text},"finish_reason":"stop"}]}).to_string(),serde_json::json!({"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":4}}).to_string(),"[DONE]".into()],
                     OpenAiWireMode::Responses=>vec![serde_json::json!({"type":"response.output_text.delta","delta":text}).to_string(),serde_json::json!({"type":"response.completed","response":{"usage":{}}}).to_string()],
                 };
-                let body=frames.into_iter().map(|frame|format!("data: {frame}\n\n")).collect::<String>();
+                let mut body = String::new();
+                for frame in frames {
+                    body.push_str("data: ");
+                    body.push_str(&frame);
+                    body.push_str("\n\n");
+                }
                 let response=format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
                 connection.write_all(response.as_bytes()).await.expect("response");
             }).await.expect("server lifetime");

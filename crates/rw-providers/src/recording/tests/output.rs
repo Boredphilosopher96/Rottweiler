@@ -28,23 +28,23 @@ impl Provider for StructuredProvider {
         Ok(())
     }
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        self.produce(request, None)
+        self.produce(&request, None)
     }
     async fn stream_with_wire_sink(
         &self,
         request: ProviderRequest,
         sink: Arc<dyn WireFrameSink>,
     ) -> Result<BoxEventStream, ProviderError> {
-        self.produce(request, Some(sink))
+        self.produce(&request, Some(sink))
     }
 }
 impl StructuredProvider {
     fn produce(
         &self,
-        request: ProviderRequest,
+        request: &ProviderRequest,
         sink: Option<Arc<dyn WireFrameSink>>,
     ) -> Result<BoxEventStream, ProviderError> {
-        let output = OutputValidation::prepare(&request, true)?;
+        let output = OutputValidation::prepare(request, true)?;
         let text = if self.valid {
             r#"{"ok":true}"#
         } else {
