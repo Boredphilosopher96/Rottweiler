@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used)]
 use super::*;
+use crate::session::SessionIndexReadControl;
 
 fn summary(id: &str, title: &str, updated: i64) -> SessionSummary {
     SessionSummary {
