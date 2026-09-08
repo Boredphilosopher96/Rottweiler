@@ -99,6 +99,42 @@ fn first_capture_fork_and_rewind_survive_reopen() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn readonly_namespace_lookup_accepts_parent_alias_but_rejects_ledger_symlink() -> TestResult {
+    let fixture = NamespaceFixture::new()?;
+    fixture.capture(&fixture.open("registered")?)?;
+    let aliases = tempdir()?;
+    let alias = aliases.path().join("storage");
+    std::os::unix::fs::symlink(fixture.directory.path(), &alias)?;
+    let blobs = CheckpointBlobStore::open(&alias, &fixture.workspace)?;
+    let empty = CheckpointStore::open(&alias.join("empty"), &fixture.workspace, blobs.clone())?;
+    assert!(empty.recover_rewinds()?.is_empty());
+    assert_eq!(
+        empty.recover_opaque_mutations(&mut CheckpointOperation::default())?,
+        0
+    );
+    assert_eq!(fs::read_dir(&empty.root)?.count(), 0);
+
+    let ledger = blobs.root.join("quota.sqlite");
+    let retained = blobs.root.join("retained-quota.sqlite");
+    fs::rename(&ledger, &retained)?;
+    std::os::unix::fs::symlink(&retained, &ledger)?;
+    assert!(empty.recover_rewinds().is_err());
+    assert!(
+        empty
+            .recover_opaque_mutations(&mut CheckpointOperation::default())
+            .is_err()
+    );
+    assert_eq!(fs::read_dir(&empty.root)?.count(), 0);
+    assert!(fs::symlink_metadata(&ledger)?.file_type().is_symlink());
+    let connection = Connection::open(retained)?;
+    let count: u32 =
+        connection.query_row("SELECT count(*) FROM namespaces", [], |row| row.get(0))?;
+    assert_eq!(count, 1);
+    Ok(())
+}
+
 #[test]
 fn rewind_can_be_the_first_namespace_mutation() -> TestResult {
     let fixture = NamespaceFixture::new()?;

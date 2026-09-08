@@ -134,8 +134,18 @@ impl CheckpointBlobStore {
         if file.metadata()?.len() > 64 * 1024 * 1024 {
             return Err(CheckpointError::CorruptBlobQuota);
         }
+        // SQLite NOFOLLOW also rejects ancestor aliases such as macOS /var.
+        // Resolve only the parent: the ledger leaf must remain non-symlinked
+        // and identify the regular file already opened under the writer lock.
+        let resolved = fs::canonicalize(&self.root)?.join("quota.sqlite");
+        if !crate::checkpoint::same_open_file_identity(
+            &file.metadata()?,
+            &fs::symlink_metadata(&resolved)?,
+        ) {
+            return Err(CheckpointError::CorruptBlobQuota);
+        }
         let connection = Connection::open_with_flags(
-            &path,
+            &resolved,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,

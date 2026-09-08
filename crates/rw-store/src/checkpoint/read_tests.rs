@@ -174,6 +174,7 @@ fn retained_bytes_can_reject_a_few_large_keys_before_union_growth() -> TestResul
 #[test]
 fn review_ledger_rejects_oversized_source_before_reading_it() -> TestResult {
     let fixture = Fixture::new()?;
+    fixture.manifest(1, &["a"])?;
     File::create(fixture.store.review_path("session"))?
         .set_len(operation::MAX_METADATA_BYTES as u64 + 1)?;
     assert!(matches!(
