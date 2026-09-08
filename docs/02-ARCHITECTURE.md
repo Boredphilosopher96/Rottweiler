@@ -181,6 +181,11 @@ and guarded HTTP connections. It advertises no server-initiated host capabilitie
 An inbound request cannot acquire session, credential, filesystem, or model
 access through a library default handler.
 
+One concrete client transport selects stdio or guarded HTTP before initialization,
+so both use the same handshake and service dispatch. Each variant retains its
+own admitted framing, send jobs, cancellation, and physical close operation.
+The stdio input buffer is allocated only for stdio, after its scratch admission.
+
 | MCP operation | Contract |
 |---|---|
 | Tools, resources, prompts | List only server-advertised capabilities; use bounded reviewed catalogs and owned unary calls |

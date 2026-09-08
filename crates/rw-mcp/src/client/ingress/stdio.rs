@@ -30,7 +30,7 @@ pub(in crate::client) struct StdioTransport {
     pending: Option<PendingDecode>,
     control: Option<JoinHandle<io::Result<()>>>,
     last_delivery: Option<Arc<DeliveryRetention>>,
-    input: [u8; 8192],
+    input: Box<[u8; 8192]>,
     start: usize,
     end: usize,
     eof: bool,
@@ -44,6 +44,7 @@ impl StdioTransport {
         writer: Writer,
         ingress: Arc<Ingress>,
     ) -> Result<Self, McpError> {
+        let scratch = Allocation::new(8192)?;
         Ok(Self {
             reader,
             writer: Arc::new(Mutex::new(writer)),
@@ -52,12 +53,12 @@ impl StdioTransport {
             pending: None,
             control: None,
             last_delivery: None,
-            input: [0; 8192],
+            input: Box::new([0; 8192]),
             start: 0,
             end: 0,
             eof: false,
             stopped: CancellationToken::default(),
-            _scratch: Allocation::new(8192)?,
+            _scratch: scratch,
         })
     }
 
@@ -98,7 +99,7 @@ impl StdioTransport {
             if self.start == self.end {
                 self.end = self
                     .reader
-                    .read(&mut self.input)
+                    .read(&mut self.input[..])
                     .await
                     .map_err(|_| super::protocol_error())?;
                 self.start = 0;

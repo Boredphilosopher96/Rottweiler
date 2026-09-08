@@ -16,6 +16,7 @@ async fn admitted_service(
     let (reader, writer) = tokio::io::split(stream);
     let transport = StdioTransport::new(Box::pin(reader), Box::pin(writer), Arc::clone(&ingress))
         .expect("transport admission");
+    let transport = crate::client::transport::ClientTransport::Stdio(transport);
     let service = Box::pin(router.serve(transport))
         .await
         .expect("client handshake");

@@ -58,7 +58,7 @@ impl McpConnector for TestOnlyUnsandboxedStdioConnector {
         )?;
         start::start(
             config.id.clone(),
-            transport,
+            super::transport::ClientTransport::Stdio(transport),
             ingress,
             Some(Box::new(Child(child))),
         )

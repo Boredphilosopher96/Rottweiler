@@ -1,16 +1,17 @@
 use super::*;
+use crate::client::transport::ClientTransport;
 use rmcp::model::{ClientRequest, JsonRpcMessage, RequestId};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn fixture() -> Result<(StdioTransport, tokio::io::DuplexStream, Arc<Ingress>), McpError> {
+fn fixture() -> Result<(ClientTransport, tokio::io::DuplexStream, Arc<Ingress>), McpError> {
     let ingress = Ingress::new(crate::McpInboundRouter::default())?;
     let (client, server) = tokio::io::duplex(8192);
     let (read, write) = tokio::io::split(client);
     let transport = StdioTransport::new(Box::pin(read), Box::pin(write), Arc::clone(&ingress))?;
-    Ok((transport, server, ingress))
+    Ok((ClientTransport::Stdio(transport), server, ingress))
 }
 
 fn ping(

@@ -1,7 +1,7 @@
 //! Connection creation owns initialization and native cleanup across caller loss.
-use super::{RmcpClient, ingress::Ingress};
+use super::{RmcpClient, ingress::Ingress, transport::ClientTransport};
 use crate::{McpClient, McpError};
-use rmcp::{ServiceExt as _, service::RoleClient, transport::Transport};
+use rmcp::ServiceExt as _;
 use rw_tools::ProtocolProcessHandle;
 use rw_types::McpServerId;
 use std::{sync::Arc, time::Duration};
@@ -13,10 +13,10 @@ struct Starting {
     armed: bool,
 }
 impl Starting {
-    async fn run<T: Transport<RoleClient> + 'static>(
+    async fn run(
         mut self,
         server: McpServerId,
-        transport: T,
+        transport: ClientTransport,
         mut result: oneshot::Sender<Result<Arc<dyn McpClient>, McpError>>,
     ) {
         let router = self.ingress.router.clone();
@@ -102,9 +102,9 @@ impl Drop for Starting {
     }
 }
 
-pub(super) async fn start<T: Transport<RoleClient> + 'static>(
+pub(super) async fn start(
     server: McpServerId,
-    transport: T,
+    transport: ClientTransport,
     ingress: Arc<Ingress>,
     child: Option<Box<dyn ProtocolProcessHandle>>,
 ) -> Result<Arc<dyn McpClient>, McpError> {

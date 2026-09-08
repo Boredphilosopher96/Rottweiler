@@ -4,6 +4,7 @@ mod closure;
 mod inbound;
 mod ingress;
 mod start;
+mod transport;
 pub use inbound::McpInboundRouter;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -155,7 +156,13 @@ where
                 return Err(error);
             }
         };
-        start::start(config.id.clone(), transport, ingress, Some(handle)).await
+        start::start(
+            config.id.clone(),
+            transport::ClientTransport::Stdio(transport),
+            ingress,
+            Some(handle),
+        )
+        .await
     }
 }
 
@@ -215,7 +222,13 @@ pub async fn connect_http(
     let ingress = ingress::Ingress::new(McpInboundRouter::default())?;
     let transport =
         ingress::http::HttpTransport::new(endpoint, token, client, Arc::clone(&ingress), capacity)?;
-    start::start(server, transport, ingress, None).await
+    start::start(
+        server,
+        transport::ClientTransport::Http(transport),
+        ingress,
+        None,
+    )
+    .await
 }
 
 fn json_object(value: Value) -> Result<JsonObject, McpError> {
