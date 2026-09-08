@@ -116,18 +116,17 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 use tracing::Instrument as _;
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 /// Composes an owned local conversation or prompt-inspection session.
 ///
 /// # Errors
 /// Returns an error when configuration, durable recovery, or composition fails.
 pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super::LocalSession> {
-    use tracing::Instrument as _;
     compose_owned_session(options)
         .instrument(tracing::trace_span!(target: "rw_performance", "runtime.local.compose"))
         .await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::LocalSession> {
     if options.max_turns == 0 {
         return Err(miette!("--max-turns must be greater than zero"));
