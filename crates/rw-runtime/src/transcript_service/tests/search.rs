@@ -101,7 +101,7 @@ fn search_finished_tool_anchors_its_started_row_and_rejects_non_document_sources
                 tool_call_id: rw_types::ToolCallId("provider".into()),
                 invocation_id: rw_types::ToolInvocationId("host".into()),
                 output: rw_types::ToolOutput::Text {
-                    text: "needle".into(),
+                    text: "needle".repeat(64 * 1024),
                 },
                 presentation: None,
                 is_error: false,

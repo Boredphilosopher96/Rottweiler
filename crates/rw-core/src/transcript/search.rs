@@ -1,73 +1,63 @@
-//! Exact search-source to effective semantic-row resolution.
-use super::{TranscriptProjectionError, decode, entity_binding};
+//! Exact search-source bindings are published with their effective semantic rows.
+use super::{TranscriptProjectionError, decode};
 use rw_store::session::transcript_index::{TranscriptIndex, TranscriptIndexRow};
 use rw_types::{
-    EngineEvent, SequenceId,
+    Block, EngineEvent, Role, SequenceId,
     transcript::{TranscriptContent, TranscriptToolStatus},
 };
 
-/// Resolve an exact published search source. Removed rows never choose nearby content.
+pub(super) fn search_binding(event: &EngineEvent) -> Option<String> {
+    let searchable = match event {
+        EngineEvent::ConversationTurnCommitted { turn, .. } => {
+            matches!(turn.role, Role::User | Role::Assistant)
+                && turn
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, Block::Text {text} if !text.is_empty()))
+        }
+        EngineEvent::ToolCallFinished { .. } => true,
+        _ => false,
+    };
+    if !searchable {
+        return None;
+    }
+    event.meta().map(|meta| binding(meta.sequence_id))
+}
+fn binding(sequence: SequenceId) -> String {
+    format!("search:{}", sequence.0)
+}
+
+/// Resolve one exact published search source without reading its original body.
+///
+/// Bindings are written only by the semantic projector after canonical input claims
+/// are validated. Removing a row also makes every binding to it unresolved.
 /// # Errors
-/// Rejects events without searchable semantic content or mismatched bindings.
+/// Rejects unpublished/removed sources and mismatched semantic bindings.
 pub fn search_source_row(
     index: &TranscriptIndex,
-    event: &EngineEvent,
+    sequence: SequenceId,
 ) -> Result<TranscriptIndexRow, TranscriptProjectionError> {
-    let sequence = event
-        .meta()
+    let row = index
+        .bound_row(&binding(sequence))?
         .ok_or(TranscriptProjectionError::Invalid(
-            "transient search source",
-        ))?
-        .sequence_id;
-    let row = match event {
-        EngineEvent::ConversationTurnCommitted { .. }
-        | EngineEvent::ConversationInputCommitted { .. }
-        | EngineEvent::ConversationContextCommitted { .. } => {
-            index.row(&format!("item:{}", sequence.0))?
+            "search match is no longer effective",
+        ))?;
+    let valid = match decode(&row)? {
+        TranscriptContent::Tool {
+            status: TranscriptToolStatus::Finished { output, .. },
+            ..
+        } => output.source.sequence == sequence,
+        TranscriptContent::Conversation { role, source, .. } => {
+            matches!(role, Role::User | Role::Assistant)
+                && row.source == sequence
+                && source.sequence == sequence
         }
-        EngineEvent::ToolCallFinished { invocation_id, .. } => {
-            index.bound_row(&entity_binding("tool", &[&invocation_id.0]))?
-        }
-        _ => {
-            return Err(TranscriptProjectionError::Invalid(
-                "event is not a search document",
-            ));
-        }
-    }
-    .ok_or(TranscriptProjectionError::Invalid(
-        "search match is no longer effective",
-    ))?;
-    if !matches_source(&row, event, sequence)? {
+        _ => false,
+    };
+    if !valid || row.revision < sequence {
         return Err(TranscriptProjectionError::Invalid(
             "search source does not match semantic row",
         ));
     }
     Ok(row)
-}
-
-fn matches_source(
-    row: &TranscriptIndexRow,
-    event: &EngineEvent,
-    sequence: SequenceId,
-) -> Result<bool, TranscriptProjectionError> {
-    Ok(match (decode(row)?, event) {
-        (
-            TranscriptContent::Tool {
-                invocation_id,
-                status: TranscriptToolStatus::Finished { output, .. },
-                ..
-            },
-            EngineEvent::ToolCallFinished {
-                invocation_id: expected,
-                ..
-            },
-        ) => invocation_id == *expected && output.source.sequence == sequence,
-        (
-            TranscriptContent::Conversation { .. },
-            EngineEvent::ConversationTurnCommitted { .. }
-            | EngineEvent::ConversationInputCommitted { .. }
-            | EngineEvent::ConversationContextCommitted { .. },
-        ) => row.source == sequence,
-        _ => false,
-    })
 }

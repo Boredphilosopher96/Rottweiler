@@ -269,23 +269,14 @@ fn search_position(
         .0
         .checked_add(1)
         .ok_or_else(|| invalid("search prefix overflow"))?;
-    let pinned = journal
+    journal
         .at_prefix(JournalPrefixIdentity {
             next_sequence,
             digest: source.digest,
         })
         .map_err(|_| invalid("search prefix is stale"))?;
-    let event = pinned
-        .record_with_decode_limit::<rw_types::EngineEvent>(source.source_sequence, 64 * 1024 * 1024)
-        .map_err(storage)?
-        .envelope
-        .event;
-    if event.meta().is_none_or(|meta| {
-        meta.session_id != *session || meta.sequence_id != source.source_sequence
-    }) {
-        return Err(invalid("search event identity mismatch"));
-    }
-    let row = rw_core::transcript::search_source_row(index, &event).map_err(storage)?;
+    let row =
+        rw_core::transcript::search_source_row(index, source.source_sequence).map_err(storage)?;
     let count = u64::try_from(maximum).map_err(|_| invalid("item limit"))?;
     Ok((
         Window::From(row.ordinal.saturating_sub(count / 2)),

@@ -217,6 +217,12 @@ pub fn project_transcript_event(
             agent_turn,
             payload,
         }));
+        if let Some(binding) = search::search_binding(event) {
+            mutations.push(TranscriptIndexMutation::Bind {
+                binding,
+                key: key.clone(),
+            });
+        }
         if let Some(binding) = binding {
             mutations.push(TranscriptIndexMutation::Bind { binding, key });
         }
