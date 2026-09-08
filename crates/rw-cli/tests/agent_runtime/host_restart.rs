@@ -199,6 +199,25 @@ impl NativeHost {
         ids.sort();
         Ok(ids)
     }
+
+    fn bootstrap_catalog(&mut self) -> TestResult<Vec<String>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let ids = self.sessions()?;
+            if ids.iter().any(|id| id == "restart-bootstrap") {
+                return Ok(ids);
+            }
+            assert!(
+                self.process.try_status()?.is_none(),
+                "engine exited before its bootstrap session became discoverable"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "bootstrap catalog did not become ready"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 #[test]
@@ -206,15 +225,17 @@ fn durable_command_retry_after_native_engine_restart_does_not_create_another_ses
 {
     let root = tempfile::Builder::new()
         .prefix("rw-retry-")
-        .tempdir_in("/tmp")?;
-    let workspace = private_test_directory(&root.path().join("workspace"));
-    let home = private_test_directory(&root.path().join("home"));
+        .tempdir_in("/tmp")?
+        .keep();
+    eprintln!("native restart fixture evidence: {}", root.display());
+    let workspace = private_test_directory(&root.join("workspace"));
+    let home = private_test_directory(&root.join("home"));
     fs::write(
-        root.path().join("provider.json"),
+        root.join("provider.json"),
         r#"[[{"type":"text_delta","text":"unused"},{"type":"finished","reason":"stop"}]]"#,
     )?;
-    let mut first = NativeHost::start(root.path(), &workspace, &home, "first")?;
-    let initial = first.sessions()?;
+    let mut first = NativeHost::start(&root, &workspace, &home, "first")?;
+    let initial = first.bootstrap_catalog()?;
     let command = ClientCommand::CreateSession {
         meta: first.meta("durable-create"),
         cwd: workspace.to_str().ok_or("workspace UTF-8")?.into(),
@@ -228,7 +249,8 @@ fn durable_command_retry_after_native_engine_restart_does_not_create_another_ses
     assert_eq!(created.len(), initial.len() + 1);
     let old_client = first.credentials.client_id.clone();
     first.process.settle(); // Kill/reap the exact engine before reacquiring its storage.
-    let mut restarted = NativeHost::start(root.path(), &workspace, &home, "restarted")?;
+    let mut restarted = NativeHost::start(&root, &workspace, &home, "restarted")?;
+    assert_eq!(restarted.bootstrap_catalog()?, created);
     assert_ne!(restarted.credentials.client_id, old_client);
     let mut retry = command;
     *retry.meta_mut() = restarted.meta("durable-create");
@@ -250,5 +272,6 @@ fn durable_command_retry_after_native_engine_restart_does_not_create_another_ses
     assert!(error.message.contains("operation identity was reused"));
     assert_eq!(restarted.sessions()?, created);
     restarted.process.settle();
+    fs::remove_dir_all(root)?;
     Ok(())
 }
