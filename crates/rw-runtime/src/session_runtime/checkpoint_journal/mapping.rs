@@ -17,7 +17,10 @@ pub(super) fn read_limit(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     #[cfg(unix)]
     let file = std::fs::File::from(rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
         rustix::fs::Mode::empty(),
     )?);
     #[cfg(not(unix))]
@@ -168,5 +171,20 @@ mod tests {
         std::fs::write(&target, encode(&valid()).expect("encode")).expect("target");
         std::os::unix::fs::symlink(&target, &link).expect("link");
         assert!(read(&link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mapping_read_rejects_fifo_without_waiting_for_a_writer() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("mapping.json");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .expect("FIFO fixture")
+                .success()
+        );
+        assert!(read(&path).is_err());
     }
 }
