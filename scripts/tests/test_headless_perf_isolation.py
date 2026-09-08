@@ -11,6 +11,7 @@ import signal
 import time
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -195,7 +196,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_scratch.py", "scripts/perf_process_scope.py", "scripts/perf_process_owner.py", "scripts/perf_process_wait.py", "scripts/native_candidate.py",
+        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_scratch.py", "scripts/perf_process_scope.py", "scripts/perf_process_owner.py", "scripts/perf_process_deadline.py", "scripts/perf_process_wait.py", "scripts/native_candidate.py",
                          "scripts/opentui_native.py", "scripts/native_profile.py", "scripts/native-linux-unwind.ld", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
             destination = fixture.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -228,42 +229,57 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
     def test_cancelled_gate_reaps_sample_and_retains_failed_scratch(self) -> None:
         self.assert_cancelled_gate(delegated=True)
 
+    def test_failed_startup_is_reaped_when_readiness_assertion_fails(self):
+        import perf_process_owner
+        from perf_process_wait import observe_exit, require_group_disappearance
+        original_prepare = self.prepared_gate
+        original_owner = perf_process_owner.OwnedProcess
+        created = []
+        def failed_startup(source):
+            fixture, gate, output, env = original_prepare(source)
+            gate.write_text("#!/bin/sh\nexit 17\n")
+            return fixture, gate, output, env
+        def capture(*args, **options):
+            owner = original_owner(*args, **options)
+            created.append(owner)
+            return owner
+        with patch.object(self, "prepared_gate", side_effect=failed_startup), \
+                patch.object(perf_process_owner, "OwnedProcess", side_effect=capture):
+            with self.assertRaises(AssertionError):
+                self.assert_cancelled_gate(delegated=False)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].process.returncode, 17)
+        with self.assertRaises(ChildProcessError):
+            observe_exit(created[0].process.pid)
+        require_group_disappearance(created[0].process.pid, timeout=0)
+
     def assert_cancelled_gate(self, *, delegated: bool) -> None:
-        from perf_process_scope import SCOPE_FD, ScopeReader
+        from perf_process_owner import OwnedProcess
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "sample.pid"
             fixture, gate, output, env = self.prepared_gate(
                 f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nexec sleep 60\n"
             )
-            scope = None
-            writer = None
-            env.pop(SCOPE_FD, None)
-            if delegated:
-                descriptor, writer = os.pipe()
-                self.addCleanup(os.close, descriptor)
-                os.set_blocking(descriptor, False)
-                scope = ScopeReader(descriptor)
-                env[SCOPE_FD] = str(writer)
-            try:
-                owner = subprocess.Popen([str(gate), str(fixture.root)], cwd=fixture.repo, env=env,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                         start_new_session=True,
-                                         pass_fds=() if writer is None else (writer,))
-            finally:
-                if writer is not None:
-                    os.close(writer)
+            wrapper = OwnedProcess([str(gate), str(fixture.root)], cwd=fixture.repo,
+                                   env=env, delegated=delegated)
+            owner = wrapper.process
             try:
                 deadline = time.monotonic() + 3
                 while not pid_path.exists() and time.monotonic() < deadline:
+                    if wrapper.observe_exit() is not None:
+                        break
                     time.sleep(.01)
                 self.assertTrue(pid_path.exists())
                 # Cancel actual warmup work. Candidate verification and Python
                 # startup are outside this cancellation oracle; the process
                 # supervisor has separate deadline and forced-death tests.
                 os.kill(owner.pid, signal.SIGTERM)
-                self.assertNotEqual(owner.wait(timeout=5), 0)
-                if scope is not None:
-                    scope.require_closed()
+                exited_by = time.monotonic() + 5
+                while wrapper.observe_exit() is None and time.monotonic() < exited_by:
+                    time.sleep(.01)
+                self.assertIsNotNone(wrapper.observe_exit(), "cancelled gate did not exit")
+                self.assertNotEqual(wrapper.observe_exit(), 0)
+                wrapper.settle()
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(int(pid_path.read_text()), 0)
                 retained = list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*"))
@@ -273,9 +289,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertEqual(evidence["status"], "fail")
                 self.assertEqual(evidence["phase"], "warmup")
             finally:
-                if owner.returncode is None:
-                    os.killpg(owner.pid, signal.SIGKILL)
-                    owner.wait()
+                wrapper.settle()
 
     def test_unproven_sample_closure_retains_headless_storage(self):
         fixture, gate, output, env = self.prepared_gate("#!/bin/sh\nexit 99\n")
