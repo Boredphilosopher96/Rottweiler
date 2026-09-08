@@ -136,7 +136,7 @@ fn reader_snapshot_and_cancellation_are_independent_of_the_retained_writer() {
             assert_eq!(read()?, "before", "snapshot must not move with the writer");
             Ok(())
         })
-        .expect("snapshot")
+        .expect("snapshot");
     });
     enter
         .recv_timeout(Duration::from_secs(1))

@@ -116,13 +116,10 @@ impl IndexWriter {
         let mut guard = loop {
             match self.state.try_lock() {
                 Ok(guard) => break guard,
-                Err(TryLockError::Poisoned(_)) => {
-                    return Err(SessionStoreError::IndexWriterUnavailable);
-                }
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                Err(TryLockError::WouldBlock) => {
+                Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
                     return Err(SessionStoreError::IndexWriterUnavailable);
                 }
             }
