@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from journal_observer import journal_files, session_journals
+from soak_journal import EventLogProbe
 from release_contract import load_contract
 from perf_process import run_sample, delegated_success_scope, check_sample_cancellation
 from perf_process_scope import UnsettledScope
@@ -36,10 +36,7 @@ DEFAULT_SECONDS = 8 * 60 * 60
 DEFAULT_RSS_LIMIT_MIB = 600
 DEFAULT_TURN_SECONDS = 2.0
 TERMINAL_SUBMIT = b"\r"
-SOAK_TOKEN = re.compile(rb"SOAK_(?:INPUT|STEP)_[0-9]{6}(?:_DONE)?")
-EVENT_TYPE = re.compile(rb'"type"\s*:\s*"([a-z0-9_]+)"')
 MAX_DIAGNOSTIC_CHARS = 4_000
-MAX_DIAGNOSTIC_EVENT_BYTES = 64 * 1024
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
 
 
@@ -252,139 +249,6 @@ def build_workload(
         steps.append(WorkloadStep(prompt=prompt, marker=marker, kind=kind))
     return steps, scripts
 
-
-class EventLogProbe:
-    """Incrementally observes durable logs without repeatedly rereading them."""
-
-    def __init__(self, sessions_root: Path) -> None:
-        self.sessions_root = sessions_root
-        self.paths: dict[tuple[int, int], Path] = {}
-        self.offsets: dict[tuple[int, int], int] = {}
-        self.tails: dict[tuple[int, int], bytes] = {}
-        self.seen_markers: set[str] = set()
-        self.marker_locations: dict[str, tuple[tuple[int, int], int]] = {}
-        self.event_counts: dict[str, int] = {}
-        self.bytes_observed = 0
-        self.pending_records: dict[tuple[int, int], bytes] = {}
-        self.last_events: dict[tuple[int, int], dict[str, object]] = {}
-
-    def poll(self, marker: str | None = None) -> bool:
-        found = marker in self.seen_markers if marker is not None else False
-        for path in (path for journal in session_journals(self.sessions_root) for path in journal_files(journal)):
-            try:
-                with path.open("rb") as handle:
-                    metadata = os.fstat(handle.fileno())
-                    identity = (metadata.st_dev, metadata.st_ino)
-                    self.paths[identity] = path
-                    size = metadata.st_size
-                    offset = self.offsets.get(identity, 0)
-                    if size < offset:
-                        offset = 0
-                        self.pending_records.pop(identity, None)
-                        self.last_events.pop(identity, None)
-                        self.tails.pop(identity, None)
-                    if size == offset:
-                        continue
-                    handle.seek(offset)
-                    raw = handle.read()
-                self.offsets[identity] = offset + len(raw)
-                self.bytes_observed += len(raw)
-                self.observe_metadata(identity, path, raw)
-                tail = self.tails.get(identity, b"")
-                combined = tail + raw
-                self.tails[identity] = combined[-256:]
-                for match in SOAK_TOKEN.finditer(combined):
-                    if match.end() <= len(tail):
-                        continue
-                    token = match.group().decode("ascii")
-                    self.seen_markers.add(token)
-                    self.marker_locations[token] = (
-                        identity,
-                        max(0, offset - len(tail) + match.start()),
-                    )
-                for match in EVENT_TYPE.finditer(combined):
-                    if match.end() <= len(tail):
-                        continue
-                    event_type = match.group(1).decode("ascii")
-                    self.event_counts[event_type] = (
-                        self.event_counts.get(event_type, 0) + 1
-                    )
-                if marker is not None and marker in self.seen_markers:
-                    found = True
-            except FileNotFoundError:
-                continue
-        return found
-
-    def observe_metadata(self, identity: tuple[int, int], path: Path, raw: bytes) -> None:
-        records = (self.pending_records.pop(identity, b"") + raw).splitlines(keepends=True)
-        for record in records:
-            if not record.endswith(b"\n"):
-                if len(record) <= MAX_DIAGNOSTIC_EVENT_BYTES:
-                    self.pending_records[identity] = record
-                continue
-            if len(record) > MAX_DIAGNOSTIC_EVENT_BYTES:
-                continue
-            try:
-                envelope = json.loads(record)
-            except (ValueError, UnicodeError):
-                continue
-            if not isinstance(envelope, dict) or not isinstance(envelope.get("event"), dict):
-                continue
-            event = envelope["event"]
-            meta = event.get("meta")
-            if not isinstance(meta, dict):
-                meta = {}
-            # Only protocol identities enter diagnostics, never event bodies.
-            fields = {
-                "session_id": meta.get("session_id", path.parent.parent.name),
-                "sequence_id": meta.get("sequence_id", envelope.get("sequence")),
-                "turn_id": event.get("turn_id"),
-                "request_id": meta.get("caused_by"),
-                "event_type": event.get("type"),
-            }
-            self.last_events[identity] = {
-                key: value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) else None
-                for key, value in fields.items()
-            }
-
-    def diagnostics(self) -> list[dict[str, object]]:
-        return [
-            {**self.last_events.get(path, {}), "observed_bytes": offset}
-            for path, offset in sorted(self.offsets.items())[-16:]
-        ]
-
-    def saw(self, marker: str) -> bool:
-        return marker in self.seen_markers
-
-    def event_count(self, event_type: str) -> int:
-        return self.event_counts.get(event_type, 0)
-
-    def marker_persisted(self, marker: str) -> bool:
-        """Re-read only the exact recorded marker range from the durable log."""
-        location = self.marker_locations.get(marker)
-        if location is None:
-            return False
-        identity, offset = location
-        self.poll()
-        path = self.paths[identity]
-        encoded = marker.encode()
-        try:
-            if path.stat().st_size < offset + len(encoded):
-                return False
-            with path.open("rb") as handle:
-                handle.seek(offset)
-                return handle.read(len(encoded)) == encoded
-        except FileNotFoundError:
-            return False
-
-    def durable_bytes(self) -> int:
-        total = 0
-        for path in (path for journal in session_journals(self.sessions_root) for path in journal_files(journal)):
-            try:
-                total += path.stat().st_size
-            except FileNotFoundError:
-                pass
-        return total
 
 
 def write_replay_script(
@@ -802,6 +666,7 @@ def _run_soak(
                     else:
                         readiness_deadline = None
                         waiting = steps[submitted]
+                        probe.begin(waiting.marker, waiting.kind)
                         # The production composer submits on plain Return. The soak
                         # drives an xterm-compatible PTY, matching the M4 release
                         # gate and a physical Return key in that terminal.

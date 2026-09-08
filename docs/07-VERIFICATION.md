@@ -401,8 +401,13 @@ launches the production supervisor, Rust engine, and compiled OpenTUI together
 under a PTY. It submits real accumulating turns through the OpenTUI composer to
 a network-free deterministic provider, streams multiple deltas per response,
 periodically calls the safe `read` tool, and runs `/compact` against the growing
-durable transcript. Each step must appear in the session event log before the
-next is submitted. The harness distinguishes PTY delivery from engine progress:
+durable transcript. The bounded journal observer consumes complete top-level
+records with contiguous source identities. A normal step requires its accepted
+input, started turn, streamed text, committed assistant marker, and matching
+successful `TurnFinished`. A tool step additionally requires the exact successful
+read completion and its canonical result reference. Manual compaction requires
+its committed summary and matching `CompactionFinished`. Markers inside partial
+records, nested payloads, or early text deltas cannot complete a step. The harness distinguishes PTY delivery from engine progress:
 an input with no durable acceptance may be submitted at most three times, while
 an accepted turn or compaction is never replayed and must finish within its
 deadline. Any failure writes a structured `soak-result.json` before the process
