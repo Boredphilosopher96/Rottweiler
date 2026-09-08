@@ -498,7 +498,7 @@ reason = "The runtime consumes the TUI-owned theme catalog instead of listing th
 [[shadow]]
 id = "duplicate-perf-gate-release-budget"
 owner = "release-distribution-contract"
-path = "crates/rw-cli/tests/perf_gate.sh"
+path = "crates/rw-cli/tests/perf_gate.py"
 pattern = '''binary_limit\s*=\s*(?:40_000_000|28_000_000)'''
 reason = "The performance gate reads the platform engine budget from the release contract."
 

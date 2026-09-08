@@ -16,6 +16,20 @@ from perf_process_scope import SCOPE_FD, ScopeReader, inherited_scope
 _SCOPE = inherited_scope()
 
 
+def wait_between_samples(seconds: float) -> None:
+    """Fixed conditioning interval, interruptible without abandoning scratch."""
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("sample conditioning interval must be finite and nonnegative")
+    deadline = time.monotonic() + seconds
+    while True:
+        if _SCOPE is not None:
+            _SCOPE.check()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, .05))
+
+
 def run_sample(
     command: list[str], *, cwd: Path, env: dict[str, str],
     timeout: float = 5.0, output_limit: int = 64 * 1024,

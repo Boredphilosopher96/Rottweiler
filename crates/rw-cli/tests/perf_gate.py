@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Build-free headless samples with scratch retained through physical settlement."""
+import json
+import hashlib
+import math
+import os
+import pathlib
+import platform
+import stat
+import statistics
+import sys
+import time
+
+import tempfile
+
+repo = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(repo / "scripts"))
+from perf_process import run_sample, wait_between_samples
+from release_contract import load_contract
+from native_candidate import verify as verify_candidate
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: perf_gate.py VERIFIED_CANDIDATE_DIRECTORY")
+    os.environ["ROTTWEILER_CREDENTIAL_BACKEND"] = "file"
+    parent = os.environ.get("RUNNER_TEMP") or os.environ.get("TMPDIR") or "/tmp"
+    with tempfile.TemporaryDirectory(prefix="rottweiler-perf.", suffix=".noindex", dir=parent) as directory:
+        measure(pathlib.Path(directory))
+
+
+def measure(root):
+    output_name = os.environ.get("ROTTWEILER_PERF_OUTPUT")
+    output = pathlib.Path(output_name) if output_name else None
+    candidate = pathlib.Path(sys.argv[1])
+    receipt = verify_candidate(candidate, repo)
+    engine = receipt["components"]["engine"]
+    built_binary = candidate / engine["path"]
+    binary = root / "rw"
+    open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(built_binary, open_flags)
+    with os.fdopen(source_fd, "rb") as source:
+        source_metadata = os.fstat(source.fileno())
+        source_mode = stat.S_IMODE(source_metadata.st_mode)
+        if (
+            not stat.S_ISREG(source_metadata.st_mode)
+            or source_metadata.st_uid != os.geteuid()
+            or source_metadata.st_nlink != 1
+            or not source_mode & stat.S_IXUSR
+        ):
+            raise SystemExit(
+                "candidate engine changed after validation or is not an owned executable"
+            )
+        with binary.open("xb") as destination:
+            digest = hashlib.sha256()
+            while block := source.read(1024 * 1024):
+                digest.update(block)
+                destination.write(block)
+            if digest.hexdigest() != engine["sha256"]:
+                raise SystemExit("candidate engine changed while making the private measurement copy")
+    binary.chmod(0o700)
+    script = repo / "crates/rw-cli/tests/fixtures/perf-script.json"
+
+    def one(index):
+        home = root / f"home-{index}"
+        home.mkdir()
+        home.chmod(0o700)
+        env = {
+            "HOME": str(home),
+            "ROTTWEILER_HOME": str(home),
+            "ROTTWEILER_CREDENTIAL_BACKEND": "file",
+            "PATH": os.environ["PATH"],
+        }
+        started = time.perf_counter_ns()
+        run = run_sample(
+            [
+                str(binary),
+                "-p", "perf",
+                "--permission-mode", "yolo",
+                "--in-memory-replay-script", str(script),
+                "--output-format", "text",
+                "--perf-markers",
+            ],
+            cwd=repo,
+            env=env,
+        )
+        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+        if run.returncode != 0 or run.stdout.strip() != b"ready":
+            raise SystemExit(
+                f"release replay failed rc={run.returncode}: {run.stderr.decode(errors='replace')}"
+            )
+        markers = {}
+        for line in run.stderr.decode().splitlines():
+            if line.startswith("rw_perf_"):
+                key, value = line.split("=", 1)
+                if key in markers or not value.isascii() or not value.isdecimal():
+                    raise ValueError("invalid or duplicate performance marker")
+                markers[key] = int(value) / 1000
+        try:
+            turn_ms = markers["rw_perf_zero_latency_turn_us"]
+        except KeyError as error:
+            raise SystemExit(f"missing performance marker: {error}") from error
+        if not math.isfinite(turn_ms) or turn_ms <= 0 or turn_ms > elapsed_ms:
+            raise ValueError("performance turn marker is outside its process interval")
+        return elapsed_ms, turn_ms
+
+    smoke = os.environ.get("ROTTWEILER_PERF_SMOKE") == "1"
+    sample_count = int(os.environ.get("ROTTWEILER_PERF_SAMPLES", "100" if smoke else "500"))
+    minimum_samples = 100
+    if sample_count < minimum_samples or sample_count > 5000:
+        raise SystemExit(
+            f"ROTTWEILER_PERF_SAMPLES must be between {minimum_samples} and 5000"
+        )
+
+    def bounded(value, limit=128):
+        return value[:limit] if isinstance(value, str) else None
+
+    def write_evidence(status, phase, error=None):
+        if output is None:
+            return
+        output.parent.mkdir(parents=True, exist_ok=True)
+        evidence = output.with_name(f"{output.stem}.evidence{output.suffix}")
+        evidence_temporary = evidence.with_name(f".{evidence.name}.tmp")
+        evidence_temporary.write_text(json.dumps({
+            "schema_version": 1,
+            "sample_count": sample_count,
+            "status": status,
+            "phase": phase,
+            "error": error,
+            "samples": [
+                {
+                    "index": index,
+                    "headless_print_us": math.ceil(start_ms * 1000),
+                    "turn_overhead_us": math.ceil(turn_ms * 1000),
+                }
+                for index, (start_ms, turn_ms) in enumerate(samples)
+            ],
+            "candidate": {"identity_sha256": receipt["identity_sha256"],
+                          "source": receipt["identity"]["source"], "engine_sha256": engine["sha256"]},
+            "runner": {
+                "github_actions": os.environ.get("GITHUB_ACTIONS") == "true",
+                "image_os": bounded(os.environ.get("ImageOS")),
+                "image_version": bounded(os.environ.get("ImageVersion")),
+                "machine": bounded(platform.machine()),
+                "os": bounded(platform.system()),
+                "os_release": bounded(platform.release()),
+                "python_version": bounded(platform.python_version()),
+                "runner_arch": bounded(os.environ.get("RUNNER_ARCH")),
+                "runner_environment": bounded(os.environ.get("RUNNER_ENVIRONMENT")),
+                "runner_os": bounded(os.environ.get("RUNNER_OS")),
+            },
+        }, sort_keys=True) + "\n", encoding="utf-8")
+        evidence_temporary.replace(evidence)
+
+    samples = []
+    phase = "conditioning"
+    write_evidence("running", phase)
+
+    # Fixed hosted runners can still be busy with image-provisioning work when a
+    # job begins; a fat-LTO link also leaves Apple runners hot while macOS may
+    # inspect the newly installed executable. Give every measurement host one
+    # fixed cooling/inspection interval, then use five fixed fresh-process warmups.
+    # Smoke mode reduces only the measured sample count; it keeps identical host
+    # conditioning so its p99 enforces the same absolute contract instead of
+    # measuring cold-runner noise.
+    # Measured results are never retried or trimmed, and even smoke mode retains
+    # the 100-sample floor required for a meaningful empirical p99.
+    try:
+        wait_between_samples(60)
+        phase = "warmup"
+        write_evidence("running", phase)
+        for index in range(-5, 0):
+            one(index)
+        phase = "sampling"
+        for index in range(sample_count):
+            samples.append(one(index))
+            write_evidence("running", phase)
+        phase = "budgets"
+        write_evidence("running", phase)
+        starts = sorted(sample[0] for sample in samples)
+        turns = sorted(sample[1] for sample in samples)
+        p95_index = math.ceil(len(samples) * 0.95) - 1
+        p99_index = math.ceil(len(samples) * 0.99) - 1
+        start_p50 = statistics.median(starts)
+        start_p99 = starts[p99_index]
+        turn_p50 = statistics.median(turns)
+        turn_p99 = turns[p99_index]
+        binary_bytes = binary.stat().st_size
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = output.with_name(f".{output.name}.tmp")
+            temporary.write_text(json.dumps({
+                "schema_version": 1,
+                "metrics": {
+                    "engine_binary_bytes": binary_bytes,
+                    "headless_print_p99_us": math.ceil(start_p99 * 1000),
+                    "turn_overhead_p99_us": math.ceil(turn_p99 * 1000),
+                },
+            }, sort_keys=True) + "\n", encoding="utf-8")
+            temporary.replace(output)
+
+
+        print(
+            f"samples={sample_count}; "
+            f"headless_print_ms p50={start_p50:.3f} "
+            f"p95={starts[p95_index]:.3f} p99={start_p99:.3f} max={starts[-1]:.3f}; "
+            f"zero_latency_turn_ms p50={turn_p50:.3f} "
+            f"p95={turns[p95_index]:.3f} p99={turn_p99:.3f} max={turns[-1]:.3f}"
+        )
+        if smoke and start_p50 >= 80:
+            raise SystemExit(f"headless print-mode smoke p50 {start_p50:.3f}ms exceeds 80ms")
+        if smoke and turn_p50 >= 20:
+            raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
+        protected_start_limit_ms = 200 if sys.platform == "darwin" else 80
+        protected_turn_limit_ms = 60
+        if not smoke and start_p99 >= protected_start_limit_ms:
+            raise SystemExit(
+                f"headless print-mode p99 {start_p99:.3f}ms exceeds "
+                f"{protected_start_limit_ms}ms"
+            )
+        if not smoke and turn_p99 >= protected_turn_limit_ms:
+            raise SystemExit(
+                f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
+                f"{protected_turn_limit_ms}ms"
+            )
+        release_platform = load_contract().resolve_platform(platform.system(), platform.machine())
+        binary_limit = release_platform.product_budgets.engine_less_than_bytes
+        if binary_bytes >= binary_limit:
+            raise SystemExit(
+                f"release binary size {binary_bytes} exceeds {binary_limit // 1_000_000}MB"
+            )
+        write_evidence("pass", "complete")
+    except BaseException as error:
+        write_evidence("fail", phase, str(error)[-4096:])
+        raise
+
+
+if __name__ == "__main__":
+    main()

@@ -151,14 +151,14 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertLess(build.index(bundle_gate), build.index(embedded_smoke))
 
     def test_gate_preserves_fixed_sampling_and_writes_evidence_first(self) -> None:
-        gate = (REPO / "crates/rw-cli/tests/perf_gate.sh").read_text(
+        gate = (REPO / "crates/rw-cli/tests/perf_gate.py").read_text(
             encoding="utf-8"
         )
 
         self.assertIn('smoke = os.environ.get("ROTTWEILER_PERF_SMOKE") == "1"', gate)
         self.assertIn('"100" if smoke else "500"', gate)
         self.assertIn("minimum_samples = 100", gate)
-        self.assertIn("time.sleep(60)", gate)
+        self.assertIn("wait_between_samples(60)", gate)
         self.assertNotIn('sys.platform == "darwin" else 1', gate)
         self.assertIn("for index in range(-5, 0)", gate)
         self.assertNotIn("warmup_count", gate)
@@ -191,7 +191,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for relative in ("crates/rw-cli/tests/perf_gate.sh", "scripts/native_candidate.py",
+        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_process_scope.py", "scripts/native_candidate.py",
                          "scripts/opentui_native.py", "scripts/native_profile.py", "scripts/native-linux-unwind.ld", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
             destination = fixture.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -205,7 +205,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         site = root / "site"
         site.mkdir()
         (site / "sitecustomize.py").write_text(
-            "import time\ntime.sleep = lambda _seconds: None\n", encoding="utf-8"
+            f"import sys\nsys.path.insert(0, {str(fixture.repo / 'scripts')!r})\nimport perf_process\nperf_process.wait_between_samples = lambda _seconds: None\n", encoding="utf-8"
         )
         output = root / "results" / "headless.json"
         env = {
@@ -217,6 +217,24 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             "RUNNER_TEMP": str(root),
         }
         return fixture, gate, output, env
+
+    def test_cancelled_gate_reaps_sample_before_removing_private_scratch(self) -> None:
+        from perf_process import run_sample
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "sample.pid"
+            fixture, gate, output, env = self.prepared_gate(
+                f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nexec sleep 60\n"
+            )
+            with self.assertRaises(TimeoutError):
+                run_sample([str(gate), str(fixture.root)], cwd=fixture.repo,
+                           env=env, timeout=2, delegated=True)
+            pid = int(pid_path.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+            self.assertEqual(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*")), [])
+            evidence = json.loads(output.with_name("headless.evidence.json").read_text())
+            self.assertEqual(evidence["status"], "fail")
+            self.assertEqual(evidence["phase"], "warmup")
 
     def test_prebuilt_gate_keeps_metrics_schema_and_writes_ordered_evidence(self) -> None:
         from test_native_candidate import native_candidate
