@@ -411,14 +411,14 @@ fn format_prompt_response(
         overflow: &'a Option<rw_types::SessionPayloadReference>,
     }
     #[derive(Serialize)]
-    struct Prompt<'a> {
+    struct Envelope<'a> {
         server: &'a McpServerId,
         prompt: &'a str,
         response: Response<'a>,
     }
     let mut encoded = Vec::new();
     rw_types::json_encoding::JsonWriter::buffer(&mut encoded, MAX_CONTROL_OUTPUT, 256)?
-        .serialize(&Prompt {
+        .serialize(&Envelope {
             server,
             prompt,
             response: Response {
