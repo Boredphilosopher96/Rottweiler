@@ -497,12 +497,18 @@ manifest that hashes the readiness and both platform performance artifacts and
 binds them to the exact source SHA, version, workflow run, and run attempt.
 Release: pre-v1 signing and publication depend on release-readiness validation and the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. Pre-v1 tags do not wait on the separately dispatched protected performance preflight. V1 and later tags additionally require that exact-SHA preflight manifest and its retained evidence; tag builds do not rerun those authoritative performance samples. Major-zero tags record the protected eight-hour soak, Terminal-Bench, 14-day dogfood ledger, and paid two-family replay as `not_claimed_for_pre_v1`; they do not allocate the self-hosted soak runners. V1 and later tags require measured macOS/Linux soak baselines, both exact-archive eight-hour soaks, the pinned 20-task Terminal-Bench baseline with a paid dated OpenAI or Anthropic model, the dogfood ledger, and paid two-family `--record` plus offline replay canary. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs required by the tag's release tier leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
-The TUI keeps the complete durable transcript projection available to replay and
-export, but mounts only the newest 128 transcript cards in OpenTUI and recycles
-plain cards in fixed-size batches. A bounded Bun collection checkpoint releases
-the retired incremental Markdown parse trees after each batch. Viewport culling
-alone does not release renderable objects, so this lifecycle is part of the
-eight-hour RSS contract rather than a paint-only optimization.
+The TUI keeps the complete durable transcript available through bounded semantic
+pages and mounts at most 16 historical rows. Row retirement retains the bounded
+Bun collection checkpoint that releases incremental Markdown parse trees.
+Viewport culling alone does not release renderable objects. The compiled memory
+probe uses this production collection policy by default, without harness-injected
+collection. `client-memory-probe.py --collect-garbage` is a separate allocator
+diagnostic and cannot replace production-policy RSS or eight-hour soak evidence.
+The compiled probe also exercises earliest/middle/latest navigation across 10,000
+mixed rows, resize and append-away anchors, refetch after cache eviction, and an
+actual process handoff with a pending child question and a parent text attachment
+larger than 4 MiB. Its bounded fixture runs in the measured client process;
+complete engine-plus-TUI RSS qualification remains a separate gate.
 
 The self-hosted `soak` labels are operational security boundaries, not
 general-purpose shared runners. They are restricted to schedule, manual, and

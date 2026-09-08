@@ -110,3 +110,39 @@ test("source navigation retains the active question's keyboard ownership", async
   expect(renderer?.currentFocusedRenderable).toBe(focused)
   expect(app.state.questions.choice).toBeDefined()
 })
+
+test("mixed historical rows retain the exact visible offset through responsive App layout", async () => {
+  const { mixedHistoryPage } = await import("../../src/diagnostics/memory-history")
+  const { MockTreeSitterClient } = await import("@opentui/core/testing")
+  const setup = await createTestRenderer({ width: 110, height: 36, useThread: false })
+  renderer = setup.renderer
+  const base = sessionReaderFor([])
+  const app = createRottweilerApp(renderer, {
+    sessionId: "mixed", treeSitterClient: new MockTreeSitterClient({ autoResolveTimeout: 0 }),
+    sessionReader: { ...base, page: async (target, read) => ({ type: "ready", page: mixedHistoryPage(target.sessionId, read, 10_000, "20000") }) },
+  })
+  renderer.root.add(app)
+  await waitForHistory(setup, () => app.transcript.mountedEntryCount > 0)
+  await app.transcript.revealHistorySource("5000")
+  await setup.flush()
+  const collapsedTool = app.transcript.captureHistoryViewport()
+  expect(collapsedTool?.anchor).toEqual({ id: "5000", offset: 0 })
+  setup.resize(72, 30)
+  await setup.flush()
+  expect(app.transcript.captureHistoryViewport()).toEqual(collapsedTool)
+  setup.resize(110, 36)
+  await setup.flush()
+  await app.transcript.revealHistorySource("5001")
+  await setup.flush()
+  app.transcript.setScrollOffset(app.transcript.scroller.scrollTop + 2)
+  await setup.flush()
+  const before = app.transcript.captureHistoryViewport()
+  expect(before?.anchor?.id).toBe("5001")
+  expect(before?.anchor?.offset).toBe(-2)
+  for (const width of [72, 35, 110]) {
+    setup.resize(width, 30)
+    await setup.flush()
+    expect(app.transcript.captureHistoryViewport()).toEqual(before)
+    expect(app.transcript.mountedEntryCount).toBeLessThanOrEqual(16)
+  }
+})

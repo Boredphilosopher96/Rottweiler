@@ -18,7 +18,30 @@ from release_contract import load_contract
 TUI_ROLE = load_contract(REPO / "contracts/release-contract.json").js_host_roles["tui"]
 
 
-def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
+
+def validate_handoff(data: dict, cycles: int) -> None:
+    """Require the actual navigation and attachment oracles, including every retirement."""
+    if (data.get("schemaVersion") != 1 or data.get("cycles") != cycles
+            or data.get("finalAllocationBytes") != 0 or data.get("resolvedChildControls") != 0
+            or data.get("handoffAttachmentBytes", 0) <= 4 * 1024 * 1024):
+        raise ValueError("compiled probe lacks complete pending-control/attachment ownership proof")
+    history = data.get("history", {})
+    expected = [("earliest", "0"), ("middle", "5000"), ("append-away", "5000"),
+                ("resize", "5000"), ("latest", "10000"),
+                ("evicted-middle-after-reconnect", "5000"), ("latest-after-reconnect", "10000")]
+    observations = history.get("observations", [])
+    if (history.get("initialRows") != 10_000 or history.get("finalRows") != 10_001
+            or history.get("mixedKinds") != ["user", "assistant-markdown-code", "tool"]
+            or [(item.get("stage"), item.get("anchor")) for item in observations] != expected
+            or any(not 0 < item.get("mounted", 0) <= 16 or item.get("cacheBytes", 0) <= 0 for item in observations)):
+        raise ValueError("compiled probe lacks exact mixed-history navigation proof")
+    destroyed = [sample for sample in data.get("samples", []) if sample.get("stage") == "destroyed"]
+    if ([sample.get("cycle") for sample in destroyed] != list(range(cycles))
+            or any(sample.get("allocation", {}).get("bytes") != 0 for sample in destroyed)):
+        raise ValueError("compiled probe omitted physical teardown observations")
+
+
+def run(candidate: Path, output: Path, cycles: int, generations: int, collect: bool = False) -> None:
     receipt = native_candidate.verify(candidate, REPO)
     executable = candidate / receipt["components"]["js_host"]["path"]
     output.mkdir(parents=True, exist_ok=False)
@@ -32,17 +55,21 @@ def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
                                ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT=str(report),
                                ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY=str(private),
                                ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
+                               ROTTWEILER_CLIENT_MEMORY_COLLECT="1" if collect else "0",
                                ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE="1" if recycle else "0")
-            with (output / f"process-{generation}.log").open("wb") as log:
-                result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
+            try:
+                with (output / f"process-{generation}.log").open("wb") as log:
+                    result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
                                         log=log, output_limit=2 * 1024 * 1024, timeout=180)
-            if native_candidate.verify(candidate, REPO) != receipt:
-                raise ValueError("candidate changed during compiled memory probe")
+            finally:
+                if native_candidate.verify(candidate, REPO) != receipt:
+                    raise ValueError("candidate changed during compiled memory probe")
             if result.returncode != (75 if recycle else 0):
                 raise ValueError(f"compiled memory probe generation {generation} exited {result.returncode}; see its log")
             data = json.loads(report.read_text())
-            if data["cycles"] != cycles or data["finalAllocationBytes"] != 0:
-                raise ValueError("compiled probe did not complete its configured allocation retirement")
+            if data.get("collection") != ("forced-after-cycle" if collect else "production-policy"):
+                raise ValueError("probe garbage collection mode differs")
+            validate_handoff(data, cycles)
             if data["recycle"]["captured"] != recycle or data["recycle"]["restored"] != (generation > 0):
                 raise ValueError("compiled probe did not preserve process handoff state")
             reports.append(data)
@@ -57,7 +84,7 @@ def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
     print(json.dumps({key: value for key, value in summary.items() if key != "processes"}, sort_keys=True))
 
 
-def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
+def run_held(candidate: Path, output: Path, cycles: int, view: str, collect: bool = False) -> None:
     receipt = native_candidate.verify(candidate, REPO)
     executable = candidate / receipt["components"]["js_host"]["path"]
     output.mkdir(parents=True, exist_ok=False)
@@ -68,15 +95,20 @@ def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
                            ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT=str(report),
                            ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY=str(private),
                            ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
+                               ROTTWEILER_CLIENT_MEMORY_COLLECT="1" if collect else "0",
                            ROTTWEILER_CLIENT_MEMORY_HELD_VIEW=view)
-        with (output / f"held-{view}.log").open("wb") as log:
-            result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
+        try:
+            with (output / f"held-{view}.log").open("wb") as log:
+                result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
                                     log=log, output_limit=2 * 1024 * 1024, timeout=300)
-        if native_candidate.verify(candidate, REPO) != receipt:
-            raise ValueError("candidate changed during held-view probe")
+        finally:
+            if native_candidate.verify(candidate, REPO) != receipt:
+                raise ValueError("candidate changed during held-view probe")
         if result.returncode != 0:
             raise ValueError(f"held {view} probe exited {result.returncode}; see its log")
         data = json.loads(report.read_text())
+        if data.get("collection") != ("forced-every-ten-cycles" if collect else "production-policy"):
+            raise ValueError("held probe garbage collection mode differs")
         if data["cycles"] != cycles or data["view"] != view or data["finalAllocationBytes"] != 0:
             raise ValueError("held-view probe did not complete its admitted lifetime")
     summary = {"schema_version": 1, "candidate_identity": receipt["identity_sha256"],
@@ -99,15 +131,16 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cycles", type=int, default=20)
     parser.add_argument("--generations", type=int, default=3)
+    parser.add_argument("--collect-garbage", action="store_true", help="Explicit allocator diagnostic; default retains the production collection policy without harness collection")
     parser.add_argument("--held-view", choices=["output", "review", "secret", "action"])
     args = parser.parse_args()
     maximum_cycles = 1000 if args.held_view is not None else 200
     if not 1 <= args.cycles <= maximum_cycles or not 1 <= args.generations <= 10:
         parser.error(f"cycles must be 1..{maximum_cycles} and generations 1..10")
     if args.held_view is not None:
-        run_held(args.candidate.resolve(), args.output.resolve(), args.cycles, args.held_view)
+        run_held(args.candidate.resolve(), args.output.resolve(), args.cycles, args.held_view, args.collect_garbage)
     else:
-        run(args.candidate.resolve(), args.output.resolve(), args.cycles, args.generations)
+        run(args.candidate.resolve(), args.output.resolve(), args.cycles, args.generations, args.collect_garbage)
 
 
 if __name__ == "__main__":

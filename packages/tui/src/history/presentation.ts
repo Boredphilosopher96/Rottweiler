@@ -55,6 +55,9 @@ export class HistoryPresentation {
     if (this.#disposed || !this.#dirty || this.#timer !== null || this.controller.snapshot.loading) return
     this.#timer = setTimeout(() => {
       this.#timer = null
+      // An explicit navigation may have started after this timer was scheduled.
+      // Its completion will reschedule the retained invalidation.
+      if (this.controller.snapshot.loading) return
       if (this.#queuedAt !== undefined) this.#diagnostics?.finish("history_queue_age", this.#queuedAt)
       this.#queuedAt = undefined
       this.#dirty = false

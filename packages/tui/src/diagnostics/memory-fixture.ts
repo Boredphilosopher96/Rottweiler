@@ -1,7 +1,8 @@
+import { mixedHistoryPage } from "./memory-history"
 import { familyControlsReader } from "../family-controls-reader"
 import { EngineHttpSseClient } from "../transport"
 import { sessionReader } from "../session-reader-factory"
-import { CLIENT_COMMAND_EXECUTION, PROTOCOL_VERSION, TRANSCRIPT_PROJECTION_VERSION, type ClientCommand, type CommandReply, type EngineEvent, type TranscriptPage } from "../protocol"
+import { CLIENT_COMMAND_EXECUTION, PROTOCOL_VERSION, type ClientCommand, type CommandReply, type EngineEvent, type TranscriptPage } from "../protocol"
 import type { ClientAllocationOwner } from "../client-allocation"
 import type { ReplyAllocation } from "../transport/reply-allocation"
 
@@ -23,6 +24,10 @@ export class MemoryFixture {
   #held = false
   #pending = new Set<() => void>()
   #invalid = false
+  historyRows: number = MEMORY_LOAD.historyRows
+  historyReads = 0
+  get historyThrough(): string { return String(Number(SOURCE) + this.historyRows - MEMORY_LOAD.historyRows) }
+  appendHistory(): void { this.historyRows++ }
   requests = 0
   resolvedChildControls = 0
   get pending(): number { return this.#pending.size }
@@ -43,7 +48,7 @@ export class MemoryFixture {
   }
   meta(): ClientCommand["meta"] { return { protocol_version: PROTOCOL_VERSION, client_id: "memory-client", request_id: `memory-${++this.#request}` } }
   historyReady(): Extract<EngineEvent, { type: "session_history_ready" }> {
-    return { type: "session_history_ready", meta: { ...this.meta(), emitted_at }, session_id: SESSION, through_sequence: SOURCE }
+    return { type: "session_history_ready", meta: { ...this.meta(), emitted_at }, session_id: SESSION, through_sequence: this.historyThrough }
   }
   hold(): void { this.#held = true }
   invalidateNext(): void { this.#invalid = true }
@@ -95,7 +100,7 @@ export class MemoryFixture {
             : { type: part.type, offset: part.offset, items: [], next_offset: null },
         } } }
       }
-      case "get_session_controls": return { type: "session_controls_ready", meta, session_id: SESSION, snapshot: { through: String(20000 + MEMORY_LOAD.toolInvocations * (1 + MEMORY_LOAD.toolChunks)),
+      case "get_session_controls": return { type: "session_controls_ready", meta, session_id: SESSION, snapshot: { through: String(Number(this.historyThrough) + 1 + MEMORY_LOAD.toolInvocations * (1 + MEMORY_LOAD.toolChunks)),
         controls: { approvals: [], pending_plan: null, questions: Array.from({ length: MEMORY_LOAD.questions }, (_, index) => ({
           question_id: `question-${index}`, turn_id: "probe-turn", question: { id: `question-${index}`, prompt: `Decision ${index} ${"context ".repeat(512)}`,
             response_kind: "select_one", options: [{ value: "yes", label: "Continue", description: "Proceed with this decision" }] },
@@ -128,19 +133,7 @@ export class MemoryFixture {
     }
   }
   #page(sessionId: string, read: Extract<ClientCommand, { type: "read_transcript" }>["read"]): TranscriptPage {
-    const count = Math.min(read.max_items, MEMORY_LOAD.pageRows)
-    const position = read.position
-    const first = position.type === "latest" ? MEMORY_LOAD.historyRows - count
-      : position.type === "at_ordinal" ? Math.min(Number(position.ordinal), MEMORY_LOAD.historyRows - count) : 0
-    return {
-      view: { session_id: sessionId, generation: "0", through: SOURCE, projection_version: TRANSCRIPT_PROJECTION_VERSION, digest: Array(32).fill(0) as TranscriptPage["view"]["digest"] },
-      first_ordinal: String(first), total_items: String(MEMORY_LOAD.historyRows), anchor: { type: "unspecified" }, invalidation: { type: "none" },
-      items: Array.from({ length: count }, (_, index) => {
-        const id = String(first + index)
-        return { id, ordinal: id, revision: id, agent_turn: null, content: { type: "command", name: `probe-${id}`, message: {
-          text: `${this.#cycle}:${id} ${"bounded history ".repeat(255)}`, format: "text", complete: true, source: { sequence: id, selector: { type: "command_message" } },
-        } } }
-      }),
-    }
+    this.historyReads++
+    return mixedHistoryPage(sessionId, read, this.historyRows, this.historyThrough)
   }
 }

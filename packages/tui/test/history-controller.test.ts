@@ -204,3 +204,29 @@ test("changing the authority path retires cached rows before a rejected scope ca
   expect(controller.cache.usage.entries).toBe(0)
   controller.dispose()
 })
+
+test("successful navigation publishes its anchor before refresh without changing a failed viewport", async () => {
+  let reject = false
+  const positions: unknown[] = []
+  const controller = new HistoryController(reader(async (session, read) => {
+    positions.push(read.position)
+    if (reject) throw new Error("source unavailable")
+    return { type: "ready", page: page(session, read.position.type === "around" ? Number(read.position.item) : 999) }
+  }), () => { })
+  try {
+    await controller.open(directSessionRead("session"))
+    controller.setAnchor({ id: "999", offset: -2 })
+    await controller.around("400")
+    expect(controller.snapshot.anchor).toEqual({ id: "400", offset: 0 })
+    await controller.refresh()
+    expect(positions.at(-1)).toEqual({ type: "around", item: "400" })
+    controller.setAnchor({ id: "400", offset: -3 })
+    await controller.refresh()
+    expect(controller.snapshot.anchor).toEqual({ id: "400", offset: -3 })
+    reject = true
+    await controller.around("700")
+    expect(controller.snapshot.error).toBe("source unavailable")
+    expect(controller.snapshot.anchor).toEqual({ id: "400", offset: -3 })
+    expect(controller.snapshot.page?.items[0]?.id).toBe("400")
+  } finally { controller.dispose() }
+})

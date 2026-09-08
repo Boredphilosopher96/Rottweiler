@@ -1,3 +1,5 @@
+import { exerciseHistory } from "./memory-history"
+import { handoffAttachments, verifyHandoffAttachments, HANDOFF_ATTACHMENT_BYTES } from "./memory-handoff"
 import { clientMemoryBreakdown } from "./memory-counters"
 import { createMemoryRenderer } from "./memory-renderer"
 import { exerciseLiveOwners } from "./memory-live"
@@ -15,7 +17,7 @@ function usage(owner: ClientAllocationOwner) { return owner.usage }
 function requireThat(value: unknown, message: string): asserts value { if (!value) throw new Error(message) }
 
 /** Invoked only by the explicitly requested compiled acceptance path. */
-export async function runClientMemoryProbe(reportPath: string, workDirectory: string, cycles: number, shouldRecycle: boolean): Promise<void> {
+export async function runClientMemoryProbe(reportPath: string, workDirectory: string, cycles: number, shouldRecycle: boolean, collect = false): Promise<void> {
   if (!Number.isSafeInteger(cycles) || cycles < 1 || cycles > 200) throw new Error("memory probe cycles must be 1..200")
   const allocations = new ClientAllocationOwner()
   const fixture = new MemoryFixture(join(workDirectory, `transport-${process.pid}.sock`), allocations)
@@ -24,10 +26,11 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
   let app: RottweilerApp | null = null
   let captured = false
   let restored = false
+  let history: Awaited<ReturnType<typeof exerciseHistory>> | null = null
   const handoffPath = join(workDirectory, "client-handoff.json")
   using handoffAllocation = allocations.reserve("decoding", 0)
   let handoff = readTuiRecycleState(handoffPath, handoffAllocation)
-  const sample = (cycle: number, stage: string) => samples.push({ cycle, stage, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, memory: stage === "destroyed-and-collected" || cycle === -1 ? clientMemoryBreakdown() : null })
+  const sample = (cycle: number, stage: string) => samples.push({ cycle, stage, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, memory: stage === "destroyed" || cycle === -1 ? clientMemoryBreakdown() : null })
   const until = async (condition: () => boolean) => {
     const deadline = performance.now() + 10_000
     while (!condition()) {
@@ -68,8 +71,10 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
         setup.mockInput.pressEscape()
         await until(() => app!.activeSubagentId === null)
         requireThat(app.composer.value.startsWith("handoff parent draft "), "parent draft was not restored after leaving child")
+        verifyHandoffAttachments(app.composer.attachments)
       }
       await until(() => app!.transcript.mountedCards.size > 0)
+      if (cycle === 0) history = await exerciseHistory(app, fixture, setup)
       app.composer.restoreDraft(`draft ${cycle} ${"d".repeat(MEMORY_LOAD.draftBytes)}`, [{ name: "notes.txt", media_type: "text/plain", data: { type: "text", content: "attachment ".repeat(24_000) } }])
       app.openSubagentPicker()
       await until(() => app!.picker.select.options.length === MEMORY_LOAD.catalogRows)
@@ -128,7 +133,8 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
       requireThat(malformed, "invalid reply passed generated validation")
       sample(cycle, "failure-and-cancellation-settled")
       await exerciseLiveOwners(app, fixture, allocations, async () => { await setup.renderOnce(); await setup.flush() }, stage => sample(cycle, stage))
-      app.composer.restoreDraft(`handoff parent draft ${cycle}`, [])
+      app.composer.restoreDraft(`handoff parent draft ${cycle}`, cycle === cycles - 1 ? handoffAttachments() : [])
+      if (cycle === cycles - 1) verifyHandoffAttachments(app.composer.attachments)
       if (cycle === cycles - 1) {
         app.openSubagentPicker()
         await until(() => app!.picker.select.options[0]?.name.includes("Response needed") === true)
@@ -145,13 +151,13 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
       }
       app.destroy(); app = null
       await until(() => allocations.usage.bytes === 0)
-      Bun.gc(true)
-      sample(cycle, "destroyed-and-collected")
+      if (collect) Bun.gc(true)
+      sample(cycle, "destroyed")
     }
   } finally { fixture.release(); app?.destroy(); await fixture.close(); setup.renderer.destroy() }
   requireThat(fixture.resolvedChildControls === 0, "probe settled a child control to permit handoff")
   requireThat(allocations.usage.bytes === 0, `final client allocation did not retire: ${JSON.stringify(allocations.usage)}`)
   await writeFile(reportPath, `${JSON.stringify({ schemaVersion: 1, bunVersion: Bun.version, platform: process.platform, pid: process.pid,
-    cycles, load: MEMORY_LOAD, fixture: "bounded protocol server in measured process", recycle: { mode: "forced capture path; not RSS threshold evidence", captured, restored },
+    cycles, history, collection: collect ? "forced-after-cycle" : "production-policy", handoffAttachmentBytes: HANDOFF_ATTACHMENT_BYTES, load: MEMORY_LOAD, fixture: "bounded protocol server in measured process", recycle: { mode: "forced capture path; not RSS threshold evidence", captured, restored },
     requests: fixture.requests, resolvedChildControls: fixture.resolvedChildControls, finalAllocationBytes: allocations.usage.bytes, samples })}\n`, { mode: 0o600 })
 }

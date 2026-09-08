@@ -200,6 +200,11 @@ export class HistoryController {
         session.activeKey = key
         session.view = page.view
         session.total = requiredU64(page.total_items)
+        // Publish explicit navigation before an invalidation can refresh this page.
+        // A failed read keeps the previous stable viewport.
+        if (position.type === "around" && session.anchor?.id !== position.item) {
+          session.anchor = { id: position.item, offset: 0 }
+        }
         session.pages.set(key, { first: requiredU64(page.first_ordinal), last: requiredU64(page.first_ordinal) + BigInt(page.items.length) })
         while (session.pages.size > MAX_SESSION_PAGES) {
           const oldest = session.pages.keys().next().value

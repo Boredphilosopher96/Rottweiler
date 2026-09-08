@@ -6,7 +6,7 @@ import { MEMORY_LOAD, type MemoryFixture } from "./memory-fixture"
 
 export async function exerciseLiveOwners(app: RottweilerApp, fixture: MemoryFixture, allocations: ClientAllocationOwner,
   render: () => Promise<void>, sample: (stage: string) => void): Promise<void> {
-  let sequence = 20000
+  let sequence = Number(fixture.historyThrough) + 1
   const meta = () => ({ protocol_version: PROTOCOL_VERSION, session_id: "memory-probe", sequence_id: String(sequence++), emitted_at: "2026-09-06T00:00:00Z" })
   app.handleEvent({ type: "turn_started", meta: meta(), turn_id: "probe-turn" })
   for (let index = 0; index < MEMORY_LOAD.toolInvocations; index++) {
@@ -54,7 +54,7 @@ export async function exerciseLiveOwners(app: RottweilerApp, fixture: MemoryFixt
   } finally { fixture.release(); document.close(); app.outputViewer.closePresentation() }
   // Source-confirmed fixture decisions close controls before the explicit process handoff.
   for (let index = 0; index < MEMORY_LOAD.questions; index++) {
-    app.handleEvent({ type: "question_answered", meta: { protocol_version: PROTOCOL_VERSION, session_id: "memory-probe", sequence_id: String(20001 + MEMORY_LOAD.toolInvocations * (1 + MEMORY_LOAD.toolChunks) + index), emitted_at: "2026-09-06T00:00:01Z" },
+    app.handleEvent({ type: "question_answered", meta: meta(),
       turn_id: "probe-turn", question_id: `question-${index}`, answer: { question_id: `question-${index}`, value: "answer" } })
   }
   await render()

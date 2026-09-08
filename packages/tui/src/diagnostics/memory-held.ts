@@ -15,7 +15,7 @@ export type HeldMemoryView = typeof HELD_MEMORY_VIEWS[number]
 const requireThat = (value: unknown, message: string) => { if (!value) throw new Error(message) }
 
 /** One mounted renderer and one unresolved view survive every streaming cycle. */
-export async function runHeldViewMemoryProbe(reportPath: string, directory: string, cycles: number, view: HeldMemoryView): Promise<void> {
+export async function runHeldViewMemoryProbe(reportPath: string, directory: string, cycles: number, view: HeldMemoryView, collect = false): Promise<void> {
   if (!HELD_MEMORY_VIEWS.includes(view) || !Number.isSafeInteger(cycles) || cycles < 1 || cycles > 1000) throw new Error("invalid held-view workload")
   const allocations = new ClientAllocationOwner()
   const fixture = new MemoryFixture(join(directory, `held-${process.pid}.sock`), allocations)
@@ -93,7 +93,7 @@ export async function runHeldViewMemoryProbe(reportPath: string, directory: stri
       if (view === "secret") requireThat(app.picker.input.value === "•".repeat("synthetic-secret-canary".length), "unsubmitted secret changed")
       if (view === "action") requireThat((allocations.usage.domains.decoding ?? 0) >= 4096, "pending credential action lost its result owner")
       if (cycle % 10 === 0 || cycle + 1 === cycles) {
-        Bun.gc(true)
+        if (collect) Bun.gc(true)
         samples.push({ cycle, elapsedMs: performance.now() - heldAt, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, terminal: terminal.snapshot, memory: clientMemoryBreakdown() })
       }
     }
@@ -113,7 +113,7 @@ export async function runHeldViewMemoryProbe(reportPath: string, directory: stri
   const settledBy = performance.now() + 10_000
   while (allocations.usage.bytes !== 0 && performance.now() < settledBy) await Bun.sleep(1)
   requireThat(allocations.usage.bytes === 0, "held-view teardown retained allocation")
-  await writeFile(reportPath, JSON.stringify({ schemaVersion: 1, pid: process.pid, bunVersion: Bun.version, view, cycles,
+  await writeFile(reportPath, JSON.stringify({ schemaVersion: 1, pid: process.pid, bunVersion: Bun.version, view, cycles, collection: collect ? "forced-every-ten-cycles" : "production-policy",
     load: { tools: MEMORY_LOAD.toolInvocations, chunksPerCyclePerTool: 4, chunkBytes: 4096, assistantBytesPerCycle: 4096, cycleIntervalMs: 50 },
     fixture: "bounded in-process protocol server; credential result is synthetic",
     terminalOutput: "streamed to a draining sink; native ANSI history is not retained", samples, finalAllocationBytes: allocations.usage.bytes }) + "\n", { mode: 0o600 })

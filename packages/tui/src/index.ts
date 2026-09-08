@@ -72,17 +72,18 @@ async function main(): Promise<void> {
   if (memoryProbeReport !== undefined && memoryProbeReport.length > 0) {
     const directory = process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY
     if (directory === undefined) throw new Error("client memory probe requires a private directory")
+    const collect = process.env.ROTTWEILER_CLIENT_MEMORY_COLLECT === "1"
     const heldView = process.env.ROTTWEILER_CLIENT_MEMORY_HELD_VIEW
     if (heldView !== undefined) {
       const { HELD_MEMORY_VIEWS, runHeldViewMemoryProbe } = await import("./diagnostics/memory-held")
       const view = HELD_MEMORY_VIEWS.find(candidate => candidate === heldView)
       if (view === undefined) throw new Error("invalid held memory view")
-      await runHeldViewMemoryProbe(memoryProbeReport, directory, Number(process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES ?? "200"), view)
+      await runHeldViewMemoryProbe(memoryProbeReport, directory, Number(process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES ?? "200"), view, collect)
       return
     }
     const { runClientMemoryProbe } = await import("./diagnostics/memory-probe")
     await runClientMemoryProbe(memoryProbeReport, directory, Number(process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES ?? "20"),
-      process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE === "1")
+      process.env.ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE === "1", collect)
     return
   }
   let runtimeForShutdown: {

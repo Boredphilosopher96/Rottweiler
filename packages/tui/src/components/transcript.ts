@@ -574,8 +574,13 @@ export class TranscriptRenderable extends BoxRenderable {
     if (anchor === null) return false
     const card = this.mountedCards.get(anchor.id)
     if (card !== undefined) {
+      // Reconciliation during resize can invalidate Yoga after its layout pass.
+      // Keep the source anchor until the replacement geometry is computed.
+      if (this.scroller.content.getLayoutNode().isDirty()) { this.requestRender(); return true }
       const previous = this.scroller.scrollTop
-      this.scroller.scrollTo(previous + card.y - this.scroller.viewport.y - anchor.offset)
+      // Culled rows can keep stale screen coordinates during a multi-pass resize.
+      // Yoga owns the current content position even before that row is painted.
+      this.scroller.scrollTo(card.getLayoutNode().getComputedTop() - anchor.offset)
       if (this.scroller.scrollTop !== previous) return true
     }
     this.#pendingAnchor = null

@@ -33,3 +33,39 @@ test("source bursts coalesce without cancelling an admitted history read", async
     expect(presentation.controller.snapshot.page?.items.length).toBe(32)
   } finally { presentation.dispose() }
 })
+
+test("scheduled invalidation waits for explicit navigation and refreshes its admitted anchor", async () => {
+  const navigation = Promise.withResolvers<void>()
+  let selectedSignal: AbortSignal | undefined
+  const positions: unknown[] = []
+  const presentation = new HistoryPresentation({
+    page: async ({ sessionId: session }, read, signal) => {
+      positions.push(read.position)
+      if (positions.length === 2) { selectedSignal = signal; await navigation.promise }
+      return { type: "ready", page: fixturePage(session, read) }
+    },
+    content: async () => { throw new Error("unused") },
+  }, () => { })
+  const until = async (ready: () => boolean) => {
+    const deadline = performance.now() + 1000
+    while (!ready()) {
+      if (performance.now() >= deadline) throw new Error("navigation did not settle")
+      await Bun.sleep(1)
+    }
+  }
+  try {
+    presentation.present(directSessionRead("history"))
+    await until(() => !presentation.controller.snapshot.loading)
+    presentation.controller.setAnchor({ id: "999", offset: -2 })
+    presentation.invalidate("history")
+    const selected = presentation.controller.around("400")
+    await Bun.sleep(150)
+    expect(positions.length).toBe(2)
+    expect(selectedSignal?.aborted).toBe(false)
+    navigation.resolve()
+    await selected
+    await until(() => positions.length === 3 && !presentation.controller.snapshot.loading)
+    expect(positions[2]).toEqual({ type: "around", item: "400" })
+    expect(presentation.controller.snapshot.anchor).toEqual({ id: "400", offset: 0 })
+  } finally { navigation.resolve(); presentation.dispose() }
+})
