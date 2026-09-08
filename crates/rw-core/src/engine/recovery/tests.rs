@@ -458,3 +458,71 @@ fn changed_mode_definition_rejects_entire_batch_without_advancing_head() {
 }
 
 use super::test_source::{SourceEvent, append_script};
+
+#[test]
+fn empty_canonical_reopen_defers_cache_until_verified_input_and_preserves_exact_bodies() {
+    let root = tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let cache = root
+        .path()
+        .join("sessions/canonical/journal/derived/recovery.redb");
+    for _ in 0..2 {
+        let mut recovery =
+            CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("empty recovery");
+        catch_up(&mut recovery, &journal.read_view(), &modes);
+        assert_eq!(recovery.head().expect("head").conversation.turns, 0);
+        assert!(!cache.exists());
+    }
+    let user = text(Role::User, "source\n\"🙂");
+    let answer = text(Role::Assistant, "answer exact");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("lazy owner");
+    let empty = recovery
+        .snapshot()
+        .expect("empty view")
+        .bind_source(&journal.read_view())
+        .expect("empty source");
+    append_script(
+        &mut journal,
+        vec![
+            SourceEvent::event(PendingEvent::TurnStarted { turn: 1 }),
+            SourceEvent::Input {
+                agent_turn: 1,
+                turn: user.clone(),
+            },
+            SourceEvent::event(PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: answer.clone(),
+            }),
+            SourceEvent::event(terminal(1)),
+        ],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    assert!(cache.exists());
+    assert_eq!(empty.window_bytes(0..0).expect("held empty source"), 0);
+    drop(empty);
+    drop(recovery);
+    let recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("reopened full source");
+    let history = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source");
+    let bytes = history.window_bytes(0..2).expect("window");
+    assert_eq!(
+        history
+            .materialize(
+                0..2,
+                HistoryMaterializationLimits {
+                    max_estimated_tokens: u64::MAX,
+                    max_turns: 2,
+                    max_serialized_bytes: bytes,
+                    max_decoded_bytes: MAX_MATERIALIZED_HISTORY_DECODE_BYTES,
+                }
+            )
+            .expect("exact bodies"),
+        vec![user, answer]
+    );
+}

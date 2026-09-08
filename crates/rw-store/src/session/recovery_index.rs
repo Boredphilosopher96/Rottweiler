@@ -2,14 +2,11 @@
 
 use super::{
     SessionStoreError,
-    derived_database::{DerivedDatabase, DerivedDatabaseError},
+    derived_database::DerivedDatabaseError,
     journal::{JournalAdvance, JournalPrefixIdentity, JournalReadView},
 };
 use redb::{ReadableDatabase as _, ReadableTable as _, TableDefinition};
-use std::{
-    io,
-    sync::{Arc, atomic::Ordering},
-};
+use std::io;
 use thiserror::Error;
 
 /// Maximum serialized live recovery checkpoint; historical rows belong in indexes.
@@ -80,7 +77,7 @@ pub struct RecoveryPage {
     pub retained_bytes: usize,
 }
 
-/// Actual descriptor I/O, excluding database cache hits.
+/// Actual database descriptor I/O, excluding namespace files and cache hits.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecoveryIndexIo {
     pub bytes_read: u64,
@@ -143,9 +140,12 @@ impl RecoveryProjection {
     }
 }
 
+mod owner;
+use owner::RecoveryOwner;
+
 /// Independent canonical recovery owner; display projections use their own database.
 pub struct RecoveryIndex {
-    owner: Arc<DerivedDatabase>,
+    owner: RecoveryOwner,
 }
 impl RecoveryIndex {
     /// Open the current recovery schema and validate its exact canonical prefix.
@@ -178,50 +178,9 @@ impl RecoveryIndex {
         version: u32,
         reset: bool,
     ) -> Result<Self, RecoveryIndexError> {
-        let owner = DerivedDatabase::open(
-            view,
-            projection.directory_name(),
-            CACHE_BYTES,
-            MAX_DATABASE_BYTES,
-            reset,
-        )?;
-        let index = Self {
-            owner: Arc::new(owner),
-        };
-        let read = index.owner.database.begin_read().map_err(storage)?;
-        let missing = matches!(
-            read.open_table(HEAD),
-            Err(redb::TableError::TableDoesNotExist(_))
-        );
-        drop(read);
-        if missing && !index.owner.was_empty {
-            return Err(RecoveryIndexError::Invalid("missing schema"));
-        }
-        if missing {
-            let transaction = index.owner.database.begin_write().map_err(storage)?;
-            transaction.open_table(ROWS).map_err(storage)?;
-            transaction.open_table(LOOKUPS).map_err(storage)?;
-            transaction
-                .open_table(HEAD)
-                .map_err(storage)?
-                .insert(
-                    0,
-                    (
-                        version,
-                        0,
-                        JournalPrefixIdentity::empty().digest.as_slice(),
-                        &[][..],
-                    ),
-                )
-                .map_err(storage)?;
-            transaction.commit().map_err(storage)?;
-        }
-        let head = index.head()?;
-        if head.version != version {
-            return Err(RecoveryIndexError::Invalid("projection version"));
-        }
-        view.at_prefix(head.prefix)?;
-        Ok(index)
+        Ok(Self {
+            owner: RecoveryOwner::open(view, projection, version, reset)?,
+        })
     }
 
     /// Read bounded control state independently of lifetime row count.
@@ -229,7 +188,15 @@ impl RecoveryIndex {
     /// # Errors
     /// Rejects missing/oversized/corrupt head metadata or storage failure.
     pub fn head(&self) -> Result<RecoveryIndexHead, RecoveryIndexError> {
-        let read = self.owner.database.begin_read().map_err(storage)?;
+        if let Some(head) = self.owner.empty_head() {
+            return Ok(head);
+        }
+        let read = self
+            .owner
+            .stored()?
+            .database
+            .begin_read()
+            .map_err(storage)?;
         read_head(&read)
     }
 
@@ -246,7 +213,7 @@ impl RecoveryIndex {
     ) -> Result<(), RecoveryIndexError> {
         use std::os::unix::fs::MetadataExt as _;
         let incoming = advance.next().derived_directory()?.metadata()?;
-        let owned = self.owner.directory.metadata()?;
+        let owned = self.owner.directory().metadata()?;
         if incoming.dev() != owned.dev() || incoming.ino() != owned.ino() {
             return Err(RecoveryIndexError::Invalid("foreign journal"));
         }
@@ -279,7 +246,14 @@ impl RecoveryIndex {
                 return Err(RecoveryIndexError::Limit("batch bytes"));
             }
         }
-        let transaction = self.owner.database.begin_write().map_err(storage)?;
+        if let Some(head) = self.owner.empty_head()
+            && head.prefix != advance.previous()
+        {
+            return Err(RecoveryIndexError::Stale);
+        }
+        self.owner.initialize(advance.next())?;
+        let owner = self.owner.stored()?;
+        let transaction = owner.database.begin_write().map_err(storage)?;
         let head = read_head_write(&transaction)?;
         if head.prefix != advance.previous() {
             return Err(RecoveryIndexError::Stale);
@@ -323,7 +297,7 @@ impl RecoveryIndex {
                 ),
             )
             .map_err(storage)?;
-        self.owner.commits.commit(transaction, charged)?;
+        owner.commits.commit(transaction, charged)?;
         Ok(())
     }
 
@@ -332,31 +306,39 @@ impl RecoveryIndex {
     /// # Errors
     /// Rejects invalid head metadata or storage failure.
     pub fn read(&self) -> Result<RecoveryReadView, RecoveryIndexError> {
-        let read = self.owner.database.begin_read().map_err(storage)?;
+        if let Some(head) = self.owner.empty_head() {
+            return Ok(RecoveryReadView {
+                read: None,
+                head,
+                owner: self.owner.clone(),
+            });
+        }
+        let read = self
+            .owner
+            .stored()?
+            .database
+            .begin_read()
+            .map_err(storage)?;
         let head = read_head(&read)?;
         Ok(RecoveryReadView {
-            read,
+            read: Some(read),
             head,
-            owner: Arc::clone(&self.owner),
+            owner: self.owner.clone(),
         })
     }
 
     /// Read physical I/O counters for independent cold-open/read/update qualification.
     #[must_use]
     pub fn io_metrics(&self) -> RecoveryIndexIo {
-        RecoveryIndexIo {
-            bytes_read: self.owner.counters.read.load(Ordering::Relaxed),
-            bytes_written: self.owner.counters.written.load(Ordering::Relaxed),
-            syncs: self.owner.counters.syncs.load(Ordering::Relaxed),
-        }
+        self.owner.io_metrics()
     }
 }
 /// A consistent canonical metadata snapshot across all materialization pages.
 /// The independent file lock remains held until the last snapshot is dropped.
 pub struct RecoveryReadView {
-    read: redb::ReadTransaction,
+    read: Option<redb::ReadTransaction>,
     head: RecoveryIndexHead,
-    owner: Arc<DerivedDatabase>,
+    owner: RecoveryOwner,
 }
 impl RecoveryReadView {
     /// Exact source prefix and control state belonging to this row snapshot.
@@ -376,7 +358,7 @@ impl RecoveryReadView {
     ) -> Result<JournalReadView, RecoveryIndexError> {
         use std::os::unix::fs::MetadataExt as _;
         let incoming = source.derived_directory()?.metadata()?;
-        let owned = self.owner.directory.metadata()?;
+        let owned = self.owner.directory().metadata()?;
         if incoming.dev() != owned.dev() || incoming.ino() != owned.ino() {
             return Err(RecoveryIndexError::Invalid("foreign journal"));
         }
@@ -388,7 +370,10 @@ impl RecoveryReadView {
     /// # Errors
     /// Rejects corrupt record lengths or storage failure.
     pub fn get(&self, key: RecoveryKey) -> Result<Option<RecoveryRow>, RecoveryIndexError> {
-        let rows = self.read.open_table(ROWS).map_err(storage)?;
+        let Some(read) = &self.read else {
+            return Ok(None);
+        };
+        let rows = read.open_table(ROWS).map_err(storage)?;
         rows.get(key.stored())
             .map_err(storage)?
             .map(|value| decode_row(key, value.value()))
@@ -401,7 +386,10 @@ impl RecoveryReadView {
     /// Rejects oversized keys/payloads and storage failures.
     pub fn lookup(&self, namespace: u8, key: &[u8]) -> Result<Option<Vec<u8>>, RecoveryIndexError> {
         validate_lookup(key, &[])?;
-        let table = self.read.open_table(LOOKUPS).map_err(storage)?;
+        let Some(read) = &self.read else {
+            return Ok(None);
+        };
+        let table = read.open_table(LOOKUPS).map_err(storage)?;
         table
             .get((namespace, key))
             .map_err(storage)?
@@ -422,7 +410,10 @@ impl RecoveryReadView {
         scope: u64,
         ordinal: u64,
     ) -> Result<Option<RecoveryRow>, RecoveryIndexError> {
-        let rows = self.read.open_table(ROWS).map_err(storage)?;
+        let Some(read) = &self.read else {
+            return Ok(None);
+        };
+        let rows = read.open_table(ROWS).map_err(storage)?;
         let mut range = rows
             .range((namespace, scope, 0)..(namespace, scope, ordinal))
             .map_err(storage)?;
@@ -470,7 +461,15 @@ impl RecoveryReadView {
             })
             .transpose()?
             .unwrap_or(0);
-        let rows = self.read.open_table(ROWS).map_err(storage)?;
+        let Some(read) = &self.read else {
+            return Ok(RecoveryPage {
+                rows: Vec::new(),
+                next_cursor: after,
+                has_more: false,
+                retained_bytes: 0,
+            });
+        };
+        let rows = read.open_table(ROWS).map_err(storage)?;
         let mut range = rows
             .range((namespace, scope, first)..=(namespace, scope, u64::MAX))
             .map_err(storage)?;
@@ -564,5 +563,7 @@ fn read_head_write(
     decode_head(value.value())
 }
 
+#[cfg(test)]
+mod empty_tests;
 #[cfg(test)]
 mod tests;

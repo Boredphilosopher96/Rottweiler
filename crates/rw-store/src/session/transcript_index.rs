@@ -179,7 +179,7 @@ pub struct TranscriptIndex {
     commits: super::derived_database::DerivedCommitPolicy,
     counters: Arc<IoCounters>,
     directory: File,
-    _lock: AdvisoryFileLock,
+    _lock: Arc<AdvisoryFileLock>,
 }
 
 #[derive(Clone, Copy)]

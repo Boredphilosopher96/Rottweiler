@@ -524,6 +524,15 @@ transaction replaces the canonical conversation generation.
   Reaching either threshold flushes the batch and releases unpinned retired pages;
   successful close flushes the remainder. Live read snapshots retain their own pages.
   This cadence applies only to rebuildable indexes, never to canonical journal appends.
+- An exact empty journal prefix reserves only its recovery namespace lock.
+  Empty reads and reconnects do not allocate a redb database or page cache; the
+  first verified mutation initializes the database under that same lock. Empty
+  snapshots retain their source identity and lock across initialization.
+  Existing cache files still pass schema and source validation on open.
+- Reconstructible redb indexes synchronize their pinned descriptors with the
+  journal's `fsync` contract. They do not request an additional Apple device-wide
+  full flush for cache creation, checkpointing or close. This does not change
+  authoritative journal, metadata or SQLite accounting durability.
 - Derived projection databases refuse database-wide crash repair. An unclean
   projection resets only its verified descriptor while retaining the writer lock,
   then catches up from bounded journal pages. Authoritative journal data and

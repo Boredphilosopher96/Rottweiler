@@ -1,7 +1,9 @@
 //! Descriptor-owned derived database machinery shared by semantic projections.
 
 mod commit;
+mod reservation;
 pub(crate) use commit::DerivedCommitPolicy;
+pub(crate) use reservation::DerivedReservation;
 
 use super::file_lock::AdvisoryFileLock;
 use super::{journal::JournalReadView, sync_event_file};
@@ -33,7 +35,7 @@ pub(crate) enum DerivedDatabaseError {
 pub(crate) struct DerivedDatabase {
     pub(crate) database: Database,
     pub(crate) directory: File,
-    pub(crate) lock: AdvisoryFileLock,
+    pub(crate) lock: Arc<AdvisoryFileLock>,
     pub(crate) counters: Arc<IoCounters>,
     pub(crate) was_empty: bool,
     pub(crate) commits: DerivedCommitPolicy,
@@ -47,25 +49,26 @@ impl DerivedDatabase {
         max_bytes: u64,
         reset: bool,
     ) -> Result<Self, DerivedDatabaseError> {
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-            || cache_bytes == 0
-            || max_bytes == 0
-        {
-            return Err(DerivedDatabaseError::Invalid("database name or limits"));
+        if cache_bytes == 0 || max_bytes == 0 {
+            return Err(DerivedDatabaseError::Invalid("database limits"));
         }
-        let directory = view.derived_directory()?;
-        let lock = open_file(&directory, &format!("{name}.lock"))?;
-        let lock = AdvisoryFileLock::try_exclusive(lock).map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock {
-                DerivedDatabaseError::Busy
-            } else {
-                DerivedDatabaseError::Io(error)
-            }
-        })?;
+        let reservation = DerivedReservation::open(view, name)?;
+        Self::open_reserved(&reservation, cache_bytes, max_bytes, reset)
+    }
+
+    pub(crate) fn open_reserved(
+        reservation: &DerivedReservation,
+        cache_bytes: usize,
+        max_bytes: u64,
+        reset: bool,
+    ) -> Result<Self, DerivedDatabaseError> {
+        let _open = tracing::trace_span!(target: "rw_performance", "derived.open", name = %reservation.name).entered();
+        if cache_bytes == 0 || max_bytes == 0 {
+            return Err(DerivedDatabaseError::Invalid("database limits"));
+        }
+        let directory = reservation.directory.try_clone()?;
+        let lock = Arc::clone(&reservation.lock);
+        let name = &reservation.name;
         let file = open_file(&directory, &format!("{name}.redb"))?;
         if reset {
             file.set_len(0)?;
@@ -107,7 +110,9 @@ fn create_database(
     counters: &Arc<IoCounters>,
 ) -> Result<Database, DerivedDatabaseError> {
     let empty = file.metadata()?.len() == 0;
+    let sync_file = file.try_clone()?;
     let backend = BoundedFile {
+        sync_file,
         inner: redb::backends::FileBackend::new(file).map_err(storage)?,
         counters: Arc::clone(counters),
         max_bytes,
@@ -138,6 +143,7 @@ pub(crate) struct IoCounters {
 struct BoundedFile {
     max_bytes: u64,
     inner: redb::backends::FileBackend,
+    sync_file: File,
     counters: Arc<IoCounters>,
 }
 impl StorageBackend for BoundedFile {
@@ -157,7 +163,10 @@ impl StorageBackend for BoundedFile {
         self.inner.set_len(len)
     }
     fn sync_data(&self) -> io::Result<()> {
-        self.inner.sync_data()?;
+        let _sync = tracing::trace_span!(target: "rw_performance", "derived.sync").entered();
+        // These reconstructible indexes use the canonical descriptor fsync contract.
+        // Their stronger Apple device-wide full flush would add no journal authority.
+        sync_event_file(&self.sync_file)?;
         self.counters.syncs.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
