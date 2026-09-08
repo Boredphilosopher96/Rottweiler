@@ -130,7 +130,9 @@ async fn absent_server_capabilities_do_not_trigger_catalog_requests() {
         rw_types::McpServerId::new("unary").expect("id"),
         service,
         None,
-    );
+    )
+    .await;
+    assert!(!client.peer.response_cache_config().await.enabled);
     assert!(client.list_tools().await.expect("no tools").is_empty());
     assert!(
         client
@@ -153,4 +155,69 @@ async fn absent_server_capabilities_do_not_trigger_catalog_requests() {
         .close(std::time::Duration::from_secs(1))
         .await
         .expect("client cleanup");
+}
+
+#[tokio::test]
+async fn prompt_reads_do_not_reuse_or_fall_back_to_an_uncharged_peer_cache() {
+    use crate::McpClient as _;
+    use std::sync::atomic::AtomicUsize;
+    struct ChangingPrompt(Arc<AtomicUsize>);
+    impl rmcp::ServerHandler for ChangingPrompt {
+        fn get_info(&self) -> rmcp::model::ServerInfo {
+            serde_json::from_value(json!({
+                "protocolVersion": rmcp::model::ProtocolVersion::default(),
+                "capabilities": {"prompts": {}},
+                "serverInfo": {"name": "uncached", "version": "1"}
+            }))
+            .expect("server info")
+        }
+        async fn get_prompt(
+            &self,
+            _: rmcp::model::GetPromptRequestParams,
+            _: RequestContext<rmcp::RoleServer>,
+        ) -> Result<rmcp::model::GetPromptResponse, ErrorData> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            if call > 2 {
+                return Err(ErrorData::internal_error("remote failure", None));
+            }
+            Ok(rmcp::model::GetPromptResponse::Complete(
+                serde_json::from_value(json!({
+                    "description": call.to_string(), "messages": [],
+                    "ttlMs": 60_000, "cacheScope": "public"
+                }))
+                .expect("prompt response"),
+            ))
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler = ChangingPrompt(Arc::clone(&calls));
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let server = tokio::spawn(async move { handler.serve(server_io).await.expect("server") });
+    let service = McpInboundRouter::default()
+        .serve(client_io)
+        .await
+        .expect("client");
+    let server = server.await.expect("server task");
+    let client = super::super::RmcpClient::new(
+        rw_types::McpServerId::new("uncached").expect("id"),
+        service,
+        None,
+    )
+    .await;
+    for expected in ["1", "2"] {
+        assert_eq!(
+            client
+                .get_prompt("same", json!({}))
+                .await
+                .expect("fresh prompt")["description"],
+            expected
+        );
+    }
+    assert!(client.get_prompt("same", json!({})).await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    client
+        .close(std::time::Duration::from_secs(1))
+        .await
+        .expect("client close");
+    server.cancel().await.expect("server close");
 }

@@ -143,7 +143,9 @@ where
             .serve(transport)
             .await
             .map_err(protocol)?;
-        Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
+        Ok(Arc::new(
+            RmcpClient::new(config.id.clone(), service, None).await,
+        ))
     }
 }
 
@@ -203,11 +205,9 @@ where
             .serve((BoundedLineReader::new(stdout, MAX_STDIO_FRAME_BYTES), stdin))
             .await
         {
-            Ok(Arc::new(RmcpClient::new(
-                config.id.clone(),
-                service,
-                Some(handle),
-            )))
+            Ok(Arc::new(
+                RmcpClient::new(config.id.clone(), service, Some(handle)).await,
+            ))
         } else {
             // Child stderr is deliberately not exposed because it is an
             // untrusted extension channel and can contain secrets. An
@@ -260,17 +260,24 @@ struct RmcpClient {
 }
 
 impl RmcpClient {
-    fn new(
+    async fn new(
         server: McpServerId,
         service: RunningService<RoleClient, McpInboundRouter>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
     ) -> Self {
-        Self {
+        let client = Self {
             server,
             peer: service.peer().clone(),
             inbound: service.service().clone(),
             closure: closure::ConnectionClosure::new(service, child),
-        }
+        };
+        // The manager owns reviewed catalogs; rmcp must not retain a second,
+        // uncharged response cache or replay stale remote bodies after errors.
+        client
+            .peer
+            .set_response_cache_config(rmcp::ClientCacheConfig::disabled())
+            .await;
+        client
     }
 
     fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
@@ -286,11 +293,11 @@ impl RmcpClient {
 /// Generic rmcp HTTP construction remains private/test-only.
 #[doc(hidden)]
 #[must_use]
-pub fn boxed_running_http_client(
+pub async fn boxed_running_http_client(
     server: McpServerId,
     service: RunningService<RoleClient, McpInboundRouter>,
 ) -> Arc<dyn McpClient> {
-    Arc::new(RmcpClient::new(server, service, None))
+    Arc::new(RmcpClient::new(server, service, None).await)
 }
 
 #[async_trait]
@@ -322,7 +329,9 @@ impl McpConnector for TestOnlyUnsandboxedStdioConnector {
                     .serve(transport)
                     .await
                     .map_err(|_| protocol_failure())?;
-                Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
+                Ok(Arc::new(
+                    RmcpClient::new(config.id.clone(), service, None).await,
+                ))
             }
             McpTransportConfig::StreamableHttp { .. } => Err(McpError::Policy(
                 "remote MCP requires a host-injected guarded McpConnector".to_owned(),

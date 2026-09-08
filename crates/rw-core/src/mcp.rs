@@ -202,7 +202,7 @@ impl McpConnector for ProductionMcpHttpConnector {
             .map_err(|_| {
                 McpError::Protocol("remote MCP protocol initialization failed".to_owned())
             })?;
-        Ok(boxed_running_http_client(config.id.clone(), service))
+        Ok(boxed_running_http_client(config.id.clone(), service).await)
     }
 }
 
