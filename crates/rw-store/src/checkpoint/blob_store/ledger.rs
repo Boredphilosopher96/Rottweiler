@@ -1,5 +1,8 @@
 //! Atomic publication of the first quota ledger under the workspace writer lock.
 use super::{CheckpointBlobStore, CheckpointError, Connection, File, Path, fs};
+use crate::{checkpoint::CheckpointOperation, session::AdvisoryFileLock};
+use rusqlite::OpenFlags;
+use std::{io, time::Duration};
 
 impl CheckpointBlobStore {
     pub(super) fn open_ledger(&self) -> Result<Connection, CheckpointError> {
@@ -11,15 +14,137 @@ impl CheckpointBlobStore {
             self.initialize_ledger(&path)?;
         }
         let connection = configured(&path)?;
-        let identity: (u32, String) =
-            connection.query_row("SELECT version,lineage FROM quota WHERE id=1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
-        if identity != (1, self.lineage.clone()) {
-            return Err(CheckpointError::CorruptBlobQuota);
-        }
+        self.validate_ledger(&connection)?;
         connection.execute_batch("CREATE TEMP TABLE protected(digest TEXT PRIMARY KEY);")?;
         Ok(connection)
+    }
+
+    // A missing directory is empty only at an authoritative unregistered prefix.
+    // Existing writers settle before this lookup; no read-side file is created.
+    pub(in crate::checkpoint) fn read_namespace_directory(
+        &self,
+        namespace: &Path,
+        kind: &str,
+        operation: &mut CheckpointOperation,
+    ) -> Result<Option<fs::ReadDir>, CheckpointError> {
+        match super::validate_namespace_directories(namespace) {
+            Ok(()) => return Ok(Some(fs::read_dir(namespace.join(kind))?)),
+            Err(CheckpointError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        loop {
+            let lock = self.existing_read_lock(operation)?;
+            let Some(registered) = self.namespace_registered(namespace, lock.is_some())? else {
+                // A first publisher installed its lock and ledger after the
+                // absent-lock observation. Acquire that owner before querying.
+                continue;
+            };
+            if !registered {
+                return Ok(None);
+            }
+            // The first publisher may have installed these after the initial read.
+            super::validate_namespace_directories(namespace)?;
+            return Ok(Some(fs::read_dir(namespace.join(kind))?));
+        }
+    }
+
+    fn existing_read_lock(
+        &self,
+        operation: &mut CheckpointOperation,
+    ) -> Result<Option<AdvisoryFileLock>, CheckpointError> {
+        let path = self.root.join("writer.lock");
+        loop {
+            operation.check()?;
+            let file = match regular_read(&path) {
+                Ok(file) => file,
+                Err(CheckpointError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    if self.root.join("quota.sqlite").try_exists()? {
+                        return Err(CheckpointError::CorruptBlobQuota);
+                    }
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            let before = file.metadata()?;
+            match AdvisoryFileLock::try_shared(file) {
+                Ok(lock) => {
+                    if !crate::checkpoint::same_open_file_identity(
+                        &before,
+                        &fs::symlink_metadata(&path)?,
+                    ) {
+                        return Err(CheckpointError::CorruptBlobQuota);
+                    }
+                    return Ok(Some(lock));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn namespace_registered(
+        &self,
+        namespace: &Path,
+        locked: bool,
+    ) -> Result<Option<bool>, CheckpointError> {
+        let path = self.root.join("quota.sqlite");
+        let file = match regular_read(&path) {
+            Ok(file) => file,
+            Err(CheckpointError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                match fs::read_dir(self.directory()) {
+                    Ok(mut entries) => {
+                        if entries.next().transpose()?.is_some() {
+                            return Err(CheckpointError::CorruptBlobQuota);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                return Ok(Some(false));
+            }
+            Err(error) => return Err(error),
+        };
+        if !locked {
+            return Ok(None);
+        }
+        if file.metadata()?.len() > 64 * 1024 * 1024 {
+            return Err(CheckpointError::CorruptBlobQuota);
+        }
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::ZERO)?;
+        connection
+            .execute_batch("PRAGMA query_only=ON; PRAGMA cache_size=-256; PRAGMA mmap_size=0;")?;
+        self.validate_ledger(&connection)?;
+        if !crate::checkpoint::same_open_file_identity(
+            &file.metadata()?,
+            &fs::symlink_metadata(&path)?,
+        ) {
+            return Err(CheckpointError::CorruptBlobQuota);
+        }
+        let namespace = namespace
+            .to_str()
+            .filter(|path| path.len() <= 4096)
+            .ok_or(CheckpointError::CorruptBlobQuota)?;
+        Ok(Some(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM namespaces WHERE path=?1)",
+            [namespace],
+            |row| row.get(0),
+        )?))
+    }
+
+    fn validate_ledger(&self, connection: &Connection) -> Result<(), CheckpointError> {
+        let identity: bool = connection.query_row(
+            "SELECT version=1 AND lineage=?1 FROM quota WHERE id=1",
+            [&self.lineage],
+            |row| row.get(0),
+        )?;
+        let page_size: u32 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        if !identity || page_size != 4096 {
+            return Err(CheckpointError::CorruptBlobQuota);
+        }
+        Ok(())
     }
 
     fn initialize_ledger(&self, path: &Path) -> Result<(), CheckpointError> {
@@ -58,9 +183,10 @@ impl CheckpointBlobStore {
 
 fn configured(path: &Path) -> Result<Connection, CheckpointError> {
     let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::ZERO)?;
     connection.execute_batch(
         "PRAGMA page_size=4096; PRAGMA journal_mode=DELETE;
-        PRAGMA synchronous=FULL; PRAGMA cache_size=-256; PRAGMA temp_store=FILE;
+        PRAGMA synchronous=FULL; PRAGMA cache_size=-256; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;
         PRAGMA max_page_count=16384; PRAGMA temp.max_page_count=16384;",
     )?;
     let page_size: u32 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
@@ -68,4 +194,25 @@ fn configured(path: &Path) -> Result<Connection, CheckpointError> {
         return Err(CheckpointError::CorruptBlobQuota);
     }
     Ok(connection)
+}
+
+fn regular_read(path: &Path) -> Result<File, CheckpointError> {
+    #[cfg(unix)]
+    let file = File::from(
+        rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(io::Error::from)?,
+    );
+    #[cfg(not(unix))]
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() || !fs::symlink_metadata(path)?.is_file() {
+        return Err(CheckpointError::CorruptBlobQuota);
+    }
+    Ok(file)
 }

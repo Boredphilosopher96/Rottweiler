@@ -11,6 +11,8 @@ use std::{
 };
 
 mod ledger;
+#[cfg(test)]
+mod namespace_tests;
 mod reconcile;
 #[cfg(test)]
 mod tests;
@@ -19,6 +21,16 @@ mod write;
 const RETAINED_BYTES: u64 = 960 * 1024 * 1024;
 const MAX_BLOBS: u64 = 65_536;
 const MAX_NAMESPACES: u64 = 1_024;
+const NAMESPACE_DIRECTORIES: [&str; 4] = ["manifests", "pending", "rewinds", "reviews"];
+
+pub(super) fn validate_namespace_directories(namespace: &Path) -> Result<(), CheckpointError> {
+    for name in NAMESPACE_DIRECTORIES {
+        if !fs::symlink_metadata(namespace.join(name))?.is_dir() {
+            return Err(CheckpointError::CorruptBlobQuota);
+        }
+    }
+    Ok(())
+}
 
 /// Shared blob storage for one physical workspace. Opening is metadata-only;
 /// the first capture acquires the durable quota authority.
@@ -69,13 +81,7 @@ impl CheckpointBlobStore {
         namespace: &Path,
         operation: &mut CheckpointOperation,
     ) -> Result<BlobWriteGuard<'a>, CheckpointError> {
-        let lock = self.lock_references(operation)?;
-        let connection = self.open_ledger()?;
-        let mut guard = BlobWriteGuard {
-            owner: self,
-            connection,
-            _lock: lock,
-        };
+        let mut guard = self.reference_writer(namespace, operation)?;
         let dirty: bool =
             guard
                 .connection
@@ -83,13 +89,27 @@ impl CheckpointBlobStore {
         guard
             .connection
             .execute("UPDATE quota SET dirty=1 WHERE id=1", [])?;
-        guard.register(namespace)?;
         if dirty {
             guard.clean_unpublished(operation)?;
             guard.reconcile(operation, true)?;
         }
         Ok(guard)
     }
+    pub(super) fn reference_writer<'a>(
+        &'a self,
+        namespace: &Path,
+        operation: &mut CheckpointOperation,
+    ) -> Result<BlobWriteGuard<'a>, CheckpointError> {
+        let lock = self.lock_references(operation)?;
+        let guard = BlobWriteGuard {
+            owner: self,
+            connection: self.open_ledger()?,
+            _lock: lock,
+        };
+        guard.register(namespace)?;
+        Ok(guard)
+    }
+
     // Reference publications use the same exclusion as GC, without opening the
     // quota ledger or changing blob-accounting state.
     pub(super) fn lock_references(
@@ -136,14 +156,21 @@ impl BlobWriteGuard<'_> {
             .query_row("SELECT 1 FROM namespaces WHERE path=?1", [path], |_| Ok(()))
             .optional()?
             .is_some();
+        if exists {
+            return validate_namespace_directories(&namespace);
+        }
         let count: i64 =
             self.connection
                 .query_row("SELECT count(*) FROM namespaces", [], |row| row.get(0))?;
-        if !exists && nonnegative(count)? >= MAX_NAMESPACES {
+        if nonnegative(count)? >= MAX_NAMESPACES {
             return Err(CheckpointError::BlobQuotaExceeded);
         }
+        for name in NAMESPACE_DIRECTORIES {
+            super::create_directory_durable(&namespace.join(name))?;
+        }
+        validate_namespace_directories(&namespace)?;
         self.connection
-            .execute("INSERT OR IGNORE INTO namespaces VALUES(?1)", [path])?;
+            .execute("INSERT INTO namespaces VALUES(?1)", [path])?;
         Ok(())
     }
 

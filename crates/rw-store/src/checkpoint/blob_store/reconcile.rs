@@ -22,6 +22,7 @@ impl BlobWriteGuard<'_> {
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let namespace: String = row.get(0)?;
+            super::validate_namespace_directories(Path::new(&namespace))?;
             for kind in ["manifests", "pending"] {
                 let root = Path::new(&namespace).join(kind);
                 directory(&root)?;
@@ -89,6 +90,7 @@ impl BlobWriteGuard<'_> {
             let namespace: String = row.get(0)?;
             let namespace = Path::new(&namespace);
             directory(namespace)?;
+            super::validate_namespace_directories(namespace)?;
             let manifests = namespace.join("manifests");
             directory(&manifests)?;
             for session in fs::read_dir(manifests)? {

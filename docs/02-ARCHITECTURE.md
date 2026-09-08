@@ -594,7 +594,15 @@ transaction replaces the canonical conversation generation.
   review enforces its 1,024 unique-file limit during union, preserving each path's
   earliest baseline. Rewind reference publication/removal takes the same bounded
   writer exclusion as reclamation without changing blob-accounting state.
-  Cold open performs no quota database reads or writes.
+  Cold open durably creates the canonical checkpoint root, but defers the four
+  manifest, pending, rewind and review directories until namespace registration.
+  Registration creates and syncs them under the quota writer lease before inserting
+  its ledger row; a registered namespace's missing directories are corruption,
+  never an invitation to recreate an empty reference inventory. Recovery reads an
+  existing ledger only when directories are missing, under the existing writer
+  lock, with bounded read-only SQLite settings. Missing storage is empty only when
+  that authority proves the namespace unregistered; reads never create a ledger
+  or lock file. Cold open itself performs no quota database reads or writes.
   Captures hold a cross-process workspace writer lease through manifest publication.
   Staging is reserved before writes; new retained content is admitted before blob
   publication. Interrupted operations reconcile before new admission. Reclamation

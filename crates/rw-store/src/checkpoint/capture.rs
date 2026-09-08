@@ -48,10 +48,7 @@ impl CheckpointStore {
         if root.join("blobs").exists() && fs::read_dir(root.join("blobs"))?.next().is_some() {
             return Err(CheckpointError::UnexpectedBlobDirectory);
         }
-        super::create_directory_durable(&root.join("manifests"))?;
-        super::create_directory_durable(&root.join("pending"))?;
-        super::create_directory_durable(&root.join("rewinds"))?;
-        super::create_directory_durable(&root.join("reviews"))?;
+        super::create_directory_durable(&root)?;
         let root = fs::canonicalize(root)?;
         let mut storage_relative = Vec::new();
         for path in [root.as_path(), blobs.storage_path()] {
@@ -751,9 +748,14 @@ impl CheckpointStore {
         &self,
         operation: &mut CheckpointOperation,
     ) -> Result<Vec<OpaqueMutation>, CheckpointError> {
-        let root = self.root.join("pending");
         let mut mutations = Vec::new();
-        for session in fs::read_dir(&root)? {
+        let Some(entries) = self
+            .blobs
+            .read_namespace_directory(&self.root, "pending", operation)?
+        else {
+            return Ok(mutations);
+        };
+        for session in entries {
             operation.check()?;
             let session = session?;
             if is_private_temporary(&session.file_name()) {

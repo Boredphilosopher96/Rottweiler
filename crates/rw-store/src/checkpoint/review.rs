@@ -282,6 +282,7 @@ impl CheckpointStore {
     }
 
     pub(super) fn write_review_ledger(&self, ledger: &ReviewLedger) -> Result<(), CheckpointError> {
+        super::blob_store::validate_namespace_directories(&self.root)?;
         atomic_replace(
             &self.review_path(&ledger.session_id),
             &super::operation::serialize_metadata(ledger, false)?,

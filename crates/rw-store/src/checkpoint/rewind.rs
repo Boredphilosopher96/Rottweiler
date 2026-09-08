@@ -27,7 +27,7 @@ impl CheckpointStore {
         operation_id: &str,
     ) -> Result<RewindHandle, CheckpointError> {
         let mut operation = CheckpointOperation::default();
-        let _references = self.blobs.lock_references(&mut operation)?;
+        let _references = self.blobs.reference_writer(&self.root, &mut operation)?;
         validate_session_id(session_id)?;
         validate_operation_id(operation_id)?;
         let path = self.rewind_path(session_id);
@@ -283,6 +283,7 @@ impl CheckpointStore {
         &self,
         transaction: &RewindTransaction,
     ) -> Result<(), CheckpointError> {
+        super::blob_store::validate_namespace_directories(&self.root)?;
         atomic_replace(
             &self.rewind_path(&transaction.handle.session_id),
             &super::operation::serialize_metadata(transaction, false)?,
@@ -293,9 +294,14 @@ impl CheckpointStore {
         &self,
         operation: &mut CheckpointOperation,
     ) -> Result<Vec<RewindHandle>, CheckpointError> {
-        let directory = self.root.join("rewinds");
         let mut handles = Vec::new();
-        for entry in fs::read_dir(directory)? {
+        let Some(entries) = self
+            .blobs
+            .read_namespace_directory(&self.root, "rewinds", operation)?
+        else {
+            return Ok(handles);
+        };
+        for entry in entries {
             let entry = entry?;
             if is_private_temporary(&entry.file_name()) {
                 continue;
