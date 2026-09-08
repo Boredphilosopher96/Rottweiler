@@ -14,10 +14,9 @@ async fn native_hooks_do_not_receive_sibling_tool_effect_authority() {
     for (index, (event, class, writes)) in [
         (HookEvent::PreTool, HookClass::Policy, true),
         (HookEvent::PostTool, HookClass::Transform, true),
-        (HookEvent::PreTool, HookClass::Observer, true),
         (HookEvent::SessionStart, HookClass::Policy, true),
-        (HookEvent::SessionEnd, HookClass::Observer, true),
-        (HookEvent::SessionStart, HookClass::Observer, false),
+        (HookEvent::SessionEnd, HookClass::Policy, true),
+        (HookEvent::SessionStart, HookClass::Policy, false),
     ]
     .into_iter()
     .enumerate()
@@ -36,11 +35,7 @@ async fn native_hooks_do_not_receive_sibling_tool_effect_authority() {
         manifest.capabilities.hooks.push(PluginHookCapability {
             name: event,
             class,
-            failure_policy: if class == HookClass::Observer {
-                HookFailurePolicy::FailOpen
-            } else {
-                HookFailurePolicy::FailClosed
-            },
+            failure_policy: HookFailurePolicy::FailClosed,
         });
         std::fs::write(
             &config.manifest_path,

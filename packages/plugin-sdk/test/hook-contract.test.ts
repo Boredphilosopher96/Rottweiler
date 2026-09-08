@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import validateInput from "../src/generated/hook-input-validator.js"
 import validateDirective from "../src/generated/hook-directive-validator.js"
+import { parsePluginManifest } from "../src/index.ts"
 import type { HookHandler } from "../src/hooks"
 
 const preTool = { hook: "pre_tool", payload: { id: "call", name: "bash", arguments: { command: "pwd" } } }
@@ -47,3 +48,14 @@ const wrongPhase: HookHandler<"pre_tool"> = () => ({
 })
 void transformPrompt
 void wrongPhase
+
+test("asynchronous observation requires event subscriptions, not observer hooks", () => {
+  const base = { name: "observation", version: "1", protocol: 3 }
+  expect(() => parsePluginManifest({ ...base, capabilities: {
+    hooks: [{ name: "pre_tool", class: "observer", failure_policy: "fail-open" }],
+  } })).toThrow("invalid class")
+  const manifest = parsePluginManifest({ ...base, capabilities: {
+    event_subscriptions: ["tool_call_finished", "turn_finished"],
+  } })
+  expect(manifest.capabilities.event_subscriptions).toEqual(["tool_call_finished", "turn_finished"])
+})

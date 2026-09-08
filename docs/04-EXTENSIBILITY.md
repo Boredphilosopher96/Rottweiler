@@ -95,15 +95,15 @@ Plugin returns a manifest on `initialize`:
     "commands": [ ... ],
     "hooks": [
       { "name": "pre_tool", "class": "policy", "failure_policy": "fail-closed" },
-      { "name": "post_tool", "failure_policy": "fail-open" },
-      { "name": "session_start", "failure_policy": "fail-open" }
+      { "name": "post_tool", "class": "transform", "failure_policy": "fail-open" },
+      { "name": "session_start", "class": "policy", "failure_policy": "fail-closed" }
     ],
     "providers": [ {
       "alias-prefix": "custom/",
       "capabilities": ["models"],
       "credential-references": ["providers.custom.api_key"]
     } ],
-    "event_subscriptions": [ "ToolCallFinished", "TurnFinished" ]
+    "event_subscriptions": [ "tool_call_finished", "turn_finished" ]
   }
 }
 ```
@@ -134,10 +134,15 @@ retain the same native-process settlement barrier as other effectful requests.
 Hooks receive a tagged `HookInput` and return a `HookDirective`. `rw-types` owns
 these types; the plugin contract generator produces TypeScript declarations and
 JSON schemas, and standalone validators check SDK boundaries without runtime AJV.
-Every hook declares its class: `transform`, `policy`, or `observer`. The dispatcher
-orders classes in that order, then priority, then ID. Policies observe transformed
-input. Observers can return only `continue` and cannot declare workspace writes.
-Policy handlers must fail closed.
+Every hook declares its class: `transform` or `policy`. The dispatcher orders
+classes in that order, then priority, then ID. Policies observe transformed input
+and must fail closed. Asynchronous observation uses durable event subscriptions:
+commits wake independent bounded cursor readers, whose acknowledgement, replay
+and physical settlement are owned by the session. Observation cannot delay a
+hook phase or alter its decision. Hooks do not accept an `observer` class.
+Pre-permission checks and SessionEnd cleanup remain synchronous policy phases;
+they are not asynchronous event subscriptions. Shell and WASM hook components
+participate in synchronous phases; asynchronous event handlers use the RPC tier.
 
 A phase admits at most 128 hooks. It has one aggregate execution deadline equal
 to its largest declared invocation timeout, with a five-second default and a

@@ -392,7 +392,7 @@ function validateManifest(manifest: PluginManifest): void {
     ])
     if (!validHooks.has(hookName)) throw new Error(`unknown hook capability ${hookName}`)
     requireKeys(hook, `hook ${hookName}`, ["name", "class", "failure_policy"])
-    if (!["transform", "policy", "observer"].includes(hook.class)) throw new Error(`hook ${hookName} has an invalid class`)
+    if (!["transform", "policy"].includes(hook.class)) throw new Error(`hook ${hookName} has an invalid class`)
     if (hook.class === "policy" && hook.failure_policy !== "fail-closed") throw new Error(`policy hook ${hookName} must fail closed`)
     if (hook.class === "transform" && !["pre_tool", "post_tool", "user_prompt_submit", "pre_compact"].includes(hookName)) throw new Error(`hook ${hookName} cannot transform input`)
     if (hook.failure_policy !== "fail-open" && hook.failure_policy !== "fail-closed") {

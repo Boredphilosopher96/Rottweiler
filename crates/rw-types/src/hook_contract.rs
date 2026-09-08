@@ -68,7 +68,6 @@ pub enum HookFailurePolicy {
 pub enum HookClass {
     Transform,
     Policy,
-    Observer,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema, TS)]

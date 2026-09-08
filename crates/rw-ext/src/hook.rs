@@ -54,11 +54,7 @@ impl HookRegistration {
             event,
             priority: 0,
             class,
-            failure_policy: if class == HookClass::Observer {
-                HookFailurePolicy::FailOpen
-            } else {
-                HookFailurePolicy::FailClosed
-            },
+            failure_policy: HookFailurePolicy::FailClosed,
             timeout: Duration::from_secs(5),
             effect: HookEffect::ReadOnly,
             applicable_tools: Vec::new(),
@@ -458,8 +454,6 @@ impl HookDispatcher {
             && !registration.event().accepts_transform())
             || (registration.class() == HookClass::Policy
                 && registration.failure_policy() != HookFailurePolicy::FailClosed)
-            || (registration.class() == HookClass::Observer
-                && registration.effect() != HookEffect::ReadOnly)
             || (registration.effect() == HookEffect::WorkspaceMutating
                 && !matches!(
                     registration.event(),
@@ -567,7 +561,7 @@ impl HookDispatcher {
         self.dispatch_selected(input, Some(effect)).await
     }
 
-    /// Executes transforms, policies and observers under one fixed phase deadline.
+    /// Executes transforms and policies under one fixed phase deadline.
     ///
     /// # Errors
     /// Rejects oversized input and returns an error if physical effects cannot settle.
@@ -631,9 +625,8 @@ impl HookDispatcher {
                     return Err(error);
                 }
                 let policy = registration.failure_policy();
-                let failed_closed = policy == HookFailurePolicy::FailClosed
-                    || (error.code() == "phase_timeout"
-                        && registration.class() != HookClass::Observer);
+                let failed_closed =
+                    policy == HookFailurePolicy::FailClosed || error.code() == "phase_timeout";
                 result.failures.push(HookFailure {
                     hook_id: registration.id.clone(),
                     policy,

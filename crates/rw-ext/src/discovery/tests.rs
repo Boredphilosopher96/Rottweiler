@@ -1216,3 +1216,23 @@ fn unreadable_untrusted_command_body_is_diagnostic_not_startup_error() {
         })
     );
 }
+
+#[test]
+fn observer_shell_hook_is_rejected_without_an_execution_adapter() {
+    let fixture = TempDir::new().expect("fixture");
+    let project = fixture.path().join("project");
+    let home = fixture.path().join("home");
+    let path = home.join(".agents/hooks.toml");
+    write(
+        &path,
+        r#"[[hook]]
+event = "post_tool"
+class = "observer"
+failure_policy = "fail-open"
+matcher = "*"
+run = "true"
+"#,
+    );
+    let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+    assert_single_diagnostic(&catalog, ArtifactKind::Hook, &path, "class");
+}

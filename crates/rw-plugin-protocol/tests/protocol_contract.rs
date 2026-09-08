@@ -180,3 +180,13 @@ fn provider_http_requires_its_host_invocation_identity() {
         .remove("invocation_id");
     assert!(serde_json::from_value::<ProviderHttpCapabilityParams>(params).is_err());
 }
+
+#[test]
+fn asynchronous_observation_is_not_a_hook_manifest_class() {
+    for class in ["transform", "policy"] {
+        let hook = json!({"name":"pre_tool", "class":class, "failure_policy":"fail-closed"});
+        assert!(serde_json::from_value::<rw_plugin_protocol::PluginHookCapability>(hook).is_ok());
+    }
+    let hook = json!({"name":"pre_tool", "class":"observer", "failure_policy":"fail-open"});
+    assert!(serde_json::from_value::<rw_plugin_protocol::PluginHookCapability>(hook).is_err());
+}

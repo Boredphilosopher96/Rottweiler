@@ -530,7 +530,7 @@ describe("wire protocol", () => {
     const messages: unknown[] = []
     const server = new PluginServer(definePlugin({
       manifest: { name: "retained-hook", version: "1", protocol: 3, capabilities: {
-        hooks: [{ name: "pre_tool", class: "observer", failure_policy: "fail-open" }],
+        hooks: [{ name: "pre_tool", class: "policy", failure_policy: "fail-closed" }],
       } },
       handlers: { hooks: { pre_tool: async (_input, { signal }) => {
         signal.addEventListener("abort", () => { observedAbort = true }, { once: true })

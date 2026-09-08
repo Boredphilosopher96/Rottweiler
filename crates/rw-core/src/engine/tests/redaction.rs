@@ -216,8 +216,8 @@ async fn hook_failure_and_block_messages_are_redacted_before_events() {
         .register(
             HookRegistration::new(
                 "fixture.secret-failure",
-                HookEvent::PermissionCheck,
-                rw_types::hook_contract::HookClass::Observer,
+                HookEvent::PreTool,
+                rw_types::hook_contract::HookClass::Transform,
             )
             .with_failure_policy(HookFailurePolicy::FailOpen),
             FixedHook {
@@ -302,7 +302,7 @@ async fn user_secrets_are_redacted_before_hooks_events_and_provider_context() {
             HookRegistration::new(
                 "fixture.capture-user",
                 HookEvent::UserPromptSubmit,
-                rw_types::hook_contract::HookClass::Observer,
+                rw_types::hook_contract::HookClass::Policy,
             ),
             PayloadCaptureHook {
                 label: "user_prompt_submit",

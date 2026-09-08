@@ -224,11 +224,10 @@ fn parse_class(
     match required_string(path, index, table, "class")? {
         "transform" => Ok(HookClass::Transform),
         "policy" => Ok(HookClass::Policy),
-        "observer" => Ok(HookClass::Observer),
         _ => Err(invalid_hook(
             path,
             index,
-            "`class` must be transform, policy, or observer",
+            "`class` must be transform or policy",
         )),
     }
 }

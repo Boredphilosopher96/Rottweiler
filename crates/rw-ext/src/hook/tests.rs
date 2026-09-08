@@ -56,16 +56,10 @@ fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
 }
 
 #[tokio::test]
-async fn transforms_precede_policy_and_observation_then_priority_and_id() {
+async fn transforms_precede_policy_then_priority_and_id() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut dispatcher = HookDispatcher::new();
     for (name, class, priority, directive) in [
-        (
-            "observer",
-            HookClass::Observer,
-            i32::MIN,
-            HookDirective::Continue {},
-        ),
         (
             "policy",
             HookClass::Policy,
@@ -92,7 +86,7 @@ async fn transforms_precede_policy_and_observation_then_priority_and_id() {
             .iter()
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>(),
-        ["a", "b", "z", "policy", "observer"]
+        ["a", "b", "z", "policy"]
     );
     assert_eq!(calls[0].1, prompt("original"));
     assert_eq!(calls[1].1, prompt("first"));
@@ -151,9 +145,9 @@ async fn permission_decisions_fold_to_the_most_restrictive_and_deny_stops_dispat
 }
 
 #[tokio::test]
-async fn observer_cannot_mutate_and_transform_cannot_block() {
+async fn policy_cannot_transform_and_transform_cannot_block() {
     for (class, directive) in [
-        (HookClass::Observer, transform("forbidden")),
+        (HookClass::Policy, transform("forbidden")),
         (
             HookClass::Transform,
             HookDirective::Block {
@@ -262,7 +256,7 @@ async fn dropping_dispatch_retains_cleanup_and_prevents_success_until_settled() 
     let cleaned = Arc::new(AtomicBool::new(false));
     let mut dispatcher = HookDispatcher::new();
     must(dispatcher.register(
-        HookRegistration::new("cleanup", HookEvent::UserPromptSubmit, HookClass::Observer),
+        HookRegistration::new("cleanup", HookEvent::UserPromptSubmit, HookClass::Policy),
         Cleanup {
             started: Arc::clone(&started),
             release: Arc::clone(&release),
@@ -296,7 +290,8 @@ async fn failed_settlement_is_fatal_even_for_fail_open_and_closes_admission() {
     let mut dispatcher = HookDispatcher::new();
     must(
         dispatcher.register(
-            HookRegistration::new("cleanup", HookEvent::UserPromptSubmit, HookClass::Observer)
+            HookRegistration::new("cleanup", HookEvent::UserPromptSubmit, HookClass::Transform)
+                .with_failure_policy(HookFailurePolicy::FailOpen)
                 .with_timeout(Duration::from_millis(1)),
             Cleanup {
                 started: Arc::new(tokio::sync::Notify::new()),
@@ -355,12 +350,10 @@ fn registration_rejects_invalid_classes_policies_effects_ids_and_duplicates() {
         HookRegistration::new("x", HookEvent::TurnEnd, HookClass::Transform),
         HookRegistration::new("x", HookEvent::PreTool, HookClass::Policy)
             .with_failure_policy(HookFailurePolicy::FailOpen),
-        HookRegistration::new("x", HookEvent::PreTool, HookClass::Observer)
-            .with_effect(HookEffect::WorkspaceMutating),
         HookRegistration::new("x", HookEvent::SessionStart, HookClass::Policy)
             .with_effect(HookEffect::WorkspaceMutating),
-        HookRegistration::new("bad\nid", HookEvent::PreTool, HookClass::Observer),
-        HookRegistration::new("x", HookEvent::PreTool, HookClass::Observer)
+        HookRegistration::new("bad\nid", HookEvent::PreTool, HookClass::Policy),
+        HookRegistration::new("x", HookEvent::PreTool, HookClass::Policy)
             .with_timeout(Duration::ZERO),
     ] {
         assert!(
@@ -374,14 +367,14 @@ fn registration_rejects_invalid_classes_policies_effects_ids_and_duplicates() {
     }
     for event in [HookEvent::SessionStart, HookEvent::SessionEnd] {
         must(dispatcher.register(
-            HookRegistration::new("same", event, HookClass::Observer),
+            HookRegistration::new("same", event, HookClass::Policy),
             fixed("x", &calls, Ok(HookDirective::Continue {})),
         ));
     }
     assert!(
         dispatcher
             .register(
-                HookRegistration::new("same", HookEvent::SessionStart, HookClass::Observer),
+                HookRegistration::new("same", HookEvent::SessionStart, HookClass::Policy),
                 fixed("x", &calls, Ok(HookDirective::Continue {}))
             )
             .is_err()
@@ -403,7 +396,7 @@ async fn settlement_timeout_closes_admission_even_when_handler_returned_successf
     let mut dispatcher = HookDispatcher::new();
     must(
         dispatcher.register(
-            HookRegistration::new("stalled", HookEvent::UserPromptSubmit, HookClass::Observer)
+            HookRegistration::new("stalled", HookEvent::UserPromptSubmit, HookClass::Policy)
                 .with_timeout(Duration::from_mins(10)),
             StalledCleanup,
         ),

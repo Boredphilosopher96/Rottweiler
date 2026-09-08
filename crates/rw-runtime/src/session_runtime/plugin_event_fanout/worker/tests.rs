@@ -444,3 +444,77 @@ async fn dropping_shutdown_wait_never_discards_accepted_callback_or_source() {
             .is_empty()
     );
 }
+
+struct ContinuePolicy;
+#[async_trait]
+impl rw_ext::HookHandler for ContinuePolicy {
+    async fn invoke(
+        &self,
+        _: rw_ext::HookInvocation<'_>,
+    ) -> Result<rw_ext::HookDirective, rw_ext::HookError> {
+        Ok(rw_ext::HookDirective::Continue {})
+    }
+    async fn settle_effects(&self) -> Result<(), rw_ext::HookError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn stalled_observer_does_not_block_policy_or_another_subscription() {
+    let stalled = Consumer::new();
+    stalled.blocked.store(true, Ordering::Release);
+    let (blocked_worker, _) = start(journal(1), stalled.clone());
+    stalled.entered.notified().await;
+    let ready = Consumer::new();
+    let (ready_worker, _) = start(journal(1), ready.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        ready.entered.notified().await;
+        // Wakes carry kinds, not payloads, and do not wait for callback capacity.
+        for _ in 0..10_000 {
+            blocked_worker.wake(ExtensionEventKind::PluginStatusChanged);
+        }
+        let mut dispatcher = rw_ext::HookDispatcher::new();
+        dispatcher
+            .register(
+                rw_ext::HookRegistration::new(
+                    "policy",
+                    rw_ext::HookEvent::PreTool,
+                    rw_ext::HookClass::Policy,
+                ),
+                ContinuePolicy,
+            )
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"));
+        let result = dispatcher
+            .dispatch(rw_ext::HookInput::PreTool(
+                rw_types::hook_contract::HookToolInput {
+                    id: "call".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"));
+        assert!(result.completed());
+    })
+    .await
+    .unwrap_or_else(|_| panic!("observation blocked unrelated delivery or policy"));
+    assert_eq!(
+        stalled
+            .notices
+            .lock()
+            .unwrap_or_else(|error| panic!("fixture: {error:?}"))
+            .len(),
+        1
+    );
+    blocked_worker.cancel();
+    ready_worker.cancel();
+    stalled.release.notify_one();
+    blocked_worker
+        .settle()
+        .await
+        .unwrap_or_else(|error| panic!("fixture: {error:?}"));
+    ready_worker
+        .settle()
+        .await
+        .unwrap_or_else(|error| panic!("fixture: {error:?}"));
+}
