@@ -5,6 +5,9 @@ use thiserror::Error;
 /// Session log/index failure without transcript contents in diagnostics.
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
+    /// The caller cancelled or the physical SQLite execution budget elapsed.
+    #[error("session index read cancelled or deadline exceeded")]
+    IndexReadInterrupted,
     /// A database table does not match its admitted schema.
     #[error("SQLite table {table} does not match its schema")]
     UnsupportedSqliteSchema {

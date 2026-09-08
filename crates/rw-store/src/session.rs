@@ -31,6 +31,8 @@ pub use error::SessionStoreError;
 pub use event_log::{SessionEventLog, garbage_collect_empty_sessions};
 #[cfg(test)]
 use index::upsert_projection;
+mod index_control;
+pub use index_control::SessionIndexReadControl;
 pub use index::{
     ProjectionStatus, SearchDocumentWriter, SessionIndex, SessionProjection, SessionSearchRow, SessionSummary,
 };

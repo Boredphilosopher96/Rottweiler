@@ -13,6 +13,7 @@ use super::*;
 mod command_receipts;
 mod fork;
 mod fork_admission;
+mod search;
 mod workspace;
 
 #[tokio::test]

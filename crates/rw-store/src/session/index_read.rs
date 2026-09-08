@@ -1,12 +1,16 @@
 //! `SQLite` owns a live read transaction; search never copies the lifetime database.
-use super::{SessionStoreError, sqlite_snapshot::validate_read_only_index};
+use super::{
+    SessionIndexReadControl, SessionStoreError, sqlite_snapshot::validate_read_only_index,
+};
 use rusqlite::{Connection, OpenFlags};
 use std::{fs, path::Path};
 
 pub(super) fn read_index<T>(
     root: &Path,
+    control: &SessionIndexReadControl,
     read: impl FnOnce(&Connection) -> Result<T, SessionStoreError>,
 ) -> Result<T, SessionStoreError> {
+    control.check()?;
     let path = root.join("index.sqlite");
     let before = validate_read_only_index(&path)?;
     let canonical_root = fs::canonicalize(root)?;
@@ -20,14 +24,16 @@ pub(super) fn read_index<T>(
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    control.install(&connection)?;
     connection.execute_batch("PRAGMA query_only=ON; PRAGMA cache_size=-1024; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;")?;
     if !same_index_file(&before, &validate_read_only_index(&path)?) {
         return Err(SessionStoreError::UnsafeSessionIndex);
     }
     connection.execute_batch("BEGIN DEFERRED")?;
     let result = read(&connection);
-    connection.execute_batch("ROLLBACK")?;
+    let rollback = connection.execute_batch("ROLLBACK");
+    control.check()?;
+    rollback?;
     if !same_index_file(&before, &validate_read_only_index(&path)?) {
         return Err(SessionStoreError::UnsafeSessionIndex);
     }

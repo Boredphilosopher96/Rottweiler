@@ -437,13 +437,24 @@ fn source_hits_share_snapshot_select_numeric_first_body_and_preserve_title_null(
             writer.text(1, SequenceId(2), 0, "needle early")
         })
         .expect("source");
-    let hits =
-        SessionIndex::search_hits_read_only(root.path(), "needle titleword", 10).expect("hits");
+    let hits = SessionIndex::search_hits_read_only(
+        root.path(),
+        "needle titleword",
+        10,
+        &SessionIndexReadControl::new(),
+    )
+    .expect("hits");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].source, source.source);
     assert_eq!(hits[0].sequence, Some(SequenceId(2)));
     assert_eq!(
-        SessionIndex::search_hits_read_only(root.path(), "titleword", 10).expect("title")[0]
+        SessionIndex::search_hits_read_only(
+            root.path(),
+            "titleword",
+            10,
+            &SessionIndexReadControl::new()
+        )
+        .expect("title")[0]
             .sequence,
         None
     );
@@ -453,12 +464,33 @@ fn source_hits_share_snapshot_select_numeric_first_body_and_preserve_title_null(
     index
         .apply_page(Some(prior), &source, |writer| writer.rewind(0))
         .expect("rewind");
-    let hits =
-        SessionIndex::search_hits_read_only(root.path(), "needle", 10).expect("title remains");
+    let hits = SessionIndex::search_hits_read_only(
+        root.path(),
+        "needle",
+        10,
+        &SessionIndexReadControl::new(),
+    )
+    .expect("title remains");
     assert_eq!(hits[0].source, source.source);
     assert_eq!(hits[0].sequence, None);
-    assert!(SessionIndex::search_hits_read_only(root.path(), &"x".repeat(513), 1).is_err());
-    assert!(SessionIndex::search_hits_read_only(root.path(), "needle", 1002).is_err());
+    assert!(
+        SessionIndex::search_hits_read_only(
+            root.path(),
+            &"x".repeat(513),
+            1,
+            &SessionIndexReadControl::new()
+        )
+        .is_err()
+    );
+    assert!(
+        SessionIndex::search_hits_read_only(
+            root.path(),
+            "needle",
+            1002,
+            &SessionIndexReadControl::new()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -482,8 +514,13 @@ fn common_term_limits_unique_sessions_and_counts_a_distinct_truncation_sentinel(
         .expect("second session");
     let oldest = projection(summary("oldest", "needle oldest", 1), 1);
     index.upsert(&oldest).expect("third title");
-    let two =
-        SessionIndex::search_hits_read_only(root.path(), "needle", 2).expect("limited unique hits");
+    let two = SessionIndex::search_hits_read_only(
+        root.path(),
+        "needle",
+        2,
+        &SessionIndexReadControl::new(),
+    )
+    .expect("limited unique hits");
     assert_eq!(
         two.iter()
             .map(|row| row.summary.id.as_str())
@@ -491,13 +528,23 @@ fn common_term_limits_unique_sessions_and_counts_a_distinct_truncation_sentinel(
         ["recent", "older"]
     );
     assert_eq!(two[0].sequence, Some(SequenceId(1)));
-    let sentinel = SessionIndex::search_hits_read_only(root.path(), "needle", 3)
-        .expect("one truncation sentinel");
+    let sentinel = SessionIndex::search_hits_read_only(
+        root.path(),
+        "needle",
+        3,
+        &SessionIndexReadControl::new(),
+    )
+    .expect("one truncation sentinel");
     assert_eq!(sentinel.len(), 3);
     assert_eq!(sentinel[2].summary.id, "oldest");
     assert_eq!(sentinel[2].sequence, None);
-    let conjunction = SessionIndex::search_hits_read_only(root.path(), "needle repeated", 3)
-        .expect("session conjunction");
+    let conjunction = SessionIndex::search_hits_read_only(
+        root.path(),
+        "needle repeated",
+        3,
+        &SessionIndexReadControl::new(),
+    )
+    .expect("session conjunction");
     assert_eq!(
         conjunction
             .iter()

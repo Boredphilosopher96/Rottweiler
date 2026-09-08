@@ -5,6 +5,7 @@ mod factory;
 mod fork_journal;
 mod git;
 mod queries;
+mod search;
 mod workspace;
 use git::{read_workspace_diff, read_workspace_status};
 use workspace::{
@@ -722,17 +723,19 @@ impl RuntimeSessionFactory {
     fn authorize_workspace_path(&self, workspace: &Path) -> Result<PathBuf, HostError> {
         let canonical = fs::canonicalize(workspace)
             .map_err(|_| HostError::Query("session workspace is unavailable".to_owned()))?;
-        if self
-            .allowed_workspaces
-            .iter()
-            .any(|root| canonical == *root || canonical.starts_with(root))
-        {
+        if self.workspace_is_allowed(&canonical) {
             Ok(canonical)
         } else {
             Err(HostError::Query(
                 "session workspace is outside authorized roots".to_owned(),
             ))
         }
+    }
+
+    fn workspace_is_allowed(&self, canonical: &Path) -> bool {
+        self.allowed_workspaces
+            .iter()
+            .any(|root| canonical == root || canonical.starts_with(root))
     }
 
     async fn compose(
@@ -847,89 +850,6 @@ impl RuntimeSessionFactory {
         }
         descriptors.sort_by(|left, right| left.session_id.0.cmp(&right.session_id.0));
         Ok(descriptors)
-    }
-
-    fn search_sessions_blocking(
-        &self,
-        query: &str,
-        limit: u32,
-    ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), SessionStoreError> {
-        let requested =
-            usize::try_from(limit).map_err(|_| SessionStoreError::SearchLimitTooLarge)?;
-        let rows = SessionIndex::search_hits_read_only(
-            &self.options.storage_root,
-            query,
-            requested.saturating_add(1),
-        )?;
-        let truncated = rows.len() > requested;
-        let descriptors: Result<Vec<_>, SessionStoreError> = rows
-            .into_iter()
-            .take(requested)
-            .map(|row| {
-                let session = self
-                    .persisted_descriptor(&row.summary.id)
-                    .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
-                let matched = row
-                    .sequence
-                    .map(|sequence| {
-                        let through = row
-                            .source
-                            .next_sequence
-                            .checked_sub(1)
-                            .map(rw_types::SequenceId)
-                            .ok_or(SessionStoreError::CorruptProjectionWatermark)?;
-                        Ok::<_, SessionStoreError>(rw_types::session_search::SessionSearchMatch {
-                            session_id: session.session_id.clone(),
-                            source_sequence: sequence,
-                            through,
-                            digest: row.source.digest,
-                        })
-                    })
-                    .transpose()?;
-                Ok(rw_types::session_search::SessionSearchHit {
-                    session,
-                    r#match: matched,
-                })
-            })
-            .collect();
-        Ok((descriptors?, truncated))
-    }
-
-    async fn search_sessions_with_retry(
-        &self,
-        query: &str,
-        limit: u32,
-    ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), HostError> {
-        for attempt in 1..=SESSION_INDEX_SEARCH_MAX_ATTEMPTS {
-            let factory = self.clone();
-            let query = query.to_owned();
-            let result =
-                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-                    factory.search_sessions_blocking(&query, limit)
-                })
-                .await
-                .map_err(|_| HostError::Query("session search worker failed".to_owned()))?;
-            match result {
-                Ok((rows, _)) if rows.is_empty() && attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS => {
-                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await;
-                }
-                Ok(result) => return Ok(result),
-                Err(SessionStoreError::UnsafeSessionIndex)
-                    if attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS =>
-                {
-                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        reason = %error,
-                        attempt,
-                        "hosted session index search failed"
-                    );
-                    return Err(HostError::Query("session index search failed".to_owned()));
-                }
-            }
-        }
-        Err(HostError::Query("session index search failed".to_owned()))
     }
 }
 

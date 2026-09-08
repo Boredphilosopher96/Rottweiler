@@ -1,6 +1,6 @@
 //! Rebuildable session listing and full-text search; accounting authority is preserved.
 use super::{
-    SessionStoreError,
+    SessionIndexReadControl, SessionStoreError,
     index_read::read_index,
     journal::JournalPrefixIdentity,
     journal_io::validate_session_id,
@@ -255,7 +255,7 @@ impl SessionIndex {
         if limit > 1_001 {
             return Err(SessionStoreError::SearchLimitTooLarge);
         }
-        Self::search_hits_read_only(root, query, limit)
+        Self::search_hits_read_only(root, query, limit, &SessionIndexReadControl::new())
             .map(|rows| rows.into_iter().map(|row| row.summary).collect())
     }
 
@@ -266,8 +266,11 @@ impl SessionIndex {
         root: &Path,
         query: &str,
         limit: usize,
+        control: &SessionIndexReadControl,
     ) -> Result<Vec<SessionSearchRow>, SessionStoreError> {
-        read_index(root, |connection| query_search(connection, query, limit))
+        read_index(root, control, |connection| {
+            query_search(connection, query, limit)
+        })
     }
 
     /// Lists newest sessions using a live `SQLite` read transaction.
@@ -285,7 +288,7 @@ impl SessionIndex {
             return Err(SessionStoreError::SearchLimitTooLarge);
         }
         let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
-        read_index(root, |connection| {
+        read_index(root, &SessionIndexReadControl::new(), |connection| {
             sqlite_schema::validate_sessions(connection)?;
             let mut statement = connection.prepare(
                 "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
