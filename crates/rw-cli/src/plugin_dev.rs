@@ -104,7 +104,7 @@ impl DevelopmentClient {
     }
 
     async fn dispatch(&self, command: ClientCommand) -> Result<()> {
-        let body = serde_json::to_vec(&command).into_diagnostic()?;
+        let body = crate::command_encoding::encode(&command).into_diagnostic()?;
         let request = Request::builder()
             .method(Method::POST)
             .uri("/v1/command")

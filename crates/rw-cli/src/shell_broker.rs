@@ -297,7 +297,7 @@ impl BrokerClient {
             status,
             captured_output: captured_output.map(str::to_owned),
         };
-        let body = serde_json::to_vec(&command)
+        let body = crate::command_encoding::encode(&command)
             .map_err(|_| ShellBrokerError::Protocol("completion could not serialize".to_owned()))?;
         let request = Request::builder()
             .method(Method::POST)

@@ -46,6 +46,7 @@ use crate::trust_cli::{
     run_trust_command,
 };
 
+mod command_encoding;
 mod doctor;
 mod extension_cli;
 mod import;
