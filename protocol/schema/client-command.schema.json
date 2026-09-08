@@ -2709,6 +2709,23 @@
         {
           "type": "object",
           "properties": {
+            "source": {
+              "$ref": "#/$defs/SessionSearchMatch"
+            },
+            "type": {
+              "type": "string",
+              "const": "search_match"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "item": {
               "$ref": "#/$defs/TranscriptItemId"
             },
@@ -2778,6 +2795,39 @@
             "generation"
           ]
         }
+      ]
+    },
+    "SessionSearchMatch": {
+      "description": "A matching document at a complete, immutable search projection prefix.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source_sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "through": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "minItems": 32,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "source_sequence",
+        "through",
+        "digest"
       ]
     },
     "TranscriptItemId": {

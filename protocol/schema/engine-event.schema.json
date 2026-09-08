@@ -728,10 +728,10 @@
         "query": {
           "type": "string"
         },
-        "sessions": {
+        "hits": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SessionDescriptor"
+            "$ref": "#/$defs/SessionSearchHit"
           }
         },
         "truncated": {
@@ -747,7 +747,7 @@
         "type",
         "meta",
         "query",
-        "sessions",
+        "hits",
         "truncated"
       ]
     },
@@ -7576,6 +7576,63 @@
       "enum": [
         "running",
         "idle"
+      ]
+    },
+    "SessionSearchHit": {
+      "description": "Session-wide term match; title-only matches have no transcript source.",
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionDescriptor"
+        },
+        "match": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionSearchMatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session",
+        "match"
+      ]
+    },
+    "SessionSearchMatch": {
+      "description": "A matching document at a complete, immutable search projection prefix.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source_sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "through": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "minItems": 32,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "source_sequence",
+        "through",
+        "digest"
       ]
     },
     "CommandDescriptor": {

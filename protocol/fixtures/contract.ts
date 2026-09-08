@@ -1104,14 +1104,17 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z"
       },
       "query": "protocol",
-      "sessions": [
+      "hits": [
         {
-          "session_id": "session-fork",
-          "title": "Session fork",
-          "workspace_name": "workspace",
-          "model": "fast",
-          "driver_client_id": "client-fixture",
-          "shell_active": false
+          "session": {
+            "session_id": "session-fork",
+            "title": "Session fork",
+            "workspace_name": "workspace",
+            "model": "fast",
+            "driver_client_id": "client-fixture",
+            "shell_active": false
+          },
+          "match": null
         }
       ],
       "truncated": false
