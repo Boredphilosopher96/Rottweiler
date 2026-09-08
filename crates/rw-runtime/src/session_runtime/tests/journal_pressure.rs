@@ -25,10 +25,22 @@ async fn run(rounds: usize) {
         .expect("independent actor config"),
     )
     .expect("control actor");
-    actor
-        .ensure_local_driver()
-        .await
-        .expect("driver attached before pressure");
+    assert_eq!(
+        actor
+            .dispatch(rw_types::ClientCommand::AttachSession {
+                meta: rw_types::CommandMeta {
+                    protocol_version: rw_types::PROTOCOL_VERSION,
+                    client_id: rw_types::ClientId("local".into()),
+                    request_id: rw_types::RequestId("pressure-attach".into()),
+                },
+                session_id: actor.session_id().clone(),
+                last_seen_sequence: None,
+                role: rw_types::ClientRole::Driver,
+            })
+            .await
+            .expect("driver attached before pressure"),
+        rw_types::CommandOutcome::Accepted {}
+    );
     for round in 0..rounds {
         owner
             .journal_service
