@@ -153,7 +153,10 @@ The SDK writer checks exhausted frame/byte admission before traversing a reply.
 A native JSON counting replacer accounts exact escaped UTF-8 contributions before
 serialization grows them, with at most 128 retained ancestor records. It preserves
 native property ordering, omissions, sparse arrays, primitive coercion, and `toJSON`
-semantics. The admitted result is encoded once into one exact UTF-8 buffer including
+semantics. Provider delivery credit is debited from this same encoded snapshot;
+frames waiting for credit retain their data-queue byte and frame slots. Control
+replies can proceed during that wait, and cancellation releases the retained frame.
+The admitted result is encoded once into one exact UTF-8 buffer including
 LF; no second full encoding or newline-string copy is retained. Reentrant writes
 from serialization callbacks reject explicitly, so a writer has one construction
 at a time. The bounded native construction string is synchronous scratch alongside

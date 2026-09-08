@@ -977,8 +977,7 @@ export class PluginServer {
             method: RPC_METHODS.providerEvent,
             params: { request_id: id, event } as unknown as JsonValue,
           }
-          if (event.type !== "finished") await credit.take(byteLength(JSON.stringify(frame)))
-          await this.#writer.write(frame, "data")
+          await this.#writer.write(frame, "data", event.type === "finished" ? undefined : credit)
         }
         if (!sawFinished) throw new SafeRpcError(-32603, "provider stream ended before finished")
       })

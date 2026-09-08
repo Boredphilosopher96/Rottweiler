@@ -1,5 +1,6 @@
 import { boundedJsonStringify } from "./json-construction"
 import { PROTOCOL_LIMITS, type JsonValue } from "./generated/protocol-3"
+import type { StreamCredit } from "./stream-credit"
 
 export const DEFAULT_MAX_RPC_LINE_BYTES = PROTOCOL_LIMITS.maxLineBytes
 
@@ -75,6 +76,7 @@ export class BoundedJsonWriter {
   #constructing = false
   readonly #queue: PendingWrite[] = []
   readonly #dataQueue: PendingWrite[] = []
+  readonly #creditQueue = new Map<PendingWrite, StreamCredit>()
   readonly #progressQueue: PendingWrite[] = []
   #progressBytes = 0
   #dataBytes = 0
@@ -102,7 +104,8 @@ export class BoundedJsonWriter {
     }
   }
 
-  write(value: JsonValue, priority: "control" | "progress" | "data" = "control"): Promise<void> {
+  write(value: JsonValue, priority: "control" | "progress" | "data" = "control", credit?: StreamCredit): Promise<void> {
+    if (credit !== undefined && priority !== "data") throw new TypeError("delivery credit requires a data frame")
     if (this.#error !== undefined) return Promise.reject(this.#error)
     // No user getter/toJSON or native enumeration runs after known exhaustion.
     if (this.#constructing) return Promise.reject(new OutboundQueueFullError())
@@ -115,12 +118,14 @@ export class BoundedJsonWriter {
     const maxFrames = priority === "control" ? this.#maxQueuedFrames
       : priority === "progress" ? PROTOCOL_LIMITS.maxInFlightRequests : PROTOCOL_LIMITS.maxProviderStreams
     const remaining = maxBytes - queuedBytes
-    if (remaining < 2 || queue.length + active >= maxFrames) {
+    const waiting = priority === "data" ? this.#creditQueue.size : 0
+    if (remaining < 2 || queue.length + active + waiting >= maxFrames) {
       const error = new OutboundQueueFullError()
       this.abort(error)
       return Promise.reject(error)
     }
-    const lineLimit = priority === "progress" ? Math.min(this.maxBytes, PROTOCOL_LIMITS.maxProgressFrameBytes) : this.maxBytes
+    const lineLimit = priority === "progress" ? Math.min(this.maxBytes, PROTOCOL_LIMITS.maxProgressFrameBytes)
+      : credit !== undefined ? Math.min(this.maxBytes, PROTOCOL_LIMITS.providerWindowBytes) : this.maxBytes
     const constructionLimit = Math.min(lineLimit, remaining - 1)
     let serialized: { readonly text: string; readonly bytes: number }
     this.#constructing = true
@@ -151,14 +156,32 @@ export class BoundedJsonWriter {
       this.abort(error instanceof Error ? error : new Error("JSON-RPC construction failed"))
       return Promise.reject(this.#error)
     }
-    const pending = new Promise<void>((resolve, reject) => queue.push({ bytes, priority, resolve, reject }))
+    const pending = new Promise<void>((resolve, reject) => {
+      const item: PendingWrite = { bytes, priority, resolve, reject }
+      if (credit === undefined) queue.push(item)
+      else {
+        // The exact encoded frame owns queue capacity while waiting. Control
+        // replies stay live; no second serialization can change its byte debit.
+        this.#creditQueue.set(item, credit)
+        void credit.take(size - 1).then(() => {
+          if (!this.#creditQueue.delete(item)) return
+          queue.push(item)
+          this.#pump()
+        }, error => {
+          if (!this.#creditQueue.delete(item)) return
+          this.#dataBytes -= size
+          reject(error)
+          this.#pump()
+        })
+      }
+    })
     this.#pump()
     return pending
   }
 
   drain(): Promise<void> {
     if (this.#error !== undefined) return Promise.reject(this.#error)
-    if (this.#active === undefined) return Promise.resolve()
+    if (this.#active === undefined && this.#creditQueue.size === 0) return Promise.resolve()
     return new Promise<void>((resolve, reject) => this.#drainers.push({ resolve, reject }))
   }
 
@@ -168,6 +191,11 @@ export class BoundedJsonWriter {
     this.#active?.reject(error)
     this.#active = undefined
     for (const item of [...this.#queue.splice(0), ...this.#progressQueue.splice(0), ...this.#dataQueue.splice(0)]) item.reject(error)
+    for (const [item, credit] of this.#creditQueue) {
+      item.reject(error)
+      credit.close(error)
+    }
+    this.#creditQueue.clear()
     this.#queuedBytes = 0
     this.#dataBytes = 0
     this.#progressBytes = 0
@@ -180,7 +208,7 @@ export class BoundedJsonWriter {
     if (this.#active !== undefined || this.#error !== undefined) return
     const item = this.#queue.shift() ?? this.#progressQueue.shift() ?? this.#dataQueue.shift()
     if (item === undefined) {
-      for (const waiter of this.#drainers.splice(0)) waiter.resolve()
+      if (this.#creditQueue.size === 0) for (const waiter of this.#drainers.splice(0)) waiter.resolve()
       return
     }
     this.#active = item
