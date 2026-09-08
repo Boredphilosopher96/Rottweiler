@@ -365,7 +365,7 @@ jobs:
       - name: Verify and prepare native candidate
         run: python3 scripts/native_candidate.py prepare "$RUNNER_TEMP/native-candidate.noindex"
       - name: Enforce headless absolute budgets with a bounded smoke sample
-        run: python3 scripts/ci_evidence.py --gate headless-smoke --output ci-results/headless.json -- crates/rw-cli/tests/perf_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
+        run: python3 scripts/ci_evidence.py --delegated --gate headless-smoke --output ci-results/headless.json -- crates/rw-cli/tests/perf_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
         env:
           ROTTWEILER_PERF_SMOKE: 1
           ROTTWEILER_PERF_SAMPLES: 100
@@ -462,7 +462,7 @@ jobs:
           sudo install -d -m 755 /run/sshd
           sudo service ssh restart
           ssh rottweiler-ci true
-      - run: python3 scripts/ci_evidence.py --gate ssh-acceptance --output ci-results/ssh.json -- crates/rw-cli/tests/m4_release_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
+      - run: python3 scripts/ci_evidence.py --delegated --gate ssh-acceptance --output ci-results/ssh.json -- crates/rw-cli/tests/m4_release_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
       - name: Retain gate evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

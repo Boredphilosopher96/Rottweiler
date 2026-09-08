@@ -11,28 +11,13 @@ import unittest
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "ci_evidence.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("ci_evidence", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
 class CiEvidenceTests(unittest.TestCase):
-    def test_permission_denial_requires_proof_that_no_live_members_remain(self):
-        process = subprocess.Popen([sys.executable, "-c", "pass"])
-        process.wait()
-        with patch.object(MODULE.os, "killpg", side_effect=PermissionError), patch.object(
-            MODULE.subprocess, "check_output", return_value=f"{process.pid} S\n".encode(),
-        ):
-            with self.assertRaises(PermissionError):
-                MODULE.settle_group(process)
-        with patch.object(MODULE.os, "killpg", side_effect=PermissionError), patch.object(
-            MODULE.subprocess, "check_output", return_value=f"{process.pid} Z\n".encode(),
-        ):
-            MODULE.settle_group(process)
-        with patch.object(MODULE.subprocess, "check_output", return_value=b"unavailable"):
-            with self.assertRaises(OSError):
-                MODULE.group_has_live_members(process.pid)
-
     @unittest.skipUnless(hasattr(os, "fork"), "requires Unix process groups")
     def test_cancellation_reaps_group_after_its_leader_has_exited(self):
         with tempfile.TemporaryDirectory() as directory:

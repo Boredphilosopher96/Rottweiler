@@ -523,6 +523,14 @@ its bytes against mutation. CI and coverage build these prerequisites before the
 test command. The product executable retains its own worker entrypoint; neither
 fixture nor a fixture role is added to the shipped product bundle.
 
+`scripts/ci_evidence.py` and measured samples share the same physical process
+owner. CI observes leader exit without reaping, signals only while that leader
+still anchors its group, then requires group disappearance. Participating nested
+Python gates use `--delegated`: their explicit settlement acknowledgement is
+required even on nonzero exit. Cancellation gives their actual owners time to
+settle independently grouped children; missing acknowledgement is `UNSETTLED`
+failure evidence. A raw command receives no nested settlement capability.
+
 `scripts/ci_evidence.py` preserves command exit status and writes bounded partial
 and final diagnostics with source/run/lock identity. Each gate retains an 8 MiB
 redacted log prefix and a 128 KiB rolling tail, with explicit omitted-byte counts,

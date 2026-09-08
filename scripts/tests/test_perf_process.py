@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import perf_process
+import perf_process_owner
 from perf_process import run_sample
 
 
@@ -105,7 +106,7 @@ else:
 
     def test_all_group_signals_precede_the_only_reap(self):
         from perf_process_wait import observe_exit
-        original = perf_process.signal_owned_group
+        original = perf_process_owner.signal_owned_group
         observed = []
         def signal(pid, number):
             # A reaped child would raise ECHILD here; WNOWAIT must preserve the
@@ -114,7 +115,7 @@ else:
             second = observe_exit(pid)
             observed.append((first, second))
             original(pid, number)
-        with patch.object(perf_process, "signal_owned_group", side_effect=signal), \
+        with patch.object(perf_process_owner, "signal_owned_group", side_effect=signal), \
                 patch.object(subprocess.Popen, "poll", side_effect=AssertionError("premature reap")):
             result = self.run_python("raise SystemExit(7)")
         self.assertEqual(result.returncode, 7)

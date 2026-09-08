@@ -139,7 +139,7 @@ jobs:
           echo "js_host=$(python3 scripts/native_candidate.py path "$RUNNER_TEMP/native-candidate.noindex" js_host)" >> "$GITHUB_OUTPUT"
       - name: Run the real supervisor, engine, and OpenTUI for eight hours
         run: >-
-          python3 scripts/ci_evidence.py --gate soak --output soak-gate.json --
+          python3 scripts/ci_evidence.py --delegated --gate soak --output soak-gate.json --
           python3 scripts/run-soak.py
           --candidate "$RUNNER_TEMP/native-candidate.noindex"
           --rw "${{ steps.components.outputs.engine }}"

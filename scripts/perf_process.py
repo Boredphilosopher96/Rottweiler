@@ -6,15 +6,14 @@ import math
 import os
 from pathlib import Path
 import selectors
-import signal
 import subprocess
 import time
 from typing import BinaryIO
 
-from perf_process_scope import SCOPE_FD, ScopeReader, inherited_scope
-from perf_process_wait import observe_exit, signal_owned_group, require_group_disappearance
+from perf_process_scope import ScopeReader
+from perf_process_owner import OwnedProcess, SCOPE as _SCOPE
+from perf_process_wait import observe_exit
 
-_SCOPE = inherited_scope()
 
 
 def require_sample_settlement() -> None:
@@ -61,30 +60,8 @@ def run_sample(
         raise ValueError("sample time and output budgets must be positive")
     started = time.monotonic()
     deadline = started + timeout
-    registration = _SCOPE.starting()
-    scope = None
-    writer = None
-    environment = dict(env)
-    environment.pop(SCOPE_FD, None)
-    try:
-        if delegated:
-            descriptor, writer = os.pipe()
-            scope = ScopeReader(descriptor)
-            os.set_blocking(descriptor, False)
-            environment[SCOPE_FD] = str(writer)
-        process = subprocess.Popen(
-            command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-            pass_fds=() if writer is None else (writer,),
-        )
-    except BaseException:
-        if scope is not None:
-            os.close(scope.descriptor)
-        _SCOPE.settled(registration)
-        raise
-    finally:
-        if writer is not None:
-            os.close(writer)
+    owner = OwnedProcess(command, cwd=cwd, env=env, delegated=delegated)
+    process, scope = owner.process, owner.scope
     spawn_ms = (time.monotonic() - started) * 1000
     stdout, stderr = bytearray(), bytearray()
 
@@ -101,7 +78,6 @@ def run_sample(
         for stream in (process.stdout, process.stderr):
             assert stream is not None
             os.set_blocking(stream.fileno(), False)
-        _SCOPE.started(registration, process.pid)
         with selectors.DefaultSelector() as selector:
             for stream, captured in ((process.stdout, stdout), (process.stderr, stderr)):
                 assert stream is not None
@@ -147,31 +123,4 @@ def run_sample(
                 time.sleep(min(remaining, .001))
         return subprocess.CompletedProcess(command, returncode, bytes(stdout), bytes(stderr))
     finally:
-        try:
-            # A cooperative wrapper must let its actual Popen owners settle their
-            # separately grouped children before it exits. Never signal a delegated
-            # PID from a registration: that PID may already have been reused.
-            if scope is not None and observe_exit(process.pid) is None:
-                signal_owned_group(process.pid, signal.SIGTERM)
-                settle_by = time.monotonic() + 5
-                while observe_exit(process.pid) is None and time.monotonic() < settle_by:
-                    scope.drain()
-                    for stream in (process.stdout, process.stderr):
-                        if stream is not None and not os.get_blocking(stream.fileno()):
-                            with contextlib.suppress(BlockingIOError):
-                                os.read(stream.fileno(), 16 * 1024)
-                    time.sleep(.01)
-            # WNOWAIT keeps the leader unreaped: its PID anchors this exact group
-            # until the last signal. Never signal a group after releasing that PID.
-            signal_owned_group(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
-            require_group_disappearance(process.pid)
-            if scope is not None:
-                scope.require_closed()
-            _SCOPE.settled(registration)
-        finally:
-            for stream in (process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
-            if scope is not None:
-                os.close(scope.descriptor)
+        owner.settle()
