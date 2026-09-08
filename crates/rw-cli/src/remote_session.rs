@@ -595,6 +595,7 @@ pub(super) async fn run_remote_tui_process(
     for attempt in 0..=5_u8 {
         let mut command = tokio::process::Command::new(&tui);
         command
+            .arg(rw_types::release_contract::JS_HOST_TUI_ROLE)
             .env_remove("ROTTWEILER_TUI_KEYBINDINGS")
             .env("ROTTWEILER_ENGINE_SOCKET", &paths.socket)
             .env("ROTTWEILER_ENGINE_TOKEN_FILE", &paths.token)
@@ -650,4 +651,39 @@ pub(super) async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
 #[cfg(not(unix))]
 pub(super) async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn remote_client_selects_the_tui_role_on_every_process_start() {
+        let root = tempfile::tempdir().expect("runtime");
+        let executable = root.path().join("host");
+        fs::write(
+            &executable,
+            "#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = tui ] || exit 64\n\
+             marker=\"$ROTTWEILER_FORK_OPERATION_DIRECTORY/started\"\n\
+             if [ ! -f \"$marker\" ]; then printf first > \"$marker\"; exit 75; fi\n\
+             printf restarted > \"$marker\"\n",
+        )
+        .expect("host fixture");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).expect("executable");
+        let paths = server::ServerRuntimePaths {
+            directory: root.path().to_owned(),
+            socket: root.path().join("engine.sock"),
+            token: root.path().join("token"),
+            descriptor: root.path().join("descriptor"),
+        };
+        run_remote_tui_process(executable, &paths, root.path(), "remote-session", None)
+            .await
+            .expect("remote client restart");
+        assert_eq!(
+            fs::read_to_string(root.path().join("started")).expect("start receipt"),
+            "restarted"
+        );
+    }
 }
