@@ -78,10 +78,13 @@ pub(super) fn validate(
     turn: u64,
     logical: &ToolResultAdmission,
 ) -> Result<(), AgentLoopError> {
-    if state.running.as_ref().map(|running| running.id) != Some(turn) || state.unsettled.is_some() {
+    if state.running.as_ref().map(|running| running.id) != Some(turn) {
         return Err(AgentLoopError::EffectsUnsettled(
             "tool result closure lost its active owner".into(),
         ));
+    }
+    if let Some(cause) = &state.unsettled {
+        return Err(AgentLoopError::EffectsUnsettled(cause.clone()));
     }
     // Sequence width cannot grow past this reservation. The final append also validates
     // its exact timestamp, cause and prefix before any selector is published.

@@ -360,7 +360,9 @@ pub(in crate::engine) async fn handle_turn_signal(
         | TurnSignal::ToolResultsUnsettled { message, .. } => {
             state.tasks.cancel();
             state.poisoned = true;
-            state.unsettled = Some(message.clone());
+            // Later failures can be consequences of this cancellation. Preserve
+            // the first physical failure for both close proof and diagnostics.
+            let message = state.unsettled.get_or_insert(message).clone();
             emit(
                 state,
                 events,
