@@ -61,7 +61,7 @@ pub(crate) struct Jobs {
     pending: AtomicUsize,
     changed: Notify,
 }
-struct Job(Arc<Jobs>);
+pub(crate) struct Job(Arc<Jobs>);
 impl Drop for Job {
     fn drop(&mut self) {
         self.0.pending.fetch_sub(1, Ordering::AcqRel);
@@ -93,18 +93,21 @@ impl<F> Work<F> {
     }
 }
 impl Jobs {
+    pub(crate) fn retain(self: &Arc<Self>) -> Result<Job, McpError> {
+        self.pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                (pending < MAX_JOBS).then_some(pending + 1)
+            })
+            .map_err(|_| exhausted())?;
+        Ok(Job(Arc::clone(self)))
+    }
     pub(crate) async fn run<T: Send + 'static>(
         self: &Arc<Self>,
         class: ResourceClass,
         outer: CancellationToken,
         work: impl FnOnce(&CancellationToken) -> T + Send + 'static,
     ) -> Result<T, McpError> {
-        self.pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                (pending < MAX_JOBS).then_some(pending + 1)
-            })
-            .map_err(|_| exhausted())?;
-        let job = Job(Arc::clone(self));
+        let job = self.retain()?;
         let cancelled = CancellationToken::default();
         let caller = Caller(cancelled.clone());
         let resource = rw_resources::acquire(class, async {

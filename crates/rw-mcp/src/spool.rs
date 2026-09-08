@@ -80,6 +80,7 @@ impl OverflowSpool for FilesystemSpool {
         _operation: &str,
         bytes: EncodedPayload,
     ) -> Result<SessionPayloadReference, McpError> {
+        let _invocation = self.jobs.retain()?;
         let redactor = Arc::clone(&self.redactor);
         let redacted = self
             .jobs
