@@ -152,8 +152,6 @@ pub(super) fn ensure_folder_trust_grantable(
 }
 
 pub(super) async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
-    use std::io::IsTerminal as _;
-
     let workspace =
         fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
     let loader = rw_store::config::ConfigLoader::from_environment().into_diagnostic()?;
@@ -232,18 +230,7 @@ pub(super) async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Res
             println!("plugin {} is already approved", plugin.name);
             continue;
         }
-        if !std::io::stdin().is_terminal() {
-            return Err(miette!(
-                "refusing plugin approval without an interactive terminal"
-            ));
-        }
-        eprint!("Approve this exact plugin identity? [y/N] ");
-        std::io::stderr().flush().into_diagnostic()?;
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer).into_diagnostic()?;
-        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            return Err(miette!("plugin approval was not granted"));
-        }
+        confirm_plugin_approval()?;
         rw_ext::approve_plugin_launch(&store, &manifest, &process, &origin)
             .map_err(|error| miette!(error.to_string()))?;
         println!(
@@ -258,6 +245,24 @@ pub(super) async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Res
     .await
     .map_err(|cause| miette!(cause.to_string()))?
     .into_diagnostic()?;
+    Ok(())
+}
+
+fn confirm_plugin_approval() -> Result<()> {
+    use std::io::IsTerminal as _;
+
+    if !std::io::stdin().is_terminal() {
+        return Err(miette!(
+            "refusing plugin approval without an interactive terminal"
+        ));
+    }
+    eprint!("Approve this exact plugin identity? [y/N] ");
+    std::io::stderr().flush().into_diagnostic()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).into_diagnostic()?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(miette!("plugin approval was not granted"));
+    }
     Ok(())
 }
 
