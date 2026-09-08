@@ -66,10 +66,11 @@ impl ActorTasks {
         guard.completed = true;
         let execution = rw_resources::acquire(class, cancellation.cancelled())
             .await
-            .map_err(|error| {
-                AgentLoopError::InvalidConfiguration(format!(
+            .map_err(|error| match error {
+                rw_resources::AdmissionError::Cancelled => AgentLoopError::Cancelled,
+                error => AgentLoopError::InvalidConfiguration(format!(
                     "blocking execution admission: {error}"
-                ))
+                )),
             })?;
         guard.completed = false;
         let span = tracing::Span::current();

@@ -311,13 +311,7 @@ pub(super) async fn run_turn(
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                send_event(
-                    &signals,
-                    PendingEvent::Error {
-                        message: error.to_string(),
-                    },
-                );
-                status = AgentTurnStatus::Failed;
+                status = super::provider_context::report_failure(error, &signals);
                 break;
             }
         };
@@ -398,13 +392,7 @@ pub(super) async fn run_turn(
                 {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        send_event(
-                            &signals,
-                            PendingEvent::Error {
-                                message: error.to_string(),
-                            },
-                        );
-                        status = AgentTurnStatus::Failed;
+                        status = super::provider_context::report_failure(error, &signals);
                         break;
                     }
                 };

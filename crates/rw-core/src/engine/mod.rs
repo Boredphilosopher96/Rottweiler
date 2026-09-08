@@ -282,6 +282,9 @@ fn diff_binding(diff: &UnifiedDiff) -> ApprovalBinding {
 /// Stable turn-loop construction or runtime failure.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AgentLoopError {
+    /// Cancellation stopped queued work before its physical execution began.
+    #[error("agent operation was cancelled before execution")]
+    Cancelled,
     /// Owned effects could not be proven settled.
     #[error("effect settlement is unproven: {0}")]
     EffectsUnsettled(String),

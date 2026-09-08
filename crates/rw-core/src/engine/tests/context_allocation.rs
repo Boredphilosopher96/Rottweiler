@@ -217,3 +217,50 @@ async fn checked_working_growth_precedes_normalization_and_retains_cache_high_wa
 }
 
 mod opaque;
+
+#[tokio::test]
+async fn cancelled_blocking_admission_never_executes_and_releases_its_task_ownership() {
+    let root = tempfile::tempdir().expect("root");
+    let config = Arc::new(
+        history::bind(config(
+            root.path(),
+            Arc::new(ScriptedModel::default()),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .await
+        .expect("source"),
+    );
+    let tasks = crate::engine::task_ownership::ActorTasks::default();
+    let cancelled = rw_tools::CancellationToken::default();
+    cancelled.cancel();
+    let source_dropped = Arc::new(AtomicBool::new(false));
+    let owner = Owner(Arc::clone(&source_dropped));
+    let result: Result<tokio::task::JoinHandle<()>, crate::engine::AgentLoopError> = tasks
+        .spawn_blocking(
+            Arc::clone(&config),
+            cancelled,
+            rw_resources::ResourceClass::Cpu,
+            move || {
+                drop(owner);
+                panic!("cancelled worker must not execute")
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::engine::AgentLoopError::Cancelled)
+    ));
+    assert!(source_dropped.load(Ordering::Acquire));
+    assert!(tasks.idle());
+    assert!(
+        tasks.failure().is_none(),
+        "unstarted work has no unsettled effects"
+    );
+    assert_eq!(
+        Arc::strong_count(&config),
+        1,
+        "cancelled task retains no generation"
+    );
+}
