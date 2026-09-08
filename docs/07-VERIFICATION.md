@@ -643,6 +643,20 @@ actual process handoff with a pending child question and a parent text attachmen
 larger than 4 MiB. Its bounded fixture runs in the measured client process;
 complete engine-plus-TUI RSS qualification remains a separate gate.
 
+Review generation tests use real App/HTTP reads and the verified native renderer
+in separate processes. They force capture while the third session-review file or
+a workspace diff is scrolled away from its beginning, then require the same
+source fingerprint and viewport, preserved draft and attachment, and no decision
+before the fresh response. Changed and removed sources must refuse restoration
+visibly. A pending decision continues to prevent recycling after closing review.
+The private version-5 handoff stores bounded path, view mode, source and workspace
+fingerprints, and viewport offsets; it contains no review body. Its restoration
+lease retires separately from the adopted composer envelope. These functional
+oracles do not replace combined RSS, recycle outage or long-soak measurements.
+Memory observations retry only an interrupted OS `memoryUsage` syscall, with
+three fresh attempts; exhaustion or any other failure aborts the gate. No old or
+zero observation substitutes for a failed read.
+
 The self-hosted `soak` labels are operational security boundaries, not
 general-purpose shared runners. They are restricted to schedule, manual, and
 exact-tag jobs and never receive release or provider credentials. WSL2 and

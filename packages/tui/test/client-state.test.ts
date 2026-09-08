@@ -98,7 +98,7 @@ describe("client-owned renderer handoff", () => {
     expect(replacement.toolsWorkspace.captureClientState()).toEqual(saved.tools)
   })
 
-  test("the production memory-check path never recycles an active review or a failed handoff", async () => {
+  test("the production memory-check path refuses a review without source authority and a failed handoff", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, onCommand: () => null })

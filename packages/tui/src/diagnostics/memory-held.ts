@@ -6,7 +6,7 @@ import { ClientAllocationOwner } from "../client-allocation"
 import { DocumentController } from "../history/document"
 import { PROTOCOL_VERSION } from "../protocol"
 import { createInitialState } from "../state"
-import { observedResidentBytes } from "../process-memory"
+import { currentResidentBytes, observedResidentBytes } from "../process-memory"
 import { MEMORY_LOAD, MemoryFixture } from "./memory-fixture"
 import { createMemoryRenderer } from "./memory-renderer"
 
@@ -87,14 +87,18 @@ export async function runHeldViewMemoryProbe(reportPath: string, directory: stri
         const chunks = app.state.tools[identity(index).invocation_id]?.chunks
         requireThat(chunks !== undefined && chunks.retainedBytes + chunks.omittedBytes === (cycle + 1) * 4 * 4096, "tool bytes were not consumed exactly")
       }
-      requireThat(app.recycleState() === null, "an unresolved held view was discarded for recycle")
+      if (view === "review") {
+        const handoff = app.recycleState()
+        requireThat(handoff !== null && handoff.review !== null, "held review lost its source-qualified handoff")
+      }
+      else requireThat(app.recycleState() === null, "an unresolved held view was discarded for recycle")
       if (view === "output") requireThat(app.outputViewer.visible && document.snapshot.page?.source.sequence === "19999", "held output changed source")
       if (view === "review") requireThat(app.reviewPanel.visible, "held review lost focus")
       if (view === "secret") requireThat(app.picker.input.value === "•".repeat("synthetic-secret-canary".length), "unsubmitted secret changed")
       if (view === "action") requireThat((allocations.usage.domains.decoding ?? 0) >= 4096, "pending credential action lost its result owner")
       if (cycle % 10 === 0 || cycle + 1 === cycles) {
         if (collect) Bun.gc(true)
-        samples.push({ cycle, elapsedMs: performance.now() - heldAt, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, terminal: terminal.snapshot, memory: clientMemoryBreakdown() })
+        samples.push({ cycle, elapsedMs: performance.now() - heldAt, rssBytes: currentResidentBytes(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, terminal: terminal.snapshot, memory: clientMemoryBreakdown() })
       }
     }
     // Settlement occurs only after the complete held-view measurement interval.

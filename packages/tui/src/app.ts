@@ -1,3 +1,5 @@
+import { ReviewController } from "./app/review-controller"
+import { reviewRoots } from "./recycle-review"
 import { ProjectionAllocations } from "./state/allocation"
 import { BootstrapPresentation } from "./app/bootstrap"
 import type { SessionBootstrap } from "./runtime-bootstrap"
@@ -160,6 +162,7 @@ export class RottweilerApp extends BoxRenderable {
   #outputViewerInvocationId: string | null = null
   #primaryView: PrimaryView = "conversation"
   #toolsElapsedTimer: ReturnType<typeof setInterval> | null = null
+  readonly #reviewRestore: ReviewController
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
@@ -254,10 +257,12 @@ export class RottweilerApp extends BoxRenderable {
       requestId: () => this.#options.requestId(),
       replayActive: () => this.#state.replay.active,
       emit: (command, allocation) => this.#options.onCommand?.(command, allocation),
-      onProjectionFailure: (kind, _type, _requestId, message) => {
+      onProjectionFailure: (kind, _type, requestId, message) => {
+        this.#reviewRestore?.rejected(requestId, message)
         this.#recordProjectionFailure(kind, message)
       },
       onCommandFailure: (type, requestId, outcome, message, failure) => {
+        this.#reviewRestore?.rejected(requestId, message)
         if (outcome !== null) {
           this.#projectRejection(outcome)
           return
@@ -470,12 +475,27 @@ export class RottweilerApp extends BoxRenderable {
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       projectRejection: outcome => this.#projectRejection(outcome), invalidSlash: message => this.#projectInvalidSlashCommand(message),
     })
+    this.#reviewRestore = new ReviewController({
+      get panel() { return app.reviewPanel }, get state() { return app.#state }, get sessionId() { return app.#sessionId },
+      requests: this.#projectionRequests, allocations: this.historyCache.allocations,
+      opened: () => {
+        this.#reviewOpen = true
+        this.#resizeReviewPanel(this.width || this.ctx.width, this.height || this.ctx.height)
+        this.setState(this.#state)
+      },
+      failed: (code, message) => this.#projectClientError(code, message),
+    })
     this.#clientRestore = new ClientRestoreController({
       ui: this, history: this.#history.controller, pickerController: this.#pickerController, children: this.#children, sessions: this.#sessions,
       input: this.#input, providers: this.#providers, mcp: this.#mcp, themes: this.#themes,
       submission: this.#submission, pickerContent: this.#pickerContent,
       get submissionsInFlight() { return app.#composerSubmissionsInFlight }, get sessionId() { return app.#sessionId },
       get theme() { return app.#theme }, get reviewOpen() { return app.#reviewOpen },
+      get reviewRestorePending() { return app.#reviewRestore.pending },
+      captureReview: () => app.reviewPanel.captureClientState(reviewRoots(app.#state)),
+      cancelReview: () => app.#reviewRestore.close(),
+      restoreReview: state => app.#reviewRestore.begin(state),
+      applyReview: () => app.#reviewRestore.apply(),
       resolveTheme: theme => this.#resolvedTheme(theme), applyTheme: theme => this.#createThemedSurface(theme),
       setPrimaryView: view => this.#setPrimaryView(view), updateToolsWorkspace: (state, restore) => this.#updateToolsWorkspace(state, restore),
     })
@@ -628,6 +648,7 @@ export class RottweilerApp extends BoxRenderable {
         this.picker.input.value = pickerQuery
       }
     }
+    this.reviewPanel.setRestorePending(this.#reviewRestore.pending)
     this.#rethemeInProgress = false
     if (this.mcpBrowser.visible) this.mcpBrowser.input.focus()
     else if (this.settingsBrowser.visible) this.settingsBrowser.input.focus()
@@ -682,6 +703,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#commandCatalogTruncationNotified = false
       this.#providers.catalogSettled()
       this.#projectionErrors = {}
+      this.#reviewRestore.close()
       this.#pendingReviewSelection = null
       this.#outputViewerInvocationId = null
       this.#reviewOpen = false
@@ -896,6 +918,7 @@ export class RottweilerApp extends BoxRenderable {
         next.workspaceDiff.truncated,
       )
     }
+    this.#reviewRestore.observe(event)
     if (event.type === "command_finished" && event.name === "add-dir" && !next.replay.active) {
       this.#pickerContent.requestCommands()
       this.#pickerContent.requestModes()
@@ -1190,24 +1213,7 @@ export class RottweilerApp extends BoxRenderable {
     this.outputViewer.focusPresentation()
   }
 
-  openReview(): void {
-    if (this.#state.replay.active) return
-    if (this.#state.shell.active) {
-      this.#projectClientError(
-        "review_unavailable_during_shell",
-        "exit the foreground shell before opening session review",
-      )
-      return
-    }
-    this.reviewPanel.showSessionReview()
-    this.#reviewOpen = true
-    this.#resizeReviewPanel(
-      this.width === 0 ? this.ctx.width : this.width,
-      this.height === 0 ? this.ctx.height : this.height,
-    )
-    this.setState(this.#state)
-    this.#projectionRequests.command({ type: "get_session_review" })
-  }
+  openReview(): void { this.#reviewRestore.open("session") }
 
   closePicker(reason: PickerCloseReason = "dismiss"): void {
     this.#clientRestore.discard()
@@ -1277,6 +1283,7 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#reviewRestore.close()
     this.#clientRestore.dispose()
     this.#contributions.close()
     this.#todos.dispose()
@@ -1333,21 +1340,7 @@ export class RottweilerApp extends BoxRenderable {
     return themeByName(theme.name, this.#systemThemeMode ?? theme.mode) ?? theme
   }
 
-  #openChangedFileDiff(path: string): void {
-    if (this.#state.replay.active || this.#state.shell.active) return
-    this.#reviewOpen = true
-    this.#resizeReviewPanel(
-      this.width === 0 ? this.ctx.width : this.width,
-      this.height === 0 ? this.ctx.height : this.height,
-    )
-    this.reviewPanel.showWorkspaceDiffMessage(path, "Loading changed-file diff…")
-    this.setState(this.#state)
-    this.#projectionRequests.command({
-      type: "get_workspace_diff",
-      path,
-      max_bytes: 1_000_000,
-    })
-  }
+  #openChangedFileDiff(path: string): void { this.#reviewRestore.open("workspace", path) }
 
   #refreshRuntimeServicesWhileToolsRun(): void {
     this.#projectionRequests.command({ type: "list_runtime_services" })
@@ -1368,6 +1361,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #closeReview(): void {
+    this.#reviewRestore.close()
     if (!this.#reviewOpen) return
     this.#reviewOpen = false
     this.#pendingReviewSelection = null

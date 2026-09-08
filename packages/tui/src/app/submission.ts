@@ -57,6 +57,7 @@ export class SubmissionController {
   constructor(readonly host: SubmissionHost) {}
   get notice(): string | null { return this.#composerNotice }
   set notice(value: string | null) { this.#composerNotice = value }
+  get reviewPending(): boolean { return this.#pendingReviewPaths.size > 0 }
   get terminalSuspended(): boolean { return this.#terminalSuspended }
   restoreInput(value: string): void { this.#lastComposerValue = value }
   reset(): void {

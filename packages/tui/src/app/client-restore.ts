@@ -1,3 +1,4 @@
+import type { RecycleReview } from "../recycle-review"
 import { interactionFingerprint, type InteractionSelection } from "../interaction-selection"
 import type { ClientAllocationLease } from "../client-allocation"
 import { retainedJsonBytes } from "../retained-json"
@@ -69,6 +70,11 @@ interface ClientRestoreHost {
   readonly sessionId: string
   readonly theme: RottweilerTheme
   readonly reviewOpen: boolean
+  readonly reviewRestorePending: boolean
+  captureReview(): RecycleReview | null
+  cancelReview(): void
+  restoreReview(state: RecycleReview): void
+  applyReview(): void
   resolveTheme(theme: RottweilerTheme): RottweilerTheme
   applyTheme(theme: RottweilerTheme): void
   setPrimaryView(view: PrimaryView): void
@@ -149,20 +155,22 @@ export class ClientRestoreController {
   /** Return no handoff while an interaction needs its current process or cannot fit the private cap. */
   recycleState(): AppClientState | null {
     const kind = this.host.pickerController.kind
-    if (this.host.children.controlsPending || (this.host.children.activeId !== null && this.host.children.captureRecycleTarget() === null) || this.host.children.draftStore.usage.pending > 0 || this.host.submissionsInFlight > 0
+    const review = this.host.reviewOpen ? this.host.captureReview() : null
+    if (this.host.reviewRestorePending || this.host.submission.reviewPending || (this.host.reviewOpen && review === null)
+      || this.host.children.controlsPending || (this.host.children.activeId !== null && this.host.children.captureRecycleTarget() === null) || this.host.children.draftStore.usage.pending > 0 || this.host.submissionsInFlight > 0
       || this.host.submission.terminalSuspended || this.host.ui.state.shell.active || this.host.ui.state.replay.active
       || this.host.providers.hasPendingAction
       || this.host.ui.state.providerAuth.pending !== null || this.host.mcp.hasDraft
       || this.host.sessions.pending
       || (kind === "timeline" && !this.host.sessions.timelineRestorable)
-      || this.host.reviewOpen || this.host.ui.outputViewer.visible
+      || this.host.ui.outputViewer.visible
       || (kind !== null && !isRestorablePicker(kind))) return null
     const history = this.host.ui.transcript.captureHistoryViewport()
     if (history === null) return null
     const surface = this.clientPickerSurface()
     const selected = surface?.selectedId ?? this.host.ui.picker.select.getSelectedOption()?.value
     return parseTuiRecycleState({
-      schemaVersion: 4,
+      schemaVersion: 5, review,
       child: this.host.children.captureRecycleTarget(),
       parentComposer: this.host.children.activeId === null ? null : this.host.children.draftStore.get("parent"),
       interaction: this.host.ui.interactionPanel.captureSelection(),
@@ -255,15 +263,17 @@ export class ClientRestoreController {
       this.#interaction = state.interaction
     }
     this.#pendingClientState = state
+    if (state.review !== null) this.host.restoreReview(state.review)
     this.host.ui.setState(this.host.ui.state)
     this.host.input.focusForInputMode()
     installed = true
     return true
-    } finally { if (!installed) { if (this.#pendingAllocation === owner) this.discard(); owner.release() } }
+    } finally { if (!installed) { this.host.cancelReview(); if (this.#pendingAllocation === owner) this.discard(); owner.release() } }
   }
 
   /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */
   applyPendingRecycleScroll(): void {
+    this.host.applyReview()
     const pending = this.#pendingClientState
     if (pending !== null) {
       if (!this.#pendingMounted) {

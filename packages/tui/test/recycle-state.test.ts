@@ -15,7 +15,7 @@ import {
 
 const roots: string[] = []
 const clientState: AppClientState = {
-  schemaVersion: 4, child: null, parentComposer: null, interaction: null, sessionId: "session-local",
+  schemaVersion: 5, review: null, child: null, parentComposer: null, interaction: null, sessionId: "session-local",
   composer: { content: "unfinished prompt", attachments: [], cursorOffset: 3, selection: { start: 1, end: 3 } },
   subagentDrafts: [], primaryView: "conversation", history: { following: false, anchor: { id: "37", offset: -2 } }, toolsScrollTop: 0,
   inputMode: "standard", focus: "composer", theme: "kennel", picker: null,
@@ -138,4 +138,15 @@ test("a handoff that fits encoded bytes but exceeds prepared bytes never exits o
   expect(exits).toBe(0)
   expect(JSON.parse(await readFile(path, "utf8"))).toEqual(clientState)
   expect(allocations.usage.bytes).toBe(0)
+})
+
+test("review handoffs require a bounded exact source identity", () => {
+  const review = { mode: "session" as const, path: "src/main.rs", fingerprint: "a".repeat(64), roots: "b".repeat(64), scrollTop: 40, scrollLeft: 0 }
+  expect(parseTuiRecycleState({ ...clientState, review })?.review).toEqual(review)
+  for (const invalid of [{ ...review, fingerprint: "" }, { ...review, path: "x".repeat(4097) }, { ...review, scrollTop: -1 }, { ...review, body: "not a view hint" }]) {
+    expect(parseTuiRecycleState({ ...clientState, review: invalid })).toBeNull()
+  }
+  const { review: _review, ...missing } = clientState
+  expect(parseTuiRecycleState(missing)).toBeNull()
+  expect(parseTuiRecycleState({ ...clientState, schemaVersion: 4 })).toBeNull()
 })

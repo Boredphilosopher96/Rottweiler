@@ -1,4 +1,5 @@
 import { TextRenderable } from "./text"
+import { ReviewDiffViewport } from "./review-diff"
 import {
   BoxRenderable,
   DiffRenderable,
@@ -17,6 +18,7 @@ import {
   filetypeForPath,
   presentableUnifiedDiff
 } from "../render"
+import { reviewFingerprint, type RecycleReview } from "../recycle-review"
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 
@@ -38,6 +40,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
   readonly files: SelectRenderable
   readonly hint: TextRenderable
   readonly diff: DiffRenderable
+  readonly diffScroller: ReviewDiffViewport
   readonly details: TextRenderable
   #review: RottweilerState["review"] = null
   #callbacks: ReviewPanelCallbacks
@@ -45,11 +48,15 @@ export class ReviewPanelRenderable extends BoxRenderable {
   #pendingPaths = new Set<string>()
   #shellActive = false
   #workspaceDiffMode = false
+  #restorePending = false
+  #sourceObject: object | null = null
+  #sourceFingerprint: string | null = null
+  #selectedPath: string | null = null
   #terminalWidth: number
   #primaryHeight: number
 
   override destroy(): void {
-    this.#review = null
+    this.#review = null; this.#sourceObject = null; this.#sourceFingerprint = null
     super.destroy()
   }
 
@@ -116,7 +123,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.diff = new DiffRenderable(ctx, {
       id: "session-review-diff",
       width: "100%",
-      height: 1,
+      height: "auto",
       diff: "",
       ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
       syntaxStyle,
@@ -127,6 +134,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
       removedBg: theme.diffRemovedBg,
       contextBg: theme.backgroundPanel,
     })
+    this.diffScroller = new ReviewDiffViewport(ctx, this.diff)
     this.files = new SelectRenderable(ctx, {
       id: "session-review-files",
       width: "100%",
@@ -157,6 +165,11 @@ export class ReviewPanelRenderable extends BoxRenderable {
     })
     this.files.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.#showSelected())
     this.files.onKeyDown = (key) => {
+      if (this.#restorePending && key.name !== "escape") { key.preventDefault(); key.stopPropagation(); return }
+      if (key.name === "pageup" || key.name === "pagedown") {
+        this.diffScroller.scrollBy((key.name === "pageup" ? -1 : 1) * Math.max(1, this.diffScroller.viewport.height - 1))
+        key.preventDefault(); key.stopPropagation(); return
+      }
       if (key.name !== "a" && key.name !== "r") return
       key.preventDefault()
       const file = this.#review?.files[this.files.getSelectedIndex()]
@@ -171,7 +184,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.leftPane.add(this.summary)
     this.leftPane.add(this.rule)
     this.leftPane.add(this.files)
-    this.leftPane.add(this.diff)
+    this.leftPane.add(this.diffScroller)
     this.leftPane.add(this.hint)
     this.rightRail.add(this.details)
     this.add(this.leftPane)
@@ -218,7 +231,8 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.rule.content = "─".repeat(Math.max(0, leftWidth - 2))
     this.files.height = fileRows
     this.files.visible = fileRows > 0
-    this.diff.height = diffRows
+    this.diffScroller.height = diffRows
+    this.diffScroller.visible = diffRows > 0
     this.diff.visible = diffRows > 0
     this.hint.height = hintRows
     this.hint.visible = hintRows > 0
@@ -227,6 +241,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
   update(state: RottweilerState, open = state.review !== null): void {
     this.#shellActive = state.shell.active
     if (!open || state.replay.active) {
+      this.#clearSource()
       this.#workspaceDiffMode = false
       this.#review = null
       this.visible = false
@@ -245,6 +260,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
     const review = state.review
     this.#review = review
     if (review === null) {
+      this.#clearSource()
       this.visible = true
       this.title = " Diff "
       this.summary.content = t`${bold(fg(this.#theme.secondary)("SESSION REVIEW"))}${fg(this.#theme.textMuted)("   loading changes")}`
@@ -255,7 +271,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
       this.resizeForTerminal(this.#terminalWidth, this.ctx.height, this.#primaryHeight)
       return
     }
-    const selectedPath = review.files[this.files.getSelectedIndex()]?.path
+    const selectedPath = this.#selectedPath
     const pending = review.files.filter((file) => file.status === "pending").length
     const totals = review.files.reduce(
       (sum, file) => addReviewLineCounts(sum, reviewLineCounts(file.unifiedDiff)),
@@ -287,11 +303,15 @@ export class ReviewPanelRenderable extends BoxRenderable {
 
   /** Switch back to the mutable retained session-review presentation. */
   showSessionReview(): void {
+    if (this.#workspaceDiffMode) this.#clearSource()
     this.#workspaceDiffMode = false
   }
 
   /** Leave any open presentation before restoring composer focus. */
   closePresentation(): void {
+    this.#restorePending = false
+    this.#clearSource()
+    this.diffScroller.scrollTo({ x: 0, y: 0 })
     this.#workspaceDiffMode = false
     this.#review = null
     this.files.blur()
@@ -314,6 +334,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
   }
 
   showDiffMessage(path: string, message: string): void {
+    this.#sourceObject = null; this.#sourceFingerprint = null;
     this.visible = true
     this.title = ` Diff · ${path} `
     this.summary.content = t`${bold(fg(this.#theme.secondary)("DIFF"))}${fg(this.#theme.textMuted)(`   ${path}`)}`
@@ -335,6 +356,8 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.files.blur()
     this.visible = true
     this.title = ` Diff · ${path} `
+    const source = { path, unifiedDiff, binary, truncated }
+    this.#bindSource(source, path)
     const counts = reviewLineCounts(unifiedDiff)
     this.summary.content = t`${bold(fg(this.#theme.secondary)("DIFF"))}${fg(this.#theme.textMuted)(`   ${path}  `)}${fg(this.#theme.diffAdded)(`+${counts.additions}`)}${fg(this.#theme.textMuted)(" ")}${fg(this.#theme.diffRemoved)(`−${counts.deletions}`)}`
     this.diff.diff = presentableUnifiedDiff(path, unifiedDiff)
@@ -355,6 +378,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
   focusPresentation(): void {
     if (this.#workspaceDiffMode) {
       this.files.blur()
+      this.diffScroller.focus()
     } else {
       this.files.focus()
     }
@@ -374,8 +398,46 @@ export class ReviewPanelRenderable extends BoxRenderable {
     }
   }
 
+  setRestorePending(pending: boolean): void { this.#restorePending = pending }
+
+  captureClientState(roots: string): RecycleReview | null {
+    if (!this.visible || this.#restorePending || this.#pendingPaths.size > 0
+      || this.#selectedPath === null || this.#sourceFingerprint === null) return null
+    return { mode: this.#workspaceDiffMode ? "workspace" : "session", path: this.#selectedPath,
+      fingerprint: this.#sourceFingerprint, roots,
+      scrollTop: Math.max(0, Math.floor(this.diffScroller.scrollTop)),
+      scrollLeft: Math.max(0, Math.floor(this.diffScroller.scrollLeft)) }
+  }
+
+  validateRestoredSource(state: RecycleReview, roots: string): boolean {
+    if (state.roots !== roots || (state.mode === "workspace") !== this.#workspaceDiffMode) return false
+    if (state.mode === "session" && !this.selectPath(state.path)) return false
+    return this.#selectedPath === state.path && this.#sourceFingerprint === state.fingerprint
+  }
+
+  restoreViewport(state: RecycleReview): void {
+    this.diffScroller.scrollTo({ x: state.scrollLeft, y: state.scrollTop })
+    this.focusPresentation()
+  }
+
+  #clearSource(): void {
+    this.#sourceObject = null; this.#sourceFingerprint = null; this.#selectedPath = null
+    this.diff.diff = ""
+    if (this.files.options.length > 0) this.files.options = []
+    this.details.content = ""
+  }
+
+  #bindSource(source: object, path: string): void {
+    if (this.#sourceObject === source) return
+    const fingerprint = reviewFingerprint(source)
+    if (this.#selectedPath !== path || this.#sourceFingerprint !== fingerprint) this.diffScroller.scrollTo({ x: 0, y: 0 })
+    this.#sourceObject = source; this.#sourceFingerprint = fingerprint; this.#selectedPath = path
+  }
+
   #showSelected(): void {
     const file = this.#review?.files[this.files.getSelectedIndex()]
+    if (file !== undefined) this.#bindSource(file, file.path)
+    else { this.#sourceObject = null; this.#sourceFingerprint = null; this.#selectedPath = null }
     this.diff.diff = file === undefined
       ? ""
       : presentableUnifiedDiff(file.path, file.unifiedDiff)

@@ -8,7 +8,7 @@ import { join } from "node:path"
 import { createRottweilerApp, type RottweilerApp } from "../app"
 import { ClientAllocationOwner } from "../client-allocation"
 import { createInitialState } from "../state"
-import { observedResidentBytes } from "../process-memory"
+import { currentResidentBytes, observedResidentBytes } from "../process-memory"
 import { readTuiRecycleState, recycleTuiIfNeeded } from "../recycle-state"
 import { MEMORY_LOAD, MEMORY_CHILD, MemoryFixture } from "./memory-fixture"
 
@@ -30,7 +30,7 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
   const handoffPath = join(workDirectory, "client-handoff.json")
   using handoffAllocation = allocations.reserve("decoding", 0)
   let handoff = readTuiRecycleState(handoffPath, handoffAllocation)
-  const sample = (cycle: number, stage: string) => samples.push({ cycle, stage, rssBytes: process.memoryUsage.rss(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, memory: stage === "destroyed" || cycle === -1 ? clientMemoryBreakdown() : null })
+  const sample = (cycle: number, stage: string) => samples.push({ cycle, stage, rssBytes: currentResidentBytes(), highWaterBytes: observedResidentBytes(), allocation: allocations.usage, memory: stage === "destroyed" || cycle === -1 ? clientMemoryBreakdown() : null })
   const until = async (condition: () => boolean) => {
     const deadline = performance.now() + 10_000
     while (!condition()) {

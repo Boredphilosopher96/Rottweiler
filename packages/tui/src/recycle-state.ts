@@ -1,3 +1,4 @@
+import { parseRecycleReview, type RecycleReview } from "./recycle-review"
 import { admittedRecycleDrafts } from "./recycle-drafts"
 import {
   closeSync,
@@ -53,7 +54,8 @@ export interface TranscriptClientState {
 
 /** Only editable client state belongs here; engine projections and credentials do not. */
 export interface AppClientState {
-  readonly schemaVersion: 4
+  readonly schemaVersion: 5
+  readonly review: RecycleReview | null
   readonly child: RecycleChildTarget | null
   readonly parentComposer: ComposerDraft | null
   readonly interaction: InteractionSelection | null
@@ -238,7 +240,7 @@ function parseBlocks(value: unknown): ClientBlockState | null {
 }
 
 export function parseTuiRecycleState(value: unknown): AppClientState | null {
-  if (!record(value) || value.schemaVersion !== 4 || !label(value.sessionId)
+  if (!record(value) || value.schemaVersion !== 5 || !label(value.sessionId)
     || !record(value.composer) || !offset(value.composer.cursorOffset)
     || !offset(value.toolsScrollTop)
     || (value.primaryView !== "conversation" && value.primaryView !== "tools")
@@ -287,6 +289,9 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
     if (childDraft === null) return null
     subagentDrafts.push({ id: entry.id, draft: childDraft })
   }
+  const review = value.review === null ? null : parseRecycleReview(value.review)
+  if (value.review !== null && review === null) return null
+  if (review !== null && (child !== null || value.picker !== null)) return null
   let picker: AppClientState["picker"] = null
   if (value.picker !== null) {
     const item = value.picker
@@ -299,7 +304,7 @@ export function parseTuiRecycleState(value: unknown): AppClientState | null {
       onboarding: item.onboarding, themeBeforePreview: item.themeBeforePreview }
   }
   const state: AppClientState = {
-    schemaVersion: 4, sessionId: value.sessionId, child, parentComposer, interaction,
+    schemaVersion: 5, review, sessionId: value.sessionId, child, parentComposer, interaction,
     composer: { ...draft, cursorOffset: value.composer.cursorOffset,
       selection },
     subagentDrafts, primaryView: value.primaryView === "tools" ? "tools" : "conversation",

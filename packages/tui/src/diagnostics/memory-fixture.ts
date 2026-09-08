@@ -32,7 +32,7 @@ export class MemoryFixture {
   resolvedChildControls = 0
   get pending(): number { return this.#pending.size }
   set cycle(value: number) { this.#cycle = value }
-  constructor(socketPath: string, allocations: ClientAllocationOwner) {
+  constructor(socketPath: string, allocations: ClientAllocationOwner, readonly reviewVariant: "single" | "multiple" | "changed" | "removed" = "single") {
     this.#server = Bun.serve({ unix: socketPath, fetch: request => this.#reply(request) })
     this.client = new EngineHttpSseClient({ socketPath, bootstrapToken: "memory-fixture", allocations })
     const read = async (command: ClientCommand, signal: AbortSignal, allocation: ReplyAllocation): Promise<Extract<CommandReply, { type: "read" }>> => {
@@ -113,9 +113,12 @@ export class MemoryFixture {
           match: { session_id: SESSION, source_sequence: "15000", through: this.historyThrough, digest: Array(32).fill(0) as import("../protocol").SessionSearchMatch["digest"] } }] }
       case "list_runtime_services": return { type: "runtime_services_listed", meta, session_id: SESSION, services: [] }
       case "list_models": return { type: "models_listed", meta, models: [], aliases: [], providers: [], cached: false, truncated: false }
+      case "get_workspace_diff": return { type: "workspace_diff_ready", meta, session_id: SESSION,
+        diff: { path: command.path, binary: false, truncated: false, unified_diff: this.reviewVariant === "removed" ? ""
+          : "--- a/held-review2.txt\n+++ b/held-review2.txt\n@@ -1,256 +1,256 @@\n" + numberedReviewLines(this.reviewVariant === "changed") } }
       case "get_session_review": return { type: "session_review_ready", meta, session_id: SESSION,
-        review: { session_id: SESSION, files: [{ path: "held-review.txt", unified_diff: "--- a/held-review.txt\n+++ b/held-review.txt\n@@ -1,256 +1,256 @@\n" + "-old content\n+new content\n".repeat(256),
-          status: "pending", truncated: false, unrestorable_reason: null, original_hash: "old", current_hash: "new" }] } }
+        review: { session_id: SESSION, files: Array.from({ length: this.reviewVariant === "single" ? 1 : this.reviewVariant === "removed" ? 2 : 3 }, (_, index) => ({ path: `held-review${index === 0 ? "" : index}.txt`, unified_diff: "--- a/held-review.txt\n+++ b/held-review.txt\n@@ -1,256 +1,256 @@\n" + (this.reviewVariant === "single" ? "-old content\n+new content\n".repeat(256) : numberedReviewLines(false)),
+          status: "pending" as const, truncated: false, unrestorable_reason: null, original_hash: "old", current_hash: this.reviewVariant === "changed" ? "changed" : "new" })) } }
       case "get_ui_catalog": return { type: "ui_catalog_ready", meta, session_id: SESSION, catalog: { entries: [] } }
       case "get_ui_panels": return { type: "ui_panels_ready", meta, session_id: SESSION, panels: { panels: [] } }
       case "read_family_controls": return { type: "family_controls_ready", meta, session_id: SESSION, snapshot: { revision: "1", children: [{ target: MEMORY_CHILD,
@@ -140,4 +143,8 @@ export class MemoryFixture {
     this.historyReads++
     return mixedHistoryPage(sessionId, read, this.historyRows, this.historyThrough)
   }
+}
+
+function numberedReviewLines(changed: boolean): string {
+  return Array.from({ length: 256 }, (_, index) => `-old content ${index}\n+${changed ? "changed" : "new"} content ${index}\n`).join("")
 }
