@@ -133,7 +133,10 @@ export class StateBannerRenderable extends TextRenderable {
     const waitingApproval = Object.values(state.tools).find(
       (tool) => tool.status === "awaiting_approval",
     )
-    if (latestError !== undefined) {
+    // A background projection failure remains inspectable, but must not obscure
+    // the live decision currently occupying the interaction panel.
+    const deferredQueryFailure = waitingApproval !== undefined && latestError?.code === "host_query_failure"
+    if (latestError !== undefined && !deferredQueryFailure) {
       const presentation = presentError(latestError)
       this.visible = true
       this.fg = this.#theme[presentation.severity]

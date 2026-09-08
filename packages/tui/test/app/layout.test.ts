@@ -161,6 +161,19 @@ describe("Rottweiler layout", () => {
       },
     })
     await expectExclusiveInteraction()
+    const queryFailure = { category: "protocol" as const, code: "host_query_failure", message: "workspace status deadline exceeded", retryable: true }
+    app.setState({ ...app.state, errors: [queryFailure] })
+    await setup.renderOnce()
+    expect(app.banner.plainText).toContain("Waiting for approval")
+    expect(app.state.errors).toContain(queryFailure)
+    const pendingTool = app.state.tools.edit!
+    app.setState({ ...app.state, tools: { edit: { ...pendingTool, status: "running" } } })
+    await setup.renderOnce()
+    expect(app.banner.plainText).toContain("workspace status deadline exceeded")
+    app.setState({ ...app.state, tools: { edit: pendingTool }, errors: [{ category: "protocol", code: "session_requires_recovery", message: "recovery", retryable: false }] })
+    await setup.renderOnce()
+    expect(app.banner.plainText).toContain("Restoring this session")
+    app.setState({ ...app.state, errors: [] })
     expect(app.interactionPanel.select.height).toBeGreaterThan(0)
 
     app.setState({
