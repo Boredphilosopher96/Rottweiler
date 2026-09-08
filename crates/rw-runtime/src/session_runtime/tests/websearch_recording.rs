@@ -240,7 +240,7 @@ async fn configured_websearch_replay_preserves_repeated_request_occurrences() {
 }
 
 #[tokio::test]
-async fn configured_websearch_reader_rejects_scalar_occurrences() {
+async fn configured_websearch_reader_requires_closed_occurrence_arrays() {
     let fixtures = tempdir().expect("fixtures");
     let writer = RecordingConfiguredWebSearcher::new(
         Arc::new(FixtureWebSearcher(WebSearchResponse {
@@ -268,7 +268,35 @@ async fn configured_websearch_reader_rejects_scalar_occurrences() {
         .expect("producer response");
     let path = fixtures.path().join(WEBSEARCH_REPLAY_FILE);
     let bytes = std::fs::read(&path).expect("producer bytes");
-    let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).expect("fixture JSON");
+    let complete: serde_json::Value = serde_json::from_slice(&bytes).expect("fixture JSON");
+    for pointer in ["/0", "/0/results/0"] {
+        let mut invalid = complete.clone();
+        let responses = invalid
+            .as_object_mut()
+            .expect("catalog")
+            .values_mut()
+            .next()
+            .expect("recorded occurrences");
+        responses
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("recorded object")
+            .insert("undeclared".into(), true.into());
+        assert!(serde_json::from_value::<WebSearchResponse>(responses[0].clone()).is_ok());
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&invalid).expect("unknown-field fixture"),
+        )
+        .expect("persist unknown field");
+        let Err(error) = ReplayingConfiguredWebSearcher::load(fixtures.path()) else {
+            panic!("accepted undeclared response field {pointer}");
+        };
+        assert!(
+            error.to_string().contains("unknown field `undeclared`"),
+            "{error}"
+        );
+    }
+    let mut invalid = complete;
     let entries = invalid.as_object_mut().expect("occurrence catalog");
     assert_eq!(entries.len(), 1);
     let occurrence = entries

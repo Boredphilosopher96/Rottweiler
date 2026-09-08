@@ -1,3 +1,5 @@
+mod schema;
+
 use async_trait::async_trait;
 use miette::Result;
 use miette::miette;
@@ -370,7 +372,7 @@ impl ReplayingConfiguredWebSearcher {
         let Some(bytes) = directory.read_fixture()? else {
             return Ok(None);
         };
-        let fixtures: BTreeMap<String, Vec<WebSearchResponse>> = serde_json::from_slice(&bytes)
+        let fixtures = schema::decode(&bytes)
             .map_err(|error| miette!("web-search fixture occurrences could not parse: {error}"))?;
         Ok(Some(Self {
             fixtures,
