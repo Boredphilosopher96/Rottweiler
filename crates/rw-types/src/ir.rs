@@ -95,6 +95,9 @@ pub enum Block {
     },
     Thinking {
         content: String,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+        #[ts(optional = false)]
         signature: Option<String>,
     },
     ToolCall {
@@ -113,7 +116,13 @@ pub enum Block {
     },
     Citation {
         uri: String,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+        #[ts(optional = false)]
         title: Option<String>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+        #[ts(optional = false)]
         excerpt: Option<String>,
     },
 }
@@ -124,7 +133,13 @@ pub enum Block {
 #[derive(Allocation)]
 #[serde(deny_unknown_fields)]
 pub struct TurnMeta {
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+    #[ts(optional = false)]
     pub created_at: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+    #[ts(optional = false)]
     pub model: Option<String>,
     pub synthetic: bool,
     pub summary: bool,

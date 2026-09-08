@@ -109,3 +109,81 @@ fn metadata_encoding_rejects_escaped_payloads_before_output_allocation() {
     );
     assert_eq!(encoded.capacity(), encoded.len());
 }
+
+#[test]
+fn metadata_loader_requires_nullable_fields_in_initial_context() {
+    use rw_types::{Block, Role, Turn, TurnMeta};
+    let root = tempfile::tempdir().expect("storage");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::create_dir_all(root.path().join("sessions/context-schema"))
+        .expect("session directory");
+    let context = [Turn {
+        role: Role::System,
+        blocks: vec![
+            Block::Thinking {
+                content: "context".into(),
+                signature: None,
+            },
+            Block::Citation {
+                uri: "https://example.org/source".into(),
+                title: None,
+                excerpt: None,
+            },
+        ],
+        meta: TurnMeta::default(),
+    }];
+    persist_session_metadata(
+        root.path(),
+        "context-schema",
+        &workspace,
+        "default",
+        &context,
+        std::slice::from_ref(&workspace),
+    )
+    .expect("producer metadata");
+    let path = root.path().join("sessions/context-schema/metadata.json");
+    let bytes = std::fs::read(&path).expect("metadata bytes");
+    let complete: Value = serde_json::from_slice(&bytes).expect("metadata JSON");
+    assert_eq!(
+        load_session_metadata_any(root.path(), "context-schema")
+            .expect("explicit nulls are valid")
+            .initial_session_context,
+        context
+    );
+    for (pointer, field) in [
+        ("/initial_session_context/0/meta", "created_at"),
+        ("/initial_session_context/0/meta", "model"),
+        ("/initial_session_context/0/blocks/0", "signature"),
+        ("/initial_session_context/0/blocks/1", "title"),
+        ("/initial_session_context/0/blocks/1", "excerpt"),
+    ] {
+        let mut missing = complete.clone();
+        let removed = missing
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .expect("IR object")
+            .remove(field);
+        assert_eq!(removed, Some(Value::Null));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&missing).expect("modified metadata"),
+        )
+        .expect("persist one omission");
+        let error = load_session_metadata_any(root.path(), "context-schema")
+            .expect_err("missing internal IR field");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("missing field `{field}`")),
+            "{error}"
+        );
+    }
+    std::fs::write(&path, bytes).expect("restore producer bytes");
+    assert_eq!(
+        load_session_metadata_any(root.path(), "context-schema")
+            .expect("restored metadata")
+            .initial_session_context,
+        context
+    );
+}
