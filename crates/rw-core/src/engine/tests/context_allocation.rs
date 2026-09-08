@@ -215,3 +215,5 @@ async fn checked_working_growth_precedes_normalization_and_retains_cache_high_wa
             > 1024 * 1024
     );
 }
+
+mod opaque;

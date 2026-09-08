@@ -6,8 +6,16 @@
 use rw_types::{Block, ImageRef, ToolOutput, ToolOutputPart, Turn, TurnMeta};
 use serde_json::Value;
 
+pub(super) fn turn(source: &Turn) -> Turn {
+    copy_turn(source, 0)
+}
+
 pub(super) fn turn_with_policy_slot(source: &Turn) -> Turn {
-    let mut blocks = Vec::with_capacity(source.blocks.len() + 1);
+    copy_turn(source, 1)
+}
+
+fn copy_turn(source: &Turn, extra_blocks: usize) -> Turn {
+    let mut blocks = Vec::with_capacity(source.blocks.len() + extra_blocks);
     blocks.extend(source.blocks.iter().map(block));
     Turn {
         role: source.role.clone(),

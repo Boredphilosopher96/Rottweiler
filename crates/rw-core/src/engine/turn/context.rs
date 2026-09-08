@@ -276,7 +276,7 @@ fn stable_items(config: &SessionActorConfig) -> Vec<AssemblyContextItem> {
                 format!("Project instructions {index}")
             },
             provenance: ContextProvenance::BuiltIn,
-            turn: turn.clone(),
+            turn: crate::engine::context_copy::turn(turn),
             pinned: false,
             evicted: false,
             summarized: false,
