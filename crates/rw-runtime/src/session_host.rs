@@ -367,9 +367,10 @@ impl ModelCatalogSource for PersistingModelCatalogSource {
         let cached = snapshot.clone();
         // The cache is explicitly non-authoritative. A live catalog remains a
         // successful result even if the private cache cannot be refreshed.
-        let _ =
-            tokio::task::spawn_blocking(move || store_model_catalog_cache(&cache_path, &cached))
-                .await;
+        let _ = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            store_model_catalog_cache(&cache_path, &cached)
+        })
+        .await;
         Ok(snapshot)
     }
 
@@ -381,7 +382,7 @@ impl ModelCatalogSource for PersistingModelCatalogSource {
         let cache_path = self.cache_path.clone();
         let provider = provider.to_owned();
         let cached = snapshot.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        let _ = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
             let durable = if let Some(base) = load_model_catalog_cache(&cache_path).ok().flatten() {
                 merge_model_catalog_provider(base, cached, &provider)
             } else {

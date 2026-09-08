@@ -565,11 +565,12 @@ impl EngineHost {
                 ));
             }
             let provider_for_store = provider.clone();
-            let warnings = tokio::task::spawn_blocking(move || {
-                provider_api_key_store(provider_for_store, api_key)
-            })
-            .await
-            .map_err(|_| HostError::Query("provider credential storage failed".to_owned()))??;
+            let warnings =
+                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                    provider_api_key_store(provider_for_store, api_key)
+                })
+                .await
+                .map_err(|_| HostError::Query("provider credential storage failed".to_owned()))??;
             let warnings = bounded_provider_auth_warnings(&warnings)?;
             let connection_ready = session
                 .handle()
