@@ -91,7 +91,7 @@ async fn cancelled_worktree_lease_rebinds_and_accepts_follow_up() {
         .run_turn(
             "follow-up".to_owned(),
             CancellationToken::default(),
-            Arc::new(NoopProgress),
+            Arc::new(NoopProgress::default()),
         )
         .await
         .expect("follow-up turn");

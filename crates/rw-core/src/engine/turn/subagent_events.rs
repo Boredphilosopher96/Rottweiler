@@ -29,7 +29,7 @@ pub(in crate::engine) struct OrderedSubagentCoordinator {
     pub(super) spawned: Notify,
     pub(super) finished: Notify,
     pub(super) signals: mpsc::UnboundedSender<TurnSignal>,
-    progress_memory: Arc<tokio::sync::Semaphore>,
+    progress_memory: rw_tools::ChildProgressBudget,
 }
 
 impl OrderedSubagentCoordinator {
@@ -62,9 +62,7 @@ impl OrderedSubagentCoordinator {
             spawned: Notify::new(),
             finished: Notify::new(),
             signals,
-            progress_memory: Arc::new(tokio::sync::Semaphore::new(
-                super::child_progress::PROGRESS_MEMORY_BYTES,
-            )),
+            progress_memory: rw_tools::ChildProgressBudget::default(),
         }
     }
 
@@ -118,6 +116,9 @@ pub(in crate::engine) struct ActorSubagentLifecycleState {
 
 #[async_trait]
 impl SubagentEventSink for ActorSubagentEventSink {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.coordinator.progress_memory.clone()
+    }
     async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
         let position = self.coordinator.position(self.index)?;
         let multiple = self.coordinator.multi_producer_calls.contains(&self.index);

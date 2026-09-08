@@ -16,13 +16,17 @@ use std::sync::{
 };
 use std::time::Duration;
 
-struct Progress;
+#[derive(Default)]
+struct Progress(rw_tools::ChildProgressBudget);
 #[async_trait::async_trait]
 impl SubagentProgressObserver for Progress {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.0.clone()
+    }
     async fn progress(
         &self,
         _: Option<u64>,
-        _: serde_json::Value,
+        _: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
         Ok(())
     }
@@ -72,7 +76,7 @@ async fn dormant_close_never_prepares_an_actor() {
             .run_turn(
                 "closed".into(),
                 CancellationToken::default(),
-                Arc::new(Progress)
+                Arc::new(Progress::default())
             )
             .await
             .is_err()
@@ -110,7 +114,7 @@ async fn resumed_followups_observe_only_their_own_turn() {
             child.run_turn(
                 "question".into(),
                 CancellationToken::default(),
-                Arc::new(Progress),
+                Arc::new(Progress::default()),
             ),
         )
         .await

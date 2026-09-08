@@ -282,6 +282,9 @@ pub(super) struct ToolObserver {
 
 #[async_trait]
 impl SubagentObserver for ToolObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.events.progress_budget()
+    }
     async fn spawned(&self, handle: &SubagentHandle, task: &str) -> Result<(), OrchestrationError> {
         self.events
             .lifecycle(SubagentLifecycleEvent::Spawned {
@@ -307,9 +310,8 @@ impl SubagentObserver for ToolObserver {
         &self,
         handle: &SubagentHandle,
         child_sequence: Option<u64>,
-        event: Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
-        let event = super::progress::admit(child_sequence, event)?;
         self.events
             .progress(SubagentProgressEvent {
                 subagent_id: handle.subagent_id.clone(),

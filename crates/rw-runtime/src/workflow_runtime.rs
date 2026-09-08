@@ -471,6 +471,9 @@ struct OrderedWorkflowObserver {
 
 #[async_trait]
 impl SubagentObserver for OrderedWorkflowObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.inner.progress_budget()
+    }
     async fn spawned(&self, handle: &SubagentHandle, task: &str) -> Result<(), OrchestrationError> {
         self.order.wait_spawn(self.position).await;
         self.inner.spawned(handle, task).await?;
@@ -489,7 +492,7 @@ impl SubagentObserver for OrderedWorkflowObserver {
         &self,
         handle: &SubagentHandle,
         child_sequence: Option<u64>,
-        event: Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
         self.inner.progress(handle, child_sequence, event).await
     }
@@ -497,6 +500,9 @@ impl SubagentObserver for OrderedWorkflowObserver {
 
 #[async_trait]
 impl SubagentObserver for WorkflowObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.events.progress_budget()
+    }
     async fn spawned(&self, handle: &SubagentHandle, task: &str) -> Result<(), OrchestrationError> {
         self.events
             .lifecycle(SubagentLifecycleEvent::Spawned {
@@ -522,7 +528,7 @@ impl SubagentObserver for WorkflowObserver {
         &self,
         handle: &SubagentHandle,
         child_sequence: Option<u64>,
-        event: Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
         self.events
             .progress(SubagentProgressEvent {

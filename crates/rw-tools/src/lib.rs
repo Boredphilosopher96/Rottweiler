@@ -19,7 +19,12 @@ pub use payloads::ToolResultPayloads;
 pub mod presentation;
 mod protocol;
 pub use presentation::ToolPresentationPlan;
+mod child_progress;
 mod registry;
+pub use child_progress::{
+    CHILD_PROGRESS_MEMORY_BYTES, ChildProgressBudget, ChildProgressPreview, ChildProgressRetention,
+    MAX_CHILD_PROGRESS_BYTES,
+};
 mod search;
 mod symbols;
 pub mod todo;

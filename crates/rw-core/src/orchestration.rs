@@ -16,7 +16,6 @@ use rw_types::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
 
@@ -30,7 +29,6 @@ pub const MAX_RETAINED_SUBAGENTS: usize = rw_types::session_children::MAX_ACTIVE
 const MAX_SUBAGENT_FINAL_TEXT_BYTES: usize = 256 * 1024;
 const MAX_SUBAGENT_DIFF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SUBAGENT_TOUCHED_FILES: usize = 4096;
-const MAX_SUBAGENT_PROGRESS_BYTES: usize = 256 * 1024;
 const MAX_MODEL_SUBAGENT_TEXT_BYTES: usize = 12 * 1024;
 const MAX_MODEL_SUBAGENT_SUMMARY_BYTES: usize = 8 * 1024;
 const MAX_ARTIFACT_REF_PREVIEW_BYTES: usize = 4 * 1024;
@@ -359,16 +357,20 @@ pub trait SubagentSessionFactory: Send + Sync {
 /// Display-only progress receiver. Implementations must not append to a parent log.
 #[async_trait]
 pub trait SubagentProgressObserver: Send + Sync {
+    /// Existing publisher allowance, shared by construction and every queued preview.
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget;
     async fn progress(
         &self,
         child_sequence: Option<u64>,
-        event: Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError>;
 }
 
 /// Lifecycle observer. Engine integration persists spawned/finished and forwards progress.
 #[async_trait]
 pub trait SubagentObserver: Send + Sync {
+    /// Existing publisher allowance, shared by construction and every queued preview.
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget;
     async fn spawned(&self, handle: &SubagentHandle, task: &str) -> Result<(), OrchestrationError>;
 
     async fn finished(&self, result: &SubagentResult) -> Result<(), OrchestrationError>;
@@ -377,7 +379,7 @@ pub trait SubagentObserver: Send + Sync {
         &self,
         handle: &SubagentHandle,
         child_sequence: Option<u64>,
-        event: Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError>;
 }
 
@@ -485,12 +487,14 @@ struct ObserverProgress {
 
 #[async_trait]
 impl SubagentProgressObserver for ObserverProgress {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.observer.progress_budget()
+    }
     async fn progress(
         &self,
         child_sequence: Option<u64>,
-        event: Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
-        let event = progress::admit(child_sequence, event)?;
         self.observer
             .progress(&self.handle, child_sequence, event)
             .await
@@ -516,7 +520,6 @@ mod startup;
 
 mod policy;
 mod presentation;
-pub(crate) mod progress;
 pub use policy::diff_artifact_reference;
 use policy::{
     bound_turn_result, bounded_cancel, bounded_close, control_timeout,

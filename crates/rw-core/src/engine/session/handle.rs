@@ -292,6 +292,12 @@ impl SessionHandle {
         Ok(())
     }
 
+    /// Admission shared by child preview construction and this parent's queue.
+    #[must_use]
+    pub fn subagent_progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.child_progress.budget.clone()
+    }
+
     /// Publishes a bounded child observation. Saturated display delivery is
     /// coalesced into a canonical source invalidation without delaying effects.
     ///

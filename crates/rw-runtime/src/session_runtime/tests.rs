@@ -360,6 +360,7 @@ struct RecoveryProbeSession {
 }
 
 struct RecoveryProbeObserver {
+    progress: rw_tools::ChildProgressBudget,
     sink: Arc<DurableEventSink>,
     parent: SessionId,
     next: std::sync::atomic::AtomicU64,
@@ -798,6 +799,9 @@ impl rw_core::SubagentSession for RecoveryProbeSession {
 
 #[async_trait]
 impl rw_core::SubagentObserver for RecoveryProbeObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.progress.clone()
+    }
     async fn spawned(
         &self,
         handle: &rw_core::SubagentHandle,
@@ -838,7 +842,7 @@ impl rw_core::SubagentObserver for RecoveryProbeObserver {
         &self,
         _handle: &rw_core::SubagentHandle,
         _child_sequence: Option<u64>,
-        _event: serde_json::Value,
+        _event: rw_tools::ChildProgressPreview,
     ) -> std::result::Result<(), rw_core::OrchestrationError> {
         Ok(())
     }

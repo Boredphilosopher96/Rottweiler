@@ -1,26 +1,23 @@
 //! Hosted child display admission shares a slot across every cloned parent handle.
 use super::state::ActorCommand;
-use crate::engine::{
-    AgentLoopError,
-    turn::child_progress::{ChildProgressSlot, PROGRESS_MEMORY_BYTES},
-};
+use crate::engine::{AgentLoopError, turn::child_progress::ChildProgressSlot};
 use rw_tools::SubagentProgressEvent;
 use rw_types::{SessionId, SubagentId};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 
 pub(super) struct HostedChildProgress {
     active: Mutex<HashMap<SubagentId, (SessionId, Arc<ChildProgressSlot>)>>,
-    budget: Arc<Semaphore>,
+    pub(super) budget: rw_tools::ChildProgressBudget,
 }
 impl HostedChildProgress {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             active: Mutex::new(HashMap::new()),
-            budget: Arc::new(Semaphore::new(PROGRESS_MEMORY_BYTES)),
+            budget: rw_tools::ChildProgressBudget::default(),
         })
     }
     pub(super) fn register(
@@ -85,48 +82,63 @@ fn invalid(error: impl std::fmt::Display) -> AgentLoopError {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    fn event(sequence: u64) -> SubagentProgressEvent {
+    fn event(owner: &HostedChildProgress, sequence: u64) -> SubagentProgressEvent {
         SubagentProgressEvent {
             subagent_id: SubagentId("child".into()),
             child_session_id: SessionId("session".into()),
             child_sequence: Some(sequence),
-            event: serde_json::json!({"text": "delta"}),
+            event: owner
+                .budget
+                .encode_value(Some(sequence), &serde_json::json!({"text": "delta"}))
+                .expect("encode")
+                .expect("preview"),
         }
     }
     #[test]
     fn saturated_actor_queue_never_blocks_child_effects_and_marks_the_next_source() {
         let owner = HostedChildProgress::new();
-        let initial = event(0);
+        let initial = event(&owner, 0);
         owner
             .register(&initial.subagent_id, &initial.child_session_id)
             .expect("register");
         let (send, mut receive) = mpsc::channel(1);
         owner.publish(initial, &send).expect("first");
-        let mut other = event(1);
+        let mut other = event(&owner, 1);
         other.subagent_id = SubagentId("other".into());
         owner
             .register(&other.subagent_id, &other.child_session_id)
             .expect("other");
         owner
-            .publish(other.clone(), &send)
+            .publish(other, &send)
             .expect("saturation does not block");
         let ActorCommand::PublishSubagentProgress(slot) = receive.try_recv().expect("first signal")
         else {
             panic!("progress")
         };
         drop(slot.take());
-        other.child_sequence = Some(2);
+        let mut other = event(&owner, 2);
+        other.subagent_id = SubagentId("other".into());
         owner.publish(other, &send).expect("next");
         let ActorCommand::PublishSubagentProgress(slot) =
             receive.try_recv().expect("second signal")
         else {
             panic!("progress")
         };
-        assert!(slot.take().expect("source marker").event.event.is_null());
+        assert!(
+            slot.take()
+                .expect("source marker")
+                .event
+                .event
+                .value()
+                .is_null()
+        );
         owner.finish(&SubagentId("other".into()));
-        let mut stale = event(3);
+        let mut stale = event(&owner, 3);
         stale.subagent_id = SubagentId("other".into());
         assert!(owner.publish(stale, &send).is_err());
-        assert_eq!(owner.budget.available_permits(), PROGRESS_MEMORY_BYTES);
+        assert_eq!(
+            owner.budget.available_bytes(),
+            rw_tools::CHILD_PROGRESS_MEMORY_BYTES
+        );
     }
 }

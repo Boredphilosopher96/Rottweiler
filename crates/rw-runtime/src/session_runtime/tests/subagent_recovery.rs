@@ -378,6 +378,7 @@ async fn recovery_recursively_rebinds_depth_two_children_and_is_restart_idempote
             .and_then(EngineEvent::meta)
             .map_or(0, |meta| meta.sequence_id.0 + 1);
         let observer: Arc<dyn rw_core::SubagentObserver> = Arc::new(RecoveryProbeObserver {
+            progress: rw_tools::ChildProgressBudget::default(),
             sink,
             parent: owner.clone(),
             next: std::sync::atomic::AtomicU64::new(next),

@@ -639,6 +639,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct DurableLifecycleObserver {
+        progress: rw_tools::ChildProgressBudget,
         sink: Arc<DurableEventSink>,
         parent: SessionId,
         next_sequence: AtomicU64,
@@ -658,6 +659,9 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
 
     #[async_trait]
     impl rw_core::SubagentObserver for DurableLifecycleObserver {
+        fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+            self.progress.clone()
+        }
         async fn spawned(
             &self,
             handle: &rw_core::SubagentHandle,
@@ -698,7 +702,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             &self,
             _handle: &rw_core::SubagentHandle,
             _child_sequence: Option<u64>,
-            _event: serde_json::Value,
+            _event: rw_tools::ChildProgressPreview,
         ) -> std::result::Result<(), rw_core::OrchestrationError> {
             Ok(())
         }
@@ -1069,6 +1073,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
         lease_record
     );
     let observer: Arc<dyn rw_core::SubagentObserver> = Arc::new(DurableLifecycleObserver {
+        progress: rw_tools::ChildProgressBudget::default(),
         sink: Arc::clone(&parent_sink),
         parent: parent.clone(),
         next_sequence: AtomicU64::new(3),

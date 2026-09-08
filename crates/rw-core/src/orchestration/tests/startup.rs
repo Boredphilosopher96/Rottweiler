@@ -2,12 +2,16 @@ use super::*;
 use tokio::sync::Notify;
 
 struct GatedObserver {
+    progress: rw_tools::ChildProgressBudget,
     entered: Arc<Notify>,
     release: Arc<Notify>,
     reject: bool,
 }
 #[async_trait]
 impl SubagentObserver for GatedObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.progress.clone()
+    }
     async fn spawned(
         &self,
         _handle: &SubagentHandle,
@@ -28,7 +32,7 @@ impl SubagentObserver for GatedObserver {
         &self,
         _handle: &SubagentHandle,
         _sequence: Option<u64>,
-        _event: Value,
+        _event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
         Ok(())
     }
@@ -43,6 +47,7 @@ async fn aborted_startup_retains_child_until_close_and_keeps_ambiguous_receipt()
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let observer = Arc::new(GatedObserver {
+        progress: rw_tools::ChildProgressBudget::default(),
         entered: Arc::clone(&entered),
         release: Arc::clone(&release),
         reject: true,
@@ -95,6 +100,7 @@ async fn unconsumed_start_reply_cancels_and_closes_the_launched_child() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let observer = Arc::new(GatedObserver {
+        progress: rw_tools::ChildProgressBudget::default(),
         entered: Arc::clone(&entered),
         release: Arc::clone(&release),
         reject: false,

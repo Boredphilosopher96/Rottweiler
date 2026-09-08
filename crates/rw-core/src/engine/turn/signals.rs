@@ -140,16 +140,18 @@ pub(in crate::engine) async fn handle_turn_signal(
                 return Ok(());
             };
             let progress = admitted.event;
-            let event = EngineEvent::SubagentProgress {
-                parent_session_id: state.session_id.clone(),
-                subagent_id: progress.subagent_id,
-                child_session_id: progress.child_session_id,
-                child_sequence: progress.child_sequence.map(SequenceId),
-                event: progress.event,
-            };
-            let _ = events.send(RoutedEvent {
-                target: state.control.driver().clone(),
-                event,
+            progress.event.deliver(|preview| {
+                let event = EngineEvent::SubagentProgress {
+                    parent_session_id: state.session_id.clone(),
+                    subagent_id: progress.subagent_id,
+                    child_session_id: progress.child_session_id,
+                    child_sequence: progress.child_sequence.map(SequenceId),
+                    event: preview,
+                };
+                let _ = events.send(RoutedEvent {
+                    target: state.control.driver().clone(),
+                    event,
+                });
             });
         }
         TurnSignal::CompactionProgress(progress) => {

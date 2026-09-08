@@ -108,6 +108,9 @@ pub(super) struct TaskObserver {
 
 #[async_trait]
 impl rw_core::SubagentObserver for TaskObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.inner.progress_budget()
+    }
     async fn spawned(
         &self,
         handle: &rw_core::SubagentHandle,
@@ -139,7 +142,7 @@ impl rw_core::SubagentObserver for TaskObserver {
         &self,
         handle: &rw_core::SubagentHandle,
         child_sequence: Option<u64>,
-        event: serde_json::Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), rw_core::OrchestrationError> {
         self.inner.progress(handle, child_sequence, event).await
     }

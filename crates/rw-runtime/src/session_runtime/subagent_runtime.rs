@@ -172,6 +172,9 @@ impl HostedSubagentObserver {
 
 #[async_trait]
 impl SubagentObserver for HostedSubagentObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.parent.subagent_progress_budget()
+    }
     async fn spawned(
         &self,
         handle: &rw_core::SubagentHandle,
@@ -201,7 +204,7 @@ impl SubagentObserver for HostedSubagentObserver {
         &self,
         handle: &rw_core::SubagentHandle,
         child_sequence: Option<u64>,
-        event: serde_json::Value,
+        event: rw_tools::ChildProgressPreview,
     ) -> Result<(), rw_core::OrchestrationError> {
         self.parent
             .publish_subagent_progress(SubagentProgressEvent {

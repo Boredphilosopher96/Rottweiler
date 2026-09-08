@@ -52,11 +52,15 @@ impl ModelDriver for SelectedModel {
 
 #[derive(Default)]
 struct RecordingSubagentSink {
+    progress: rw_tools::ChildProgressBudget,
     lifecycles: Mutex<Vec<SubagentLifecycleEvent>>,
 }
 
 #[async_trait]
 impl SubagentEventSink for RecordingSubagentSink {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.progress.clone()
+    }
     async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
         self.lifecycles
             .lock()
@@ -102,14 +106,18 @@ struct FakeSession {
     fail_close: bool,
 }
 
-struct NoopProgress;
+#[derive(Default)]
+struct NoopProgress(rw_tools::ChildProgressBudget);
 
 #[async_trait]
 impl SubagentProgressObserver for NoopProgress {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.0.clone()
+    }
     async fn progress(
         &self,
         _child_sequence: Option<u64>,
-        _event: Value,
+        _event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
         Ok(())
     }
@@ -213,7 +221,14 @@ impl SubagentSession for FakeSession {
             () = tokio::time::sleep(Duration::from_millis(delay)) => {}
         }
         progress
-            .progress(Some(0), json!({"type":"text_delta","text":prompt}))
+            .progress(
+                Some(0),
+                progress
+                    .progress_budget()
+                    .encode_value(Some(0), &json!({"type":"text_delta","text":prompt}))
+                    .expect("encode")
+                    .expect("preview"),
+            )
             .await?;
         let invalid_artifact = prompt == "invalid-artifact";
         let valid_artifact = prompt == "valid-artifact";
@@ -276,6 +291,7 @@ impl SubagentSession for FakeSession {
 
 #[derive(Default)]
 struct RecordingObserver {
+    progress: rw_tools::ChildProgressBudget,
     events: Mutex<Vec<String>>,
     results: Mutex<Vec<SubagentResult>>,
     fail_finished: bool,
@@ -391,6 +407,9 @@ impl SubagentMetadataStore for RecordingMetadataStore {
 
 #[async_trait]
 impl SubagentObserver for RecordingObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.progress.clone()
+    }
     async fn spawned(
         &self,
         handle: &SubagentHandle,
@@ -427,7 +446,7 @@ impl SubagentObserver for RecordingObserver {
         &self,
         _handle: &SubagentHandle,
         _child_sequence: Option<u64>,
-        _event: Value,
+        _event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
         Ok(())
     }

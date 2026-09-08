@@ -41,7 +41,6 @@ use rw_tools::{
 use rw_types::{
     Block, Cost, SessionId, SubagentResult, SubagentStatus, Usage, config::PermissionDecision,
 };
-use serde_json::Value;
 use tempfile::TempDir;
 
 struct CapturingDriver {
@@ -360,11 +359,15 @@ impl SubagentSession for ReplaySession {
 
 #[derive(Default)]
 struct ReplayObserver {
+    progress: rw_tools::ChildProgressBudget,
     events: Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl SubagentObserver for ReplayObserver {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.progress.clone()
+    }
     async fn spawned(
         &self,
         _handle: &SubagentHandle,
@@ -393,7 +396,7 @@ impl SubagentObserver for ReplayObserver {
         &self,
         _handle: &SubagentHandle,
         _child_sequence: Option<u64>,
-        _event: Value,
+        _event: rw_tools::ChildProgressPreview,
     ) -> Result<(), OrchestrationError> {
         Ok(())
     }
@@ -401,11 +404,15 @@ impl SubagentObserver for ReplayObserver {
 
 #[derive(Default)]
 struct CapturingEventSink {
+    progress: rw_tools::ChildProgressBudget,
     lifecycle: Mutex<Vec<SubagentLifecycleEvent>>,
 }
 
 #[async_trait]
 impl SubagentEventSink for CapturingEventSink {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.progress.clone()
+    }
     async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
         self.lifecycle.lock().expect("lifecycle").push(event);
         Ok(())

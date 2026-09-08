@@ -451,15 +451,17 @@ pub(super) async fn handle_actor_command(
         ActorCommand::PublishSubagentProgress(slot) => {
             if let Some(admitted) = slot.take() {
                 let progress = admitted.event;
-                let _ = events.send(RoutedEvent {
-                    target: None,
-                    event: EngineEvent::SubagentProgress {
-                        parent_session_id: state.session_id.clone(),
-                        subagent_id: progress.subagent_id,
-                        child_session_id: progress.child_session_id,
-                        child_sequence: progress.child_sequence.map(SequenceId),
-                        event: progress.event,
-                    },
+                progress.event.deliver(|preview| {
+                    let _ = events.send(RoutedEvent {
+                        target: None,
+                        event: EngineEvent::SubagentProgress {
+                            parent_session_id: state.session_id.clone(),
+                            subagent_id: progress.subagent_id,
+                            child_session_id: progress.child_session_id,
+                            child_sequence: progress.child_sequence.map(SequenceId),
+                            event: preview,
+                        },
+                    });
                 });
             }
         }

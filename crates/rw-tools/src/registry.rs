@@ -249,17 +249,19 @@ pub enum SubagentLifecycleEvent {
 }
 
 /// One child event forwarded only to the active parent client for display.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct SubagentProgressEvent {
     pub subagent_id: SubagentId,
     pub child_session_id: SessionId,
     pub child_sequence: Option<u64>,
-    pub event: Value,
+    pub event: crate::ChildProgressPreview,
 }
 
 /// Engine-owned bridge for durable lifecycle and display-only child progress.
 #[async_trait]
 pub trait SubagentEventSink: Send + Sync {
+    /// Existing publisher allowance, shared by construction and every queued preview.
+    fn progress_budget(&self) -> crate::ChildProgressBudget;
     async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError>;
 
     async fn progress(&self, event: SubagentProgressEvent) -> Result<(), ToolError>;

@@ -24,7 +24,7 @@ rw-types.workspace = true
 rustix.workspace = true
 schemars.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 shell-words.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
