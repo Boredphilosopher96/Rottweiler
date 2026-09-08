@@ -56,7 +56,7 @@ fn provider_boundaries_reject_foreign_fields() {
 }
 
 #[test]
-fn nullable_event_fields_are_explicit_and_conversation_metadata_is_optional() {
+fn nullable_event_and_conversation_fields_are_explicit() -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         serde_json::from_value::<ProviderEvent>(
             json!({"type":"thinking_delta","content":"reason"})
@@ -71,9 +71,29 @@ fn nullable_event_fields_are_explicit_and_conversation_metadata_is_optional() {
     );
     let mut with_history = request();
     with_history["turns"] = json!([{
-        "role": "assistant", "meta": {"synthetic":false,"summary":false},
-        "blocks": [{"type":"thinking","content":"reason"},
-                   {"type":"citation","uri":"https://example.com"}]
+        "role": "assistant", "meta": {"created_at":null,"model":null,"synthetic":false,"summary":false},
+        "blocks": [{"type":"thinking","content":"reason","signature":null},
+                   {"type":"citation","uri":"https://example.com","title":null,"excerpt":null}]
     }]);
-    assert!(serde_json::from_value::<ProviderRequest>(with_history).is_ok());
+    assert!(serde_json::from_value::<ProviderRequest>(with_history.clone()).is_ok());
+    for (path, field) in [
+        ("/turns/0/meta", "created_at"),
+        ("/turns/0/meta", "model"),
+        ("/turns/0/blocks/0", "signature"),
+        ("/turns/0/blocks/1", "title"),
+        ("/turns/0/blocks/1", "excerpt"),
+    ] {
+        let mut incomplete = with_history.clone();
+        incomplete
+            .pointer_mut(path)
+            .ok_or("nested field")?
+            .as_object_mut()
+            .ok_or("nested object")?
+            .remove(field);
+        assert!(
+            serde_json::from_value::<ProviderRequest>(incomplete).is_err(),
+            "accepted missing {path}/{field}"
+        );
+    }
+    Ok(())
 }

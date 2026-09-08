@@ -7,6 +7,17 @@ use rw_plugin_protocol::{
     HookFailurePolicy, PROTOCOL_VERSION, PluginCapabilities, PluginHookCapability, PluginManifest,
 };
 
+// Native fixture suites share cold executable and compiler resources. Admission
+// precedes each invocation's unchanged product deadline.
+static NATIVE_FIXTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+async fn admit_native_fixture() -> tokio::sync::SemaphorePermit<'static> {
+    NATIVE_FIXTURES
+        .acquire()
+        .await
+        .expect("native fixture admission")
+}
+
 fn helper_digest(path: &Path) -> rw_tools::ExecutableDigest {
     let bytes = std::fs::read(path).expect("fixture bytes");
     rw_tools::ExecutableDigest {
@@ -162,6 +173,7 @@ fn wat_bytes(value: &str) -> String {
 
 #[tokio::test]
 async fn helper_reuses_compilation_with_fresh_invocations() {
+    let _admission = admit_native_fixture().await;
     let pool = WasmWorkerPool::new();
     let hook = WasmProcessHook::new(
         pool.clone(),
@@ -200,6 +212,7 @@ async fn helper_reuses_compilation_with_fresh_invocations() {
 
 #[tokio::test]
 async fn helper_rejects_malformed_components_and_recovers() {
+    let _admission = admit_native_fixture().await;
     let pool = WasmWorkerPool::new();
     let helper = fixture_helper();
     let invalid = WasmProcessHook::new(
@@ -226,6 +239,7 @@ async fn helper_rejects_malformed_components_and_recovers() {
 
 #[tokio::test]
 async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
+    let _admission = admit_native_fixture().await;
     let pool = WasmWorkerPool::with_worker_limit(2).expect("capacity");
     let helper = fixture_helper();
     let bytes = component(r#"{"decision":"continue"}"#);
@@ -271,6 +285,7 @@ async fn cache_is_bounded_and_manifest_and_limits_are_part_of_identity() {
 
 #[tokio::test]
 async fn guest_trap_retires_its_worker_and_allows_a_fresh_generation() {
+    let _admission = admit_native_fixture().await;
     check_trap_retirement(fixture_helper()).await;
 }
 
@@ -317,6 +332,7 @@ async fn worker_capacity_measurement() {
 
 #[tokio::test]
 async fn approved_helper_survives_installation_replacement_before_worker_start() {
+    let _admission = admit_native_fixture().await;
     let directory = tempfile::tempdir().expect("bundle");
     let installation = directory.path().join("rottweiler-wasm-host");
     std::fs::copy(env!("CARGO_BIN_EXE_rottweiler-wasm-host"), &installation)

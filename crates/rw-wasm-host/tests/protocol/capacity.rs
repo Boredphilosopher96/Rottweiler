@@ -223,6 +223,7 @@ fn worker_rss(pool: &WasmWorkerPool, workers: usize) -> BTreeMap<u32, u64> {
 
 #[tokio::test]
 async fn measurement_guest_checks_exact_input_bytes_and_output() {
+    let _admission = super::admit_native_fixture().await;
     check_byte_oracle(super::fixture_helper()).await;
 }
 

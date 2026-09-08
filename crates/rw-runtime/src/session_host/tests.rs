@@ -6,7 +6,6 @@ use rw_store::session::SessionEventLog;
 use std::time::Instant;
 
 use rw_core::{ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelDescriptor};
-use rw_store::session::{SessionProjection, SessionSummary as StoredSessionSummary};
 use tempfile::tempdir;
 
 use super::*;
@@ -209,25 +208,22 @@ fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
     let workspace = private_test_directory(&root.path().join("workspace"));
     let admission_runtime = tokio::runtime::Runtime::new().expect("admission runtime");
     let factory = admission_runtime.block_on(factory(root.path(), &workspace));
-    SessionIndex::open(&factory.options.storage_root)
-        .and_then(|index| {
-            index.upsert(&SessionProjection {
-                input_claims: rw_core::recovery::InputClaimCheckpoint::default()
-                    .encode()
-                    .expect("empty claim checkpoint"),
-                summary: StoredSessionSummary {
-                    id: "scheduling-delay".to_owned(),
-                    title: "Scheduling delay".to_owned(),
-                    updated_unix_ms: 1,
-                    cost_micros: 0,
-                    turn_count: 1,
-                },
-                explicit_title: false,
-                complete: true,
-                source: rw_store::session::journal::JournalPrefixIdentity::empty(),
+    admission_runtime.block_on(async {
+        let session = factory
+            .create(CreateSessionRequest {
+                session_id: SessionId("scheduling-delay".into()),
+                workspace: workspace.display().to_string(),
+                model: None,
             })
-        })
-        .expect("searchable session index");
+            .await
+            .expect("complete durable session");
+        session
+            .handle()
+            .snapshot()
+            .await
+            .expect("initialized source");
+        session.handle().close().await.expect("seed actor settled");
+    });
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .max_blocking_threads(1)
@@ -242,12 +238,13 @@ fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
             std::thread::sleep(Duration::from_millis(250));
         });
         running.await.expect("blocking worker started");
-        assert!(
+        assert_eq!(
             factory
                 .persisted_sessions()
                 .await
                 .expect("session list after scheduling delay")
-                .is_empty()
+                .len(),
+            1
         );
         blocker.await.expect("first blocker");
 
@@ -258,10 +255,14 @@ fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
         });
         running.await.expect("blocking worker started");
         let (sessions, truncated) = factory
-            .search_persisted_sessions("scheduling", 10)
+            .search_persisted_sessions("New session", 10)
             .await
             .expect("session search after scheduling delay");
-        assert!(sessions.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].session.session_id,
+            SessionId("scheduling-delay".into())
+        );
         assert!(!truncated);
         blocker.await.expect("second blocker");
     });

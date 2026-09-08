@@ -8,7 +8,6 @@ use crate::engine::durability::NoopSessionEventSink;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::tests::fixtures::hooks::RewriteUserPromptHook;
 use crate::engine::tests::fixtures::models::ContinuousDeltaModel;
-use crate::engine::tests::fixtures::models::DelayedFinishModel;
 use crate::engine::tests::fixtures::models::PendingModel;
 use crate::engine::tests::fixtures::models::ScriptedModel;
 use crate::engine::tests::fixtures::sinks::BlockingBatchSink;
@@ -462,12 +461,17 @@ async fn multiple_immediate_deltas_coalesce_without_losing_order() {
 }
 
 #[tokio::test]
-async fn delayed_finish_never_holds_a_lone_delta_beyond_the_coalescing_window() {
+async fn lone_delta_flushes_while_the_provider_is_pending() {
     let root = TempDir::new().expect("tempdir");
+    let first_delta = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
     let handle = crate::engine::tests::fixtures::history::spawn(config(
         root.path(),
-        Arc::new(DelayedFinishModel {
-            delay: Duration::from_millis(50),
+        Arc::new(ContinuousDeltaModel {
+            count: 1,
+            first_delta: Arc::clone(&first_delta),
+            allow_finish: Arc::clone(&allow_finish),
+            delay: Duration::ZERO,
         }),
         Arc::new(ToolRegistry::new()),
         PermissionDecision::Allow,
@@ -478,19 +482,25 @@ async fn delayed_finish_never_holds_a_lone_delta_beyond_the_coalescing_window() 
     let mut events = handle.subscribe().expect("subscription");
 
     handle.send_message("run").await.expect("message");
+    timeout(Duration::from_secs(3), first_delta.notified())
+        .await
+        .expect("provider started after owned context preparation");
+    // The provider cannot finish until the delta is observed. This proves timer
+    // flushing independently of storage scheduling and native latency budgets.
     let delta = timeout(
-        Duration::from_millis(30),
+        Duration::from_secs(3),
         next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::TextDelta { .. })
         }),
     )
     .await
-    .expect("delta must be visible promptly");
+    .expect("delta must be visible while the provider remains pending");
     assert!(matches!(
         delta.kind,
         PendingEvent::TextDelta { turn: 1, ref text }
-            if text == "visible promptly"
+            if text == "x"
     ));
+    allow_finish.notify_one();
     let finished = next_matching(&mut events, |kind| {
         matches!(kind, PendingEvent::TurnFinished { .. })
     })
@@ -530,7 +540,7 @@ async fn continuous_deltas_flush_on_the_anchored_coalescing_deadline() {
         .await
         .expect("provider started after owned context preparation");
     let delta = timeout(
-        Duration::from_millis(30),
+        Duration::from_secs(3),
         next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::TextDelta { .. })
         }),

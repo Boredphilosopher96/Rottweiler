@@ -2,7 +2,6 @@ use super::provider_context::{ProviderContext, Reservation, Selection};
 use super::start::AcceptedUserMessage;
 use crate::engine::AgentTurnStatus;
 use crate::engine::SessionUsage;
-use crate::engine::TEXT_DELTA_COALESCE_WINDOW;
 use crate::engine::commands::CommandToolCall;
 use crate::engine::pending_event::PendingEvent;
 use crate::engine::projection::ContextSurgeryAction;
@@ -24,9 +23,9 @@ use crate::engine::turn::hooks::hook_rejection;
 use crate::engine::turn::hooks::mark_unsettled;
 use crate::engine::turn::hooks::report_hook_failures;
 use crate::engine::turn::provider_calls;
+use crate::engine::turn::provider_messages::PendingText;
 use crate::engine::turn::provider_messages::append_text;
 use crate::engine::turn::provider_messages::append_thinking;
-use crate::engine::turn::provider_messages::flush_pending_text_delta;
 use crate::engine::turn::provider_messages::persist_conversation_turn;
 use crate::engine::turn::provider_messages::persist_event;
 use crate::engine::turn::provider_messages::send_event;
@@ -535,29 +534,18 @@ pub(super) async fn run_turn(
         let mut iteration_usage = SessionUsage::default();
         let mut stream_failed = false;
         let mut provider_overflow_recovered = false;
-        let mut pending_text_delta = None;
-        let mut pending_text_delta_deadline = None;
+        let mut pending_text = PendingText::default();
         loop {
-            let next = if let Some(deadline) = pending_text_delta_deadline {
+            let next = if let Some(deadline) = pending_text.deadline() {
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => {
-                        flush_pending_text_delta(
-                            &mut pending_text_delta,
-                            &mut pending_text_delta_deadline,
-                            &signals,
-                            turn,
-                        );
+                        pending_text.flush(&signals, turn);
                         status = AgentTurnStatus::Interrupted;
                         break;
                     }
                     () = tokio::time::sleep_until(deadline) => {
-                        flush_pending_text_delta(
-                            &mut pending_text_delta,
-                            &mut pending_text_delta_deadline,
-                            &signals,
-                            turn,
-                        );
+                        pending_text.flush(&signals, turn);
                         continue;
                     }
                     event = stream.next() => event,
@@ -572,12 +560,7 @@ pub(super) async fn run_turn(
                 }
             };
             let Some(event) = next else {
-                flush_pending_text_delta(
-                    &mut pending_text_delta,
-                    &mut pending_text_delta_deadline,
-                    &signals,
-                    turn,
-                );
+                pending_text.flush(&signals, turn);
                 break;
             };
             if first_provider_event {
@@ -590,12 +573,7 @@ pub(super) async fn run_turn(
             let event = match event {
                 Ok(event) => event,
                 Err(error) => {
-                    flush_pending_text_delta(
-                        &mut pending_text_delta,
-                        &mut pending_text_delta_deadline,
-                        &signals,
-                        turn,
-                    );
+                    pending_text.flush(&signals, turn);
                     if error.kind == rw_providers::ProviderErrorKind::ContextOverflow
                         && assistant.blocks.is_empty()
                         && calls.is_empty()
@@ -663,12 +641,7 @@ pub(super) async fn run_turn(
                 &event,
                 ProviderEvent::TextDelta { .. } | ProviderEvent::Finished { .. }
             ) {
-                flush_pending_text_delta(
-                    &mut pending_text_delta,
-                    &mut pending_text_delta_deadline,
-                    &signals,
-                    turn,
-                );
+                pending_text.flush(&signals, turn);
             }
             match event {
                 ProviderEvent::RouteSelected { route } => selected_route = Some(route),
@@ -676,12 +649,7 @@ pub(super) async fn run_turn(
                 ProviderEvent::TextDelta { text } => {
                     let text = config.secret_redactor.redact(&text);
                     append_text(&mut assistant.blocks, &text);
-                    pending_text_delta
-                        .get_or_insert_with(String::new)
-                        .push_str(&text);
-                    pending_text_delta_deadline.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + TEXT_DELTA_COALESCE_WINDOW
-                    });
+                    pending_text.push(&text);
                 }
                 ProviderEvent::ThinkingDelta { content, signature } => {
                     let content = config.secret_redactor.redact(&content);
@@ -829,12 +797,7 @@ pub(super) async fn run_turn(
                 ProviderEvent::Usage { usage: latest } => iteration_usage.update(latest),
                 ProviderEvent::Finished { reason } => {
                     if reason == FinishReason::ToolCalls || !calls.is_empty() {
-                        flush_pending_text_delta(
-                            &mut pending_text_delta,
-                            &mut pending_text_delta_deadline,
-                            &signals,
-                            turn,
-                        );
+                        pending_text.flush(&signals, turn);
                     }
                     finish_reason = Some(reason);
                     break;
@@ -966,12 +929,7 @@ pub(super) async fn run_turn(
             Ok(false) => {}
         }
         if budget_stop {
-            flush_pending_text_delta(
-                &mut pending_text_delta,
-                &mut pending_text_delta_deadline,
-                &signals,
-                turn,
-            );
+            pending_text.flush(&signals, turn);
         }
         if provider_overflow_recovered {
             continue 'iterations;
@@ -1056,7 +1014,7 @@ pub(super) async fn run_turn(
                 break;
             }
             status = AgentTurnStatus::Completed;
-            deferred_terminal_delta = pending_text_delta.take();
+            deferred_terminal_delta = pending_text.take();
             deferred_terminal_turn = assistant_turn;
             break;
         }

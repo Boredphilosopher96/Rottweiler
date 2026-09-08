@@ -133,7 +133,7 @@ fn generated_operation_values_reject_unknown_fields_at_their_owner() {
 }
 
 #[test]
-fn omitted_optional_fields_are_tolerated() {
+fn omitted_nullable_fields_are_rejected() {
     let fixture_text =
         fs::read_to_string(fixture_path()).expect("generated protocol fixture should be present");
     let fixture_json: Value =
@@ -144,8 +144,15 @@ fn omitted_optional_fields_are_tolerated() {
         .as_object_mut()
         .expect("thinking block should be an object")
         .remove("signature");
-    assert!(serde_json::from_value::<Block>(thinking).is_ok());
+    assert!(serde_json::from_value::<Block>(thinking).is_err());
+}
 
+#[test]
+fn compact_instructions_are_optional() {
+    let fixture_json: Value = serde_json::from_str(
+        &fs::read_to_string(fixture_path()).expect("generated protocol fixture"),
+    )
+    .expect("fixture JSON");
     let mut compact = fixture_json["client_commands"]
         .as_array()
         .expect("commands should be an array")
