@@ -61,6 +61,12 @@ pub(super) fn validate_session_id(value: &str) -> Result<()> {
     SessionId::validate(value).map_err(|_| miette!("session id is empty, too long, or unsafe"))
 }
 
+#[tracing::instrument(
+    target = "rw_performance",
+    level = "trace",
+    name = "session.metadata.persist",
+    skip_all
+)]
 pub(super) fn persist_session_metadata(
     storage_root: &Path,
     session_id: &str,

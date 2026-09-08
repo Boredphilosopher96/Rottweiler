@@ -39,6 +39,12 @@ impl PromptShapeStore {
     /// Open one exact, private schema with a bounded page cache and no lifetime scan.
     /// # Errors
     /// Rejects unsafe files, foreign schemas, and unavailable storage.
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "prompt_shape.open",
+        skip_all
+    )]
     pub fn open(path: &Path) -> Result<Self, PromptShapeError> {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -115,6 +121,12 @@ impl PromptShapeStore {
     /// Commit the first request shape at one immutable canonical source boundary.
     /// # Errors
     /// Rejects oversized profiles, source substitution, and failed durable writes.
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "prompt_shape.record",
+        skip_all
+    )]
     pub fn record(
         &mut self,
         turn: u64,

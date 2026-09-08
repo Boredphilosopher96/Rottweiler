@@ -34,6 +34,12 @@ impl CheckpointStore {
     ///
     /// Returns an error when the workspace cannot be canonicalized or storage
     /// directories cannot be created.
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "checkpoint.namespace.open",
+        skip_all
+    )]
     pub fn open(
         namespace_root: &Path,
         workspace: &Path,

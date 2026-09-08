@@ -313,6 +313,12 @@ impl WorktreeIsolation {
     ///
     /// Returns an error when either root is unsafe, the repository is not an
     /// exact Git top level, Git is unavailable, or the operation is cancelled.
+    #[tracing::instrument(
+        target = "rw_performance",
+        level = "trace",
+        name = "worktree.validate",
+        skip_all
+    )]
     pub async fn new(
         repository_root: impl AsRef<Path>,
         private_root: impl AsRef<Path>,

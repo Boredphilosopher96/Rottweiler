@@ -58,6 +58,7 @@ pub(super) struct RewindCoordinatorDecision {
     pub(super) state: RewindCoordinatorState,
 }
 
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "checkpoint.stores.open", skip_all, fields(root_count = workspace_roots.len()))]
 pub(super) fn open_checkpoint_stores(
     storage_root: &Path,
     root: &Path,
@@ -364,6 +365,12 @@ pub(super) fn preview_persisted_workspace_roots(
     Ok(Some(generation))
 }
 
+#[tracing::instrument(
+    target = "rw_performance",
+    level = "trace",
+    name = "checkpoint.mapping.persist",
+    skip_all
+)]
 pub(super) fn persist_root_mapping(path: &Path, mapping: &CheckpointRootMapping) -> Result<()> {
     mapping::validate(mapping)?;
     persist_private_json(path, mapping)

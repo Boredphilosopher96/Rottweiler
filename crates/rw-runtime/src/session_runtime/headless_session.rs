@@ -114,12 +114,19 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use tracing::Instrument as _;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 /// Composes an owned local conversation or prompt-inspection session.
 ///
 /// # Errors
 /// Returns an error when configuration, durable recovery, or composition fails.
+#[tracing::instrument(
+    target = "rw_performance",
+    level = "trace",
+    name = "runtime.local.compose",
+    skip_all
+)]
 pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super::LocalSession> {
     if options.max_turns == 0 {
         return Err(miette!("--max-turns must be greater than zero"));
@@ -302,12 +309,16 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         open_checkpoint_stores(&storage_root, &checkpoint_root, &workspace_roots)?;
     let recovery_stores = Arc::clone(&checkpoint_stores);
     rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        let _worker =
+            tracing::trace_span!(target: "rw_performance", "checkpoint.opaque_recovery.worker")
+                .entered();
         let mut operation = rw_store::checkpoint::CheckpointOperation::default();
         for store in recovery_stores.iter() {
             store.recover_opaque_mutations(&mut operation)?;
         }
         Ok::<_, rw_store::checkpoint::CheckpointError>(())
     })
+    .instrument(tracing::trace_span!(target: "rw_performance", "checkpoint.opaque_recovery"))
     .await
     .map_err(|error| miette!("checkpoint recovery worker failed: {error}"))?
     .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
@@ -315,10 +326,14 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
     let rewind_stores = Arc::clone(&checkpoint_stores);
     let rewind_checkpoint_root = checkpoint_root.clone();
     let log = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        let _worker =
+            tracing::trace_span!(target: "rw_performance", "checkpoint.rewind_recovery.worker")
+                .entered();
         let mut log = log;
         recover_rewind_transactions(&rewind_checkpoint_root, &rewind_stores, &mut log)?;
         Ok::<_, miette::Report>(log)
     })
+    .instrument(tracing::trace_span!(target: "rw_performance", "checkpoint.rewind_recovery"))
     .await
     .map_err(|error| miette!("rewind recovery worker failed: {error}"))??;
     let durable_sink = DurableEventSink::new(
