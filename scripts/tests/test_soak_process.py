@@ -136,7 +136,9 @@ class SoakProcessTests(unittest.TestCase):
                 self.assertTrue(observe_stopped(process.pid))
                 self.assertTrue(observe_stopped(process.pid))
                 return child_pid
-            self.assertEqual(kill_direct_child(process, select_child), child_pid)
+            fault = kill_direct_child(process, select_child)
+            self.assertEqual(fault.pid, child_pid)
+            self.assertLessEqual(fault.signal_started, fault.signal_finished)
             self.wait_ready(reaped)
             self.assertEqual(reaped.read_text(), str(-signal.SIGKILL))
             terminate_supervisor(process, master, set(), lambda: {process.pid}, grace=.5)

@@ -7,6 +7,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from perf_process_scope import UnsettledScope
 from perf_process_wait import observe_exit, observe_stopped, require_group_disappearance, signal_owned_group
@@ -99,9 +100,16 @@ def terminate_supervisor(
         raise UnsettledScope(f"UNSETTLED soak supervisor {process.pid}: " + "; ".join(failures))
 
 
+@dataclass(frozen=True)
+class ChildFault:
+    pid: int
+    signal_started: float
+    signal_finished: float
+
+
 def kill_direct_child(
     supervisor: subprocess.Popen[bytes], select_child: Callable[[], int | None],
-) -> int | None:
+) -> ChildFault | None:
     """Pin a direct child's PID by stopping its unreaped parent during the fault.
 
     The selector must return an actual direct child from a fresh observation.
@@ -118,9 +126,11 @@ def kill_direct_child(
                 raise UnsettledScope("supervisor did not stop before child fault")
             time.sleep(.001)
         pid = select_child()
-        if pid is not None:
-            os.kill(pid, signal.SIGKILL)
-        return pid
+        if pid is None:
+            return None
+        signal_started = time.monotonic()
+        os.kill(pid, signal.SIGKILL)
+        return ChildFault(pid, signal_started, time.monotonic())
     finally:
         # This Popen leader remains unreaped throughout, including selection or
         # signal failure. Resume it so its actual child owner can run cleanup.

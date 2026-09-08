@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from soak_journal import EventLogProbe
+from soak_outages import Outages
 from release_contract import load_contract
 from perf_process import run_sample, delegated_success_scope, check_sample_cancellation
 from perf_process_scope import UnsettledScope
@@ -381,6 +382,8 @@ def _run_soak(
             "SOAK_FIXTURE_API_KEY": "offline-soak-fixture",
             "ROTTWEILER_HOME": str(state),
             "ROTTWEILER_DRIVER_READY_MARKER": "SOAK_DRIVER_READY",
+            "ROTTWEILER_PROCESS_START_MARKER": "SOAK_TUI_PROCESS_START",
+            "ROTTWEILER_INTERACTIVE_MARKER": "SOAK_TUI_INPUT_ACK",
             "TERM": "xterm-256color",
         }
         if tui is not None:
@@ -406,7 +409,7 @@ def _run_soak(
         terminal_tail = bytearray()
         engine_diagnostic = "not observed"
         driver_ready_count = 0
-        ready_marker_tail = b""
+        outages = Outages(started)
         ready_tui_pid: int | None = None
         restart_ready_before = 0
         readiness_deadline: float | None = started + 20
@@ -421,6 +424,7 @@ def _run_soak(
                        "driver_readiness" if ready_tui_pid is None else "ready"),
                 supervisor_pid=process.pid,
                 driver_ready_count=driver_ready_count,
+                tui_outages=outages.snapshot(complete=False),
                 ready_tui_pid=ready_tui_pid,
                 engine_generations=engine_generations[-16:],
                 tui_generations=tui_generations[-16:],
@@ -500,14 +504,12 @@ def _run_soak(
                 if readable:
                     try:
                         while chunk := os.read(master, 64 * 1024):
-                            readiness_bytes = ready_marker_tail + chunk
-                            markers = readiness_bytes.count(b"SOAK_DRIVER_READY")
-                            ready_marker_tail = readiness_bytes[-(len(b"SOAK_DRIVER_READY") - 1):]
+                            def observed_ready_tui() -> int | None:
+                                return find_descendant(process_table(), process.pid, js_host_executable, role=TUI_ROLE)
+                            markers = outages.feed(chunk, time.monotonic(), observed_ready_tui)
                             driver_ready_count += markers
                             if markers:
-                                ready_tui_pid = find_descendant(
-                                    process_table(), process.pid, js_host_executable, role=TUI_ROLE
-                                )
+                                ready_tui_pid = outages.generations[-1]["pid"]
                             # The first marker is initial readiness; every later
                             # marker is a successfully reattached TUI, including
                             # planned memory recycles and the forced probe below.
@@ -619,9 +621,10 @@ def _run_soak(
                         current_rows = process_table()
                         pid = find_descendant(current_rows, process.pid, js_host_executable, role=TUI_ROLE)
                         return pid if pid is not None and current_rows[pid].parent == process.pid else None
-                    tui_pid = kill_direct_child(process, current_direct_tui) if engine_pid is not None else None
-                    if engine_pid is not None and tui_pid is not None:
-                        restart_old_tui = tui_pid
+                    fault = kill_direct_child(process, current_direct_tui) if engine_pid is not None else None
+                    if engine_pid is not None and fault is not None:
+                        outages.force(fault.signal_started, fault.signal_finished)
+                        restart_old_tui = fault.pid
                         restart_engine = engine_pid
                         restart_ready_before = driver_ready_count
                         ready_tui_pid = None
@@ -663,6 +666,7 @@ def _run_soak(
                         if now >= readiness_deadline:
                             raise RuntimeError("current TUI did not establish driver readiness before input")
                     else:
+                        outages.confirm_ready(now, current_tui)
                         readiness_deadline = None
                         waiting = steps[submitted]
                         probe.begin(waiting.marker, waiting.kind)
@@ -744,6 +748,7 @@ def _run_soak(
                 )
             if streamed_turns == 0 or tool_turns == 0 or compactions == 0:
                 raise RuntimeError("soak did not exercise every required production path")
+            outages.require_complete()
             if not forced_restart_completed or tui_restarts < 1:
                 raise RuntimeError("soak did not complete the supervised TUI reconnect")
             durable_bytes = probe.durable_bytes()
@@ -752,6 +757,7 @@ def _run_soak(
         finally:
             primary = sys.exception()
             capture_progress()
+            progress.snapshot(tui_outages=outages.snapshot())
             if primary is not None:
                 progress.snapshot(primary_error=redact_diagnostic(str(primary)),
                                   primary_error_type=type(primary).__name__)
