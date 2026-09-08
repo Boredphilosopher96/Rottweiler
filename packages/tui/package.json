@@ -34,7 +34,7 @@
   },
   "devDependencies": {
     "@napi-rs/canvas": "1.0.8",
-    "@types/bun": "1.4.0",
+    "@types/bun": "1.4.1",
     "ajv": "8.20.0",
     "typescript": "7.0.2"
   },
