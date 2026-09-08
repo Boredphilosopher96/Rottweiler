@@ -25,33 +25,91 @@ pub(crate) async fn register_mcp_command(
             manager: Arc::clone(&manager),
         },
     )?;
-    let mut registered = std::collections::BTreeSet::new();
-    for prompt in manager.prompts().await {
-        let name = mcp_prompt_command_name(&prompt.server, &prompt.name);
-        if !registered.insert(name.clone()) {
-            continue;
-        }
-        registry.register(
-            CommandDescriptor::new(
-                name,
-                format!("MCP prompt {} from {}", prompt.name, prompt.server),
-            )
-            .with_argument_hint("[JSON object]")
-            .with_source(CommandSource::Mcp),
-            McpPromptCommand {
-                manager: Arc::clone(&manager),
-                server: prompt.server,
-                prompt: prompt.name,
-            },
-        )?;
+    let prompts = Arc::new(
+        manager
+            .prompts()
+            .await
+            .map_err(|_| CommandRegistryError::Admission)?,
+    );
+    let bytes = prompts
+        .iter()
+        .try_fold(4096_usize, |total, prompt| {
+            prompt
+                .server
+                .as_str()
+                .len()
+                .checked_add(prompt.name.len())
+                .and_then(|bytes| bytes.checked_mul(32))
+                .and_then(|bytes| bytes.checked_add(2048))
+                .and_then(|bytes| total.checked_add(bytes))
+        })
+        .ok_or(CommandRegistryError::Admission)?;
+    let slot = rw_mcp::McpResponseSlot::new(
+        rw_mcp::McpResponseLimits::new(bytes).map_err(|_| CommandRegistryError::Admission)?,
+    )
+    .map_err(|_| CommandRegistryError::Admission)?;
+    let work = PromptCommandWork {
+        manager,
+        prompts,
+        retained: Arc::new(slot.retain_native()),
+    };
+    let commands =
+        rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || work.prepare())
+            .await
+            .map_err(|_| CommandRegistryError::Admission)?;
+    for (descriptor, handler) in commands.values {
+        registry.register(descriptor, handler)?;
     }
     Ok(())
 }
 
+struct PromptCommandWork {
+    manager: Arc<McpManager>,
+    prompts: Arc<rw_mcp::McpResponse<Vec<rw_mcp::McpCatalogEntry>>>,
+    retained: Arc<dyn Send + Sync>,
+}
+struct PreparedPromptCommands {
+    values: Vec<(CommandDescriptor, McpPromptCommand)>,
+    // Includes the temporary registration vector until its iterator retires.
+    _retained: Arc<dyn Send + Sync>,
+}
+impl PromptCommandWork {
+    fn prepare(self) -> PreparedPromptCommands {
+        let mut values = Vec::with_capacity(self.prompts.len());
+        let mut names = std::collections::BTreeSet::new();
+        for (index, prompt) in self.prompts.iter().enumerate() {
+            let name = mcp_prompt_command_name(&prompt.server, &prompt.name);
+            if !names.insert(name.clone()) {
+                continue;
+            }
+            let descriptor = CommandDescriptor::new(
+                name,
+                format!("MCP prompt {} from {}", prompt.name, prompt.server),
+            )
+            .with_argument_hint("[JSON object]")
+            .with_source(CommandSource::Mcp);
+            values.push((
+                descriptor,
+                McpPromptCommand {
+                    manager: Arc::clone(&self.manager),
+                    index,
+                    prompts: Arc::clone(&self.prompts),
+                    _retained: Arc::clone(&self.retained),
+                },
+            ));
+        }
+        PreparedPromptCommands {
+            values,
+            _retained: self.retained,
+        }
+    }
+}
+
 pub(super) struct McpPromptCommand {
     manager: Arc<McpManager>,
-    server: McpServerId,
-    prompt: String,
+    index: usize,
+    prompts: Arc<rw_mcp::McpResponse<Vec<rw_mcp::McpCatalogEntry>>>,
+    _retained: Arc<dyn Send + Sync>,
 }
 
 pub(super) struct DynamicMcpPromptCommand {
@@ -94,10 +152,11 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpPromptCo
         _context: &mut SessionCommandContext,
         invocation: CommandInvocation,
     ) -> std::result::Result<SessionCommandOutput, CommandExecutionError> {
+        let prompt = &self.prompts[self.index];
         execute_mcp_prompt(
             &self.manager,
-            &self.server,
-            &self.prompt,
+            &prompt.server,
+            &prompt.name,
             invocation.arguments(),
         )
         .await
@@ -364,13 +423,6 @@ pub(super) fn render_mcp_approval(summary: &McpApprovalSummary, confirm_with: &s
     }
     lines.push(format!("To approve: {confirm_with}"));
     lines.join("\n")
-}
-
-pub(super) fn escape_untrusted_json(value: &str) -> String {
-    value
-        .replace('&', "\\u0026")
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
 }
 
 pub(super) fn mcp_prompt_command_name(server: &McpServerId, prompt: &str) -> String {

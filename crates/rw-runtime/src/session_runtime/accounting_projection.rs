@@ -15,12 +15,16 @@ use std::{
 pub(super) fn inherited_journal_through(
     storage_root: &Path,
     session_id: &str,
+    allowance: Box<dyn rw_core::recovery::HistoryWorkingAllowance>,
 ) -> Result<Option<SequenceId>> {
-    super::session_metadata::load_session_metadata_any(storage_root, session_id)
+    super::session_metadata::load_session_metadata_any(storage_root, session_id, allowance)
         .map(|metadata| metadata.inherited_journal_through)
 }
 
-pub(super) fn refresh_session_index(storage_root: &Path) -> Result<()> {
+pub(super) fn refresh_session_index(
+    storage_root: &Path,
+    reserve: &dyn Fn() -> Box<dyn rw_core::recovery::HistoryWorkingAllowance>,
+) -> Result<()> {
     let index = SessionIndex::reset_derived(storage_root).into_diagnostic()?;
     match std::fs::read_dir(storage_root.join("sessions")) {
         Ok(entries) => {
@@ -35,7 +39,7 @@ pub(super) fn refresh_session_index(storage_root: &Path) -> Result<()> {
                 let log = SessionEventLog::open(storage_root, &id).into_diagnostic()?;
                 let source = log.read_view();
                 super::search_projection::synchronize(&index, storage_root, &id, &source)?;
-                reconcile_source_accounting(storage_root, &id, &source)?;
+                reconcile_source_accounting(storage_root, &id, &source, reserve())?;
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -233,8 +237,9 @@ fn reconcile_source_accounting(
     root: &Path,
     session: &str,
     source: &rw_store::session::journal::JournalReadView,
+    allowance: Box<dyn rw_core::recovery::HistoryWorkingAllowance>,
 ) -> Result<()> {
-    let inherited = inherited_journal_through(root, session)?;
+    let inherited = inherited_journal_through(root, session, allowance)?;
     let ledger = rw_store::session::AccountingLedger::open(root).into_diagnostic()?;
     let mut after = None;
     loop {

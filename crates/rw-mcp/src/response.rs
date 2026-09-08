@@ -105,6 +105,46 @@ impl<T> McpResponse<T> {
     pub(crate) fn wire(value: T, retained: Vec<Arc<Allocation>>) -> Self {
         Self { value, retained }
     }
+
+    /// Transform a borrowed response under a destination allowance acquired before
+    /// construction. The physical CPU worker retains the source and allowance even
+    /// when its caller disappears. The trusted projection must bound every temporary
+    /// and its result by the declared slot; the result cannot borrow the source.
+    pub async fn project<U: Send + 'static>(
+        self,
+        slot: McpResponseSlot,
+        project: impl FnOnce(&T) -> Result<U, McpError> + Send + 'static,
+    ) -> Result<McpResponse<U>, McpError>
+    where
+        T: Send + 'static,
+    {
+        let work = Projection {
+            source: self,
+            slot,
+            project,
+        };
+        rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || work.run())
+            .await
+            .map_err(|_| invalid())?
+    }
+}
+
+struct Projection<T, F> {
+    source: McpResponse<T>,
+    project: F,
+    slot: McpResponseSlot,
+}
+impl<T, U, F: FnOnce(&T) -> Result<U, McpError>> Projection<T, F> {
+    fn run(self) -> Result<McpResponse<U>, McpError> {
+        let value = (self.project)(&self.source);
+        value.map(|value| McpResponse::wire(value, vec![self.slot.into_retention()]))
+    }
+}
+
+impl<T> AsRef<T> for McpResponse<T> {
+    fn as_ref(&self) -> &T {
+        &self.value
+    }
 }
 fn invalid() -> McpError {
     McpError::Protocol("MCP response construction admission exceeded".into())
@@ -123,5 +163,46 @@ impl<'a, T> IntoIterator for &'a McpResponse<Vec<T>> {
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
         self.value.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+    #[tokio::test]
+    async fn abandoned_projection_retains_source_until_physical_worker_finishes() {
+        let source = McpResponseSlot::new(McpResponseLimits::new(8192).expect("limit"))
+            .expect("slot")
+            .adopt(String::from("source"))
+            .await
+            .expect("source");
+        let retained = Arc::downgrade(&source.retained[0]);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slot =
+            McpResponseSlot::new(McpResponseLimits::new(8192).expect("limit")).expect("slot");
+        let caller = tokio::spawn(source.project(slot, move |source| {
+            let _ = started_tx.send(());
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("release");
+            Ok(source.clone())
+        }));
+        started_rx.await.expect("started");
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert!(
+            retained.upgrade().is_some(),
+            "physical source remains charged"
+        );
+        release_tx.send(()).expect("release");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while retained.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical completion");
     }
 }

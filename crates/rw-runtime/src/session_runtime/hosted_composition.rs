@@ -190,8 +190,12 @@ pub(crate) async fn compose_hosted_actor(
         options.dangerously_trust,
     )?);
     let inherited_journal_through = if options.resume {
-        super::session_metadata::load_session_metadata_any(&options.storage_root, &session_id)?
-            .inherited_journal_through
+        super::session_metadata::load_session_metadata_any(
+            &options.storage_root,
+            &session_id,
+            Box::new(options.journal_service.history_working()),
+        )?
+        .inherited_journal_through
     } else {
         None
     };
@@ -227,20 +231,39 @@ pub(crate) async fn compose_hosted_actor(
         .clone()
         .unwrap_or_else(|| options.config.models.default.clone());
     let (mut initial_context, persisted_model_alias, budget_session_id) = if options.resume {
-        let metadata = load_session_metadata(&options.storage_root, &session_id, &workspace)?;
-        let mut context = metadata.initial_session_context;
+        let metadata = load_session_metadata(
+            &options.storage_root,
+            &session_id,
+            &workspace,
+            Box::new(options.journal_service.history_working()),
+        )?;
+        let persisted_model_alias = metadata.model_alias.clone();
+        let budget_session_id = metadata.budget_session_id.clone();
         let recorded_count = metadata.initial_context_workspace_root_count;
+        let mut context = rw_core::InitialSessionContext::from_owned(
+            metadata.map(|metadata| metadata.initial_session_context),
+            Box::new(options.journal_service.history_working()),
+        )
+        .into_diagnostic()?;
         for root in workspace_roots.iter().skip(recorded_count) {
-            if let Some(instructions) = rw_core::load_root_project_instructions(root)
-                .map_err(|error| miette!("project instructions could not load: {error}"))?
+            if let Some(instructions) =
+                super::initial_memory::root_instruction_context(root, &options.journal_service)?
             {
-                context.push(instructions.as_system_turn());
+                context
+                    .append_owned(
+                        instructions,
+                        Box::new(options.journal_service.history_working()),
+                    )
+                    .into_diagnostic()?;
             }
         }
-        (context, metadata.model_alias, metadata.budget_session_id)
+        (context, persisted_model_alias, budget_session_id)
     } else {
-        let context = fresh_initial_session_context(&options.storage_root, &workspace_roots)
-            .map_err(|error| miette!("project instructions could not load: {error}"))?;
+        let context = fresh_initial_session_context(
+            &options.storage_root,
+            &workspace_roots,
+            &options.journal_service,
+        )?;
         persist_session_metadata(
             &options.storage_root,
             &session_id,
@@ -248,10 +271,16 @@ pub(crate) async fn compose_hosted_actor(
             &configured_model_alias,
             &context,
             &workspace_roots,
+            Box::new(options.journal_service.history_working()),
         )?;
+        let context = rw_core::InitialSessionContext::from_owned(
+            context,
+            Box::new(options.journal_service.history_working()),
+        )
+        .into_diagnostic()?;
         (
             context,
-            configured_model_alias,
+            configured_model_alias.clone(),
             rw_types::SessionId(session_id.clone()),
         )
     };
@@ -458,7 +487,9 @@ pub(crate) async fn compose_hosted_actor(
         .map_err(|error| miette!("MCP tools could not register: {error}"))?;
         built_tools.registry = Arc::new(registry);
         if let Some(index) = runtime.deferred_context().await? {
-            initial_context.push(index);
+            initial_context
+                .append_owned(index, Box::new(options.journal_service.history_working()))
+                .into_diagnostic()?;
         }
         Some(runtime)
     };
@@ -653,8 +684,10 @@ pub(crate) async fn compose_hosted_actor(
         built_tools.read_only_hook_scratch.clone(),
         &workspace_roots,
     ));
-    if let Some(index) = skill_index_turn(&extension_catalog)? {
-        initial_context.push(index);
+    if let Some(index) = skill_index_turn(&extension_catalog, &options.journal_service)? {
+        initial_context
+            .append_owned(index, Box::new(options.journal_service.history_working()))
+            .into_diagnostic()?;
     }
     let (_, mut wasm_startup_notifications, wasm_hooks) = compose_initial_runtime_hooks(
         &options.wasm_workers,

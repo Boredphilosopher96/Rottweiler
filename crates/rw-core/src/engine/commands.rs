@@ -2,6 +2,10 @@ mod navigation;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Immutable descriptor-only view retaining its registered metadata sources.
+pub type SessionCommandCatalog =
+    rw_ext::CommandCatalog<SessionCommandContext, SessionCommandOutput>;
+
 /// Engine-owned slash-command context. Public handlers use this exact type.
 #[derive(Clone, Debug)]
 pub struct SessionCommandContext {

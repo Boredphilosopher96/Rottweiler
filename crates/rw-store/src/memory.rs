@@ -262,6 +262,67 @@ impl ProjectMemoryStore {
             .map_err(MemoryError::from)
     }
 
+    /// Visit newest records in one read snapshot without materializing the table.
+    /// The callback borrows one validated row and returns false when its output
+    /// budget is full. `total` counts that same snapshot, including omitted rows.
+    ///
+    /// # Errors
+    /// Rejects inaccessible storage, invalid row types, UTF-8, or oversized content.
+    pub fn visit_newest(
+        &self,
+        mut visit: impl FnMut(usize, i64, &str) -> bool,
+    ) -> Result<(), MemoryError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM memory_entries", [], |row| row.get(0))?;
+        let total = usize::try_from(count)
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, count))?;
+        // Check the blob byte length in SQLite before requesting content: an
+        // externally corrupted large row must not allocate its body for a visitor.
+        let mut statement = transaction.prepare("SELECT id, length(CAST(content AS BLOB)), CASE WHEN length(CAST(content AS BLOB)) <= ?1 THEN content ELSE NULL END FROM memory_entries ORDER BY id DESC")?;
+        let limit = i64::try_from(MAX_MEMORY_ENTRY_BYTES)
+            .map_err(|cause| rusqlite::Error::ToSqlConversionFailure(Box::new(cause)))?;
+        let mut rows = statement.query([limit])?;
+        while let Some(row) = rows.next()? {
+            let byte_count: i64 = row.get(1)?;
+            let byte_count = usize::try_from(byte_count)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, byte_count))?;
+            if byte_count > MAX_MEMORY_ENTRY_BYTES {
+                return Err(MemoryError::EntryTooLarge {
+                    bytes: byte_count,
+                    limit: MAX_MEMORY_ENTRY_BYTES,
+                });
+            }
+            let value = row.get_ref(2)?;
+            let rusqlite::types::ValueRef::Text(bytes) = value else {
+                return Err(rusqlite::Error::InvalidColumnType(
+                    1,
+                    "content".into(),
+                    value.data_type(),
+                )
+                .into());
+            };
+            if bytes.len() > MAX_MEMORY_ENTRY_BYTES {
+                return Err(MemoryError::EntryTooLarge {
+                    bytes: bytes.len(),
+                    limit: MAX_MEMORY_ENTRY_BYTES,
+                });
+            }
+            let text = std::str::from_utf8(bytes).map_err(|cause| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(cause),
+                )
+            })?;
+            if !visit(total, row.get(0)?, text) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Clears every project-memory entry transactionally and returns the count.
     ///
     /// # Errors
@@ -499,7 +560,10 @@ mod tests {
 
     use tempfile::{TempDir, tempdir};
 
-    use super::{MEMORY_STORAGE_DIRECTORY, MemoryError, ProjectMemoryStore, workspace_storage_key};
+    use super::{
+        MAX_MEMORY_ENTRY_BYTES, MEMORY_STORAGE_DIRECTORY, MemoryError, ProjectMemoryStore,
+        workspace_storage_key,
+    };
 
     fn storage_dir() -> TempDir {
         let directory = tempdir().unwrap_or_else(|error| panic!("storage: {error}"));
@@ -749,5 +813,47 @@ mod tests {
         );
         assert!(!storage.path().join(MEMORY_STORAGE_DIRECTORY).exists());
         assert!(!workspace.path().join(".rottweiler").exists());
+    }
+
+    #[test]
+    fn newest_visit_stops_before_materializing_a_dense_memory_table() {
+        let storage = storage_dir();
+        let workspace = tempdir().unwrap_or_else(|cause| panic!("workspace: {cause}"));
+        let store = ProjectMemoryStore::open_in(storage.path(), workspace.path())
+            .unwrap_or_else(|cause| panic!("store: {cause}"));
+        let mut connection = store
+            .connect()
+            .unwrap_or_else(|cause| panic!("connection: {cause}"));
+        let transaction = connection
+            .transaction()
+            .unwrap_or_else(|cause| panic!("transaction: {cause}"));
+        for _ in 0..10_000 {
+            transaction
+                .execute("INSERT INTO memory_entries(content) VALUES ('a')", [])
+                .unwrap_or_else(|cause| panic!("row: {cause}"));
+        }
+        transaction
+            .commit()
+            .unwrap_or_else(|cause| panic!("commit: {cause}"));
+        let mut visited = Vec::new();
+        store
+            .visit_newest(|total, id, content| {
+                assert_eq!(total, 10_000);
+                assert_eq!(content, "a");
+                visited.push(id);
+                visited.len() < 3
+            })
+            .unwrap_or_else(|cause| panic!("visit: {cause}"));
+        assert_eq!(visited, vec![10_000, 9_999, 9_998]);
+        connection
+            .execute(
+                "INSERT INTO memory_entries(content) VALUES (?1)",
+                ["x".repeat(MAX_MEMORY_ENTRY_BYTES + 1)],
+            )
+            .unwrap_or_else(|cause| panic!("invalid row: {cause}"));
+        assert!(matches!(
+            store.visit_newest(|_, _, _| panic!("oversized row cannot reach caller")),
+            Err(MemoryError::EntryTooLarge { .. })
+        ));
     }
 }

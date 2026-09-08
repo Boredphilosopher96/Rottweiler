@@ -18,7 +18,7 @@ const SHUTDOWN_PROOF_TIMEOUT: Duration = Duration::from_secs(30);
 type Proof = Result<(), Arc<str>>;
 pub(super) struct ActorControl {
     pub(super) active_turn: Arc<std::sync::atomic::AtomicU64>,
-    pub(super) command_descriptors: Arc<std::sync::RwLock<Arc<[rw_ext::CommandDescriptor]>>>,
+    pub(super) command_descriptors: Arc<std::sync::RwLock<crate::SessionCommandCatalog>>,
     pub(super) mode_registry: Arc<std::sync::RwLock<Arc<rw_ext::ModeRegistry>>>,
     pub(super) shutdown: ActorShutdown,
 }

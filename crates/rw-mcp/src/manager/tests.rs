@@ -215,19 +215,7 @@ async fn five_servers_stay_deferred_and_support_full_catalog_and_calls() {
             .into_iter()
             .all(|(_, result)| result.is_ok())
     );
-    let prompt = manager.deferred_prompt().await.expect("prompt");
-    let tokenizer = tiktoken_rs::cl100k_base().expect("tokenizer");
-    assert!(tokenizer.encode_with_special_tokens(&prompt).len() < 2_000);
-    let index_json = serde_json::to_value(manager.deferred_tool_index().await).expect("index");
-    assert!(index_json.to_string().find("inputSchema").is_none());
-    let definitions = manager
-        .tool_search("look", None)
-        .await
-        .expect("admitted tool definitions");
-    assert_eq!(definitions.len(), 5);
-    assert_eq!(definitions[0].capabilities.capabilities().len(), 2);
-    assert_eq!(manager.resources().await.len(), 5);
-    assert_eq!(manager.prompts().await.len(), 5);
+    assert_five_deferred_catalogs(&manager).await;
     let server = McpServerId::new("server-0").expect("id");
     assert!(
         !manager
@@ -263,6 +251,31 @@ async fn five_servers_stay_deferred_and_support_full_catalog_and_calls() {
             .into_iter()
             .all(|(_, result)| result.is_ok())
     );
+}
+
+async fn assert_five_deferred_catalogs(manager: &McpManager) {
+    let prompt = manager.deferred_prompt().await.expect("prompt");
+    let tokenizer = tiktoken_rs::cl100k_base().expect("tokenizer");
+    assert!(tokenizer.encode_with_special_tokens(&prompt).len() < 2_000);
+    let index_json = serde_json::to_value(
+        &*manager
+            .deferred_tool_index()
+            .await
+            .expect("admitted metadata"),
+    )
+    .expect("index");
+    assert!(index_json.to_string().find("inputSchema").is_none());
+    let definitions = manager
+        .tool_search("look", None)
+        .await
+        .expect("admitted tool definitions");
+    assert_eq!(definitions.len(), 5);
+    assert_eq!(definitions[0].capabilities.capabilities().len(), 2);
+    assert_eq!(
+        manager.resources().await.expect("admitted metadata").len(),
+        5
+    );
+    assert_eq!(manager.prompts().await.expect("admitted metadata").len(), 5);
 }
 
 #[tokio::test]

@@ -127,7 +127,7 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
         workspace_root: workspace.path().to_path_buf(),
         additional_workspace_roots: Vec::new(),
         workspace_generation: 0,
-        initial_session_context: Vec::new(),
+        initial_session_context: rw_core::InitialSessionContext::default(),
         startup_notifications: Vec::new(),
         model_alias: "local/base".to_owned(),
         model,

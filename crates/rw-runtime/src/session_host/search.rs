@@ -32,10 +32,12 @@ impl RuntimeSessionFactory {
         &self,
         summary: &SessionSummary,
     ) -> Result<Option<SessionDescriptor>, HostError> {
-        let metadata =
-            load_session_metadata_any(&self.options.storage_root, &summary.id).map_err(|_| {
-                HostError::Persistence("session metadata is unavailable or invalid".into())
-            })?;
+        let metadata = load_session_metadata_any(
+            &self.options.storage_root,
+            &summary.id,
+            Box::new(self.journal_service.history_working()),
+        )
+        .map_err(|_| HostError::Persistence("session metadata is unavailable or invalid".into()))?;
         let workspace = std::fs::canonicalize(&metadata.workspace)
             .map_err(|_| HostError::Query("session workspace is unavailable".into()))?;
         if !self.workspace_is_allowed(&workspace) {
@@ -45,7 +47,7 @@ impl RuntimeSessionFactory {
             session_id: SessionId(summary.id.clone()),
             title: summary.title.clone(),
             workspace_name: workspace_name(&workspace),
-            model: ModelAlias(metadata.model_alias),
+            model: ModelAlias(metadata.model_alias.clone()),
             driver_client_id: None,
             shell_active: false,
         }))

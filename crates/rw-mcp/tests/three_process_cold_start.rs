@@ -88,24 +88,7 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
     let lifetimes = (0..3)
         .map(|index| directory.path().join(format!("lifetime-{index}")))
         .collect::<Vec<_>>();
-    let identities = lifetimes
-        .iter()
-        .map(|path| std::fs::read(path).expect("process identity"))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        identities.len(),
-        3,
-        "MCP connections use distinct processes"
-    );
-    assert!(identities.iter().all(|identity| identity.len() == 32));
-    for path in &lifetimes {
-        let file = std::fs::File::open(path).expect("process lifetime descriptor");
-        assert_eq!(
-            rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive),
-            Err(rustix::io::Errno::WOULDBLOCK),
-            "connected server retains its kernel lifetime lock"
-        );
-    }
+    assert_live_identities(&lifetimes);
     assert_eq!(
         manager
             .tool_search("echo", None)
@@ -114,8 +97,11 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
             .len(),
         3
     );
-    assert_eq!(manager.resources().await.len(), 3);
-    assert_eq!(manager.prompts().await.len(), 3);
+    assert_eq!(
+        manager.resources().await.expect("admitted metadata").len(),
+        3
+    );
+    assert_eq!(manager.prompts().await.expect("admitted metadata").len(), 3);
     assert!(
         manager
             .shutdown()
@@ -127,5 +113,26 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
         let file = std::fs::File::open(path).expect("retired process lifetime");
         rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
             .expect("shutdown settled each process lifetime");
+    }
+}
+
+fn assert_live_identities(lifetimes: &[PathBuf]) {
+    let identities = lifetimes
+        .iter()
+        .map(|path| std::fs::read(path).expect("process identity"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        identities.len(),
+        3,
+        "MCP connections use distinct processes"
+    );
+    assert!(identities.iter().all(|identity| identity.len() == 32));
+    for path in lifetimes {
+        let file = std::fs::File::open(path).expect("process lifetime descriptor");
+        assert_eq!(
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK),
+            "connected server retains its kernel lifetime lock"
+        );
     }
 }

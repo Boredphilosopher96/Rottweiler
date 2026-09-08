@@ -154,6 +154,19 @@ fn wire_command_catalog_is_bounded_below_the_sse_line_limit() {
 }
 
 #[test]
+fn wire_command_catalog_counts_borrowed_oversized_metadata_before_copying() {
+    let descriptor =
+        ExtensionCommandDescriptor::new("oversized", "\"".repeat(MAX_WIRE_COMMAND_CATALOG_BYTES));
+    let (commands, truncated) = wire_command_catalog(std::iter::once(&descriptor));
+    assert!(truncated);
+    assert!(commands.is_empty());
+    let small = ExtensionCommandDescriptor::new("exact", "quoted \" text");
+    let (borrowed, truncated) = wire_command_catalog(std::iter::once(&small));
+    assert!(!truncated);
+    assert_eq!(borrowed[0].description, small.description());
+}
+
+#[test]
 fn wire_mode_catalog_is_count_and_byte_bounded() {
     let active = ModeDescriptor {
         id: rw_types::ModeId("zzzz-active".to_owned()),

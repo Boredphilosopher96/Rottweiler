@@ -143,6 +143,9 @@ impl CommandExecutionError {
 /// Command registration or invocation failure.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum CommandRegistryError {
+    /// A dynamic command source could not admit its metadata construction.
+    #[error("command metadata admission exceeded")]
+    Admission,
     /// A command name was empty or contained unsupported characters.
     #[error("invalid command name `{name}`; use lowercase ASCII letters, digits, '-', '_' or '.'")]
     InvalidName { name: String },
@@ -164,10 +167,39 @@ pub enum CommandRegistryError {
     },
 }
 
-#[derive(Clone)]
 struct RegisteredCommand<Context, Output> {
     descriptor: CommandDescriptor,
     handler: Arc<dyn CommandHandler<Context, Output>>,
+}
+
+/// Descriptor-only view of one immutable registry generation.
+///
+/// The shared registry retains each descriptor and its handler's source owner;
+/// this view exposes no parsing or execution capability and copies no metadata.
+pub struct CommandCatalog<Context, Output> {
+    registry: Arc<CommandRegistry<Context, Output>>,
+}
+impl<Context, Output> Clone for CommandCatalog<Context, Output> {
+    fn clone(&self) -> Self {
+        Self {
+            registry: Arc::clone(&self.registry),
+        }
+    }
+}
+impl<Context, Output> CommandCatalog<Context, Output> {
+    /// Iterates borrowed descriptors in canonical order.
+    #[must_use]
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &CommandDescriptor> {
+        self.registry.descriptors()
+    }
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.registry.commands.len()
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.registry.commands.is_empty()
+    }
 }
 
 /// Deterministic slash-command registry shared by built-ins and extensions.
@@ -177,7 +209,7 @@ struct RegisteredCommand<Context, Output> {
 /// overriding an existing command.
 #[derive(Clone)]
 pub struct CommandRegistry<Context, Output> {
-    commands: BTreeMap<String, RegisteredCommand<Context, Output>>,
+    commands: BTreeMap<Arc<str>, Arc<RegisteredCommand<Context, Output>>>,
 }
 
 impl<Context, Output> Default for CommandRegistry<Context, Output> {
@@ -193,6 +225,14 @@ impl<Context, Output> CommandRegistry<Context, Output> {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Captures this immutable generation without copying its metadata.
+    #[must_use]
+    pub fn catalog(self: &Arc<Self>) -> CommandCatalog<Context, Output> {
+        CommandCatalog {
+            registry: Arc::clone(self),
+        }
     }
 
     /// Registers a command through the common built-in/extension API.
@@ -223,18 +263,20 @@ impl<Context, Output> CommandRegistry<Context, Output> {
         descriptor: CommandDescriptor,
         handler: Arc<dyn CommandHandler<Context, Output>>,
     ) -> Result<(), CommandRegistryError> {
-        validate_name(descriptor.name())?;
-        let name = descriptor.name.clone();
-        if self.commands.contains_key(&name) {
-            return Err(CommandRegistryError::Duplicate { name });
+        // Descriptor bytes retire before the handler that owns their admission.
+        // Registry clones share this entire registration and its key backing.
+        let registration = Arc::new(RegisteredCommand {
+            descriptor,
+            handler,
+        });
+        validate_name(registration.descriptor.name())?;
+        let name = registration.descriptor.name();
+        if self.commands.contains_key(name) {
+            return Err(CommandRegistryError::Duplicate {
+                name: name.to_owned(),
+            });
         }
-        self.commands.insert(
-            name,
-            RegisteredCommand {
-                descriptor,
-                handler,
-            },
-        );
+        self.commands.insert(Arc::from(name), registration);
         Ok(())
     }
 
@@ -400,6 +442,78 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[test]
+    fn registry_clone_shares_descriptor_and_registration_custody() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(
+                CommandDescriptor::new("large", "x".repeat(128 * 1024)),
+                Append("ok"),
+            )
+            .expect("register");
+        let cloned = registry.clone();
+        assert!(std::ptr::eq(
+            registry.resolve("large").expect("original"),
+            cloned.resolve("large").expect("clone")
+        ));
+        let owner = Arc::downgrade(registry.commands.get("large").expect("owner"));
+        assert!(registry.unregister("large"));
+        assert!(owner.upgrade().is_some());
+        assert_eq!(
+            cloned
+                .resolve("large")
+                .expect("retained")
+                .description()
+                .len(),
+            128 * 1024
+        );
+        drop(cloned);
+        assert!(owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn descriptor_snapshot_retains_exact_registration_after_generation_replacement() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(
+                CommandDescriptor::new("large", "x".repeat(128 * 1024)),
+                Append("old"),
+            )
+            .expect("register");
+        let registry = Arc::new(registry);
+        let source = Arc::downgrade(registry.commands.get("large").expect("source"));
+        let snapshot = registry.catalog();
+        let clone = snapshot.clone();
+        assert!(std::ptr::eq(
+            snapshot.iter().next().expect("descriptor"),
+            registry.resolve("large").expect("registered")
+        ));
+        let mut replacement = (*registry).clone();
+        assert!(replacement.unregister("large"));
+        assert!(Arc::new(replacement).catalog().is_empty());
+        drop(registry);
+        drop(snapshot);
+        assert!(
+            source.upgrade().is_some(),
+            "old catalog retains its metadata source"
+        );
+        assert_eq!(clone.len(), 1);
+        assert_eq!(
+            clone
+                .iter()
+                .next()
+                .expect("old descriptor")
+                .description()
+                .len(),
+            128 * 1024
+        );
+        drop(clone);
+        assert!(
+            source.upgrade().is_none(),
+            "final catalog retires its source"
+        );
+    }
 
     struct Append(&'static str);
 

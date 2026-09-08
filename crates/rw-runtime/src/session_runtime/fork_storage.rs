@@ -47,7 +47,12 @@ pub(crate) fn fork_hosted_session_storage(
 ) -> Result<()> {
     validate_session_id(parent_session_id)?;
     validate_session_id(child_session_id)?;
-    let parent_metadata = load_session_metadata(storage_root, parent_session_id, workspace)?;
+    let parent_metadata = load_session_metadata(
+        storage_root,
+        parent_session_id,
+        workspace,
+        Box::new(journal_service.history_working()),
+    )?;
     let route = crate::mode_recovery::fork_route(
         journal_service,
         parent_session_id,
@@ -146,6 +151,7 @@ pub(crate) fn fork_hosted_session_storage(
             through_sequence,
             through_turn,
             fork_operation_id,
+            Box::new(journal_service.history_working()),
         )?;
         Ok(())
     })();
@@ -186,8 +192,9 @@ pub(crate) fn validate_forked_session_commit(
     child_session_id: &str,
     operation_id: &str,
     parent_session_id: &str,
+    allowance: Box<dyn rw_core::recovery::HistoryWorkingAllowance>,
 ) -> Result<()> {
-    let metadata = load_session_metadata(storage_root, child_session_id, workspace)?;
+    let metadata = load_session_metadata(storage_root, child_session_id, workspace, allowance)?;
     if metadata.fork_operation_id.as_deref() != Some(operation_id)
         || metadata.fork_parent_session_id.as_deref() != Some(parent_session_id)
     {
@@ -222,7 +229,23 @@ pub(super) fn persist_forked_session_metadata(
     inherited_journal_through: Option<SequenceId>,
     fork_at_turn: u64,
     fork_operation_id: Option<&str>,
+    mut allowance: Box<dyn rw_core::recovery::HistoryWorkingAllowance>,
 ) -> Result<()> {
+    let other_bytes = parent.model_alias.len()
+        + parent.session_id.len()
+        + parent.budget_session_id.0.len()
+        + parent.workspace.as_os_str().len()
+        + workspace_roots
+            .iter()
+            .map(|root| root.as_os_str().len())
+            .sum::<usize>()
+        + child_session_id.len()
+        + fork_operation_id.map_or(0, str::len);
+    super::session_metadata::admit_metadata_write(
+        &parent.initial_session_context,
+        other_bytes,
+        &mut *allowance,
+    )?;
     let directory = storage_root.join("sessions").join(child_session_id);
     ensure_real_directory(&directory, false)?;
     let metadata = SessionMetadata {

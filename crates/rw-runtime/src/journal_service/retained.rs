@@ -23,7 +23,8 @@ struct Pool {
     order: Semaphore,
     waiters: Semaphore,
 }
-pub(super) struct HistoryRetentions(Arc<Pool>);
+/// Operation-owned canonical read admission shared by all readers in that operation.
+pub struct HistoryRetentions(Arc<Pool>);
 pub(crate) struct HistoryRetention {
     pool: Arc<Pool>,
     bytes: usize,
@@ -41,7 +42,8 @@ fn rounded(bytes: usize) -> Result<usize, AgentLoopError> {
     Ok(bytes.div_ceil(UNIT_BYTES) * UNIT_BYTES)
 }
 impl HistoryRetentions {
-    pub(super) fn new() -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self(Arc::new(Pool {
             usage: Mutex::default(),
             changed: Notify::new(),
@@ -144,3 +146,16 @@ impl Drop for HistoryRetention {
 
 #[cfg(test)]
 mod tests;
+
+impl Default for HistoryRetentions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl HistoryRetentions {
+    /// Reserve from this operation's existing canonical resident pool before reads.
+    #[must_use]
+    pub fn reserve(&self) -> Box<dyn HistoryWorkingAllowance> {
+        Box::new(self.working())
+    }
+}

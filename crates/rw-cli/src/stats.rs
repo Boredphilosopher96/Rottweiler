@@ -202,6 +202,7 @@ fn load_session_facts(
     start: &UtcTimestamp,
     end: &UtcTimestamp,
 ) -> Result<Vec<SessionFacts>> {
+    let metadata_budget = rw_runtime::CanonicalReadBudget::new();
     let sessions_root = storage_root.join("sessions");
     let metadata = fs::symlink_metadata(&sessions_root)
         .map_err(|_| miette!("session storage could not be read"))?;
@@ -238,7 +239,7 @@ fn load_session_facts(
     for id in ids {
         let remaining = MAX_STATS_HISTORY_BYTES.saturating_sub(total_bytes);
         let (inherited_through, metadata_bytes) =
-            inherited_accounting_boundary(storage_root, &id, remaining)?;
+            inherited_accounting_boundary(storage_root, &id, remaining, &metadata_budget)?;
         add_history_scan_totals(&mut total_bytes, &mut total_events, metadata_bytes, 0)?;
         let remaining = MAX_STATS_HISTORY_BYTES.saturating_sub(total_bytes);
         let (events, event_bytes) =
@@ -334,6 +335,7 @@ fn inherited_accounting_boundary(
     storage_root: &Path,
     session_id: &str,
     max_bytes: u64,
+    budget: &rw_runtime::CanonicalReadBudget,
 ) -> Result<(Option<rw_core::SequenceId>, u64)> {
     let path = storage_root
         .join("sessions")
@@ -344,6 +346,7 @@ fn inherited_accounting_boundary(
             storage_root,
             session_id,
             max_bytes,
+            budget.reserve(),
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, 0)),
         Err(_) => Err(miette!("session metadata could not be inspected")),

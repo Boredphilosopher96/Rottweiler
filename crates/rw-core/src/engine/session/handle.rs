@@ -1,3 +1,4 @@
+use crate::SessionCommandCatalog;
 use crate::engine::AgentLoopError;
 use crate::engine::MessageDisposition;
 use crate::engine::SessionSnapshot;
@@ -10,7 +11,6 @@ use crate::engine::session::state::ProtocolCompletion;
 use crate::engine::session::subscription::SessionSubscription;
 use crate::engine::shutdown;
 use crate::engine::wire_turn_id;
-use rw_ext::CommandDescriptor;
 use rw_ext::ModeRegistry;
 use rw_tools::SubagentProgressEvent;
 use rw_types::Answer;
@@ -58,7 +58,7 @@ pub struct SessionHandle {
     pub(super) local_request_sequence: Arc<AtomicU64>,
     pub(super) local_attached: Arc<AtomicBool>,
     pub(super) local_last_seen: Option<SequenceId>,
-    pub(super) command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
+    pub(super) command_descriptors: Arc<RwLock<SessionCommandCatalog>>,
     pub(super) mode_registry: Arc<RwLock<Arc<ModeRegistry>>>,
     pub(super) model: Arc<dyn ModelDriver>,
 }
@@ -139,7 +139,7 @@ impl SessionHandle {
     /// session, including project commands, skills, MCP prompts, and plugins.
     ///
     #[must_use]
-    pub fn command_descriptors(&self) -> Arc<[CommandDescriptor]> {
+    pub fn command_descriptors(&self) -> SessionCommandCatalog {
         self.command_descriptors
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

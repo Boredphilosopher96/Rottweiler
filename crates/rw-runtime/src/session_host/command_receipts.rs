@@ -24,10 +24,14 @@ impl RuntimeSessionFactory {
             if let Some(workspace) = workspace {
                 factory.authorize_workspace(&workspace)?;
             } else if let Some(session) = session {
-                let metadata = load_session_metadata_any(&factory.options.storage_root, &session.0)
-                    .map_err(|_| {
-                        HostError::Persistence("receipt session metadata is unavailable".into())
-                    })?;
+                let metadata = load_session_metadata_any(
+                    &factory.options.storage_root,
+                    &session.0,
+                    Box::new(factory.journal_service.history_working()),
+                )
+                .map_err(|_| {
+                    HostError::Persistence("receipt session metadata is unavailable".into())
+                })?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
             } else {
                 return Err(HostError::Protocol(

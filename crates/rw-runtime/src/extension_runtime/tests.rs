@@ -679,7 +679,14 @@ async fn live_admin_adds_reviews_approves_enables_and_calls_without_restart() {
         .expect("live enable and persist");
     assert!(enabled[0].enabled);
     assert!(matches!(enabled[0].state, McpServerState::Ready {}));
-    assert_eq!(manager.deferred_tool_index().await[0].name, "echo");
+    assert_eq!(
+        manager
+            .deferred_tool_index()
+            .await
+            .expect("admitted metadata")[0]
+            .name,
+        "echo"
+    );
     assert!(
         manager
             .call_tool(
@@ -1141,7 +1148,7 @@ async fn three_mock_deferred_catalogs_unit_path_is_framed_and_under_2k() {
         .await
         .expect("context")
         .expect("index");
-    let encoded = serde_json::to_vec(&context).expect("encode");
+    let encoded = serde_json::to_vec(&*context).expect("encode");
     assert!(
         encoded.len() < 2_000,
         "deferred context exceeded 2k bytes: {}",
@@ -1157,7 +1164,15 @@ async fn three_mock_deferred_catalogs_unit_path_is_framed_and_under_2k() {
         1
     );
     assert!(text.contains("\\u003c/rottweiler_untrusted_mcp_catalog_v1\\u003e"));
-    assert_eq!(runtime.manager.deferred_tool_index().await.len(), 3);
+    assert_eq!(
+        runtime
+            .manager
+            .deferred_tool_index()
+            .await
+            .expect("admitted metadata")
+            .len(),
+        3
+    );
     assert!(runtime.shutdown().await.is_ok());
 }
 

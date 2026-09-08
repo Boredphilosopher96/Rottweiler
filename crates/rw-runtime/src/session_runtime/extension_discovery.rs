@@ -112,31 +112,70 @@ pub fn extension_user_roots(credentials_path: &Path) -> (PathBuf, PathBuf) {
     (home, rottweiler)
 }
 
-pub(super) fn skill_index_turn(catalog: &ExtensionCatalog) -> Result<Option<Turn>> {
+pub(super) fn skill_index_turn(
+    catalog: &ExtensionCatalog,
+    journal: &crate::journal_service::JournalService,
+) -> Result<Option<rw_core::recovery::HistoryRead<Turn>>> {
+    use rw_types::{allocation::PrepareAllocation, json_encoding::JsonWriter};
+    use std::io::Write as _;
     const MAX_SKILL_INDEX_BYTES: usize = 64 * 1024;
-    let mut entries = Vec::new();
-    let mut encoded_bytes = 0_usize;
-    for skill in catalog.skills() {
-        let entry = serde_json::json!({
-            "name": skill.name(),
-            "description": skill.description(),
-            "allowed_tools": skill.allowed_tools(),
-        });
-        let size = serde_json::to_vec(&entry)
-            .map_err(|error| miette!("skill index could not encode: {error}"))?
-            .len();
-        if encoded_bytes.saturating_add(size) > MAX_SKILL_INDEX_BYTES {
-            break;
-        }
-        encoded_bytes = encoded_bytes.saturating_add(size);
-        entries.push(entry);
+    #[derive(serde::Serialize)]
+    struct Entry<'a> {
+        allowed_tools: &'a [String],
+        description: &'a str,
+        name: &'a str,
     }
-    if entries.is_empty() {
+    let mut allowance = journal.history_working();
+    // Borrowed descriptors are source-owned; only bounded encoding and framing
+    // storage is constructed here, including Vec reallocation overlap.
+    allowance
+        .resize(MAX_SKILL_INDEX_BYTES * 8 + 4096)
+        .map_err(|cause| miette!("skill index admission failed: {cause}"))?;
+    let mut json = Vec::new();
+    let mut count = 0_usize;
+    let mut encoded_bytes = 0_usize;
+    {
+        // The historic entry-sum ceiling excludes delimiters; one comma per
+        // nonempty entry is at most half the entry bytes, covered explicitly.
+        let mut output = JsonWriter::buffer(&mut json, MAX_SKILL_INDEX_BYTES * 2 + 2, 4096)
+            .map_err(|cause| miette!("skill index could not encode: {cause}"))?;
+        output
+            .write_all(b"[")
+            .map_err(|cause| miette!("skill index could not encode: {cause}"))?;
+        for skill in catalog.skills() {
+            let entry = Entry {
+                allowed_tools: skill.allowed_tools(),
+                description: skill.description(),
+                name: skill.name(),
+            };
+            let mut measure = JsonWriter::count(usize::MAX);
+            measure
+                .serialize(&entry)
+                .map_err(|cause| miette!("skill index could not encode: {cause}"))?;
+            if encoded_bytes.saturating_add(measure.written()) > MAX_SKILL_INDEX_BYTES {
+                break;
+            }
+            if count > 0 {
+                output
+                    .write_all(b",")
+                    .map_err(|cause| miette!("skill index could not encode: {cause}"))?;
+            }
+            output
+                .serialize(&entry)
+                .map_err(|cause| miette!("skill index could not encode: {cause}"))?;
+            encoded_bytes += measure.written();
+            count += 1;
+        }
+        output
+            .write_all(b"]")
+            .map_err(|cause| miette!("skill index could not encode: {cause}"))?;
+    }
+    if count == 0 {
         return Ok(None);
     }
-    let json = serde_json::to_string(&entries)
-        .map_err(|error| miette!("skill index could not encode: {error}"))?;
-    Ok(Some(Turn {
+    let json = String::from_utf8(json)
+        .map_err(|cause| miette!("skill index could not encode: {cause}"))?;
+    let turn = Turn {
         role: Role::System,
         blocks: vec![Block::Text {
             text: format!(
@@ -144,5 +183,14 @@ pub(super) fn skill_index_turn(catalog: &ExtensionCatalog) -> Result<Option<Turn
             ),
         }],
         meta: TurnMeta::default(),
-    }))
+    };
+    drop(json);
+    allowance
+        .resize(
+            turn.prepared_bytes()
+                .and_then(|bytes| bytes.checked_add(4096))
+                .ok_or_else(|| miette!("skill index allocation overflow"))?,
+        )
+        .map_err(|cause| miette!("skill index admission failed: {cause}"))?;
+    Ok(Some(rw_core::recovery::HistoryRead::new(turn, allowance)))
 }

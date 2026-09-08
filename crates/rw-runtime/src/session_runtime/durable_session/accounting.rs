@@ -41,7 +41,11 @@ impl DurableEventSink {
         let inherited = if let Some(canonical) = self.canonical.get() {
             canonical.inherited_journal_through()
         } else {
-            inherited_journal_through(&self.storage_root, &self.session_id)?
+            inherited_journal_through(
+                &self.storage_root,
+                &self.session_id,
+                Box::new(self.journal_service.history_working()),
+            )?
         };
         let entries = project_accounting(&self.session_id, events, inherited)?;
         if progress.map_or(0, |prefix| prefix.next_sequence) != first.sequence_id.0 {

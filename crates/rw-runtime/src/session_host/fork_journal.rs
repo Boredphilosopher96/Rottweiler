@@ -146,11 +146,12 @@ impl RuntimeSessionFactory {
         workspace: &Path,
         order: &crate::journal_service::ProjectionPermit,
     ) -> Result<ExpectedForkState, HostError> {
-        let metadata =
-            load_session_metadata_any(&self.options.storage_root, &request.parent.session_id.0)
-                .map_err(|_| {
-                    HostError::Persistence("fork parent metadata is unavailable".to_owned())
-                })?;
+        let metadata = load_session_metadata_any(
+            &self.options.storage_root,
+            &request.parent.session_id.0,
+            Box::new(self.journal_service.history_working()),
+        )
+        .map_err(|_| HostError::Persistence("fork parent metadata is unavailable".to_owned()))?;
         if metadata.workspace != workspace {
             return Err(HostError::Persistence(
                 "fork parent workspace does not match its operation".to_owned(),
@@ -219,7 +220,11 @@ impl RuntimeSessionFactory {
             .to_hex()
             .to_string();
         Ok(ExpectedForkState {
-            model: ModelAlias(recovered.model_alias.unwrap_or(metadata.model_alias)),
+            model: ModelAlias(
+                recovered
+                    .model_alias
+                    .unwrap_or_else(|| metadata.model_alias.clone()),
+            ),
             workspace_generation: recovered.workspace_generation,
             roots_digest,
             modes,
@@ -291,15 +296,19 @@ impl RuntimeSessionFactory {
                 &journal.child_session_id.0,
                 &journal.operation_id,
                 &journal.parent.session_id.0,
+                Box::new(self.journal_service.history_working()),
             )
             .map_err(|_| {
                 HostError::Persistence("completed fork storage validation failed".to_owned())
             })?;
-            let child_metadata =
-                load_session_metadata_any(&self.options.storage_root, &journal.child_session_id.0)
-                    .map_err(|_| {
-                        HostError::Persistence("completed fork metadata is unavailable".to_owned())
-                    })?;
+            let child_metadata = load_session_metadata_any(
+                &self.options.storage_root,
+                &journal.child_session_id.0,
+                Box::new(self.journal_service.history_working()),
+            )
+            .map_err(|_| {
+                HostError::Persistence("completed fork metadata is unavailable".to_owned())
+            })?;
             let child_roots_digest = blake3::hash(
                 &serde_json::to_vec(&child_metadata.workspace_roots).map_err(|_| {
                     HostError::Persistence("completed fork roots could not serialize".to_owned())
@@ -774,6 +783,7 @@ impl RuntimeSessionFactory {
                             &journal.child_session_id.0,
                             &journal.operation_id,
                             &journal.parent.session_id.0,
+                            Box::new(self.journal_service.history_working()),
                         )
                         .map_err(|_| {
                             HostError::Persistence(
@@ -805,6 +815,7 @@ impl RuntimeSessionFactory {
                         &journal.child_session_id.0,
                         &journal.operation_id,
                         &journal.parent.session_id.0,
+                        Box::new(self.journal_service.history_working()),
                     )
                     .map_err(|_| {
                         HostError::Persistence(
@@ -820,6 +831,7 @@ impl RuntimeSessionFactory {
                         &journal.child_session_id.0,
                         &journal.operation_id,
                         &journal.parent.session_id.0,
+                        Box::new(self.journal_service.history_working()),
                     )
                     .map_err(|_| {
                         HostError::Persistence(

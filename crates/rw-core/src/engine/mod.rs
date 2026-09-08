@@ -84,8 +84,8 @@ mod turn;
 pub use commands::{
     CommandToolCall, CommandToolOutputKind, FolderTrustController, FolderTrustOperation,
     NoopFolderTrustController, NoopWorkspaceRootController, SessionCommandAction,
-    SessionCommandContext, SessionCommandOutput, WorkspaceRootController, WorkspaceRootRequest,
-    WorkspaceRuntimeGeneration, builtin_command_registry,
+    SessionCommandCatalog, SessionCommandContext, SessionCommandOutput, WorkspaceRootController,
+    WorkspaceRootRequest, WorkspaceRuntimeGeneration, builtin_command_registry,
 };
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,

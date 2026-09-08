@@ -1,6 +1,7 @@
 //! Host integration helpers for MCP runtime control and RPC plugin approval.
 
 mod mcp_commands;
+mod mcp_context;
 pub(crate) use mcp_commands::*;
 
 mod mcp_service;
@@ -64,7 +65,9 @@ use rw_plugin_protocol::{
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
 use rw_tools::{CancellationToken, SandboxedProtocolLauncher, Tool, UpstreamProxy};
-use rw_types::{Block, CommandSource, McpServerId, Role, Turn, TurnMeta};
+#[cfg(test)]
+use rw_types::Block;
+use rw_types::{CommandSource, McpServerId, Turn};
 use serde::{Deserialize, Serialize};
 
 use crate::extension_config::DiscoveredMcpServer;

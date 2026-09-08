@@ -149,9 +149,12 @@ async fn custom_command_shadow_expansion_and_skill_selection_are_live() {
     .expect("skill resource");
 
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
-    let index = skill_index_turn(&catalog)
-        .expect("index")
-        .expect("skill index");
+    let index = skill_index_turn(
+        &catalog,
+        &crate::journal_service::JournalService::new(&home).expect("journal"),
+    )
+    .expect("index")
+    .expect("skill index");
     let Block::Text { text } = &index.blocks[0] else {
         panic!("skill index is text")
     };

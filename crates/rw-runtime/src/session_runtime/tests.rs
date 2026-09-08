@@ -1142,3 +1142,18 @@ fn checkpoint_two_edits(store: &CheckpointStore, session: &str, workspace: &Path
 }
 
 mod live_delivery;
+
+fn owned_initial_context(
+    build: impl FnOnce() -> Vec<rw_types::Turn>,
+) -> rw_core::InitialSessionContext {
+    let budget = crate::CanonicalReadBudget::new();
+    let mut allowance = budget.reserve();
+    allowance
+        .resize(16 * 1024 * 1024)
+        .expect("fixture source allowance");
+    rw_core::InitialSessionContext::from_owned(
+        rw_core::recovery::HistoryRead::new(build(), allowance),
+        budget.reserve(),
+    )
+    .expect("fixture context")
+}

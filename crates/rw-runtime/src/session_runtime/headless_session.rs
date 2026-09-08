@@ -172,7 +172,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         tracing::warn!("{}", warning.message());
     }
 
-    let session_id = select_session(&storage_root, &workspace, &options)?;
+    let session_id = select_session(&storage_root, &workspace, &options, &journal_service)?;
     validate_session_id(&session_id)?;
     let session_exists = journal_service.contains_session(&session_id)?;
     let resuming = (options.resume.is_some() || options.continue_latest) && session_exists;
@@ -215,8 +215,12 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         options.dangerously_trust,
     )?);
     let inherited_journal_through = if resuming {
-        super::session_metadata::load_session_metadata_any(&storage_root, &session_id)?
-            .inherited_journal_through
+        super::session_metadata::load_session_metadata_any(
+            &storage_root,
+            &session_id,
+            Box::new(journal_service.history_working()),
+        )?
+        .inherited_journal_through
     } else {
         None
     };
@@ -275,20 +279,33 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .clone()
         .unwrap_or_else(|| loaded_config.config.models.default.clone());
     let (mut initial_context, persisted_model_alias, budget_session_id) = if resuming {
-        let metadata = load_session_metadata(&storage_root, &session_id, &workspace)?;
-        let mut context = metadata.initial_session_context;
+        let metadata = load_session_metadata(
+            &storage_root,
+            &session_id,
+            &workspace,
+            Box::new(journal_service.history_working()),
+        )?;
+        let persisted_model_alias = metadata.model_alias.clone();
+        let budget_session_id = metadata.budget_session_id.clone();
         let recorded_count = metadata.initial_context_workspace_root_count;
+        let mut context = rw_core::InitialSessionContext::from_owned(
+            metadata.map(|metadata| metadata.initial_session_context),
+            Box::new(journal_service.history_working()),
+        )
+        .into_diagnostic()?;
         for root in workspace_roots.iter().skip(recorded_count) {
-            if let Some(instructions) = rw_core::load_root_project_instructions(root)
-                .map_err(|error| miette!("project instructions could not load: {error}"))?
+            if let Some(instructions) =
+                super::initial_memory::root_instruction_context(root, &journal_service)?
             {
-                context.push(instructions.as_system_turn());
+                context
+                    .append_owned(instructions, Box::new(journal_service.history_working()))
+                    .into_diagnostic()?;
             }
         }
-        (context, metadata.model_alias, metadata.budget_session_id)
+        (context, persisted_model_alias, budget_session_id)
     } else {
-        let context = fresh_initial_session_context(&storage_root, &workspace_roots)
-            .map_err(|error| miette!("project instructions could not load: {error}"))?;
+        let context =
+            fresh_initial_session_context(&storage_root, &workspace_roots, &journal_service)?;
         persist_session_metadata(
             &storage_root,
             &session_id,
@@ -296,7 +313,13 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
             &configured_model_alias,
             &context,
             &workspace_roots,
+            Box::new(journal_service.history_working()),
         )?;
+        let context = rw_core::InitialSessionContext::from_owned(
+            context,
+            Box::new(journal_service.history_working()),
+        )
+        .into_diagnostic()?;
         (
             context,
             configured_model_alias.clone(),
@@ -566,7 +589,9 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         .map_err(|error| miette!("MCP tools could not register: {error}"))?;
         built_tools.registry = Arc::new(registry);
         if let Some(index) = runtime.deferred_context().await? {
-            initial_context.push(index);
+            initial_context
+                .append_owned(index, Box::new(journal_service.history_working()))
+                .into_diagnostic()?;
         }
         Some(runtime)
     })
@@ -869,8 +894,10 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         built_tools.read_only_hook_scratch.clone(),
         &workspace_roots,
     ));
-    if let Some(index) = skill_index_turn(&extension_catalog)? {
-        initial_context.push(index);
+    if let Some(index) = skill_index_turn(&extension_catalog, &journal_service)? {
+        initial_context
+            .append_owned(index, Box::new(journal_service.history_working()))
+            .into_diagnostic()?;
     }
     let wasm_workers = rw_ext::WasmWorkerPool::new();
     let (_, mut wasm_startup_notifications, wasm_hooks) = compose_initial_runtime_hooks(

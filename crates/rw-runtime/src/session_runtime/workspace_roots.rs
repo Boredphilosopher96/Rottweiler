@@ -149,13 +149,13 @@ pub(crate) struct PreparedExtensionGeneration {
     pub(crate) hooks: Arc<HookDispatcher>,
     pub(crate) commands: Arc<CommandRegistry<SessionCommandContext, SessionCommandOutput>>,
     pub(crate) modes: Arc<rw_ext::ModeRegistry>,
-    pub(crate) skill_index: Option<Turn>,
+    pub(crate) skill_index: Option<rw_core::recovery::HistoryRead<Turn>>,
 }
 
 pub(crate) struct PreparedRootGeneration {
     pub(crate) catalog: Arc<rw_ext::ExtensionCatalog>,
     pub(crate) roots: Vec<PathBuf>,
-    pub(crate) supplemental_context: Vec<Turn>,
+    pub(crate) supplemental_context: rw_core::InitialSessionContext,
     pub(crate) built: BuiltTools,
     pub(crate) permissions: Arc<PermissionGate>,
     pub(crate) extensions: PreparedExtensionGeneration,
@@ -270,12 +270,18 @@ impl RuntimeWorkspaceRootController {
         let recovered = rw_core::SessionActorRecovery::from_bootstrap(
             event_sink.capture_history().await?.bootstrap().await?,
         )?;
-        let mut initial_context = fresh_initial_session_context(storage_root, &roots)
-            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
-        if let Some(index) = skill_index_turn(&catalog)
+        let initial_context =
+            fresh_initial_session_context(storage_root, &roots, &self.journal_service)
+                .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let mut initial_context = rw_core::InitialSessionContext::from_owned(
+            initial_context,
+            Box::new(self.journal_service.history_working()),
+        )?;
+        if let Some(index) = skill_index_turn(&catalog, &self.journal_service)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?
         {
-            initial_context.push(index);
+            initial_context
+                .append_owned(index, Box::new(self.journal_service.history_working()))?;
         }
         let permissions = parent_permissions
             .fork_for_workspace_roots(&roots)
@@ -491,14 +497,16 @@ impl RuntimeWorkspaceRootController {
                 "workspace root generation requires an added root".to_owned(),
             )
         })?;
-        let mut supplemental_context = rw_core::load_root_project_instructions(added_root)
-            .map_err(|_error| {
-                AgentLoopError::InvalidConfiguration(
-                    "workspace root instructions could not load".to_owned(),
-                )
-            })?
-            .map(|instructions| vec![instructions.as_system_turn()])
-            .unwrap_or_default();
+        let mut supplemental_context = rw_core::InitialSessionContext::default();
+        if let Some(instructions) =
+            super::initial_memory::root_instruction_context(added_root, &self.journal_service)
+                .map_err(|cause| AgentLoopError::InvalidConfiguration(cause.to_string()))?
+        {
+            supplemental_context.append_owned(
+                instructions,
+                Box::new(self.journal_service.history_working()),
+            )?;
+        }
         let built = self.prepare_tools(&roots)?;
         let trusted_roots =
             trusted_lsp_roots(&roots, &self.trust_store_path, self.dangerously_trust).map_err(
@@ -525,7 +533,8 @@ impl RuntimeWorkspaceRootController {
         let catalog = self.extension_catalog(&roots)?;
         let mut extensions = self.prepare_extensions(&catalog, &roots, &built)?;
         if let Some(index) = extensions.skill_index.take() {
-            supplemental_context.push(index);
+            supplemental_context
+                .append_owned(index, Box::new(self.journal_service.history_working()))?;
         }
         Ok(PreparedRootGeneration {
             catalog,
@@ -593,7 +602,7 @@ impl RuntimeWorkspaceRootController {
         roots: &[PathBuf],
         built: &BuiltTools,
     ) -> std::result::Result<PreparedExtensionGeneration, AgentLoopError> {
-        let skill_index = skill_index_turn(catalog).map_err(|_error| {
+        let skill_index = skill_index_turn(catalog, &self.journal_service).map_err(|_error| {
             AgentLoopError::InvalidConfiguration(
                 "workspace skill index could not prepare".to_owned(),
             )

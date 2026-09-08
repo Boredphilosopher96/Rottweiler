@@ -513,6 +513,18 @@ at most 128 segments and 4,096 turns. Source bodies and segment metadata retain
 their resident credit until the final reference is destroyed, including MCP
 catalog context whose original result owner moves intact into the session.
 
+Canonical session metadata uses one admitted decoder for every caller. File
+identity and the 8 MiB encoded ceiling are checked before reading; input and
+parser scratch are reserved before buffer allocation. Structural limits of
+65,536 nodes and depth 64 precede the typed allocation profile and decode. The
+returned metadata retains its working allowance through its consumer. Hosted
+readers use their journal's resident pool; standalone selection and statistics
+reuse one operation-owned canonical-read budget, which performs no storage I/O
+when created. Metadata writes admit copied context and encoding before growth.
+Initial project-memory selection visits newest rows in one read snapshot and
+stops at the framed context limit; it does not materialize the complete memory
+table or repeated candidate JSON trees.
+
 Compaction reads token- and byte-bounded pages into an owned rolling summary.
 Large individual blocks use complete source/block/byte continuation through
 UTF-8-safe summary fragments. Evicted and pruned payloads are removed before

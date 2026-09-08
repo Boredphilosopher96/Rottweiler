@@ -167,8 +167,7 @@ fn install_extensions(snapshot: &SessionExtensionSnapshot, context: &DispatchCon
     *context
         .command_descriptors
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Arc::from(snapshot.commands.descriptors().cloned().collect::<Vec<_>>());
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.commands.catalog();
 }
 
 async fn apply_workspace(
@@ -211,8 +210,7 @@ async fn apply_workspace(
     *context
         .command_descriptors
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Arc::from(next.commands.descriptors().cloned().collect::<Vec<_>>());
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = next.commands.catalog();
     *context
         .mode_registry
         .write()

@@ -24,6 +24,7 @@ mod replies;
 mod rewind;
 mod source_rewind;
 mod ui_actions;
+use crate::SessionCommandCatalog;
 use crate::engine::AgentLoopError;
 use crate::engine::MAX_CAPTURED_SHELL_OUTPUT_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES;
@@ -44,7 +45,6 @@ use crate::engine::turn::StartTurnRuntime;
 use crate::engine::turn::TurnSignal;
 use crate::engine::turn::emit;
 pub(super) use message_input::prepare_user_message;
-use rw_ext::CommandDescriptor;
 use rw_ext::ModeRegistry;
 use rw_tools::ToolContext;
 use rw_types::EngineEvent;
@@ -61,7 +61,7 @@ pub(super) struct DispatchContext<'a> {
     pub(super) turn_signals: &'a mpsc::UnboundedSender<TurnSignal>,
     pub(super) events: &'a crate::engine::live_events::LiveEvents,
     pub(super) active_turn: &'a Arc<AtomicU64>,
-    pub(super) command_descriptors: &'a Arc<RwLock<Arc<[CommandDescriptor]>>>,
+    pub(super) command_descriptors: &'a Arc<RwLock<SessionCommandCatalog>>,
     pub(super) mode_registry: &'a Arc<RwLock<Arc<ModeRegistry>>>,
 }
 
@@ -75,7 +75,7 @@ pub(super) async fn handle_actor_command(
     turn_signals: &mpsc::UnboundedSender<TurnSignal>,
     events: &crate::engine::live_events::LiveEvents,
     active_turn: &Arc<AtomicU64>,
-    command_descriptors: &Arc<RwLock<Arc<[CommandDescriptor]>>>,
+    command_descriptors: &Arc<RwLock<SessionCommandCatalog>>,
     mode_registry: &Arc<RwLock<Arc<ModeRegistry>>>,
 ) {
     if state.recovery_requested {

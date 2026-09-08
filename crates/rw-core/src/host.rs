@@ -1013,8 +1013,15 @@ fn overlay_model_catalog_current(
 }
 
 fn wire_command_catalog(
-    descriptors: impl IntoIterator<Item = rw_ext::CommandDescriptor>,
+    descriptors: impl IntoIterator<Item = impl std::borrow::Borrow<rw_ext::CommandDescriptor>>,
 ) -> (Vec<CommandDescriptor>, bool) {
+    #[derive(serde::Serialize)]
+    struct BorrowedCommand<'a> {
+        name: &'a str,
+        description: &'a str,
+        usage: &'a str,
+        source: rw_types::CommandSource,
+    }
     let mut commands = Vec::new();
     let mut truncated = false;
     // JSON arrays need two brackets plus one comma between adjacent entries.
@@ -1026,20 +1033,23 @@ fn wire_command_catalog(
             truncated = true;
             break;
         }
-        let command = CommandDescriptor {
-            name: descriptor.name().to_owned(),
-            description: descriptor.description().to_owned(),
-            usage: descriptor.argument_hint().unwrap_or_default().to_owned(),
+        let descriptor = std::borrow::Borrow::borrow(&descriptor);
+        let command = BorrowedCommand {
+            name: descriptor.name(),
+            description: descriptor.description(),
+            usage: descriptor.argument_hint().unwrap_or_default(),
             source: descriptor.source(),
         };
-        let Ok(encoded) = serde_json::to_vec(&command) else {
+        let mut encoded =
+            rw_types::json_encoding::JsonWriter::count(MAX_WIRE_COMMAND_CATALOG_BYTES);
+        if encoded.serialize(&command).is_err() {
             truncated = true;
             break;
-        };
+        }
         let separator = usize::from(!commands.is_empty());
         let Some(next_size) = serialized_bytes
             .checked_add(separator)
-            .and_then(|size| size.checked_add(encoded.len()))
+            .and_then(|size| size.checked_add(encoded.written()))
         else {
             truncated = true;
             break;
@@ -1049,7 +1059,12 @@ fn wire_command_catalog(
             break;
         }
         serialized_bytes = next_size;
-        commands.push(command);
+        commands.push(CommandDescriptor {
+            name: command.name.to_owned(),
+            description: command.description.to_owned(),
+            usage: command.usage.to_owned(),
+            source: command.source,
+        });
     }
     (commands, truncated)
 }

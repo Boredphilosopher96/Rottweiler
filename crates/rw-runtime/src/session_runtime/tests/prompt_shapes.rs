@@ -148,7 +148,7 @@ async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offlin
         workspace_root: workspace,
         additional_workspace_roots: Vec::new(),
         workspace_generation: 0,
-        initial_session_context: vec![system],
+        initial_session_context: super::owned_initial_context(|| vec![system]),
         startup_notifications: Vec::new(),
         model_alias: profile.model_alias.clone(),
         model,

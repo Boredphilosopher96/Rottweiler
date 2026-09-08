@@ -349,7 +349,7 @@ async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
         workspace_root: workspace.path().to_path_buf(),
         additional_workspace_roots: Vec::new(),
         workspace_generation: 0,
-        initial_session_context: Vec::new(),
+        initial_session_context: rw_core::InitialSessionContext::default(),
         startup_notifications: Vec::new(),
         model_alias: "local/base".to_owned(),
         model: model.clone(),

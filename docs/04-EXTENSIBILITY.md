@@ -329,6 +329,23 @@ the protocol's numeric matching behavior; cancellation IDs use exact matching.
 Unknown or duplicate response IDs close the connection. The SDK response cache is
 disabled, and reviewed catalogs retain their own allocation credit.
 
+Deferred tool, resource, and prompt listings are admitted projections of those
+catalogs. An owned CPU worker counts selected entries and field bytes while
+borrowing the catalog, reserves destination credit, then copies metadata. It
+never copies schemas into a deferred index. The deferred JSON fragment has a
+32 KiB write-time ceiling; escaped framing and the resulting system turn retain
+their construction owner into immutable session context. Dynamic prompt commands
+retain their admitted catalog and descriptor storage with the actual registered
+handler. Registry clones share registration and name backing rather than copying
+those strings; unregistering one registry cannot retire another one's storage.
+
+Live command-catalog snapshots expose borrowed descriptors from the same immutable
+registry generation. They retain the registrations and their metadata source
+allowances without copying descriptor strings or exposing handler execution.
+Replacing a generation leaves prior readers charged until their final snapshot
+retires. Wire catalog projection measures borrowed fields before copying the
+accepted bounded prefix.
+
 The `rw` MCP server uses an owned stdio dispatcher with the same raw-frame and
 working-byte pool. It admits at most 64 outstanding requests before task creation,
 rejects duplicate active IDs, and retains each decoded body through bridge work

@@ -119,6 +119,9 @@ where
     }
 }
 
+/// An operation-owned canonical read budget; constructing it performs no storage I/O.
+pub use journal_service::retained::HistoryRetentions as CanonicalReadBudget;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

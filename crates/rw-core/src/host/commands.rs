@@ -445,7 +445,7 @@ impl EngineHost {
             ClientCommand::ListCommands { meta, session_id } => {
                 let session = self.ready_session(&session_id).await?;
                 let descriptors = session.handle().command_descriptors();
-                let (commands, truncated) = wire_command_catalog(descriptors.iter().cloned());
+                let (commands, truncated) = wire_command_catalog(descriptors.iter());
                 Ok((
                     CommandOutcome::Accepted {},
                     Some(session_id.clone()),

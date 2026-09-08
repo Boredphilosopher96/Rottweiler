@@ -2,7 +2,9 @@ mod catalog;
 mod client_proof;
 mod invocations;
 mod lifecycle;
+mod metadata;
 mod operations;
+pub use metadata::MAX_DEFERRED_PROMPT_BYTES;
 mod search;
 mod transition;
 
@@ -12,9 +14,8 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
 use crate::{
-    CappedResponse, DeferredTool, McpCatalogEntry, McpClient, McpConnector, McpError, McpLimits,
-    McpResponse, McpResponseLimits, McpResponseSlot, McpServerConfig, McpToolDefinition,
-    OverflowSpool, ServerState, ServerStatus,
+    CappedResponse, McpClient, McpConnector, McpError, McpLimits, McpResponse, McpResponseLimits,
+    McpResponseSlot, McpServerConfig, McpToolDefinition, OverflowSpool, ServerState, ServerStatus,
 };
 use catalog::{PreparedCatalog, prepare_catalog};
 use rw_tools::CapabilityManifest;
@@ -328,82 +329,6 @@ impl McpManager {
             .collect()
     }
 
-    /// Name + one-line description only: no input schemas or annotations.
-    #[must_use]
-    pub async fn deferred_tool_index(&self) -> Vec<DeferredTool> {
-        let servers = self.inner.servers.read().await;
-        let mut index = Vec::new();
-        for (server, entry) in &*servers {
-            if !entry.config.enabled
-                || !entry.config.defer_tools
-                || !matches!(entry.state, ServerState::Ready)
-                || !entry.catalog_valid()
-            {
-                continue;
-            }
-            for tool in &entry.tools {
-                if let Some(name) = tool.get("name").and_then(Value::as_str) {
-                    index.push(DeferredTool {
-                        server: server.clone(),
-                        name: name.to_owned(),
-                        description: one_line(
-                            tool.get("description")
-                                .and_then(Value::as_str)
-                                .unwrap_or(""),
-                        ),
-                    });
-                }
-            }
-        }
-        index
-    }
-
-    /// Exact provider-context fragment used for measured deferred-loading tests.
-    pub async fn deferred_prompt(&self) -> Result<String, McpError> {
-        serde_json::to_string(&self.deferred_tool_index().await)
-            .map_err(|error| McpError::Encoding(error.to_string()))
-    }
-
-    pub async fn resources(&self) -> Vec<McpCatalogEntry> {
-        self.catalog_entries("resources").await
-    }
-
-    pub async fn prompts(&self) -> Vec<McpCatalogEntry> {
-        self.catalog_entries("prompts").await
-    }
-
-    async fn catalog_entries(&self, kind: &str) -> Vec<McpCatalogEntry> {
-        let servers = self.inner.servers.read().await;
-        let mut result = Vec::new();
-        for (server, entry) in &*servers {
-            if !entry.ready() {
-                continue;
-            }
-            let values = if kind == "resources" {
-                &entry.resources
-            } else {
-                &entry.prompts
-            };
-            for value in values {
-                result.push(McpCatalogEntry {
-                    server: server.clone(),
-                    name: value
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned(),
-                    description: value
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned(),
-                    uri: value.get("uri").and_then(Value::as_str).map(str::to_owned),
-                });
-            }
-        }
-        result
-    }
-
     pub async fn call_tool(
         &self,
         server: &McpServerId,
@@ -624,11 +549,6 @@ async fn load_catalog(
         client.list_prompts(McpResponseSlot::new(client.response_limits())?)
     );
     Ok((tools?, resources?, prompts?))
-}
-
-fn one_line(value: &str) -> String {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    compact.chars().take(160).collect()
 }
 
 fn definition(

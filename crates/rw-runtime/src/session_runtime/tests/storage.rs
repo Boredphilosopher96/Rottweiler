@@ -112,6 +112,7 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
         "default",
         &[],
         std::slice::from_ref(&workspace),
+        crate::CanonicalReadBudget::new().reserve(),
     )
     .expect("metadata fixture");
     let path = root.path().join("sessions/metadata-bounds/metadata.json");
@@ -120,12 +121,18 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
         root.path(),
         "metadata-bounds",
         MAX_SESSION_METADATA_BYTES,
+        crate::CanonicalReadBudget::new().reserve(),
     )
     .expect("bounded metadata read");
     assert_eq!(metadata.session_id, "metadata-bounds");
     assert_eq!(descriptor_bytes, expected_bytes);
     assert_eq!(
-        inherited_journal_through(root.path(), "metadata-bounds").expect("accounting boundary"),
+        inherited_journal_through(
+            root.path(),
+            "metadata-bounds",
+            crate::CanonicalReadBudget::new().reserve(),
+        )
+        .expect("accounting boundary"),
         None
     );
 
@@ -136,10 +143,18 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
             root.path(),
             "metadata-bounds",
             MAX_SESSION_METADATA_BYTES,
+            crate::CanonicalReadBudget::new().reserve(),
         )
         .is_err()
     );
-    assert!(inherited_journal_through(root.path(), "metadata-bounds").is_err());
+    assert!(
+        inherited_journal_through(
+            root.path(),
+            "metadata-bounds",
+            crate::CanonicalReadBudget::new().reserve(),
+        )
+        .is_err()
+    );
     std::fs::remove_file(alias).expect("remove hard link");
     std::fs::OpenOptions::new()
         .write(true)
@@ -151,10 +166,18 @@ fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
             root.path(),
             "metadata-bounds",
             MAX_SESSION_METADATA_BYTES,
+            crate::CanonicalReadBudget::new().reserve(),
         )
         .is_err()
     );
-    assert!(inherited_journal_through(root.path(), "metadata-bounds").is_err());
+    assert!(
+        inherited_journal_through(
+            root.path(),
+            "metadata-bounds",
+            crate::CanonicalReadBudget::new().reserve(),
+        )
+        .is_err()
+    );
 }
 
 #[cfg(unix)]
@@ -285,6 +308,7 @@ async fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         "fast",
         &[],
         std::slice::from_ref(&workspace),
+        crate::CanonicalReadBudget::new().reserve(),
     )
     .expect("parent metadata");
     let parent_stores = open_checkpoint_stores(
@@ -464,15 +488,25 @@ async fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
             meta, driver_client_id,
         }) if meta.session_id == child && driver_client_id == &driver)
     );
-    let inherited = inherited_journal_through(&storage, &child.0).expect("boundary");
+    let inherited = inherited_journal_through(
+        &storage,
+        &child.0,
+        crate::CanonicalReadBudget::new().reserve(),
+    )
+    .expect("boundary");
     assert_eq!(inherited, Some(SequenceId(5)));
     assert!(
         project_accounting(&child.0, &child_events, inherited)
             .expect("accounting")
             .is_empty()
     );
-    let child_metadata =
-        load_session_metadata(&storage, &child.0, &workspace).expect("child metadata");
+    let child_metadata = load_session_metadata(
+        &storage,
+        &child.0,
+        &workspace,
+        crate::CanonicalReadBudget::new().reserve(),
+    )
+    .expect("child metadata");
     assert_eq!(
         child_metadata.workspace_roots,
         vec![workspace.clone(), added.clone()]

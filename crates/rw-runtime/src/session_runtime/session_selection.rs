@@ -16,6 +16,7 @@ pub(super) fn select_session(
     storage_root: &Path,
     workspace: &Path,
     options: &LocalSessionOptions,
+    journal: &crate::journal_service::JournalService,
 ) -> Result<String> {
     if let Some(session) = &options.resume {
         return Ok(session.clone());
@@ -24,8 +25,10 @@ pub(super) fn select_session(
         // The SQLite index is a disposable projection. Print mode intentionally
         // leaves it stale so completing a headless turn never waits on SQLite;
         // an explicit continue operation rebuilds from authoritative JSONL.
-        refresh_session_index(storage_root)?;
-        if let Some(session) = latest_workspace_session(storage_root, workspace)? {
+        refresh_session_index(storage_root, &|| Box::new(journal.history_working()))?;
+        if let Some(session) = latest_workspace_session(storage_root, workspace, &|| {
+            Box::new(journal.history_working())
+        })? {
             return Ok(session);
         }
         if is_zero_turn_prompt_dump(options) {
@@ -54,13 +57,15 @@ pub fn select_interactive_session(
         return Ok(session.to_owned());
     }
     if continue_latest {
-        refresh_session_index(storage_root)?;
-        return latest_workspace_session(storage_root, workspace)?.ok_or_else(|| {
-            miette!(
-                "there is no previous session for workspace {} to continue",
-                workspace.display()
-            )
-        });
+        let budget = crate::CanonicalReadBudget::new();
+        refresh_session_index(storage_root, &|| budget.reserve())?;
+        return latest_workspace_session(storage_root, workspace, &|| budget.reserve())?
+            .ok_or_else(|| {
+                miette!(
+                    "there is no previous session for workspace {} to continue",
+                    workspace.display()
+                )
+            });
     }
     new_session_id()
 }
@@ -75,13 +80,14 @@ pub(super) fn is_zero_turn_prompt_dump(options: &LocalSessionOptions) -> bool {
 pub(super) fn latest_workspace_session(
     storage_root: &Path,
     workspace: &Path,
+    reserve: &dyn Fn() -> Box<dyn rw_core::recovery::HistoryWorkingAllowance>,
 ) -> Result<Option<String>> {
     let sessions = SessionIndex::open(storage_root)
         .map_err(|error| miette!("session index could not open: {error}"))?
         .list(10_000)
         .map_err(|error| miette!("sessions could not be listed: {error}"))?;
     for session in sessions {
-        match load_session_metadata(storage_root, &session.id, workspace) {
+        match load_session_metadata(storage_root, &session.id, workspace, reserve()) {
             Ok(_) => return Ok(Some(session.id)),
             Err(error) => tracing::debug!(
                 session_id = %session.id,

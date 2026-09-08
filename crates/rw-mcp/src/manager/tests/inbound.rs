@@ -55,8 +55,20 @@ async fn revoked_catalog_is_hidden_and_reconnect_requires_schema_approval() {
             .expect("admitted tool definitions")
             .is_empty()
     );
-    assert!(manager.resources().await.is_empty());
-    assert!(manager.prompts().await.is_empty());
+    assert!(
+        manager
+            .resources()
+            .await
+            .expect("admitted metadata")
+            .is_empty()
+    );
+    assert!(
+        manager
+            .prompts()
+            .await
+            .expect("admitted metadata")
+            .is_empty()
+    );
     assert!(manager.call_tool(&id, "lookup", json!({})).await.is_err());
     assert!(manager.approve_pending_tools(&id).await.is_err());
     let second = Arc::new(MockClient {

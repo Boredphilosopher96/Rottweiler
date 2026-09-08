@@ -31,11 +31,12 @@ impl HostQueryService for RuntimeSessionFactory {
             .map_err(|error| HostError::Query(error.to_string()))?;
         self.transcripts
             .blocking(move |reader| {
-                let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
-                        .map_err(|_| {
-                            HostError::Persistence("session metadata is unavailable".into())
-                        })?;
+                let metadata = super::load_session_metadata_any(
+                    &factory.options.storage_root,
+                    &root.0,
+                    Box::new(factory.journal_service.history_working()),
+                )
+                .map_err(|_| HostError::Persistence("session metadata is unavailable".into()))?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
                 reader.read_children(&session, &scope, &order)
             })
@@ -57,11 +58,12 @@ impl HostQueryService for RuntimeSessionFactory {
             Arc::clone(&self.journal_service),
             session.clone(),
             move |budget| {
-                let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
-                        .map_err(|_| {
-                            HostError::Persistence("session metadata is unavailable".into())
-                        })?;
+                let metadata = super::load_session_metadata_any(
+                    &factory.options.storage_root,
+                    &root.0,
+                    Box::new(factory.journal_service.history_working()),
+                )
+                .map_err(|_| HostError::Persistence("session metadata is unavailable".into()))?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
                 factory
                     .transcripts
@@ -85,11 +87,12 @@ impl HostQueryService for RuntimeSessionFactory {
             .clone();
         self.transcripts
             .blocking(move |transcripts| {
-                let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
-                        .map_err(|_| {
-                            HostError::Persistence("session metadata is unavailable".into())
-                        })?;
+                let metadata = super::load_session_metadata_any(
+                    &factory.options.storage_root,
+                    &root.0,
+                    Box::new(factory.journal_service.history_working()),
+                )
+                .map_err(|_| HostError::Persistence("session metadata is unavailable".into()))?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
                 transcripts.read_tail(&session, &scope, &read)
             })
@@ -110,11 +113,12 @@ impl HostQueryService for RuntimeSessionFactory {
             .clone();
         self.transcripts
             .blocking(move |transcripts| {
-                let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
-                        .map_err(|_| {
-                            HostError::Persistence("session metadata is unavailable".into())
-                        })?;
+                let metadata = super::load_session_metadata_any(
+                    &factory.options.storage_root,
+                    &root.0,
+                    Box::new(factory.journal_service.history_working()),
+                )
+                .map_err(|_| HostError::Persistence("session metadata is unavailable".into()))?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
                 transcripts.read(&session, &scope, &read)
             })
@@ -135,11 +139,12 @@ impl HostQueryService for RuntimeSessionFactory {
             .clone();
         self.transcripts
             .blocking(move |transcripts| {
-                let metadata =
-                    super::load_session_metadata_any(&factory.options.storage_root, &root.0)
-                        .map_err(|_| {
-                            HostError::Persistence("session metadata is unavailable".into())
-                        })?;
+                let metadata = super::load_session_metadata_any(
+                    &factory.options.storage_root,
+                    &root.0,
+                    Box::new(factory.journal_service.history_working()),
+                )
+                .map_err(|_| HostError::Persistence("session metadata is unavailable".into()))?;
                 factory.authorize_workspace_path(&metadata.workspace)?;
                 transcripts.read_content(&session, &scope, &read)
             })

@@ -64,8 +64,12 @@ impl SessionFactory for RuntimeSessionFactory {
     }
 
     async fn resume(&self, session_id: &SessionId) -> Result<HostedSession, HostError> {
-        let metadata = load_session_metadata_any(&self.options.storage_root, &session_id.0)
-            .map_err(|_| HostError::Persistence("session metadata is unavailable".to_owned()))?;
+        let metadata = load_session_metadata_any(
+            &self.options.storage_root,
+            &session_id.0,
+            Box::new(self.journal_service.history_working()),
+        )
+        .map_err(|_| HostError::Persistence("session metadata is unavailable".to_owned()))?;
         let workspace = self.authorize_workspace_path(&metadata.workspace)?;
         self.compose(session_id.clone(), workspace, None, true)
             .await

@@ -24,6 +24,7 @@ pub use client::{
     McpAuthorizationProvider, McpClient, McpConnectionApprovalPolicy, McpConnector,
     McpInboundRouter, SandboxedStdioConnector, connect_http, sorted_headers,
 };
+pub use manager::MAX_DEFERRED_PROMPT_BYTES;
 pub use manager::{CompactJsonEncoder, MAX_SERVERS, McpManager, StructuredResponseEncoder};
 pub use server::{
     BridgeError, EngineMcpBridge, EngineTool, MAX_SERVER_SESSIONS, McpServerAuthority,

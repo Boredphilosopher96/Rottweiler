@@ -75,12 +75,14 @@ impl DurableEventSink {
         let storage_root = self.storage_root.clone();
         let session_id = self.session_id.clone();
         let admission = self.journal_service.admit_read().map_err(persistence)?;
+        let metadata_allowance = Box::new(self.journal_service.history_working());
         let inherited = self
             .reads
             .run(admission, move |_| {
                 super::super::session_metadata::load_session_metadata_any(
                     &storage_root,
                     &session_id,
+                    metadata_allowance,
                 )
                 .map(|metadata| metadata.inherited_journal_through)
                 .map_err(persistence)

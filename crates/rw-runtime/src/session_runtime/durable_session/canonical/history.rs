@@ -28,6 +28,12 @@ struct CapturedHistory {
 
 #[async_trait]
 impl SessionHistory for DurableEventSink {
+    fn reserve_working_set(
+        &self,
+    ) -> Result<Box<dyn rw_core::recovery::HistoryWorkingAllowance>, AgentLoopError> {
+        Ok(Box::new(self.journal_service.history_working()))
+    }
+
     async fn capture_history(&self) -> Result<Arc<dyn SessionHistoryView>, AgentLoopError> {
         let owner = Arc::clone(
             self.canonical

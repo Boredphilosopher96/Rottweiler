@@ -1,7 +1,10 @@
+mod admission;
+pub(super) use admission::admit_write as admit_metadata_write;
 mod encoding;
 use super::MAX_WORKSPACE_ROOTS;
 pub(super) use encoding::encode as encode_session_metadata;
 use miette::{IntoDiagnostic, Result, miette};
+use rw_core::recovery::{HistoryRead, HistoryWorkingAllowance};
 use rw_types::{SequenceId, SessionId, Turn};
 use serde::{Deserialize, Serialize};
 #[cfg(not(unix))]
@@ -74,7 +77,16 @@ pub(super) fn persist_session_metadata(
     model_alias: &str,
     initial_session_context: &[Turn],
     workspace_roots: &[PathBuf],
+    mut allowance: Box<dyn HistoryWorkingAllowance>,
 ) -> Result<()> {
+    let other_bytes = workspace_roots
+        .iter()
+        .try_fold(
+            session_id.len() + model_alias.len() + workspace.as_os_str().len(),
+            |total, root| total.checked_add(root.as_os_str().len()),
+        )
+        .ok_or_else(|| miette!("metadata path allocation overflow"))?;
+    admit_metadata_write(initial_session_context, other_bytes, &mut *allowance)?;
     validate_session_id(session_id)?;
     let sessions = storage_root.join("sessions");
     ensure_real_directory(&sessions, false)?;
@@ -141,8 +153,9 @@ pub(super) fn load_session_metadata(
     storage_root: &Path,
     session_id: &str,
     expected_workspace: &Path,
-) -> Result<SessionMetadata> {
-    let metadata = load_session_metadata_any(storage_root, session_id)?;
+    allowance: Box<dyn HistoryWorkingAllowance>,
+) -> Result<HistoryRead<SessionMetadata>> {
+    let metadata = load_session_metadata_any(storage_root, session_id, allowance)?;
     if metadata.workspace != expected_workspace {
         return Err(miette!(
             "session metadata identity does not match this session and canonical workspace"
@@ -154,16 +167,23 @@ pub(super) fn load_session_metadata(
 pub(crate) fn load_session_metadata_any(
     storage_root: &Path,
     session_id: &str,
-) -> Result<SessionMetadata> {
-    load_session_metadata_any_bounded(storage_root, session_id, MAX_SESSION_METADATA_BYTES)
-        .map(|(metadata, _)| metadata)
+    allowance: Box<dyn HistoryWorkingAllowance>,
+) -> Result<HistoryRead<SessionMetadata>> {
+    load_session_metadata_any_bounded(
+        storage_root,
+        session_id,
+        MAX_SESSION_METADATA_BYTES,
+        allowance,
+    )
+    .map(|(metadata, _)| metadata)
 }
 
 pub(crate) fn load_session_metadata_any_bounded(
     storage_root: &Path,
     session_id: &str,
     max_bytes: u64,
-) -> Result<(SessionMetadata, u64)> {
+    mut allowance: Box<dyn HistoryWorkingAllowance>,
+) -> Result<(HistoryRead<SessionMetadata>, u64)> {
     let max_bytes = max_bytes.min(MAX_SESSION_METADATA_BYTES);
     validate_session_id(session_id)?;
     let sessions = storage_root.join("sessions");
@@ -172,10 +192,11 @@ pub(crate) fn load_session_metadata_any_bounded(
     ensure_real_directory(&directory, false)?;
     let path = directory.join("metadata.json");
     #[cfg(unix)]
-    let (bytes, byte_count) = load_session_metadata_unix(&directory, &path, max_bytes)?;
+    let (bytes, byte_count) =
+        load_session_metadata_unix(&directory, &path, max_bytes, &mut *allowance)?;
     #[cfg(not(unix))]
-    let (bytes, byte_count) = load_session_metadata_portable(&path, max_bytes)?;
-    let metadata: SessionMetadata = serde_json::from_slice(&bytes).into_diagnostic()?;
+    let (bytes, byte_count) = load_session_metadata_portable(&path, max_bytes, &mut *allowance)?;
+    let metadata = admission::decode(bytes, allowance)?;
     validate_session_id(&metadata.budget_session_id.0)?;
     if metadata.version != SESSION_METADATA_VERSION || metadata.session_id != session_id {
         return Err(miette!(
@@ -210,8 +231,9 @@ pub fn load_inherited_accounting_boundary_bounded(
     storage_root: &Path,
     session_id: &str,
     max_bytes: u64,
+    allowance: Box<dyn HistoryWorkingAllowance>,
 ) -> Result<(Option<SequenceId>, u64)> {
-    load_session_metadata_any_bounded(storage_root, session_id, max_bytes)
+    load_session_metadata_any_bounded(storage_root, session_id, max_bytes, allowance)
         .map(|(metadata, bytes)| (metadata.inherited_journal_through, bytes))
 }
 
@@ -285,6 +307,7 @@ pub(super) fn load_session_metadata_unix(
     directory: &Path,
     path: &Path,
     max_bytes: u64,
+    allowance: &mut dyn HistoryWorkingAllowance,
 ) -> Result<(Vec<u8>, u64)> {
     let parent = open_session_metadata_directory(directory)?;
     let stat = rustix::fs::statat(
@@ -330,6 +353,13 @@ pub(super) fn load_session_metadata_unix(
     }
     let length = usize::try_from(byte_count)
         .map_err(|_| miette!("session metadata size cannot be represented"))?;
+    allowance
+        .resize(
+            length
+                .checked_mul(2)
+                .ok_or_else(|| miette!("metadata input size overflow"))?,
+        )
+        .into_diagnostic()?;
     let mut bytes = vec![0_u8; length];
     let mut offset = 0_usize;
     while offset < bytes.len() {
@@ -378,6 +408,7 @@ pub(super) fn load_session_metadata_unix(
 pub(super) fn load_session_metadata_portable(
     path: &Path,
     max_bytes: u64,
+    allowance: &mut dyn HistoryWorkingAllowance,
 ) -> Result<(Vec<u8>, u64)> {
     let before = std::fs::symlink_metadata(path).into_diagnostic()?;
     if before.file_type().is_symlink() || !before.is_file() {
@@ -393,6 +424,14 @@ pub(super) fn load_session_metadata_portable(
     if opened.len() != before.len() || opened.modified().ok() != before.modified().ok() {
         return Err(miette!("session metadata changed while it was opened"));
     }
+    allowance
+        .resize(
+            usize::try_from(max_bytes)
+                .into_diagnostic()?
+                .saturating_add(1)
+                .saturating_mul(4),
+        )
+        .into_diagnostic()?;
     let mut bytes = Vec::new();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)

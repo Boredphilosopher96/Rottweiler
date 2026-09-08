@@ -659,11 +659,12 @@ impl RuntimeSessionFactory {
     }
 
     fn workspace_for_session(&self, descriptor: &SessionDescriptor) -> Result<PathBuf, HostError> {
-        let metadata =
-            load_session_metadata_any(&self.options.storage_root, &descriptor.session_id.0)
-                .map_err(|_| {
-                    HostError::Query("session workspace metadata is unavailable".to_owned())
-                })?;
+        let metadata = load_session_metadata_any(
+            &self.options.storage_root,
+            &descriptor.session_id.0,
+            Box::new(self.journal_service.history_working()),
+        )
+        .map_err(|_| HostError::Query("session workspace metadata is unavailable".to_owned()))?;
         let workspace = self.authorize_workspace_path(&metadata.workspace)?;
         if workspace_name(&workspace) != descriptor.workspace_name {
             return Err(HostError::Query(
@@ -805,8 +806,12 @@ impl RuntimeSessionFactory {
     }
 
     fn persisted_descriptor(&self, session_id: &str) -> Result<SessionDescriptor, HostError> {
-        let metadata = load_session_metadata_any(&self.options.storage_root, session_id)
-            .map_err(|_| HostError::Persistence("session metadata is unavailable".to_owned()))?;
+        let metadata = load_session_metadata_any(
+            &self.options.storage_root,
+            session_id,
+            Box::new(self.journal_service.history_working()),
+        )
+        .map_err(|_| HostError::Persistence("session metadata is unavailable".to_owned()))?;
         let workspace = self.authorize_workspace_path(&metadata.workspace)?;
         Ok(SessionDescriptor {
             session_id: SessionId(session_id.to_owned()),
@@ -817,7 +822,7 @@ impl RuntimeSessionFactory {
                 .filter(|title| !title.trim().is_empty())
                 .unwrap_or_else(|| "New session".to_owned()),
             workspace_name: workspace_name(&workspace),
-            model: ModelAlias(metadata.model_alias),
+            model: ModelAlias(metadata.model_alias.clone()),
             // Persisted sessions are inactive until resumed. Live descriptors
             // from the host registry replace these entries after opening.
             driver_client_id: None,

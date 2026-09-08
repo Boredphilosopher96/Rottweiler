@@ -270,7 +270,11 @@ async fn five_distinct_production_sandboxed_servers_remain_deferred_and_bounded(
     assert!(tokenizer.encode_with_special_tokens(&deferred_prompt).len() < 2_000);
     assert!(!deferred_prompt.contains("inputSchema"));
     assert_eq!(
-        manager.deferred_tool_index().await.len(),
+        manager
+            .deferred_tool_index()
+            .await
+            .expect("admitted metadata")
+            .len(),
         PROFILES.len() * 3
     );
 

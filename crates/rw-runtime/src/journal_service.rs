@@ -4,7 +4,7 @@ mod payloads;
 mod projection_order;
 pub(crate) use projection_order::{ProjectionOrder, ProjectionPermit};
 use projection_order::{ProjectionOrders, projection_order};
-mod retained;
+pub(crate) mod retained;
 mod search;
 use commits::JournalCommits;
 

@@ -116,7 +116,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
         workspace_root: workspace.clone(),
         additional_workspace_roots: Vec::new(),
         workspace_generation: 0,
-        initial_session_context: Vec::new(),
+        initial_session_context: rw_core::InitialSessionContext::default(),
         startup_notifications: Vec::new(),
         model_alias: "fast".to_owned(),
         model,

@@ -67,9 +67,7 @@ impl SessionActor {
         let (command_tx, command_rx) = mpsc::channel(64);
         let event_tx = crate::engine::live_events::LiveEvents::new(config.event_capacity)?;
         let active_turn = Arc::new(AtomicU64::new(0));
-        let command_descriptors = Arc::new(RwLock::new(Arc::from(
-            config.commands.descriptors().cloned().collect::<Vec<_>>(),
-        )));
+        let command_descriptors = Arc::new(RwLock::new(config.commands.catalog()));
         let mode_registry = Arc::new(RwLock::new(Arc::clone(&config.modes)));
         let shutdown = shutdown::ActorShutdown::new(Arc::new(super::control::SessionControl::new(
             config.session_id.clone(),
