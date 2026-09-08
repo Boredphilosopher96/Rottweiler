@@ -23,7 +23,7 @@ struct Output {
 fn transform(seed: u64, input: &[u8]) -> Output {
     let mut checksum = seed;
     for _ in 0..128 {
-        checksum = checksum.wrapping_mul(6364136223846793005).wrapping_add(1);
+        checksum = checksum.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
     }
     let key = seed.to_le_bytes()[0];
     let bytes = input.iter().map(|value| value ^ key).collect();

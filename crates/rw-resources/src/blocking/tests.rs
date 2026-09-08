@@ -53,9 +53,9 @@ async fn cancelled_waiter_keeps_work_and_discarded_result_inside_physical_lease(
     let waiter = tokio::spawn(async move {
         let result_pool = worker_pool.clone();
         run(&worker_pool, ResourceClass::Cpu, move || {
-            let _source = source;
             let _ = entered.send(());
             released.recv().expect("physical release");
+            drop(source);
             RetainedResult {
                 pool: result_pool,
                 dropped: Some(dropped),
