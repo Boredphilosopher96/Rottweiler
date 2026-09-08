@@ -408,3 +408,6 @@ fn admitted_call_cannot_change_its_budget_scope() {
     accounted.identity.budget_session_id = SessionId("other".into());
     assert!(ledger.settle_accounted(&accounted).is_err());
 }
+
+#[cfg(unix)]
+mod process;
