@@ -208,6 +208,8 @@ pub struct CheckpointStore {
 mod blob_store;
 pub use blob_store::CheckpointBlobStore;
 mod capture;
+mod directory;
+use directory::create_directory_durable;
 mod git;
 mod operation;
 pub use operation::{CheckpointCancellation, CheckpointOperation};
@@ -958,36 +960,6 @@ fn hash_inventory_file(
         return Err(CheckpointError::CaptureChanged);
     }
     Ok(hash)
-}
-
-// Persist each new directory's entry before a child publication can become clean.
-fn create_directory_durable(path: &Path) -> Result<(), CheckpointError> {
-    let mut missing = Vec::new();
-    let mut current = path;
-    loop {
-        match fs::metadata(current) {
-            Ok(metadata) if metadata.is_dir() => break,
-            Ok(_) => return Err(CheckpointError::UnsafePath),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        if missing.len() >= 64 {
-            return Err(CheckpointError::OperationLimit("directory depth"));
-        }
-        missing.push(current);
-        current = current.parent().ok_or(CheckpointError::UnsafePath)?;
-    }
-    for directory in missing.into_iter().rev() {
-        match fs::create_dir(directory) {
-            Ok(()) => {}
-            Err(error)
-                if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
-            Err(error) => return Err(error.into()),
-        }
-        File::open(directory)?.sync_all()?;
-        File::open(directory.parent().ok_or(CheckpointError::UnsafePath)?)?.sync_all()?;
-    }
-    Ok(())
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
