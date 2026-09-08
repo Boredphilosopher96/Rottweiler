@@ -723,6 +723,7 @@ pub struct VaultMcpTokenProvider<E, K> {
     credentials: Arc<CredentialManager<E, K>>,
     bindings: BTreeMap<McpServerId, McpOAuthBinding>,
     refreshers: tokio::sync::Mutex<BTreeMap<McpServerId, Arc<RefreshingOAuth>>>,
+    secret_registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
 }
 
 impl<E, K> fmt::Debug for VaultMcpTokenProvider<E, K> {
@@ -739,9 +740,11 @@ impl<E, K> VaultMcpTokenProvider<E, K> {
     pub fn new(
         credentials: Arc<CredentialManager<E, K>>,
         bindings: BTreeMap<McpServerId, McpOAuthBinding>,
+        secret_registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
     ) -> Self {
         Self {
             credentials,
+            secret_registrar,
             bindings,
             refreshers: tokio::sync::Mutex::new(BTreeMap::new()),
         }
@@ -871,7 +874,7 @@ where
             sink,
         )
         .map_err(|_| McpError::Policy("MCP OAuth refresh configuration is invalid".to_owned()))?;
-        let source = Arc::new(source);
+        let source = Arc::new(source.with_secret_registrar(Arc::clone(&self.secret_registrar)));
         refreshers.insert(server.clone(), source.clone());
         Ok(source)
     }
@@ -904,6 +907,8 @@ where
             ));
         }
         let stored = self.load_credential(server, resource, binding)?;
+        self.secret_registrar
+            .register(&ProviderSecret::new(&stored.access_token));
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| McpError::Policy("system clock is before the Unix epoch".to_owned()))?

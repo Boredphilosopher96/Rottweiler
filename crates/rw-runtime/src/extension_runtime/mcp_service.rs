@@ -919,6 +919,7 @@ impl McpSessionRuntime {
         configs: &[DiscoveredMcpServer],
         workspace_roots: &[PathBuf],
         spool: Arc<dyn OverflowSpool>,
+        secret_registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
         helper: &Arc<super::SandboxHelperSource>,
         credentials_path: &Path,
         upstream_proxy: Option<UpstreamProxy>,
@@ -933,7 +934,11 @@ impl McpSessionRuntime {
             .iter()
             .filter_map(DiscoveredMcpServer::oauth_binding)
             .collect::<BTreeMap<_, _>>();
-        let authorization = Arc::new(VaultMcpTokenProvider::new(credentials.clone(), bindings));
+        let authorization = Arc::new(VaultMcpTokenProvider::new(
+            credentials.clone(),
+            bindings,
+            secret_registrar.clone(),
+        ));
         let mut http_client = ProductionMcpHttpClient::new();
         for endpoint in configs.iter().filter_map(|config| match &config.transport {
             crate::extension_config::DiscoveredMcpTransport::Http { endpoint, .. } => {
@@ -979,16 +984,24 @@ impl McpSessionRuntime {
             configs,
             connector,
             spool,
-            move |reference| {
-                credentials
-                    .resolve(&CredentialReference::new(reference))
-                    .map(|resolved| resolved.secret().expose_secret().clone())
-                    .map_err(|error| miette!("MCP credential reference could not resolve: {error}"))
-            },
+            move |reference| resolve_mcp_credential(&credentials, &*secret_registrar, reference),
             approvals,
             scratch,
             stdio_environment,
         )
         .await
     }
+}
+
+pub(super) fn resolve_mcp_credential(
+    credentials: &CredentialManager,
+    registrar: &dyn rw_providers::KnownSecretRegistrar,
+    reference: &str,
+) -> Result<String> {
+    let resolved = credentials
+        .resolve(&CredentialReference::new(reference))
+        .map_err(|_| miette!("MCP credential reference could not resolve"))?;
+    let secret = resolved.secret().expose_secret();
+    registrar.register(&rw_providers::Secret::new(secret));
+    Ok(secret.clone())
 }

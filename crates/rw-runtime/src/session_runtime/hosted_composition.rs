@@ -431,6 +431,7 @@ pub(crate) async fn compose_hosted_actor(
                     options.journal_service.payload_source(&session_id)?,
                     plugin_redactor.clone(),
                 )),
+                plugin_redactor.clone(),
                 &sandbox_helper,
                 &options.credentials_path,
                 root_global_proxy

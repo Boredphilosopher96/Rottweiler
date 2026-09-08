@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use super::*;
+mod payloads;
 use crate::extension_config::{
     DiscoveredMcpServer, DiscoveredMcpTransport, ExecutableConfigOrigin,
 };
@@ -306,6 +307,7 @@ async fn empty_or_http_only_production_runtime_never_launches_the_helper() {
         &[],
         std::slice::from_ref(&workspace),
         Arc::new(MemorySpool),
+        Arc::new(rw_providers::FixtureRedactor::default()),
         &helper,
         &credentials,
         None,
@@ -344,6 +346,7 @@ async fn empty_or_http_only_production_runtime_never_launches_the_helper() {
         &[http],
         &[workspace],
         Arc::new(MemorySpool),
+        Arc::new(rw_providers::FixtureRedactor::default()),
         &helper,
         &credentials,
         None,

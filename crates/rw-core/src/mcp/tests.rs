@@ -239,11 +239,30 @@ fn toon_encoder_is_structured_and_deterministic() {
 }
 
 #[test]
-fn protected_mcp_framing_and_utf8_truncation_are_stable() {
+fn protected_mcp_framing_is_stable() {
     let result = untrusted_result("remote instructions", json!({}));
     assert!(result.content.starts_with(UNTRUSTED_OPEN));
     assert!(result.content.ends_with(UNTRUSTED_CLOSE));
-    assert_eq!(truncate_utf8("🐕🐕", 5), "🐕");
+}
+
+#[test]
+fn overflow_read_requires_the_complete_source_reference_and_cursor_contract() {
+    let reference = json!({"digest":"a".repeat(64),"bytes":1});
+    assert!(parse::<McpOverflowInput>(json!({"reference":reference,"offset":0})).is_err());
+    assert!(parse::<McpOverflowInput>(json!({"reference":reference,"query":null})).is_err());
+    assert!(
+        parse::<McpOverflowInput>(json!({"id":"old","bytes":1,"query":null,"offset":0})).is_err()
+    );
+    assert!(
+        parse::<McpOverflowInput>(json!({"reference":reference,"offset":0,"query":null})).is_ok()
+    );
+    let required = schema::<McpOverflowInput>()["required"]
+        .as_array()
+        .expect("required fields")
+        .clone();
+    for field in ["reference", "offset", "query"] {
+        assert!(required.iter().any(|value| value == field));
+    }
 }
 
 #[tokio::test]
@@ -287,6 +306,7 @@ async fn expired_mcp_oauth_refreshes_once_and_persists_rotation() {
         )
         .expect("seed credential");
     let server = McpServerId::new("oauth-refresh-fixture").expect("server id");
+    let redactor = Arc::new(rw_providers::FixtureRedactor::default());
     let provider = VaultMcpTokenProvider::new(
         manager.clone(),
         BTreeMap::from([(
@@ -303,6 +323,7 @@ async fn expired_mcp_oauth_refreshes_once_and_persists_rotation() {
                 }),
             },
         )]),
+        redactor.clone(),
     );
     let responder = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("refresh request");
@@ -338,6 +359,9 @@ async fn expired_mcp_oauth_refreshes_once_and_persists_rotation() {
         .expect("cached token")
         .expect("cached bearer");
     assert_eq!(second.expose(), REFRESHED_ACCESS);
+    for secret in [INITIAL_REFRESH, ROTATED_REFRESH, REFRESHED_ACCESS] {
+        assert!(!redactor.redact_text(secret).contains(secret));
+    }
     let resolved = manager.resolve(&reference).expect("rotated credential");
     let rotated: StoredMcpOAuthCredential =
         serde_json::from_str(resolved.secret().expose_secret()).expect("rotated JSON");

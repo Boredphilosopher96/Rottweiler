@@ -525,6 +525,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
                 journal_service.payload_source(&session_id)?,
                 plugin_redactor.clone(),
             )),
+            plugin_redactor.clone(),
             &sandbox_helper,
             &config_loader.credentials_path(),
             root_global_proxy
