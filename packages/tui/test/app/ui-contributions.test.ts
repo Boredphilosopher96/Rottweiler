@@ -4,7 +4,7 @@ import { createRottweilerApp } from "../../src/app"
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { systemThemeFor } from "../../src/theme"
 import { emptySessionReader, sessionReaderFor, toolItem, waitForHistory } from "../fixtures/history"
-import { fixturePresentation, surfacePage } from "../fixtures/ui"
+import { fixturePresentation, surfacePage } from "../../src/diagnostics/ui-fixture"
 
 test("native panel actions are keyboard reachable, exact-revision commands, and survive closing until settlement", async () => {
   const setup = await createTestRenderer({ width: 100, height: 32, useThread: false })

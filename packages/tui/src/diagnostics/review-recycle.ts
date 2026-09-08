@@ -119,5 +119,5 @@ export async function runReviewRecycleProbe(directory: string, mode: "capture" |
     } finally { setup.renderer.destroy() }
   }
   requireThat(allocations.usage.bytes === 0, `review generation retained allocation: ${JSON.stringify(allocations.usage)}`)
-  await writeFile(join(directory, `${mode}.json`), JSON.stringify({ mode, observed, decisions, finalAllocationBytes: allocations.usage.bytes }))
+  await writeFile(join(directory, `${mode}.json`), JSON.stringify({ schemaVersion: 1, pid: process.pid, bunVersion: Bun.version, view, mode, observed, decisions, finalAllocationBytes: allocations.usage.bytes }))
 }

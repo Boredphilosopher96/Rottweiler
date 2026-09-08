@@ -4,7 +4,7 @@ import { ClientCache } from "../src/history/cache"
 import type { HistoryCacheValue } from "../src/history/controller"
 import { DocumentController } from "../src/history/document"
 import { TRANSCRIPT_PROJECTION_VERSION, type TranscriptView, type TranscriptContentSource } from "../src/protocol"
-import { fixturePresentation, surfacePage } from "./fixtures/ui"
+import { fixturePresentation, surfacePage } from "../src/diagnostics/ui-fixture"
 
 const view: TranscriptView = { session_id: "history", projection_version: TRANSCRIPT_PROJECTION_VERSION, generation: "0", through: "7", digest: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
 const source: TranscriptContentSource = { sequence: "7", selector: { type: "tool_presentation", invocation_id: "instance" } }

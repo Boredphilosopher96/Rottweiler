@@ -2,7 +2,7 @@ import { formatToolArguments, formatToolSubject } from "../src/tool-arguments"
 import { describe, expect, test } from "bun:test"
 import { displayPath, presentTool, setWorkspaceRoots } from "../src/render"
 import { createInitialState, MAX_TOOL_RESULT_PREVIEW_BYTES, prepareToolDisplay } from "../src/state"
-import { fixturePresentation } from "./fixtures/ui"
+import { fixturePresentation } from "../src/diagnostics/ui-fixture"
 import { meta, reduce } from "./state/fixtures"
 
 function finish(output: import("../src/protocol").ToolOutput, presentation: import("../src/protocol").UiPresentation | null = null) {

@@ -1,4 +1,4 @@
-import { fixturePresentation } from "../fixtures/ui"
+import { fixturePresentation } from "../../src/diagnostics/ui-fixture"
 import { prepareToolDisplay } from "../../src/state/tool-display"
 import { CodeRenderable, DiffRenderable, SyntaxStyle } from "@opentui/core"
 import {

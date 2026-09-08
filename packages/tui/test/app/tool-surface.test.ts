@@ -4,7 +4,7 @@ import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
 import { systemThemeFor } from "../../src/theme"
 import { sessionReaderFor, toolItem, waitForHistory } from "../fixtures/history"
-import { fixturePresentation, surfacePage } from "../fixtures/ui"
+import { fixturePresentation, surfacePage } from "../../src/diagnostics/ui-fixture"
 
 test("native tool surface opens from canonical row and survives retheming without a second read", async () => {
   const setup = await createTestRenderer({ width: 100, height: 32, useThread: false })

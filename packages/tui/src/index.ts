@@ -60,6 +60,23 @@ async function main(): Promise<void> {
     await runCompiledTreeSitterSmoke(treeSitterSmokeReport)
     return
   }
+  const reviewProbeDirectory = process.env.ROTTWEILER_CLIENT_REVIEW_PROBE_DIRECTORY
+  if (reviewProbeDirectory !== undefined) {
+    const mode = process.env.ROTTWEILER_CLIENT_REVIEW_PROBE_MODE
+    const view = process.env.ROTTWEILER_CLIENT_REVIEW_PROBE_VIEW
+    if (!reviewProbeDirectory || (mode !== "capture" && mode !== "restore" && mode !== "changed" && mode !== "removed")
+      || (view !== "session" && view !== "workspace")) throw new Error("invalid review generation probe configuration")
+    const { runReviewRecycleProbe } = await import("./diagnostics/review-recycle")
+    await runReviewRecycleProbe(reviewProbeDirectory, mode, view)
+    return
+  }
+  const richProbeDirectory = process.env.ROTTWEILER_CLIENT_RICH_PROBE_DIRECTORY
+  if (richProbeDirectory !== undefined) {
+    if (!richProbeDirectory) throw new Error("rich contribution probe requires a private directory")
+    const { runRichExtensionProbe } = await import("./diagnostics/rich-extension")
+    await runRichExtensionProbe(richProbeDirectory)
+    return
+  }
   const inputProbeReport = process.env.ROTTWEILER_CLIENT_INPUT_PROBE_REPORT
   if (inputProbeReport !== undefined && inputProbeReport.length > 0) {
     const directory = process.env.ROTTWEILER_CLIENT_INPUT_PROBE_DIRECTORY

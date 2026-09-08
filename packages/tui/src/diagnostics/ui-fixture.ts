@@ -1,4 +1,4 @@
-import type { UiPresentation, TranscriptContentRead, TranscriptContentPage } from "../../src/protocol"
+import type { UiPresentation, TranscriptContentRead, TranscriptContentPage } from "../protocol"
 
 export function fixturePresentation(): UiPresentation {
   return {

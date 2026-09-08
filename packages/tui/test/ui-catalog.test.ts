@@ -8,7 +8,7 @@ import { prepareUiPanels, prepareUiSurface, uiIdentity } from "../src/ui/present
 import { retainedJsonBytes } from "../src/retained-json"
 import { MAX_UI_CONTRIBUTIONS, MAX_UI_DESCRIPTOR_BYTES, MAX_UI_ACTIONS, MAX_UI_FIELDS, MAX_UI_TABLE_ROWS, MAX_UI_TABLE_COLUMNS, MAX_UI_PANEL_SLOTS, MAX_UI_PANELS_BYTES, MAX_UI_SURFACE_BYTES, type UiPanels } from "../src/protocol"
 import validateSurface from "../../../protocol/ui-presentation-validator.js"
-import { fixturePresentation } from "./fixtures/ui"
+import { fixturePresentation } from "../src/diagnostics/ui-fixture"
 
 function panelFixture(): UiPanels {
   const presentation = fixturePresentation()
