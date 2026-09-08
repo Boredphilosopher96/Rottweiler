@@ -79,7 +79,7 @@ def observe(command: list[str], gate: str, output: Path, *, delegated: bool = Fa
     exit_code = 1
     try:
         owner = OwnedProcess(command, cwd=Path.cwd(), env=dict(os.environ),
-                             delegated=delegated, combined_output=True)
+                             delegated=delegated, output="combined")
         process = owner.process
         assert process.stdout is not None
         last_checkpoint = started

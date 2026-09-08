@@ -229,7 +229,7 @@ jobs:
           persist-credentials: false
       - run: python3 scripts/ci_evidence.py --gate sandbox --output ci-results/sandbox.json -- crates/rw-sandbox/tests/linux_security_gate.sh
       - name: M8 production-composition functional acceptance
-        run: python3 scripts/ci_evidence.py --gate m8-functional --output ci-results/m8.json -- crates/rw-cli/tests/m8_release_gate_linux.sh
+        run: python3 scripts/ci_evidence.py --delegated --gate m8-functional --output ci-results/m8.json -- crates/rw-cli/tests/m8_release_gate_linux.sh
         env:
           ROTTWEILER_M8_FUNCTIONAL_ONLY: 1
           ROTTWEILER_M8_PERF_SAMPLES: 1

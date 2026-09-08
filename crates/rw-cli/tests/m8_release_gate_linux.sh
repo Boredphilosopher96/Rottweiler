@@ -37,11 +37,6 @@ if printenv ROTTWEILER_PERF_OUTPUT >/dev/null 2>&1; then
   esac
 fi
 
-cleanup() {
-  docker rm -f "$container" >/dev/null 2>&1 || :
-}
-trap cleanup EXIT HUP INT TERM
-
 docker volume create "$cargo_volume" >/dev/null
 
 set -- docker run --rm --privileged \
@@ -117,4 +112,4 @@ set -- "$@" "$image" sh -eu -c '
   exit "$status"
 '
 
-"$@"
+exec python3 "$repo/scripts/m8_container.py" "$container" -- "$@"

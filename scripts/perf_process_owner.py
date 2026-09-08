@@ -18,8 +18,11 @@ class OwnedProcess:
     """One unreaped leader anchors every real signal; closure requires actual proof."""
 
     def __init__(self, command: list[str], *, cwd: Path, env: dict[str, str],
-                 delegated: bool = False, combined_output: bool = False):
-        self.registration = SCOPE.starting()
+                 delegated: bool = False, output: str = "capture",
+                 cleanup_of: str | None = None):
+        if output not in {"capture", "combined", "inherit", "stdout"}:
+            raise ValueError("unknown physical process output mode")
+        self.registration = SCOPE.starting(cleanup_of=cleanup_of)
         self.scope = None
         self.process = None
         self.finished = False
@@ -30,13 +33,14 @@ class OwnedProcess:
         try:
             if delegated:
                 descriptor, writer = os.pipe()
+                os.set_blocking(writer, False)
                 self.scope = ScopeReader(descriptor)
                 os.set_blocking(descriptor, False)
                 environment[SCOPE_FD] = str(writer)
             self.process = subprocess.Popen(
                 command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT if combined_output else subprocess.PIPE,
+                stdout=None if output == "inherit" else subprocess.PIPE,
+                stderr=None if output in {"inherit", "stdout"} else (subprocess.STDOUT if output == "combined" else subprocess.PIPE),
                 start_new_session=True, pass_fds=() if writer is None else (writer,),
             )
         except BaseException:
@@ -70,11 +74,13 @@ class OwnedProcess:
             raise self.failure
         process = self.process
         try:
-            if self.scope is not None and observe_exit(process.pid) is None:
+            if self.scope is not None:
                 signal_owned_group(process.pid, signal.SIGTERM)
                 settle_by = time.monotonic() + 5
-                while observe_exit(process.pid) is None and time.monotonic() < settle_by:
+                while time.monotonic() < settle_by:
                     self.scope.drain()
+                    if observe_exit(process.pid) is not None and self.scope.closed:
+                        break
                     for stream in (process.stdout, process.stderr):
                         if stream is not None:
                             with contextlib.suppress(BlockingIOError):

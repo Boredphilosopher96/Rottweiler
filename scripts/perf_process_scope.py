@@ -136,8 +136,11 @@ class ProcessScope:
             self.failed = True
             raise
 
-    def starting(self) -> str:
-        self.check()
+    def starting(self, *, cleanup_of: str | None = None) -> str:
+        if cleanup_of is None:
+            self.check()
+        elif cleanup_of not in self.active:
+            raise RuntimeError("cleanup requires an active physical owner")
         if len(self.active) == MAX_ACTIVE:
             raise RuntimeError("too many active verification children")
         self.counter += 1

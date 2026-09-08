@@ -55,6 +55,10 @@ class M8LinuxWrapperTests(unittest.TestCase):
             docker.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\n"
+                "case \"$1\" in\n"
+                " create) printf '%064d\\n' 1 ;;\n"
+                " inspect) echo 'exited 0' ;;\n"
+                "esac\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -72,7 +76,7 @@ class M8LinuxWrapperTests(unittest.TestCase):
 
             log_text = log.read_text(encoding="utf-8")
             calls = log_text.splitlines()
-            run = next(call for call in calls if call.startswith("run "))
+            run = next(call for call in calls if call.startswith("create "))
             self.assertIn("--privileged", run)
             self.assertIn(f"type=bind,source={REPO},target={REPO}", run)
             self.assertIn("--tmpfs /m8-work:rw,exec,size=3g", run)

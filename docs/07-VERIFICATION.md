@@ -531,6 +531,15 @@ required even on nonzero exit. Cancellation gives their actual owners time to
 settle independently grouped children; missing acknowledgement is `UNSETTLED`
 failure evidence. A raw command receives no nested settlement capability.
 
+The privileged M8 gate also owns its daemon container, independently of the
+Docker CLI process. Creation returns the full immutable container ID before
+workload start. Cancellation requires removal by that ID and a successful
+absence query before acknowledgement. An ambiguous creation reply or failed
+removal retains an explicit unsettled obligation; killing the Docker CLI cannot
+satisfy it. Normal creation has no added duration cap. Cancellation allows four
+seconds for its creation reply; removal and absence controls each have two-second
+bounds within the outer cooperative settlement window.
+
 `scripts/ci_evidence.py` preserves command exit status and writes bounded partial
 and final diagnostics with source/run/lock identity. Each gate retains an 8 MiB
 redacted log prefix and a 128 KiB rolling tail, with explicit omitted-byte counts,

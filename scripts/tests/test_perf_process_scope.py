@@ -46,6 +46,25 @@ run_sample([sys.executable,'-c',{child!r}],cwd=Path.cwd(),env=dict(os.environ),t
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
+    @unittest.skipUnless(hasattr(os, "fork"), "requires a same-group nested owner")
+    def test_exited_wrapper_keeps_nested_owner_alive_for_cooperative_settlement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "child.pid"
+            native = f"import os,time; open({str(pid_path)!r},'w').write(str(os.getpid())); time.sleep(60)"
+            wrapper = f"""import os,sys,time
+from pathlib import Path
+from perf_process import run_sample
+if os.fork():
+    while not Path({str(pid_path)!r}).exists(): time.sleep(.01)
+    os._exit(0)
+run_sample([sys.executable,'-c',{native!r}],cwd=Path.cwd(),env=dict(os.environ),timeout=60)
+"""
+            with self.assertRaises(TimeoutError) as failed:
+                self.wrapper(wrapper, timeout=.5)
+            self.assertNotIsInstance(failed.exception, UnsettledScope)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid_path.read_text()), 0)
+
     def test_forced_wrapper_death_during_start_and_after_announcement_is_unsettled(self):
         for announced in (False, True):
             with self.subTest(announced=announced), tempfile.TemporaryDirectory() as temporary:
@@ -86,6 +105,30 @@ os._exit(0)
                 self.wrapper(wrapper)
             self.assertTrue(kill.called)
             self.assertTrue(all(call.args[0] != 1 for call in kill.call_args_list))
+
+    def test_cancelled_scope_allows_only_cleanup_of_an_existing_owner(self):
+        from perf_process_owner import OwnedProcess, SCOPE
+        from perf_process_scope import ScopeCancelled
+        parent = SCOPE.starting()
+        previous = SCOPE.cancelled
+        SCOPE.cancelled = signal.SIGTERM
+        try:
+            with self.assertRaises(ScopeCancelled):
+                OwnedProcess([sys.executable, "-c", "pass"], cwd=Path.cwd(), env=dict(os.environ))
+            with self.assertRaisesRegex(RuntimeError, "active physical owner"):
+                OwnedProcess([sys.executable, "-c", "pass"], cwd=Path.cwd(), env=dict(os.environ), cleanup_of="unowned")
+            owner = OwnedProcess([sys.executable, "-c", "print('cleanup')"],
+                                 cwd=Path.cwd(), env=dict(os.environ), cleanup_of=parent)
+            try:
+                import time
+                while owner.observe_exit() is None:
+                    time.sleep(.001)
+                self.assertEqual(owner.process.stdout.read(), b"cleanup\n")
+            finally:
+                owner.settle()
+            SCOPE.settled(parent)
+        finally:
+            SCOPE.cancelled = previous
 
     def test_stale_settlement_cannot_release_another_owner_with_the_same_pid(self):
         reader = ScopeReader(-1)
