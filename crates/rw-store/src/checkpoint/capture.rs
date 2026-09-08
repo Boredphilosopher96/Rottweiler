@@ -278,7 +278,7 @@ impl CheckpointStore {
             let state = if !pending.before.contains_key(&path) {
                 match after.get(&path) {
                     Some(InventoryEntry::Directory) => CheckpointFileState::Unrestorable {
-                        reason: "opaque command created a directory that M2 cannot remove safely"
+                        reason: "opaque command created a directory that cannot be removed safely"
                             .to_owned(),
                     },
                     Some(InventoryEntry::Regular { .. } | InventoryEntry::Symlink { .. })

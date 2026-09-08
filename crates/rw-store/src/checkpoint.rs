@@ -1108,3 +1108,6 @@ pub enum CheckpointError {
 mod read_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod acceptance;
