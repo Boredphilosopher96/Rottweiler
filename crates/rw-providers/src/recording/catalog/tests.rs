@@ -101,13 +101,15 @@ fn descriptor_admission_rejects_sparse_oversize_before_reading_and_checks_cancel
     std::fs::create_dir_all(&directory).expect("directory");
     let path = directory.join("fixture.json");
     let file = std::fs::File::create(&path).expect("file");
-    file.set_len(u64::try_from(replay_reads::MAX_FIXTURE_BYTES + 1).expect("length"))
+    file.set_len(u64::try_from(crate::MAX_RECORDING_FIXTURE_BYTES + 1).expect("length"))
         .expect("sparse source");
-    assert!(replay_reads::read_bounded(&path, replay_reads::MAX_FIXTURE_BYTES, || Ok(())).is_err());
+    assert!(
+        replay_reads::read_bounded(&path, crate::MAX_RECORDING_FIXTURE_BYTES, || Ok(())).is_err()
+    );
     assert!(replay_reads::read_bounded(&path, MANIFEST_BYTES, || Ok(())).is_err());
     file.set_len(128 * 1024).expect("bounded source");
     let checks = Cell::new(0);
-    let error = replay_reads::read_bounded(&path, replay_reads::MAX_FIXTURE_BYTES, || {
+    let error = replay_reads::read_bounded(&path, crate::MAX_RECORDING_FIXTURE_BYTES, || {
         checks.set(checks.get() + 1);
         if checks.get() >= 3 {
             Err(ProviderError::new(
@@ -134,8 +136,8 @@ fn structural_admission_rejects_dense_nodes_and_both_encoding_directions_agree()
     );
     let dense = format!(
         "[{}]",
-        "null,".repeat(replay_reads::MAX_FIXTURE_BYTES / 128) + "null"
+        "null,".repeat(crate::MAX_RECORDING_FIXTURE_BYTES / 128) + "null"
     );
-    assert!(dense.len() < replay_reads::MAX_FIXTURE_BYTES);
+    assert!(dense.len() < crate::MAX_RECORDING_FIXTURE_BYTES);
     assert!(decode_fixture(dense.as_bytes()).is_err());
 }

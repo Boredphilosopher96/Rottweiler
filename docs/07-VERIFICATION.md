@@ -23,6 +23,14 @@ changes to deliver unfinished feature work.
 
 ## 1. Deterministic replay (the foundation)
 
+Provider and configured-search recording files share a 64 MiB encoded ceiling.
+Configured-search reads pin a private regular-file descriptor with nonblocking,
+no-follow open, allocate only its admitted length, and reject observed length or
+modification-time changes. JSON structure and a 256 MiB conservative decoded-work
+ceiling are checked before constructing the required occurrence arrays. These
+per-file bounds do not describe an aggregate resident-memory pool. Recording
+publication uses the same file and structure limits.
+
 The record/replay middleware is the spine of all agent-level testing:
 
 - `rw --record fixtures/<name>` captures every provider request/response (redacted) into a fixture.

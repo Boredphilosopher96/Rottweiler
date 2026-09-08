@@ -11,7 +11,6 @@ use std::{
 };
 use tokio::sync::Notify;
 
-pub(super) const MAX_FIXTURE_BYTES: usize = 64 * 1024 * 1024;
 const PROOF_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default)]
@@ -189,7 +188,7 @@ async fn prove(job: &Job) -> Result<(), ProviderError> {
     }
 }
 fn read_fixture(path: &std::path::Path) -> Result<Vec<u8>, ProviderError> {
-    read_bounded(path, MAX_FIXTURE_BYTES, || Ok(()))
+    read_bounded(path, crate::MAX_RECORDING_FIXTURE_BYTES, || Ok(()))
 }
 pub(super) fn read_bounded(
     path: &std::path::Path,

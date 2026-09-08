@@ -4,7 +4,6 @@ use super::CancellationToken;
 use super::FixtureRedactor;
 use super::FixtureWebSearcher;
 use super::Path;
-use super::Read;
 use super::RecordingConfiguredWebSearcher;
 use super::ReplayingConfiguredWebSearcher;
 use super::SequencedWebSearcher;
@@ -137,7 +136,7 @@ fn configured_websearch_load_rejects_symlinks_and_reads_a_pinned_descriptor() {
         .expect("private fixture");
     let directory =
         WebSearchFixtureDirectory::open(fixtures.path(), false).expect("pinned fixture directory");
-    let mut pinned = directory
+    let pinned = directory
         .open_fixture()
         .expect("open fixture")
         .expect("fixture exists");
@@ -151,8 +150,7 @@ fn configured_websearch_load_rejects_symlinks_and_reads_a_pinned_descriptor() {
         .expect("private replacement");
     symlink(&replacement, &fixture_path).expect("swapped symlink");
 
-    let mut bytes = Vec::new();
-    pinned.read_to_end(&mut bytes).expect("read pinned file");
+    let bytes = pinned.read().expect("bounded pinned read");
     assert_eq!(bytes, original);
     assert!(ReplayingConfiguredWebSearcher::load(fixtures.path()).is_err());
 }
@@ -326,3 +324,5 @@ async fn configured_websearch_reader_requires_closed_occurrence_arrays() {
         expected
     );
 }
+
+mod bounded;

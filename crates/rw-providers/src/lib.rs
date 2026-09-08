@@ -65,7 +65,7 @@ pub use openai_subscription::{
 };
 pub use pricing::{CostBreakdown, ModelPricing, PricingTable};
 pub use proxy::{ProxyEnvironment, ProxyResolution, ProxySettings, ProxySource};
-pub use recording::{FixtureRedactor, Recorder, ReplayProvider};
+pub use recording::{FixtureRedactor, MAX_RECORDING_FIXTURE_BYTES, Recorder, ReplayProvider};
 pub use retry::{
     Clock, Delay, JitterSource, ProductionJitter, RetryPolicy, SeededJitter, TokioClock, TokioDelay,
 };

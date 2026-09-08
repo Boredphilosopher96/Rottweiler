@@ -33,6 +33,9 @@ use crate::{
     WireMode,
 };
 
+/// Maximum encoded bytes in one provider or configured-search recording file.
+pub const MAX_RECORDING_FIXTURE_BYTES: usize = 64 * 1024 * 1024;
+
 const FIXTURE_VERSION: u16 = 4;
 const WRITER_QUEUE_CAPACITY: usize = 8;
 
@@ -1251,7 +1254,7 @@ fn write_fixture_sync(
     let bytes = String::from_utf8(bytes)
         .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
     let redacted = redactor.redact(&bytes);
-    if redacted.len() > replay_reads::MAX_FIXTURE_BYTES {
+    if redacted.len() > crate::MAX_RECORDING_FIXTURE_BYTES {
         return Err(ProviderError::new(
             ProviderErrorKind::Protocol,
             "recording fixture exceeds encoded byte admission",

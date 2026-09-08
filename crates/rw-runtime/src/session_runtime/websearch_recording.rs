@@ -1,4 +1,7 @@
+mod read;
 mod schema;
+
+use read::FixtureRead;
 
 use async_trait::async_trait;
 use miette::Result;
@@ -10,7 +13,6 @@ use rw_tools::WebSearchRequest;
 use rw_tools::WebSearchResponse;
 use rw_tools::WebSearcher;
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -85,12 +87,15 @@ impl WebSearchFixtureDirectory {
         self.path.join(WEBSEARCH_REPLAY_FILE)
     }
 
-    pub(super) fn open_fixture(&self) -> Result<Option<std::fs::File>> {
+    pub(super) fn open_fixture(&self) -> Result<Option<FixtureRead>> {
         #[cfg(unix)]
         let descriptor = match rustix::fs::openat(
             &self.descriptor,
             WEBSEARCH_REPLAY_FILE,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
         ) {
             Ok(descriptor) => descriptor,
@@ -138,17 +143,14 @@ impl WebSearchFixtureDirectory {
                 ));
             }
         }
-        Ok(Some(file))
+        FixtureRead::new(file, metadata).map(Some)
     }
 
     pub(super) fn read_fixture(&self) -> Result<Option<Vec<u8>>> {
-        let Some(mut file) = self.open_fixture()? else {
+        let Some(file) = self.open_fixture()? else {
             return Ok(None);
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| miette!("web-search fixture could not read: {error}"))?;
-        Ok(Some(bytes))
+        file.read().map(Some)
     }
 
     pub(super) fn persist(&self, bytes: &[u8]) -> std::result::Result<(), ToolError> {
@@ -324,9 +326,20 @@ impl RecordingConfiguredWebSearcher {
             .fixtures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let bytes = serde_json::to_vec(&*fixtures).map_err(|error| {
-            ToolError::Network(format!("web-search fixture encode failed: {error}"))
+        let encode_error =
+            |error| ToolError::Network(format!("web-search fixture encode failed: {error}"));
+        let mut count =
+            rw_types::json_encoding::JsonWriter::count(rw_providers::MAX_RECORDING_FIXTURE_BYTES);
+        count.serialize(&*fixtures).map_err(encode_error)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(count.written()).map_err(|_| {
+            ToolError::Network("web-search fixture encoding allocation unavailable".into())
         })?;
+        rw_types::json_encoding::JsonWriter::buffer(&mut bytes, count.written(), 0)
+            .map_err(|error| ToolError::Network(error.to_string()))?
+            .serialize(&*fixtures)
+            .map_err(encode_error)?;
+        schema::admit(&bytes).map_err(encode_error)?;
         self.directory.persist(&bytes)
     }
 }

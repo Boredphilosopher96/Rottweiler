@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used)]
 
-use super::{MAX_FIXTURE_BYTES, PROOF_TIMEOUT, ReplayReads, read_fixture};
+use super::{PROOF_TIMEOUT, ReplayReads, read_fixture};
 use crate::ProviderErrorKind;
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -86,7 +86,7 @@ async fn completed_unconsumed_result_keeps_admission_and_worker_panic_unwinds_be
 fn oversized_sparse_fixture_is_rejected_before_payload_allocation() {
     let path = std::env::temp_dir().join(format!("rw-replay-read-limit-{}", std::process::id()));
     let file = std::fs::File::create(&path).expect("fixture");
-    file.set_len((MAX_FIXTURE_BYTES + 1) as u64)
+    file.set_len((crate::MAX_RECORDING_FIXTURE_BYTES + 1) as u64)
         .expect("sparse fixture");
     drop(file);
     let result = read_fixture(&path);

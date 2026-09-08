@@ -18,7 +18,7 @@ const CATALOG_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) const MANIFEST_BYTES: usize = crate::types::MAX_PROVIDER_MODEL_CATALOG_BYTES;
 // Includes serde tagged-content intermediates and vector/string growth. Source
 // bytes are separately limited to 64 MiB and released before the next file.
-const DECODE_BYTES: usize = 4 * replay_reads::MAX_FIXTURE_BYTES;
+const DECODE_BYTES: usize = 4 * crate::MAX_RECORDING_FIXTURE_BYTES;
 // The manifest stays alive while each fixture is verified, so it has a separate
 // small decode allowance rather than borrowing the fixture's full window.
 const MANIFEST_DECODE_BYTES: usize = 4 * MANIFEST_BYTES;
@@ -101,7 +101,7 @@ fn scan(
             continue;
         }
         let bytes =
-            replay_reads::read_bounded(&entry.path(), replay_reads::MAX_FIXTURE_BYTES, &check)?;
+            replay_reads::read_bounded(&entry.path(), crate::MAX_RECORDING_FIXTURE_BYTES, &check)?;
         check()?;
         let fixture = decode_fixture(&bytes)?;
         fixture.validate()?;
@@ -137,7 +137,7 @@ fn scan(
 }
 
 pub(super) fn decode_fixture(bytes: &[u8]) -> Result<RecordFixture, ProviderError> {
-    admit(bytes, replay_reads::MAX_FIXTURE_BYTES, DECODE_BYTES)?;
+    admit(bytes, crate::MAX_RECORDING_FIXTURE_BYTES, DECODE_BYTES)?;
     serde_json::from_slice(bytes).map_err(|error| invalid(&error))
 }
 pub(super) fn decode_manifest(bytes: &[u8]) -> Result<CapabilityManifest, ProviderError> {
@@ -145,7 +145,7 @@ pub(super) fn decode_manifest(bytes: &[u8]) -> Result<CapabilityManifest, Provid
     serde_json::from_slice(bytes).map_err(|error| invalid(&error))
 }
 pub(super) fn admit_fixture(bytes: &[u8]) -> Result<(), ProviderError> {
-    admit(bytes, replay_reads::MAX_FIXTURE_BYTES, DECODE_BYTES)
+    admit(bytes, crate::MAX_RECORDING_FIXTURE_BYTES, DECODE_BYTES)
 }
 pub(super) fn admit_manifest(bytes: &[u8]) -> Result<(), ProviderError> {
     admit(bytes, MANIFEST_BYTES, MANIFEST_DECODE_BYTES)
@@ -157,7 +157,7 @@ pub(super) fn encode_manifest(value: &CapabilityManifest) -> Result<Vec<u8>, Pro
     Ok(bytes)
 }
 pub(super) fn encode_fixture(value: &RecordFixture) -> Result<Vec<u8>, ProviderError> {
-    let bytes = encode(value, replay_reads::MAX_FIXTURE_BYTES)?;
+    let bytes = encode(value, crate::MAX_RECORDING_FIXTURE_BYTES)?;
     admit_fixture(&bytes)?;
     Ok(bytes)
 }
