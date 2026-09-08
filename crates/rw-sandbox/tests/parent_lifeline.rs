@@ -1,6 +1,6 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used)]
-//! The real helper keeps executing cleanup after its Rust owner is SIGKILLed.
+//! The real helper keeps executing cleanup after its Rust owner receives `SIGKILL`.
 mod common;
 use rw_sandbox::{NetworkPolicy, PluginRendezvous, SandboxPolicy, shell_launch_plan};
 use std::{
@@ -58,9 +58,8 @@ fn controller() {
         .expect("effect identity");
     assert!(!pid.trim().is_empty(), "effect published readiness");
     fs::write(root.join("ready"), child.id().to_string()).expect("ready receipt");
-    loop {
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    child.wait().expect("controller owns the supervisor wait");
+    drop(control);
 }
 
 struct Controller(Child);
