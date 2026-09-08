@@ -40,7 +40,8 @@
       "additionalProperties": false,
       "required": [
         "type",
-        "content"
+        "content",
+        "signature"
       ]
     },
     {
@@ -138,7 +139,9 @@
       "additionalProperties": false,
       "required": [
         "type",
-        "uri"
+        "uri",
+        "title",
+        "excerpt"
       ]
     }
   ],

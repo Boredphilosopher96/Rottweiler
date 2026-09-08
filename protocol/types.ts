@@ -250,9 +250,9 @@ export type ToolOutputPart = { "type": "text", text: string, } | { "type": "stru
 
 export type ToolOutput = { "type": "text", text: string, } | { "type": "structured", value: JsonValue, } | { "type": "mixed", parts: Array<ToolOutputPart>, };
 
-export type Block = { "type": "text", text: string, } | { "type": "thinking", content: string, signature?: string | null, } | { "type": "tool_call", id: ToolCallId, name: string, args: JsonValue, } | { "type": "tool_result", id: ToolCallId, output: ToolOutput, is_error: boolean, } | { "type": "image", media_type: string, data: ImageRef, } | { "type": "citation", uri: string, title?: string | null, excerpt?: string | null, };
+export type Block = { "type": "text", text: string, } | { "type": "thinking", content: string, signature: string | null, } | { "type": "tool_call", id: ToolCallId, name: string, args: JsonValue, } | { "type": "tool_result", id: ToolCallId, output: ToolOutput, is_error: boolean, } | { "type": "image", media_type: string, data: ImageRef, } | { "type": "citation", uri: string, title: string | null, excerpt: string | null, };
 
-export type TurnMeta = { created_at?: string | null, model?: string | null, synthetic: boolean, summary: boolean, };
+export type TurnMeta = { created_at: string | null, model: string | null, synthetic: boolean, summary: boolean, };
 
 export type Turn = { role: Role, blocks: Array<Block>, meta: TurnMeta, };
 
@@ -608,6 +608,8 @@ export type TranscriptView = { session_id: SessionId, projection_version: number
 export type SessionSearchMatch = { session_id: SessionId, source_sequence: SequenceId, through: SequenceId, digest: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], };
 
 export type SessionSearchHit = { session: SessionDescriptor, match: SessionSearchMatch | null, };
+
+export type SessionPayloadReference = { digest: string, bytes: number, };
 
 export type TranscriptPosition = { "type": "first", } | { "type": "latest", } | { "type": "search_match", source: SessionSearchMatch, } | { "type": "before", item: TranscriptItemId, } | { "type": "after", item: TranscriptItemId, } | { "type": "around", item: TranscriptItemId, } | { "type": "at_ordinal", ordinal: TranscriptOrdinal, generation: TranscriptGeneration, };
 
