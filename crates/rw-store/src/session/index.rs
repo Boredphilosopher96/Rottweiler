@@ -13,6 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const MAX_SEARCH_CANDIDATES: usize = 10_000;
+
 /// One denormalized row in the session listing/search index.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionSummary {
@@ -273,6 +275,23 @@ impl SessionIndex {
         })
     }
 
+    /// Select authorized results before counting the visible limit, within one snapshot.
+    /// At most 10,000 candidate summaries are inspected; exhaustion is an error.
+    /// # Errors
+    /// Returns source errors or the selection owner's explicit failure.
+    pub fn search_selected_read_only<T, E: From<SessionStoreError>>(
+        root: &Path,
+        query: &str,
+        limit: usize,
+        control: &SessionIndexReadControl,
+        mut select: impl FnMut(&SessionSummary) -> Result<Option<T>, E>,
+    ) -> Result<Vec<(SessionSearchRow, T)>, E> {
+        read_index(root, control, |connection| {
+            Ok(query_selected(connection, query, limit, &mut select))
+        })
+        .map_err(E::from)?
+    }
+
     /// Lists newest sessions using a live `SQLite` read transaction.
     /// `SQLite` may maintain its transient WAL coordination files; stored rows are read-only.
     ///
@@ -322,11 +341,21 @@ fn query_search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SessionSearchRow>, SessionStoreError> {
+    query_selected(connection, query, limit, &mut |_| Ok(Some(())))
+        .map(|rows| rows.into_iter().map(|(row, ())| row).collect())
+}
+
+fn query_selected<T, E: From<SessionStoreError>>(
+    connection: &Connection,
+    query: &str,
+    limit: usize,
+    select: &mut impl FnMut(&SessionSummary) -> Result<Option<T>, E>,
+) -> Result<Vec<(SessionSearchRow, T)>, E> {
     if query.len() > 512 {
-        return Err(SessionStoreError::SearchQueryTooLarge);
+        return Err(SessionStoreError::SearchQueryTooLarge.into());
     }
     if limit > 1001 {
-        return Err(SessionStoreError::SearchLimitTooLarge);
+        return Err(SessionStoreError::SearchLimitTooLarge.into());
     }
     let terms = query
         .split_whitespace()
@@ -342,27 +371,36 @@ fn query_search(
         .map(rusqlite::types::Value::Text)
         .collect::<Vec<_>>();
     arguments.push(rusqlite::types::Value::Integer(
-        i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?,
+        i64::try_from(MAX_SEARCH_CANDIDATES + 1).map_err(|_| SessionStoreError::LimitOverflow)?,
     ));
-    let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(arguments), |row| {
-        Ok((
-            summary_from_row(row)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, Vec<u8>>(6)?,
-            row.get::<_, Option<String>>(7)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (summary, next, digest, sequence) = row?;
+    let mut statement = connection.prepare(&sql).map_err(SessionStoreError::from)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(arguments), |row| {
+            Ok((
+                summary_from_row(row)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })
+        .map_err(SessionStoreError::from)?;
+    let mut selected = Vec::with_capacity(limit);
+    if limit == 0 {
+        return Ok(selected);
+    }
+    for (ordinal, row) in rows.enumerate() {
+        if ordinal == MAX_SEARCH_CANDIDATES {
+            return Err(SessionStoreError::SearchCandidateLimitExceeded.into());
+        }
+        let (summary, next, digest, sequence) = row.map_err(SessionStoreError::from)?;
         let next_sequence = parse_sequence(&next)?;
         let sequence = sequence
             .map(|value| parse_sequence(&value).map(SequenceId))
             .transpose()?;
         if sequence.is_some_and(|value| value.0 >= next_sequence) {
-            return Err(SessionStoreError::CorruptProjectionWatermark);
+            return Err(SessionStoreError::CorruptProjectionWatermark.into());
         }
-        Ok(SessionSearchRow {
+        let row = SessionSearchRow {
             summary,
             sequence,
             source: JournalPrefixIdentity {
@@ -371,9 +409,15 @@ fn query_search(
                     .try_into()
                     .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?,
             },
-        })
-    })
-    .collect()
+        };
+        if let Some(value) = select(&row.summary)? {
+            selected.push((row, value));
+        }
+        if selected.len() == limit {
+            break;
+        }
+    }
+    Ok(selected)
 }
 
 fn search_sql(term_count: usize) -> String {

@@ -8,6 +8,9 @@ pub enum SessionStoreError {
     /// The caller cancelled or the physical SQLite execution budget elapsed.
     #[error("session index read cancelled or deadline exceeded")]
     IndexReadInterrupted,
+    /// More candidate sessions must be inspected than this bounded read permits.
+    #[error("session search candidate budget exceeded; narrow the query")]
+    SearchCandidateLimitExceeded,
     /// A database table does not match its admitted schema.
     #[error("SQLite table {table} does not match its schema")]
     UnsupportedSqliteSchema {

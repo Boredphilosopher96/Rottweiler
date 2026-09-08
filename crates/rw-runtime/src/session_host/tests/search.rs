@@ -23,9 +23,20 @@ async fn search_excludes_other_workspaces_but_rejects_malformed_session_metadata
             .expect("initialized durable source");
         hosted.handle().close().await.expect("close seed actor");
     }
+    let index = SessionIndex::open(&writer.options.storage_root).expect("index");
+    for (id, time) in [("search-allowed", 1), ("search-outside", 2)] {
+        let mut projection = index
+            .projection(id)
+            .expect("read projection")
+            .expect("source");
+        projection.summary.updated_unix_ms = time;
+        index
+            .upsert(&projection)
+            .expect("deterministic candidate order");
+    }
     let reader = factory(root.path(), &allowed).await;
     let (hits, truncated) = reader
-        .search_persisted_sessions("New session", 10)
+        .search_persisted_sessions("New session", 1)
         .await
         .expect("authorized search remains available");
     assert!(!truncated);
@@ -50,7 +61,7 @@ async fn search_excludes_other_workspaces_but_rejects_malformed_session_metadata
     )
     .expect("invalid source");
     assert!(matches!(
-        reader.search_persisted_sessions("New session", 10).await,
+        reader.search_persisted_sessions("New session", 1).await,
         Err(HostError::Persistence(_))
     ));
 }

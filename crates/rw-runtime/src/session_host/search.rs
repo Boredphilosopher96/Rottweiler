@@ -14,6 +14,12 @@ enum SearchFailure {
     Index(SessionStoreError),
     Metadata(HostError),
 }
+impl From<SessionStoreError> for SearchFailure {
+    fn from(error: SessionStoreError) -> Self {
+        Self::Index(error)
+    }
+}
+
 struct SearchWaiter(SessionIndexReadControl);
 impl Drop for SearchWaiter {
     fn drop(&mut self) {
@@ -24,7 +30,7 @@ impl Drop for SearchWaiter {
 impl RuntimeSessionFactory {
     fn search_descriptor(
         &self,
-        summary: SessionSummary,
+        summary: &SessionSummary,
     ) -> Result<Option<SessionDescriptor>, HostError> {
         let metadata =
             load_session_metadata_any(&self.options.storage_root, &summary.id).map_err(|_| {
@@ -36,8 +42,8 @@ impl RuntimeSessionFactory {
             return Ok(None);
         }
         Ok(Some(SessionDescriptor {
-            session_id: SessionId(summary.id),
-            title: summary.title,
+            session_id: SessionId(summary.id.clone()),
+            title: summary.title.clone(),
             workspace_name: workspace_name(&workspace),
             model: ModelAlias(metadata.model_alias),
             driver_client_id: None,
@@ -52,23 +58,21 @@ impl RuntimeSessionFactory {
     ) -> Result<(Vec<SessionSearchHit>, bool), SearchFailure> {
         let requested = usize::try_from(limit)
             .map_err(|_| SearchFailure::Index(SessionStoreError::SearchLimitTooLarge))?;
-        let rows = SessionIndex::search_hits_read_only(
+        let rows = SessionIndex::search_selected_read_only(
             &self.options.storage_root,
             query,
             requested.saturating_add(1),
             control,
-        )
-        .map_err(SearchFailure::Index)?;
+            |summary| {
+                control.check().map_err(SearchFailure::Index)?;
+                self.search_descriptor(summary)
+                    .map_err(SearchFailure::Metadata)
+            },
+        )?;
         let truncated = rows.len() > requested;
         let mut hits = Vec::with_capacity(rows.len().min(requested));
-        for row in rows.into_iter().take(requested) {
+        for (row, session) in rows.into_iter().take(requested) {
             control.check().map_err(SearchFailure::Index)?;
-            let Some(session) = self
-                .search_descriptor(row.summary)
-                .map_err(SearchFailure::Metadata)?
-            else {
-                continue;
-            };
             let matched = if let Some(sequence) = row.sequence {
                 let through = row
                     .source
