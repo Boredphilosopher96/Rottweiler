@@ -5,6 +5,7 @@ import ctypes
 import errno
 import os
 import sys
+import time
 
 
 if sys.platform == "darwin" and not hasattr(os, "waitid"):
@@ -24,13 +25,6 @@ if sys.platform == "darwin" and not hasattr(os, "waitid"):
     _waitid = _libc.waitid
     _waitid.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.POINTER(DarwinSignalInfo), ctypes.c_int]
     _waitid.restype = ctypes.c_int
-
-
-if sys.platform == "darwin":
-    _libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    _group_members = _libproc.proc_listpgrppids
-    _group_members.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-    _group_members.restype = ctypes.c_int
 
 
 def observe_exit(pid: int) -> int | None:
@@ -54,26 +48,27 @@ def observe_exit(pid: int) -> int | None:
 
 
 def signal_owned_group(pid: int, number: int) -> None:
-    """Signal while the owned leader is unreaped, including a zombie-only group."""
+    """Signal an unreaped leader's group; callers must then reap and prove absence."""
     try:
         os.killpg(pid, number)
     except ProcessLookupError:
         return
     except PermissionError:
-        # XNU killpg1 skips SZOMB members and returns EPERM if none is eligible.
-        # Do not mask an actual permission denial: prove this anchored group
-        # contains only our already-exited child with a bounded libproc query.
-        if sys.platform != "darwin" or observe_exit(pid) is None:
+        if sys.platform != "darwin":
             raise
-        members = (ctypes.c_int * 2)()
-        count = _group_members(pid, members, ctypes.sizeof(members))
-        if count != 1 or members[0] != pid:
-            raise
+        # XNU can reject the signal while exit is in progress, before waitid
+        # publishes the status. Keep the PID owned through that bounded handoff.
+        # An exited leader is not group settlement: every caller still reaps it
+        # and requires group disappearance. Live descendants cannot earn an ack.
+        deadline = time.monotonic() + 1
+        while observe_exit(pid) is None:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.001)
 
 
 def require_group_disappearance(pid: int, timeout: float = 5) -> None:
     """Prove no process remains in the group; never signal after leader reaping."""
-    import time
     from perf_process_scope import UnsettledScope
     deadline = time.monotonic() + timeout
     while True:

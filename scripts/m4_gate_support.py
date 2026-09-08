@@ -556,7 +556,7 @@ def read_until_all(
     captured = bytearray()
     while time.monotonic() < deadline:
         check_sample_cancellation()
-        ready, _, _ = select.select([process.fd], [], [], min(0.05, deadline - time.monotonic()))
+        ready, _, _ = select.select([process.fd], [], [], max(0, min(0.05, deadline - time.monotonic())))
         if not ready:
             continue
         try:
@@ -594,7 +594,7 @@ def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
         if status is not None:
             return status
         ready, _, _ = select.select(
-            [process.fd], [], [], min(0.05, deadline - time.monotonic())
+            [process.fd], [], [], max(0, min(0.05, deadline - time.monotonic()))
         )
         if ready:
             with contextlib.suppress(OSError):

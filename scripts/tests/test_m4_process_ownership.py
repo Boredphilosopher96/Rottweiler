@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -20,6 +21,19 @@ from perf_process_wait import observe_exit
 class M4ProcessOwnershipTests(unittest.TestCase):
     def spawn(self, source):
         return support.spawn_pty(Path(sys.executable), dict(os.environ), Path.cwd(), ['-c', source])
+
+    def test_preemption_at_deadline_never_passes_negative_select_timeout(self):
+        process = SimpleNamespace(fd=0, pid=123, exit_status=lambda: None)
+        for marker_read in (True, False):
+            with self.subTest(marker_read=marker_read), \
+                    patch.object(support.time, 'monotonic', side_effect=[0, .99, 1.01, 1.02]), \
+                    patch.object(support.select, 'select', return_value=([], [], [])) as select:
+                with self.assertRaises(RuntimeError if marker_read else TimeoutError):
+                    if marker_read:
+                        support.read_until(process, b'MARKER', timeout=1)
+                    else:
+                        support.wait_for_pty_exit(process, timeout=1)
+                self.assertEqual(select.call_args.args[-1], 0)
 
     def test_observation_keeps_identity_until_idempotent_cleanup(self):
         process = self.spawn("print('READY',flush=True); raise SystemExit(7)")
