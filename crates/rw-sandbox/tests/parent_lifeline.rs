@@ -168,7 +168,9 @@ fn normal_child_exit_preserves_nonzero_status() {
     loop {
         if let Some(status) = owner.0.try_wait().expect("child status") {
             assert_eq!(status.code(), Some(23));
-            control.verify_settlement().expect("effect retirement receipt");
+            control
+                .verify_settlement()
+                .expect("effect retirement receipt");
             break;
         }
         assert!(
