@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import hashlib
 import json
 import math
 import os
@@ -15,6 +17,8 @@ import select
 import shutil
 import signal
 import statistics
+import stat
+import sys
 import subprocess
 import tempfile
 import time
@@ -370,16 +374,68 @@ def descendant_processes(root_pid: int) -> list[tuple[int, int, int, str]]:
     return descendants
 
 
+def process_image_path(pid: int) -> pathlib.Path:
+    """Ask the kernel for the executing image, independent of its argv spelling."""
+    if sys.platform == "linux":
+        return pathlib.Path(f"/proc/{pid}/exe")
+    if sys.platform == "darwin":
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        library.proc_pidpath.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+        if library.proc_pidpath(pid, buffer, len(buffer)) <= 0:
+            cause = ctypes.get_errno()
+            raise OSError(cause, f"cannot identify running image for PID {pid}")
+        return pathlib.Path(os.fsdecode(buffer.value))
+    raise RuntimeError(f"unsupported M8 process-image platform: {sys.platform}")
+
+
+def image_identity(path: pathlib.Path, expected_bytes: int) -> tuple[tuple[int, ...], str] | None:
+    """Hash a bounded, stable descriptor; private copies and sealed memfds are valid."""
+    with path.open("rb") as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size != expected_bytes:
+            return None
+        digest = hashlib.sha256()
+        copied = 0
+        while chunk := source.read(64 * 1024):
+            copied += len(chunk)
+            if copied > expected_bytes:
+                raise RuntimeError("running image grew during identity verification")
+            digest.update(chunk)
+        after = os.fstat(source.fileno())
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    identity = tuple(getattr(before, field) for field in fields)
+    if copied != expected_bytes or identity != tuple(getattr(after, field) for field in fields):
+        raise RuntimeError("running image changed during identity verification")
+    return identity, digest.hexdigest()
+
+
 def fixture_processes(
     descendants: list[tuple[int, int, int, str]], fixture: pathlib.Path
 ) -> list[tuple[int, int]]:
     fixtures: list[tuple[int, int]] = []
-    expected = fixture.resolve()
-    for pid, _, pgid, command in descendants:
-        program = command.split(maxsplit=1)[0]
-        with contextlib.suppress(OSError):
-            if pathlib.Path(program).resolve() == expected:
-                fixtures.append((pid, pgid))
+    expected_bytes = fixture.stat().st_size
+    expected = image_identity(fixture, expected_bytes)
+    if expected is None:
+        raise RuntimeError("approved fixture is not a regular executable image")
+    for pid, _, pgid, _ in descendants:
+        try:
+            image = process_image_path(pid)
+            identity = image_identity(image, expected_bytes)
+            if identity is None or identity[1] != expected[1]:
+                continue
+            # The process must still execute that descriptor in the captured group.
+            current = process_image_path(pid).stat()
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if tuple(getattr(current, field) for field in fields) != identity[0]:
+                raise RuntimeError(f"fixture PID {pid} changed its running image")
+            if os.getpgid(pid) != pgid:
+                raise RuntimeError(f"fixture PID {pid} changed its process group")
+            fixtures.append((pid, pgid))
+        except (FileNotFoundError, ProcessLookupError):
+            # A descendant may naturally retire while its snapshot is inspected.
+            continue
     return sorted(fixtures)
 
 
@@ -653,7 +709,7 @@ def one_sample(
     fixture_groups = {group for _, group in fixture_records}
     if len(fixture_pids) != 3 or len(fixture_groups) != 3:
         raise RuntimeError(
-            f"sample {sample} did not expose three canonical fixture processes in distinct "
+            f"sample {sample} did not expose three exact approved fixture images in distinct "
             f"groups after explicit activation: {fixture_records!r}"
         )
     leaked = group_members(child_groups)

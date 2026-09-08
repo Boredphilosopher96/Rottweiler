@@ -476,6 +476,14 @@ capability boundaries. Evidence is retained per exact run. Establish a required
 coverage threshold only after reviewing the first protected measurements;
 lowering a later threshold requires the same review as a performance waiver.
 Manual protected performance: isolated Linux build artifacts plus macOS binaries built directly on the measurement host to avoid download provenance distortion · 500-sample full p99 gates on fixed native hosted Linux X64 and macOS ARM64 images · M4/M8/TUI performance and release-size evidence.
+M8 identifies activated MCP fixtures through their kernel executable images
+(`/proc/<pid>/exe` on Linux and `proc_pidpath` on macOS), comparing bounded
+streamed SHA-256 and byte counts with the approved fixture artifact. Executable
+metadata must stay stable across capture. Original argv paths are not identity:
+approved programs execute from private snapshots or sealed descriptors. The gate
+still requires exactly three descendant fixture processes in three distinct
+process groups, no startup activation, and complete child-group retirement after
+shutdown. Image hashing occurs outside the prompt-ready timing interval.
 Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · the non-optional Terminal-Bench subset on v1+ development lines · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025. Pre-v1 nightlies omit Terminal-Bench capability qualification.
 Pre-release: the manually dispatched non-publishing preflight validates
 repository-owned public signing inputs, measured baselines, protected
