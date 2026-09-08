@@ -51,12 +51,18 @@ def run(request_path: Path, result_path: Path):
         with log_path.open("rb") as log:
             evidence = log.read(16 * 1024).decode("utf8", errors="replace")
         result["error"] = f"{type(error).__name__}: {error}"[:4096] + "\n" + evidence
-    # No acknowledgement is written if cleanup could not prove group closure.
-    require_sample_settlement()
+    # Failed evidence is never a successful physical-closure acknowledgement.
+    try:
+        require_sample_settlement()
+    except BaseException as error:
+        result["settled"] = False
+        result["error"] = result.get("error", "") + "\n" + str(error)[:4096]
     encoded = json.dumps(result, ensure_ascii=True).encode()
     if len(encoded) > MAX_OUTPUT * 6 + 8192:
         raise ValueError("oversized test process result")
     result_path.write_bytes(encoded)
+    if not result["settled"]:
+        raise SystemExit(125)
 
 
 if __name__ == "__main__":

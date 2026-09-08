@@ -56,13 +56,15 @@ export class TestProcessScope {
     })
     let payload: unknown
     try {
-      if (code !== 0 || (await stat(result)).size > 6 * 1024 * 1024 + 8192) throw new Error("Missing bounded acknowledgement")
+      if ((await stat(result)).size > 6 * 1024 * 1024 + 8192) throw new Error("Missing bounded acknowledgement")
       payload = JSON.parse(await readFile(result, "utf8"))
-      if (typeof payload !== "object" || payload === null || !("settled" in payload) || payload.settled !== true) {
-        throw new Error("Missing physical-settlement acknowledgement")
+      if (code !== 0 || typeof payload !== "object" || payload === null || !("settled" in payload) || payload.settled !== true) {
+        const detail = typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string"
+          ? payload.error.slice(0, 24 * 1024) : "Missing physical-settlement acknowledgement"
+        throw new Error(detail)
       }
     } catch (error) {
-      throw new Error(`UNSETTLED test process; retained ${this.directory}`, { cause: error })
+      throw new Error(`UNSETTLED test process; retained ${this.directory}: ${String(error)}`, { cause: error })
     }
     this.#unsettled = false
     if ("error" in payload) throw new Error(String(payload.error))
