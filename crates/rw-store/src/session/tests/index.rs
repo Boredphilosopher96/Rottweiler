@@ -460,3 +460,49 @@ fn source_hits_share_snapshot_select_numeric_first_body_and_preserve_title_null(
     assert!(SessionIndex::search_hits_read_only(root.path(), &"x".repeat(513), 1).is_err());
     assert!(SessionIndex::search_hits_read_only(root.path(), "needle", 1002).is_err());
 }
+
+#[test]
+fn common_term_limits_unique_sessions_and_counts_a_distinct_truncation_sentinel() {
+    let root = tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
+    let recent = projection(summary("recent", "needle recent", 3), 1001);
+    index
+        .apply_page(None, &recent, |writer| {
+            for sequence in 1..=1000 {
+                writer.text(1, SequenceId(sequence), 0, "needle repeated document")?;
+            }
+            Ok(())
+        })
+        .expect("many matching documents");
+    let older = projection(summary("older", "needle older", 2), 2);
+    index
+        .apply_page(None, &older, |writer| {
+            writer.text(1, SequenceId(1), 0, "needle repeated document")
+        })
+        .expect("second session");
+    let oldest = projection(summary("oldest", "needle oldest", 1), 1);
+    index.upsert(&oldest).expect("third title");
+    let two =
+        SessionIndex::search_hits_read_only(root.path(), "needle", 2).expect("limited unique hits");
+    assert_eq!(
+        two.iter()
+            .map(|row| row.summary.id.as_str())
+            .collect::<Vec<_>>(),
+        ["recent", "older"]
+    );
+    assert_eq!(two[0].sequence, Some(SequenceId(1)));
+    let sentinel = SessionIndex::search_hits_read_only(root.path(), "needle", 3)
+        .expect("one truncation sentinel");
+    assert_eq!(sentinel.len(), 3);
+    assert_eq!(sentinel[2].summary.id, "oldest");
+    assert_eq!(sentinel[2].sequence, None);
+    let conjunction = SessionIndex::search_hits_read_only(root.path(), "needle repeated", 3)
+        .expect("session conjunction");
+    assert_eq!(
+        conjunction
+            .iter()
+            .map(|row| row.summary.id.as_str())
+            .collect::<Vec<_>>(),
+        ["recent", "older"]
+    );
+}

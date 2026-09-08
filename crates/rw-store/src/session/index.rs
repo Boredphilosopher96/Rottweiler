@@ -333,12 +333,7 @@ fn query_search(
         return Ok(Vec::new());
     }
     sqlite_schema::validate_sessions(connection)?;
-    let sets = (1..=terms.len()).map(|number| format!("SELECT d.session_id FROM sessions_fts JOIN search_documents d ON d.rowid=sessions_fts.rowid WHERE sessions_fts MATCH ?{number}")).collect::<Vec<_>>().join(" INTERSECT ");
-    let bodies = (1..=terms.len()).map(|number| format!("SELECT d.session_id,d.sequence_id FROM sessions_fts JOIN search_documents d ON d.rowid=sessions_fts.rowid WHERE d.kind=1 AND sessions_fts MATCH ?{number}")).collect::<Vec<_>>().join(" UNION ");
-    let sql = format!(
-        "WITH body_matches AS ({bodies}) SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count,s.next_sequence,s.source_digest,(SELECT sequence_id FROM body_matches b WHERE b.session_id=s.id ORDER BY length(sequence_id),sequence_id LIMIT 1) FROM sessions s JOIN ({sets}) matching ON matching.session_id=s.id WHERE s.search_complete=1 ORDER BY s.updated_unix_ms DESC,s.id ASC LIMIT ?{}",
-        terms.len() + 1
-    );
+    let sql = search_sql(terms.len());
     let mut arguments = terms
         .into_iter()
         .map(rusqlite::types::Value::Text)
@@ -377,6 +372,21 @@ fn query_search(
     })
     .collect()
 }
+
+fn search_sql(term_count: usize) -> String {
+    // One posting-list scan per term feeds both session conjunction and the
+    // earliest body source. Length-prefixed decimal keys preserve full u64 order.
+    let postings = (1..=term_count).map(|number| format!("SELECT d.session_id,{number} AS term,d.kind,d.sequence_id FROM sessions_fts JOIN search_documents d ON d.rowid=sessions_fts.rowid WHERE sessions_fts MATCH ?{number}")).collect::<Vec<_>>().join(" UNION ALL ");
+    format!(
+        "WITH postings AS ({postings}), matching AS (SELECT session_id,MIN(CASE WHEN kind=1 THEN printf('%02d',length(sequence_id))||sequence_id END) AS body_source FROM postings GROUP BY session_id HAVING count(DISTINCT term)={}) SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count,s.next_sequence,s.source_digest,substr(matching.body_source,3) FROM sessions s JOIN matching ON matching.session_id=s.id WHERE s.search_complete=1 ORDER BY s.updated_unix_ms DESC,s.id ASC LIMIT ?{}",
+        term_count,
+        term_count + 1
+    )
+}
+
+#[cfg(test)]
+#[path = "index_search_plan_tests.rs"]
+mod search_plan_tests;
 
 fn parse_sequence(value: &str) -> Result<u64, SessionStoreError> {
     let parsed = value
