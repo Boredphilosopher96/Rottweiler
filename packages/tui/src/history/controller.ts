@@ -150,6 +150,7 @@ export class HistoryController {
     const sessionId = this.#sessionId
     const target = this.#target
     if (this.#disposed || sessionId === null || target === null) return
+    if (position.type === "search_match" && position.source.session_id !== sessionId) throw new Error("Search match belongs to another session.")
     this.#request?.abort()
     const request = new AbortController()
     this.#request = request
@@ -178,6 +179,7 @@ export class HistoryController {
           continue
         }
         if (result.type === "ordering_changed") {
+          if (position.type === "search_match") throw new Error("Search match is no longer available. Search again.")
           const anchor = session.anchor?.id ?? this.snapshot.page?.items[0]?.id
           this.#invalidate(session)
           session.view = null
@@ -187,6 +189,12 @@ export class HistoryController {
         const page = result.page
         const admittedAt = this.diagnostics?.start()
         validatePage(page, sessionId)
+        let searchItem: import("../protocol").TranscriptItem | undefined
+        if (position.type === "search_match") {
+          const anchor = page.anchor
+          searchItem = anchor.type === "exact" ? page.items.find(item => item.id === anchor.item) : undefined
+          if (searchItem === undefined) throw new Error("Search did not resolve an exact transcript item.")
+        }
         if (session.view?.through != null && (page.view.through == null
           || requiredU64(page.view.through) < requiredU64(session.view.through))) {
           throw new Error("history response predates the applied source prefix")
@@ -200,6 +208,10 @@ export class HistoryController {
         session.activeKey = key
         session.view = page.view
         session.total = requiredU64(page.total_items)
+        if (searchItem !== undefined) {
+          session.anchor = { id: searchItem.id, offset: 0 }
+          this.#selection = { ordinal: requiredU64(searchItem.ordinal) }
+        }
         // Publish explicit navigation before an invalidation can refresh this page.
         // A failed read keeps the previous stable viewport.
         if (position.type === "around" && session.anchor?.id !== position.item) {

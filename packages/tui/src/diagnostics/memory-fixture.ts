@@ -107,6 +107,10 @@ export class MemoryFixture {
         })) } } }
       case "get_todos": return { type: "todos_read", meta, session_id: command.session_id, result: { type: "ready", todos: { through: SOURCE, snapshot: { items: [] } } } }
       case "read_session_children": return { type: "session_children_ready", meta, session_id: command.session_id, result: { type: "ready", snapshot: { through: SOURCE, children: [] } } }
+      case "list_sessions": return { type: "sessions_listed", meta, sessions: [] }
+      case "search_sessions": return { type: "sessions_search_ready", meta, query: command.query, truncated: false,
+        hits: [{ session: { session_id: SESSION, title: "Memory history", workspace_name: "Probe", model: "fast", driver_client_id: "memory-client", shell_active: false },
+          match: { session_id: SESSION, source_sequence: "15000", through: this.historyThrough, digest: Array(32).fill(0) as import("../protocol").SessionSearchMatch["digest"] } }] }
       case "list_runtime_services": return { type: "runtime_services_listed", meta, session_id: SESSION, services: [] }
       case "list_models": return { type: "models_listed", meta, models: [], aliases: [], providers: [], cached: false, truncated: false }
       case "get_session_review": return { type: "session_review_ready", meta, session_id: SESSION,

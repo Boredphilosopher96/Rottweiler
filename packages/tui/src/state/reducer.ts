@@ -324,8 +324,8 @@ function applyKnownEvent(
     case "sessions_search_ready":
       return {
         ...state,
-        sessions: event.sessions.map(projectSession),
-        sessionSearch: { query: event.query, truncated: event.truncated },
+        sessions: event.hits.map(hit => projectSession(hit.session)),
+        sessionSearch: { query: event.query, truncated: event.truncated, matches: event.hits.flatMap(hit => hit.match === null || hit.match.session_id !== hit.session.session_id ? [] : [hit.match]) },
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
     case "command_descriptors_listed":

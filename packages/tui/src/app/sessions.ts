@@ -1,3 +1,4 @@
+import { SessionSearchNavigation } from "./session-search"
 import { directSessionRead } from "../session-reader"
 import { homedir } from "node:os"
 import type {
@@ -8,7 +9,7 @@ import type {
 } from "../components"
 import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker, ProjectionKind } from "../projection-requests"
-import type { Attachment, CommandOutcome, EngineEvent } from "../protocol"
+import type { Attachment, CommandOutcome, EngineEvent, SessionSearchMatch } from "../protocol"
 import { presentError } from "../render"
 import type { ComposerDraftStore, DraftSubmission } from "../composer-drafts"
 import type { ClientCache } from "../history/cache"
@@ -39,7 +40,7 @@ interface SessionUiHost {
   composerNotice: string | null
   refresh(): void
   closePicker(): void
-  navigateTranscript(sequence: string): Promise<import("../protocol").TranscriptAnchor | null>
+  navigateTranscript(source: string | SessionSearchMatch): Promise<import("../protocol").TranscriptAnchor | null>
   selectSession(sessionId: string): void | Promise<void>
   sendMessage(content: string, attachments: readonly Attachment[]): Promise<boolean>
   projectError(code: string, message: string, retryable?: boolean): void
@@ -69,6 +70,7 @@ type SessionListAction =
   | { readonly kind: "retry" }
 
 type SessionPickerAction =
+  | { readonly kind: "match"; readonly source: SessionSearchMatch }
   | { readonly kind: "resume"; readonly session: SessionProjection }
   | { readonly kind: "rename"; readonly session: SessionProjection }
 
@@ -102,6 +104,7 @@ function expandLeadingHome(path: string): string {
 
 export class SessionUiController {
   readonly #host: SessionUiHost
+  readonly #search: SessionSearchNavigation
   #pendingSessionCreateRequestId: string | null = null
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #exportNoticeTimer: ReturnType<typeof setTimeout> | null = null
@@ -113,8 +116,8 @@ export class SessionUiController {
   #rewindRead: AbortController | null = null
   #navigation: object | null = null
   #retrying = false
-  constructor(host: SessionUiHost) { this.#host = host }
-  get pending(): boolean { return this.#navigation !== null || this.#retrying || this.#rewindRead !== null || this.#pendingRewindIntent !== null || this.#pendingExport !== null || this.#pendingSessionCreateRequestId !== null }
+  constructor(host: SessionUiHost) { this.#host = host; this.#search = new SessionSearchNavigation(host) }
+  get pending(): boolean { return this.#search.pending || this.#navigation !== null || this.#retrying || this.#rewindRead !== null || this.#pendingRewindIntent !== null || this.#pendingExport !== null || this.#pendingSessionCreateRequestId !== null }
   clearRewind(): boolean {
     const pending = this.#pendingRewindIntent !== null || this.#rewindRead !== null
     this.#rewindRead?.abort(); this.#rewindRead = null
@@ -297,7 +300,7 @@ export class SessionUiController {
   }
 
   async #navigate(event: Extract<EngineEvent, { type: "session_navigation_requested" }>): Promise<void> {
-    if (this.#navigation !== null) {
+    if (this.#navigation !== null || this.#search.pending) {
       this.#host.projectError("navigation_pending", "A session navigation is already pending.", true)
       return
     }
@@ -400,6 +403,7 @@ export class SessionUiController {
   #openSessionActionPicker(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
     this.#host.pickerController.kind = "sessionActions"
+    this.#host.picker.input.value = ""
     this.#host.pickerController.refresh()
   }
 
@@ -722,7 +726,7 @@ export class SessionUiController {
             id: session.sessionId,
             label: session.title || session.workspaceName,
             description: `${session.workspaceName} · ${session.model}${session.shellActive ? " · shell active" : ""}`,
-            searchText: `${session.sessionId} ${session.title ?? ""} ${session.workspaceName} ${session.model}`,
+            searchText: `${this.#host.state.sessionSearch?.query ?? ""} ${session.sessionId} ${session.title ?? ""} ${session.workspaceName} ${session.model}`,
             value: { kind: "session", session } as const,
           })),
         ]
@@ -757,7 +761,10 @@ export class SessionUiController {
           this.#host.closePicker()
           break
         }
+        const match = this.#host.state.sessionSearch?.matches.find(source => source.session_id === session.sessionId)
         const items: PickerItem<SessionPickerAction>[] = [
+          ...(match === undefined ? [] : [{ id: "match", label: "Open matching message",
+            description: "Jump to the exact source found in this conversation", value: { kind: "match", source: match } as const }]),
           {
             id: "resume",
             label: "Resume session",
@@ -775,7 +782,9 @@ export class SessionUiController {
           `Session actions · ${boundedUiText(session.title ?? session.workspaceName, 64)}`,
           items,
           (item) => {
-            if (item.value.kind === "resume") {
+            if (item.value.kind === "match") {
+              void this.#search.open(item.value.source)
+            } else if (item.value.kind === "resume") {
               this.#host.closePicker()
               void this.#host.selectSession(item.value.session.sessionId)
             } else {

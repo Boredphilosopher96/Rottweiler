@@ -116,14 +116,14 @@ describe("state queries", () => {
       type: "sessions_search_ready",
       meta: replyMeta("search-1"),
       query: "rott",
-      sessions: [
-        { title: "Fixture",
+      hits: [
+        { match: null, session: { title: "Fixture",
           session_id: "session-state",
           workspace_name: "Rottweiler",
           model: "fast",
           driver_client_id: null,
           shell_active: false,
-        },
+        } },
       ],
       truncated: true,
     })
@@ -137,7 +137,7 @@ describe("state queries", () => {
         shellActive: false,
       },
     ])
-    expect(state.sessionSearch).toEqual({ query: "rott", truncated: true })
+    expect(state.sessionSearch).toEqual({ query: "rott", truncated: true, matches: [] })
     expect(state.lastSequence).toBeNull()
   })
 

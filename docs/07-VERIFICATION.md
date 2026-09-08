@@ -505,7 +505,8 @@ probe uses this production collection policy by default, without harness-injecte
 collection. `client-memory-probe.py --collect-garbage` is a separate allocator
 diagnostic and cannot replace production-policy RSS or eight-hour soak evidence.
 The compiled probe also exercises earliest/middle/latest navigation across 10,000
-mixed rows, resize and append-away anchors, refetch after cache eviction, and an
+mixed rows, resize and append-away anchors, refetch after cache eviction, a
+source-qualified jump through the session search picker, and an
 actual process handoff with a pending child question and a parent text attachment
 larger than 4 MiB. Its bounded fixture runs in the measured client process;
 complete engine-plus-TUI RSS qualification remains a separate gate.

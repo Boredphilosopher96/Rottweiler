@@ -345,6 +345,14 @@ export class TranscriptRenderable extends BoxRenderable {
     } finally { this.#requestedAnchor = null }
   }
 
+  async revealSearchMatch(source: import("../protocol").SessionSearchMatch): Promise<void> {
+    await this.#historyOptions.onHistorySearch?.(source)
+    if (this.#history?.error != null) throw new Error(this.#history.error)
+    if (this.#history?.sessionId !== source.session_id || this.#history?.page?.anchor.type !== "exact") {
+      throw new Error("Search did not resolve an exact transcript item.")
+    }
+  }
+
   captureHistoryViewport(): HistoryViewport | null {
     if (this.#history === null || this.#history.following) return { following: true, anchor: null }
     // An in-flight navigation has not selected a physical source row yet.
@@ -497,6 +505,9 @@ export class TranscriptRenderable extends BoxRenderable {
   }
 
   scrollBy(direction: 1 | -1, unit: "step" | "viewport"): void {
+    // Explicit scrolling supersedes an unfinished layout restoration.
+    this.#pendingAnchor = null
+    this.#pendingBottom = false
     this.#historyOptions.onHistoryFollowing?.(false)
     this.#moveWindow(direction)
     this.scroller.scrollBy(direction, unit)
@@ -578,9 +589,7 @@ export class TranscriptRenderable extends BoxRenderable {
       // Keep the source anchor until the replacement geometry is computed.
       if (this.scroller.content.getLayoutNode().isDirty()) { this.requestRender(); return true }
       const previous = this.scroller.scrollTop
-      // Culled rows can keep stale screen coordinates during a multi-pass resize.
-      // Yoga owns the current content position even before that row is painted.
-      this.scroller.scrollTo(card.getLayoutNode().getComputedTop() - anchor.offset)
+      this.scroller.scrollTo(previous + card.y - this.scroller.viewport.y - anchor.offset)
       if (this.scroller.scrollTop !== previous) return true
     }
     this.#pendingAnchor = null

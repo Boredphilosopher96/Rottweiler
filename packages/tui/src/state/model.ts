@@ -27,6 +27,7 @@ import type {
   ProviderNextAction,
   Question,
   RuntimeServiceDescriptor,
+  SessionSearchMatch,
   SubagentStatus as SubagentTerminalStatus,
   ToolCapability,
   TranscriptContentSource,
@@ -244,6 +245,7 @@ export interface SessionReviewProjection {
 }
 
 export interface SessionSearchProjection {
+  readonly matches: readonly SessionSearchMatch[]
   readonly query: string
   readonly truncated: boolean
 }

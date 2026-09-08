@@ -6,9 +6,11 @@ import type { createMemoryRenderer } from "./memory-renderer"
 /** Pure indexed fixture: each request materializes only its bounded mixed page. */
 export function mixedHistoryPage(session: string, read: TranscriptRead, total: number, through: string): TranscriptPage {
   const count = Math.min(read.max_items, 32, total), position = read.position
-  const selected = "item" in position ? Number(position.item) : null
+  if (position.type === "search_match" && (position.source.session_id !== session || position.source.source_sequence !== "15000"
+    || position.source.through !== through || position.source.digest.some(byte => byte !== 0))) throw new Error("fixture search token differs")
+  const selected = position.type === "search_match" ? 5001 : "item" in position ? Number(position.item) : null
   const requested = position.type === "latest" ? total - count : position.type === "at_ordinal" ? Number(position.ordinal)
-    : position.type === "around" ? selected! - Math.floor(count / 2)
+    : position.type === "around" || position.type === "search_match" ? selected! - Math.floor(count / 2)
     : position.type === "before" ? selected! - count : position.type === "after" ? selected! + 1 : 0
   const first = Math.max(0, Math.min(total - count, requested))
   return {
@@ -70,5 +72,28 @@ export async function exerciseHistory(app: RottweilerApp, fixture: MemoryFixture
   await reveal("5000", "evicted-middle-after-reconnect")
   requireThat(fixture.historyReads > reads, "evicted history was not fetched through the source reader")
   await reveal(String(fixture.historyRows - 1), "latest-after-reconnect")
+  app.openSessionPicker()
+  const deadline = performance.now() + 10_000
+  while (!app.picker.select.options.some(option => option.value === "sessions.new")) {
+    if (performance.now() >= deadline) throw new Error("session picker did not become editable")
+    await Bun.sleep(1); await render()
+  }
+  await setup.mockInput.typeText("needle-in-message")
+  while (!app.picker.select.options.some(option => option.value === "memory-probe")) {
+    if (performance.now() >= deadline) throw new Error(`indexed search result was filtered out of the picker: ${JSON.stringify({ focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, composer: app.composer.value.slice(0, 100), query: app.picker.input.value, results: app.state.sessionSearch, options: app.picker.select.options.map(option => option.value), errors: app.state.errors.slice(-3) })}`)
+    await Bun.sleep(1); await render()
+  }
+  app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "memory-probe"))
+  app.picker.select.selectCurrent()
+  await render()
+  const matchIndex = app.picker.select.options.findIndex(option => option.value === "match")
+  requireThat(matchIndex >= 0, "source search hit has no exact jump action")
+  app.picker.select.setSelectedIndex(matchIndex); app.picker.select.selectCurrent()
+  while (app.transcript.captureHistoryViewport()?.anchor?.id !== "5001") {
+    if (performance.now() >= deadline) throw new Error("search result did not reveal its exact semantic row")
+    await Bun.sleep(1); await render()
+  }
+  requireThat(app.transcript.mountedCards.has("5001") && !app.transcript.mountedCards.has("15000"), "search source was confused with semantic row identity")
+  record("search-match")
   return { initialRows: 10_000, finalRows: fixture.historyRows, mixedKinds: ["user", "assistant-markdown-code", "tool"], observations }
 }

@@ -376,7 +376,7 @@ export class RottweilerApp extends BoxRenderable {
       pickerController: this.#pickerController, requests: this.#projectionRequests,
       refresh: () => this.setState(this.#state), closePicker: () => this.closePicker(),
       selectSession: id => this.#options.onSessionSelect?.(id),
-      navigateTranscript: sequence => navigateTranscript(this, this.#children, this.#document, () => this.#closeReview(), sequence),
+      navigateTranscript: source => navigateTranscript(this, this.#children, this.#document, () => this.#closeReview(), source),
       sendMessage: (content, attachments) => this.#submission.sendMessage(content, attachments),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       projectRejection: outcome => this.#projectRejection(outcome),

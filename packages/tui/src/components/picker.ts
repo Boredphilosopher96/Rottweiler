@@ -454,6 +454,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       this.open(title, items, onSelect, compact)
       return
     }
+    const resumed = this.status.visible
     this.#configurePresentation(
       false,
       items.length,
@@ -468,6 +469,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#onSelect = onSelect
     this.#query = this.input.value
     this.#filter(this.input.value, true)
+    if (resumed) this.input.focus()
   }
 
   /** Composer-anchored autocomplete keeps editing focus in the textarea. */

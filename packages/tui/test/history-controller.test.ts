@@ -230,3 +230,31 @@ test("successful navigation publishes its anchor before refresh without changing
     expect(controller.snapshot.page?.items[0]?.id).toBe("400")
   } finally { controller.dispose() }
 })
+
+test("search resolves only an exact row and never falls back across ordering or session mismatch", async () => {
+  const source = { session_id: "session", source_sequence: "900", through: "1000", digest: Array(32).fill(0) as import("../src/protocol").SessionSearchMatch["digest"] }
+  let response: TranscriptReadResult = { type: "ready", page: { ...page("session", 42), anchor: { type: "exact", item: "42" } } }
+  let reads = 0
+  const controller = new HistoryController(reader(async (_session, request) => {
+    reads++
+    return request.position.type === "search_match" ? response : { type: "ready", page: page("session", 999) }
+  }), () => { })
+  try {
+    await controller.open(directSessionRead("session"))
+    await controller.load({ type: "search_match", source })
+    expect(controller.snapshot.anchor).toEqual({ id: "42", offset: 0 })
+    expect(controller.snapshot.selection?.ordinal).toBe(42n)
+    const prior = controller.snapshot.page
+    response = { type: "ready", page: { ...page("session", 40), anchor: { type: "replaced", requested: "900", replacement: "40" } } }
+    await controller.load({ type: "search_match", source })
+    expect(controller.snapshot.error).toContain("exact transcript item")
+    expect(controller.snapshot.page).toBe(prior)
+    response = { type: "ordering_changed", view: page("session", 40).view }
+    const count = reads
+    await controller.load({ type: "search_match", source })
+    expect(reads).toBe(count + 1)
+    expect(controller.snapshot.error).toContain("Search again")
+    await expect(controller.load({ type: "search_match", source: { ...source, session_id: "foreign" } })).rejects.toThrow("another session")
+    expect(reads).toBe(count + 1)
+  } finally { controller.dispose() }
+})

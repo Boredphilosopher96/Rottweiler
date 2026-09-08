@@ -97,3 +97,16 @@ describe("byte-owned fragmented JSON decoding", () => {
     await expect(boundedJson(new Response(new Uint8Array([34, 0xff, 34])), 64)).rejects.toThrow()
   })
 })
+
+test("search replies require explicit nullable source hits and reject the removed summary-only shape", async () => {
+  const command = { ...query, type: "search_sessions", query: "needle", limit: 100 } satisfies ClientCommand
+  const session = { session_id: "session", title: "Title", workspace_name: "Workspace", model: "fast", driver_client_id: null, shell_active: false }
+  const event = { type: "sessions_search_ready", meta: listed.meta, query: "needle", truncated: false, hits: [{ session, match: null }] } satisfies EngineEvent
+  const envelope = (value: unknown) => ({ type: "read", outcome: { type: "accepted" }, events: [value] })
+  expect((await clientFor(envelope(event)).postCommand(command)).type).toBe("read")
+  for (const malformed of [
+    { ...event, hits: [{ session }] },
+    { type: event.type, meta: event.meta, query: event.query, truncated: false, sessions: [session] },
+    { ...event, hits: [{ session, match: { session_id: "session", source_sequence: "3", through: "5" } }] },
+  ]) await expect(clientFor(envelope(malformed)).postCommand(command)).rejects.toThrow()
+})

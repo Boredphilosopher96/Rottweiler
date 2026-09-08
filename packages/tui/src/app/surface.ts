@@ -123,6 +123,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onHistoryAnchor: anchor => host.history.controller.setAnchor(anchor),
       onHistorySeek: ordinal => { void host.history?.controller.seek(ordinal) },
       onHistoryAround: item => host.history.controller.around(item),
+      onHistorySearch: source => host.history.controller.load({ type: "search_match", source }),
       onHistoryBoundary: boundary => { void host.history?.controller.load({ type: boundary }) },
       onHistoryFollowing: following => host.history?.controller.setFollowing(following),
       onOpenToolOutput: (invocationId) => host.openToolOutput(invocationId),

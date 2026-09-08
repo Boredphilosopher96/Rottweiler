@@ -19,7 +19,7 @@ class ClientMemoryProbeTests(unittest.TestCase):
     def test_handoff_oracle_rejects_missing_history_attachment_and_retirement(self):
         expected = [("earliest", "0"), ("middle", "5000"), ("append-away", "5000"),
                     ("resize", "5000"), ("latest", "10000"),
-                    ("evicted-middle-after-reconnect", "5000"), ("latest-after-reconnect", "10000")]
+                    ("evicted-middle-after-reconnect", "5000"), ("latest-after-reconnect", "10000"), ("search-match", "5001")]
         valid = {"schemaVersion": 1, "cycles": 2, "finalAllocationBytes": 0,
                  "resolvedChildControls": 0, "handoffAttachmentBytes": 4_980_736,
                  "history": {"initialRows": 10_000, "finalRows": 10_001,

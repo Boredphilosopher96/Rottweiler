@@ -28,7 +28,7 @@ def validate_handoff(data: dict, cycles: int) -> None:
     history = data.get("history", {})
     expected = [("earliest", "0"), ("middle", "5000"), ("append-away", "5000"),
                 ("resize", "5000"), ("latest", "10000"),
-                ("evicted-middle-after-reconnect", "5000"), ("latest-after-reconnect", "10000")]
+                ("evicted-middle-after-reconnect", "5000"), ("latest-after-reconnect", "10000"), ("search-match", "5001")]
     observations = history.get("observations", [])
     if (history.get("initialRows") != 10_000 or history.get("finalRows") != 10_001
             or history.get("mixedKinds") != ["user", "assistant-markdown-code", "tool"]
