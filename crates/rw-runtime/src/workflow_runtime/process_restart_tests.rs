@@ -10,13 +10,14 @@ use rw_ext::{
 use rw_resources::process::BlockingProcess;
 use rw_types::{
     Cost, SessionId, SubagentId, Usage,
-    workflow::{WorkflowRunId, WorkflowTaskOutcome, WorkflowTaskState},
+    workflow::{WorkflowChild, WorkflowRunId, WorkflowTaskOutcome, WorkflowTaskState},
 };
 use std::{
     fs::{self, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -29,6 +30,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct EffectTask {
     root: PathBuf,
     restarting: bool,
+    journal: Arc<DurableWorkflowJournal>,
 }
 
 #[async_trait]
@@ -38,6 +40,14 @@ impl WorkflowStepExecutor for EffectTask {
         request: WorkflowStepRequest,
     ) -> Result<WorkflowStepArtifact, WorkflowStepExecutionError> {
         assert!(!self.restarting, "restart must not dispatch any task");
+        let child = WorkflowChild {
+            subagent_id: SubagentId(format!("completed-{}", request.step_id)),
+            session_id: SessionId(format!("{}-session", request.step_id)),
+        };
+        self.journal
+            .bind_child(request.task_id, child.clone())
+            .await
+            .map_err(|error| WorkflowStepExecutionError::unsettled(error.to_string()))?;
         let root = self.root.clone();
         let step = request.step_id.clone();
         rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
@@ -65,8 +75,8 @@ impl WorkflowStepExecutor for EffectTask {
             return std::future::pending().await;
         }
         Ok(WorkflowStepArtifact {
-            subagent_id: SubagentId("completed-plan".into()),
-            child_session_id: SessionId("plan-session".into()),
+            subagent_id: child.subagent_id,
+            child_session_id: child.session_id,
             final_text: "durable plan artifact".into(),
             touched_files: Vec::new(),
             diff_artifact: None,
@@ -100,11 +110,15 @@ async fn child_run(root: &Path, restarting: bool) -> TestResult {
     let executor = EffectTask {
         root: root.to_owned(),
         restarting,
+        journal: Arc::clone(&journal),
     };
     let result = WorkflowRunner::new(&executor, journal.as_ref())
         .run(workflow)
         .await;
-    assert!(restarting, "initial runner must wait before settlement");
+    assert!(
+        restarting,
+        "initial runner returned before effect readiness: {result:?}"
+    );
     assert!(matches!(result, Err(WorkflowRunError::UnsettledTask { step }) if step == "build"));
     let state = journal.state().await?;
     let WorkflowTaskState::Settled {
@@ -115,8 +129,9 @@ async fn child_run(root: &Path, restarting: bool) -> TestResult {
     };
     assert_eq!(artifact.final_text, "durable plan artifact");
     assert!(matches!(
-        state.tasks["build"],
-        WorkflowTaskState::Started { .. }
+        &state.tasks["build"],
+        WorkflowTaskState::Started { child: Some(child) }
+            if child.subagent_id.0 == "completed-build" && child.session_id.0 == "build-session"
     ));
     assert!(matches!(state.tasks["review"], WorkflowTaskState::Pending));
     assert_eq!(fs::read_to_string(root.join("effects"))?, "plan\nbuild\n");
@@ -134,7 +149,7 @@ fn spawn(root: &Path, phase: &str) -> Result<BlockingProcess, Box<dyn std::error
             .env(CHILD_ROOT, root)
             .env(CHILD_PHASE, phase)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(diagnostics.try_clone()?)
             .stderr(diagnostics),
     )?)
 }
@@ -158,21 +173,37 @@ fn durable_runner_restart_preserves_effect_and_refuses_reexecution() -> TestResu
         let restarting = std::env::var(CHILD_PHASE)? == "restart";
         return tokio::runtime::Runtime::new()?.block_on(child_run(Path::new(&root), restarting));
     }
-    let root = tempfile::tempdir()?;
-    let workflow = root.path().join("project/.agents/workflows/delivery.toml");
+    let root = tempfile::Builder::new()
+        .prefix("rw-a31-restart-")
+        .tempdir()?;
+    // Unwind the process owners before deciding whether to retain their evidence.
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parent_run(root.path())));
+    if !matches!(&outcome, Ok(Ok(()))) {
+        let retained = root.keep();
+        eprintln!(
+            "workflow restart failure evidence retained at {}",
+            retained.display()
+        );
+    }
+    match outcome {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn parent_run(root: &Path) -> TestResult {
+    let workflow = root.join("project/.agents/workflows/delivery.toml");
     fs::create_dir_all(workflow.parent().ok_or("workflow parent")?)?;
     fs::write(
         workflow,
         "description = \"restart\"\n[[step]]\nid = \"plan\"\nagent = \"plan\"\n[[step]]\nid = \"build\"\nagent = \"general\"\nneeds = [\"plan\"]\n[[step]]\nid = \"review\"\nagent = \"explore\"\nneeds = [\"build\"]\n",
     )?;
-    let mut first = spawn(root.path(), "initial")?;
-    await_ready(&first, || root.path().join("effect-ready").exists())?;
-    assert_eq!(
-        fs::read_to_string(root.path().join("effects"))?,
-        "plan\nbuild\n"
-    );
+    let mut first = spawn(root, "initial")?;
+    await_ready(&first, || root.join("effect-ready").exists())?;
+    assert_eq!(fs::read_to_string(root.join("effects"))?, "plan\nbuild\n");
     first.settle(); // SIGKILL and joined group retirement, without runner destructors.
-    let mut restarted = spawn(root.path(), "restart")?;
+    let mut restarted = spawn(root, "restart")?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
         if let Some(status) = restarted.try_status()? {
@@ -185,11 +216,8 @@ fn durable_runner_restart_preserves_effect_and_refuses_reexecution() -> TestResu
     assert!(
         status.success(),
         "restart failed: {}",
-        fs::read_to_string(root.path().join("restart.log"))?
+        fs::read_to_string(root.join("restart.log"))?
     );
-    assert_eq!(
-        fs::read_to_string(root.path().join("effects"))?,
-        "plan\nbuild\n"
-    );
+    assert_eq!(fs::read_to_string(root.join("effects"))?, "plan\nbuild\n");
     Ok(())
 }
