@@ -162,3 +162,6 @@ pub(super) fn forward_events(
     });
     receive
 }
+
+#[cfg(test)]
+mod tests;
