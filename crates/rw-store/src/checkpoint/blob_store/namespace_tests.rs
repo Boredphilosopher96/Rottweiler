@@ -207,20 +207,27 @@ fn recovery_waits_for_first_registration_before_reading_durable_inventory() -> T
             .map(|entries| entries.is_some());
         sender.send(result)
     });
-    assert!(matches!(
-        receiver.recv_timeout(Duration::from_millis(30)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ));
-    let writer = BlobWriteGuard {
-        owner: &fixture.blobs,
-        connection: fixture.blobs.open_ledger()?,
-        _lock: lock,
-    };
-    writer.register(&store.root)?;
-    drop(writer);
+    let waiting = receiver.recv_timeout(Duration::from_millis(30));
+    let publication = (|| {
+        let writer = BlobWriteGuard {
+            owner: &fixture.blobs,
+            connection: fixture.blobs.open_ledger()?,
+            _lock: lock,
+        };
+        writer.register(&store.root)
+    })();
+    if publication.is_err() {
+        cancellation.cancel();
+    }
     let result = receiver.recv_timeout(Duration::from_secs(2));
     cancellation.cancel();
+    // Settle the reader even when publication or an assertion fails.
     worker.join().map_err(|_| "reader panicked")??;
+    publication?;
+    assert!(matches!(
+        waiting,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
     assert!(result??);
     Ok(())
 }
@@ -243,7 +250,14 @@ fn missing_inventory_rejects_special_or_oversized_authority_files() -> TestResul
                 "directory" => fs::create_dir(&path)?,
                 "symlink" => std::os::unix::fs::symlink(fixture.workspace.join("file"), &path)?,
                 "fifo" => {
-                    rustix::fs::mkfifo(&path, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)?
+                    use std::os::unix::fs::FileTypeExt;
+                    assert!(
+                        std::process::Command::new("mkfifo")
+                            .arg(&path)
+                            .status()?
+                            .success()
+                    );
+                    assert!(fs::symlink_metadata(&path)?.file_type().is_fifo());
                 }
                 "oversized" => File::create(&path)?.set_len(64 * 1024 * 1024 + 1)?,
                 _ => unreachable!(),
@@ -301,7 +315,11 @@ fn malformed_namespace_view_cannot_run_unbounded_readonly_vm_work() -> TestResul
              SELECT CAST(n AS TEXT) AS path FROM spin;",
     )?;
     drop(connection);
-    assert!(store.recover_rewinds().is_err());
+    assert!(matches!(
+        store.recover_rewinds(),
+        Err(CheckpointError::BlobLedger(error))
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted)
+    ));
     assert!(!store.root.join("pending").exists());
     let connection = Connection::open(fixture.blobs.root.join("quota.sqlite"))?;
     let count: u32 =
