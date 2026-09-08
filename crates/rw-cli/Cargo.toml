@@ -53,7 +53,7 @@ toml.workspace = true
 rustix = { workspace = true, features = ["pipe"] }
 nix = { workspace = true, features = ["term"] }
 ed25519-dalek.workspace = true
-rmcp.workspace = true
+rmcp = { workspace = true, features = ["transport-io"] }
 tempfile = "3.23"
 
 [lints]

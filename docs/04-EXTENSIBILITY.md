@@ -395,6 +395,11 @@ Replacing a generation leaves prior readers charged until their final snapshot
 retires. Wire catalog projection measures borrowed fields before copying the
 accepted bounded prefix.
 
+The product links the rmcp client protocol state machine with owned transports.
+The SDK's server and I/O codecs are enabled only by explicit `test-support`
+fixture builds and development dependencies for external interoperability tests;
+the HTTP test server is likewise a development dependency.
+
 The `rw` MCP server uses an owned stdio dispatcher with the same raw-frame and
 working-byte pool. It admits at most 64 outstanding requests before task creation,
 rejects duplicate active IDs, and retains each decoded body through bridge work
