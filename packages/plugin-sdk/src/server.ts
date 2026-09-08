@@ -12,7 +12,7 @@ import validateEventKind from "./generated/extension-event-kind-validator.js"
 import { hostStateContext, type HostSessionApi, type HostStateApi } from "./host-state"
 import { invokeHook, type HookHandlers } from "./hooks"
 import validateProviderRequest from "./generated/provider-request-validator.js"
-import validateProviderEvent from "./generated/provider-event-validator.js"
+import { captureProviderEvent } from "./provider-event"
 import validateHookInput from "./generated/hook-input-validator.js"
 import validateHookDirective from "./generated/hook-directive-validator.js"
 import { ToolProgressReporter } from "./tool-progress"
@@ -968,9 +968,9 @@ export class PluginServer {
           throw new SafeRpcError(-32603, "provider must return an async event stream")
         }
         let sawFinished = false
-        for await (const event of events) {
+        for await (const value of events) {
           if (call.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
-          this.#validateProviderEvent(event, sawFinished)
+          const event = this.#validateProviderEvent(value, sawFinished)
           if (event.type === "finished") sawFinished = true
           const frame: JsonValue = {
             jsonrpc: "2.0",
@@ -996,11 +996,13 @@ export class PluginServer {
     }
   }
 
-  #validateProviderEvent(event: ProviderEvent, sawFinished: boolean): void {
-    if (!validateProviderEvent(event)) throw new SafeRpcError(-32603, "invalid provider event")
+  #validateProviderEvent(value: ProviderEvent, sawFinished: boolean): ProviderEvent {
+    const event = captureProviderEvent(value)
+    if (event === undefined) throw new SafeRpcError(-32603, "invalid provider event")
     if (sawFinished) {
       throw new SafeRpcError(-32603, "provider emitted an invalid event sequence")
     }
+    return event
   }
 
   #toolParams(raw: unknown): ToolCallParams {

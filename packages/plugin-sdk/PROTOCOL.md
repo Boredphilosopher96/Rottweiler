@@ -258,3 +258,11 @@ Authenticated provider HTTP requires `invocation_id`, the exact host request ID
 for the active provider or model catalog call. The SDK exposes this operation
 only on `ProviderHandlerContext`. The host checks identity, exact alias, declared
 credential reference and the invocation deadline before starting the request.
+
+Provider handlers yield plain records whose protocol data is carried by enumerable
+own properties. The SDK captures those fields once into a schema-bounded,
+null-prototype record before validation, sequence tracking, delivery-credit
+selection and output encoding. Unknown enumerable fields and non-record prototypes
+are rejected. Nested JSON values retain their native serialization semantics;
+this is not a deep clone. The generated ProviderEvent schema owns the permitted
+field set, so schema changes update capture and validation together.
