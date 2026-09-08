@@ -136,3 +136,13 @@ test("reentrant serialization cannot create another construction in the same wri
   expect(await nested).toBeInstanceOf(OutboundQueueFullError)
   expect(output).toEqual(['"outer"\n'])
 })
+
+test("boxed Number coercion rejects BigInt exactly as native JSON", () => {
+  let calls = 0
+  const boxed = new Number(2)
+  Object.defineProperty(boxed, "valueOf", { value: () => { calls += 1; return 1n } })
+  expect(() => JSON.stringify(boxed)).toThrow(TypeError)
+  calls = 0
+  expect(() => boundedJsonStringify(boxed as unknown as JsonValue, 64, () => new Error("limit"))).toThrow(TypeError)
+  expect(calls).toBe(1)
+})

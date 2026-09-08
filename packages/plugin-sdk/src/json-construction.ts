@@ -48,7 +48,9 @@ export function boundedJsonStringify(
     // customized primitive conversion runs once, at the same semantic boundary.
     let current = original
     if (typeof current === "object" && current !== null) {
-      if (isNumberObject(current)) current = Number(current)
+      // Unary plus implements ToNumber, including rejection of a BigInt
+      // returned by custom coercion (Number(object) would accept it).
+      if (isNumberObject(current)) current = +(current as unknown as number)
       else if (isStringObject(current)) current = String(current)
       else if (isBooleanObject(current)) current = Boolean.prototype.valueOf.call(current)
       else if (isBigIntObject(current)) current = BigInt.prototype.valueOf.call(current)
