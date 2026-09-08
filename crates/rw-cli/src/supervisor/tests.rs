@@ -115,7 +115,7 @@ fn keybindings_and_theme_are_forwarded_only_to_the_tui() {
 #[test]
 fn tui_resume_cursor_is_explicit_and_never_inherited() {
     let config = fixture_config();
-    for (sequence, expected) in [(None, None), (Some(41), Some("41"))] {
+    for (sequence, expected) in [(None, None), (Some(SequenceId(41)), Some("41"))] {
         let command = command_from_spec(&tui_spec(&config, sequence));
         let value = command
             .as_std()

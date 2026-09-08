@@ -616,6 +616,7 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::transcript::TranscriptView);
     declaration!(rw_types::session_search::SessionSearchMatch);
     declaration!(rw_types::session_search::SessionSearchHit);
+    declaration!(rw_types::SessionPayloadReference);
     declaration!(rw_types::transcript::TranscriptPosition);
     declaration!(rw_types::transcript::TranscriptRead);
     declaration!(rw_types::transcript::TranscriptItem);
