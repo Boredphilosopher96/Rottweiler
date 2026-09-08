@@ -85,6 +85,24 @@ else:
             self.assertEqual(result.returncode, 7)
             self.assertEqual(effect.read_text(), "done")
 
+    def test_exited_leader_with_closed_output_descendant_requires_group_disappearance(self):
+        result = self.run_python("""import os,time
+if os.fork() == 0:
+    os.close(1); os.close(2); time.sleep(60)
+else:
+    os._exit(0)
+""")
+        self.assertEqual(result.returncode, 0)
+
+    def test_after_reap_group_reuse_is_unsettled_without_live_signals(self):
+        from perf_process_wait import require_group_disappearance
+        from perf_process_scope import UnsettledScope
+        with patch.object(os, "killpg") as probe:
+            with self.assertRaisesRegex(UnsettledScope, "phase=after-reap"):
+                require_group_disappearance(123, timeout=.002)
+        self.assertTrue(probe.called)
+        self.assertTrue(all(call.args == (123, 0) for call in probe.call_args_list))
+
     def test_all_group_signals_precede_the_only_reap(self):
         from perf_process_wait import observe_exit
         original = perf_process.signal_owned_group

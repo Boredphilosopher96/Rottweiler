@@ -12,7 +12,7 @@ import time
 from typing import BinaryIO
 
 from perf_process_scope import SCOPE_FD, ScopeReader, inherited_scope
-from perf_process_wait import observe_exit, signal_owned_group
+from perf_process_wait import observe_exit, signal_owned_group, require_group_disappearance
 
 _SCOPE = inherited_scope()
 
@@ -149,6 +149,7 @@ def run_sample(
             # until the last signal. Never signal a group after releasing that PID.
             signal_owned_group(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
+            require_group_disappearance(process.pid)
             if scope is not None:
                 scope.require_closed()
             if registration is not None:

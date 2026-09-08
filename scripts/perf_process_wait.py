@@ -66,3 +66,22 @@ def signal_owned_group(pid: int, number: int) -> None:
         count = query(pid, members, ctypes.sizeof(members))
         if count != 1 or members[0] != pid:
             raise
+
+
+def require_group_disappearance(pid: int, timeout: float = 5) -> None:
+    """Prove no process remains in the group; never signal after leader reaping."""
+    import time
+    from perf_process_scope import UnsettledScope
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            # A zombie-only Darwin group or a reused/unowned group is not a
+            # disappearance proof. Neither may receive another actual signal.
+            pass
+        if time.monotonic() >= deadline:
+            raise UnsettledScope(f"UNSETTLED process group: leader={pid} phase=after-reap")
+        time.sleep(.001)
