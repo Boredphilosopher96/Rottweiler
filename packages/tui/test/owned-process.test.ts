@@ -127,3 +127,40 @@ while True:
     await expect(access(owner.directory)).rejects.toThrow()
   }
 }, 15_000)
+
+test("VM death closes its lifeline and the Python owner reaps native work", async () => {
+  const owner = await scope()
+  const pidFile = join(owner.directory, "orphan.pid")
+  const directoryFile = join(owner.directory, "orphan.directory")
+  const native = `import os,time;open(${JSON.stringify(pidFile)},'w').write(str(os.getpid()));time.sleep(30)`
+  const victim = `
+import {TestProcessScope} from ${JSON.stringify(new URL("./support/owned-process.ts", import.meta.url).pathname)};
+const owner=await TestProcessScope.create("rw-vm-loss-");
+await Bun.write(${JSON.stringify(directoryFile)}, owner.directory);
+await owner.run(["python3","-c",${JSON.stringify(native)}],{timeoutMs:5000});
+`
+  // This controller remains alive while its child VM dies. It explicitly waits
+  // the retained Python/native proof before its own outer group may be settled.
+  const controller = `
+import {readFile,rm} from "node:fs/promises";
+const child=Bun.spawn([process.execPath,"-e",${JSON.stringify(victim)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
+const deadline=Date.now()+8000;
+async function file(path){while(Date.now()<deadline){try{return await readFile(path,"utf8")}catch{}await Bun.sleep(5)}throw new Error("missing physical evidence: "+path)}
+async function absent(pid){while(Date.now()<deadline){try{process.kill(pid,0)}catch{return}await Bun.sleep(5)}throw new Error("process still present: "+pid)}
+let result;
+try{
+ const pid=Number(await file(${JSON.stringify(pidFile)}));
+ const directory=await file(${JSON.stringify(directoryFile)});
+ child.kill("SIGKILL");await child.exited;
+ result=JSON.parse(await file(directory+"/process.result.json"));
+ if(result.settled!==true)throw new Error("UNSETTLED "+directory);
+ await absent(result.supervisor_pid);await absent(pid);
+ await rm(directory,{recursive:true});
+ if(!String(result.error).includes("ScopeCancelled"))throw new Error("parent loss did not cancel native work: "+result.error);
+ console.log("physical parent-loss settlement");
+}finally{if(child.exitCode===null){child.kill("SIGTERM");await child.exited}}
+`
+  const result = await owner.run([process.execPath, "-e", controller], { timeoutMs: 12_000 })
+  expect(result.code).toBe(0)
+  expect(result.stdout).toContain("physical parent-loss settlement")
+}, 20_000)

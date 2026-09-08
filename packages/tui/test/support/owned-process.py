@@ -6,6 +6,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
 from perf_process import run_sample, require_sample_settlement
+from owned_process_lifeline import ParentLifeline
 
 MAX_REQUEST = 1024 * 1024
 MAX_OUTPUT = 1024 * 1024
@@ -36,7 +37,7 @@ def run(request_path: Path, result_path: Path):
     timeout = request["timeoutMs"]
     if type(limit) is not int or not 0 < limit <= MAX_OUTPUT or type(timeout) is not int or not 0 < timeout <= 120_000:
         raise ValueError("invalid test process budgets")
-    result = {"settled": True}
+    result = {"settled": True, "supervisor_pid": os.getpid()}
     log_path = request_path.with_suffix(".output.log")
     try:
         with log_path.open("wb") as log:
@@ -67,7 +68,8 @@ def run(request_path: Path, result_path: Path):
 
 if __name__ == "__main__":
     try:
-        run(Path(sys.argv[1]), Path(sys.argv[2]))
+        with ParentLifeline(0):
+            run(Path(sys.argv[1]), Path(sys.argv[2]))
     except BaseException:
         # Missing result is an explicit unproven lifetime; caller retains scratch.
         sys.exit(125)

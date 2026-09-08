@@ -1,10 +1,13 @@
 import { parentPort, workerData } from "node:worker_threads"
 
 // This worker only owns the Python supervisor. Python owns its bounded native
-// process group; do not terminate the worker while that physical work is pending.
+// process group. The stdin pipe keeps parent lifetime explicit: VM death closes
+// it and requests cooperative cancellation in Python without killing its owner.
 const { bridge, request, result } = workerData as { bridge: string; request: string; result: string }
 const child = Bun.spawn(["python3", bridge, request, result], {
-  stdin: "ignore", stdout: "ignore", stderr: "ignore",
+  stdin: "pipe", stdout: "ignore", stderr: "ignore",
 })
-parentPort!.postMessage(await child.exited)
+const status = await child.exited
+await child.stdin.end()
+parentPort!.postMessage(status)
 parentPort!.close()
