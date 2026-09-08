@@ -26,7 +26,9 @@ fn approved_plugin_profile(
             "executable, config, origin, or manifest requires explicit approval".to_owned(),
         ));
     }
-    config.validate_executable_identity()?;
+    // The launcher must verify the approved executable and attested code while
+    // pinning their actual launch bytes. A preceding mutable-path hash provides
+    // no execution authority and would read every payload a second time.
     let roots = canonical_roots(approved_roots)?;
     let cwd_authorized = if config.source_identity().is_some() {
         config

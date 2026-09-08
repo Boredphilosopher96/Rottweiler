@@ -308,3 +308,46 @@ async fn direct_argv_launcher_never_invokes_a_shell_implicitly() {
         .expect("bounded reap")
         .expect("reap");
 }
+
+#[tokio::test]
+async fn approved_launch_rejects_substitution_at_the_launcher_before_execution() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = TempDir::new().expect("fixture");
+    let executable = root.path().join("plugin");
+    let marker = root.path().join("executed");
+    std::fs::write(&executable, b"#!/bin/sh\nexit 0\n").expect("approved executable");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("executable mode");
+    let config = PluginProcessConfig::new(&executable)
+        .expect("identity")
+        .with_cwd(root.path())
+        .expect("working directory");
+    let manifest = PluginManifest {
+        name: "replaced-launch".to_owned(),
+        version: "1.0.0".to_owned(),
+        protocol: rw_plugin_protocol::PROTOCOL_VERSION,
+        capabilities: PluginCapabilities::default(),
+    };
+    let store = MemoryApproval::default();
+    approve_plugin_launch(&store, &manifest, &config, "project:replaced").expect("approval");
+    std::fs::write(
+        &executable,
+        format!("#!/bin/sh\nprintf executed > '{}'\n", marker.display()),
+    )
+    .expect("substitution");
+    let launcher = TrackingDirectLauncher::default();
+    let result = PluginHost::launch_approved(
+        &launcher,
+        Arc::new(store),
+        &config,
+        "project:replaced",
+        &[root.path().to_path_buf()],
+        manifest,
+        Arc::new(DenyPushHandler),
+        Arc::new(NoopPluginBoundaryRedactor),
+    )
+    .await;
+    assert!(matches!(result, Err(PluginHostError::Process(_))));
+    assert!(launcher.0.lock().expect("launcher record").is_none());
+    assert!(!marker.exists(), "unapproved bytes must never execute");
+}
