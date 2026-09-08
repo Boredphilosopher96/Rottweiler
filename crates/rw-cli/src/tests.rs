@@ -664,7 +664,8 @@ fn owned_runtime_cleanup_retains_unconsumed_editing_state_and_its_directory() ->
     let handoff = runtime.join("tui-recycle-state.json");
     std::fs::write(&token, b"token")?;
     std::fs::write(&handoff, br#"{"draft":"unsent work"}"#)?;
-    let mut guard = RuntimeDirectoryGuard::capture(&runtime)?;
+    let mut guard = RuntimeDirectoryGuard::capture(&runtime)
+        .unwrap_or_else(|error| panic!("runtime guard must capture: {error}"));
     let Err(error) = guard.cleanup() else {
         panic!("editing state must be retained");
     };
