@@ -108,6 +108,19 @@ impl RuntimeDirectoryGuard {
             return Ok(());
         }
         self.validate_identity()?;
+        let handoff = self.path.join("tui-recycle-state.json");
+        match fs::symlink_metadata(&handoff) {
+            Ok(_) => {
+                // Only the client may consume editing state. A failed restore or
+                // cancelled respawn must not turn unsent work into cleanup debris.
+                return Err(io::Error::other(format!(
+                    "unconsumed editing state retained at {}",
+                    handoff.display()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         let entries = fs::read_dir(&self.path)?.collect::<io::Result<Vec<_>>>()?;
         for entry in entries {
             let name = entry.file_name();

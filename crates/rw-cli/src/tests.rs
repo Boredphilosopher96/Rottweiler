@@ -652,6 +652,40 @@ fn owned_runtime_cleanup_removes_only_known_private_artifacts() {
 }
 
 #[test]
+fn owned_runtime_cleanup_retains_unconsumed_editing_state_and_its_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+    let runtime = root.path().join("engine-fixture");
+    std::fs::create_dir(&runtime)
+        .unwrap_or_else(|error| panic!("runtime directory must exist: {error}"));
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("runtime directory must be private: {error}"));
+    let token = runtime.join("auth.token");
+    let handoff = runtime.join("tui-recycle-state.json");
+    std::fs::write(&token, b"token")
+        .unwrap_or_else(|error| panic!("runtime token must exist: {error}"));
+    std::fs::write(&handoff, br#"{"draft":"unsent work"}"#)
+        .unwrap_or_else(|error| panic!("editing state must exist: {error}"));
+    let mut guard = RuntimeDirectoryGuard::capture(&runtime)
+        .unwrap_or_else(|error| panic!("runtime guard must capture: {error}"));
+    let error = guard.cleanup().expect_err("editing state must be retained");
+    assert!(error.to_string().contains("unconsumed editing state"));
+    assert!(
+        token.is_file(),
+        "cleanup must not partially dismantle the runtime"
+    );
+    assert_eq!(
+        std::fs::read(&handoff).expect("editing state remains"),
+        br#"{"draft":"unsent work"}"#
+    );
+    std::fs::remove_file(&handoff).expect("client consumes editing state");
+    guard.cleanup().expect("consumed runtime can be removed");
+    assert!(!runtime.exists());
+}
+
+#[test]
 fn guarded_server_creates_a_missing_selected_runtime_before_capture() {
     let root = tempfile::tempdir()
         .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));

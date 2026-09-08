@@ -354,12 +354,13 @@ impl ProcessBackend for TokioProcessBackend {
     }
 }
 
-fn command_from_spec(spec: &ChildSpec) -> Command {
+pub(super) fn command_from_spec(spec: &ChildSpec) -> Command {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
         .env_remove(TUI_KEYBINDINGS_ENV)
         .env_remove(TUI_THEME_ENV)
+        .env_remove(LAST_SEEN_ENV)
         .envs(&spec.env);
     command
 }

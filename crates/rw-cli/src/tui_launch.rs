@@ -85,12 +85,8 @@ impl TuiLaunch<'_> {
 }
 
 fn command(spec: &ChildSpec) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(&spec.program);
+    let mut command = crate::supervisor::command_from_spec(spec);
     command
-        .args(&spec.args)
-        .env_remove("ROTTWEILER_TUI_KEYBINDINGS")
-        .env_remove("ROTTWEILER_LAST_SEEN_SEQUENCE")
-        .envs(&spec.env)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
