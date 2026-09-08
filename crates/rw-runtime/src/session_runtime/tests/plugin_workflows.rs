@@ -125,6 +125,8 @@ async fn run_status(
     .expect("workflow command");
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut reads = 0;
+        let mut todo_commits = 0;
+        let mut todo_calls = 0;
         let mut summary = None;
         loop {
             match events
@@ -135,6 +137,22 @@ async fn run_status(
                 .clone()
             {
                 EngineEvent::ToolCallStarted { name, .. } if name == "read" => reads += 1,
+                EngineEvent::TodoStateCommitted { snapshot, .. } => {
+                    assert_eq!(todo_calls, 0, "shared task commit precedes its tool result");
+                    assert_eq!(
+                        snapshot.items,
+                        vec![rw_types::todo::TodoItem {
+                            id: "sdk-task".into(),
+                            content: "Shared SDK task".into(),
+                            status: rw_types::todo::TodoStatus::Pending,
+                        }]
+                    );
+                    todo_commits += 1;
+                }
+                EngineEvent::ToolCallFinished { name, is_error, .. } if name == "todo" => {
+                    assert!(!is_error, "SDK executes the ordinary built-in task tool");
+                    todo_calls += 1;
+                }
                 EngineEvent::ToolCallFinished {
                     presentation: Some(presentation),
                     invocation_id,
@@ -146,6 +164,16 @@ async fn run_status(
                     summary = Some((presentation, invocation_id));
                 }
                 EngineEvent::CommandFinished { name, .. } if name == "task-workflow" => {
+                    assert_eq!(
+                        todo_calls,
+                        if argument == "start" { 2 } else { 1 },
+                        "upsert once; list through the shared tool on every query"
+                    );
+                    assert_eq!(
+                        todo_commits,
+                        usize::from(argument == "start"),
+                        "reopen/list never rewrites the shared task"
+                    );
                     let (presentation, invocation) = summary.expect("canonical rich tool result");
                     return (presentation, reads, invocation);
                 }
