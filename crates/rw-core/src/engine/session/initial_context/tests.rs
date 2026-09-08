@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -211,12 +212,14 @@ fn opaque_source(live: &Arc<AtomicUsize>, mixed: bool) -> InitialSessionContext 
     // The source producer owns its deliberately oversized opaque map. Overlay
     // admission is separate and may only cover normalized destination storage.
     let mut retained = allowance(live, usize::MAX);
-    retained.resize(64 * 1024 * 1024).unwrap();
+    retained
+        .resize(64 * 1024 * 1024)
+        .expect("walk fixture invariant");
     InitialSessionContext::from_owned(
         HistoryRead::new(vec![value], retained),
         allowance(live, usize::MAX),
     )
-    .unwrap()
+    .expect("walk fixture invariant")
 }
 
 #[test]
@@ -225,22 +228,35 @@ fn policy_overlay_rebuilds_opaque_maps_and_preserves_wire_order() {
     for mixed in [false, true] {
         let mut context = opaque_source(&live, mixed);
         let original = context.clone();
-        let expected = serde_json::to_string(original.iter().next().unwrap()).unwrap();
+        let expected =
+            serde_json::to_string(original.iter().next().expect("walk fixture invariant"))
+                .expect("walk fixture invariant");
         let before = live.load(Ordering::SeqCst);
         context
             .append_system_text("policy", allowance(&live, 64 * 1024))
-            .unwrap();
-        let changed = context.iter().next().unwrap();
+            .expect("walk fixture invariant");
+        let changed = context.iter().next().expect("walk fixture invariant");
         assert_eq!(changed.blocks.len(), 2);
         assert_eq!(
-            serde_json::to_string(&changed.blocks[0]).unwrap(),
-            serde_json::to_string(&original.iter().next().unwrap().blocks[0]).unwrap()
+            serde_json::to_string(&changed.blocks[0]).expect("walk fixture invariant"),
+            serde_json::to_string(
+                &original
+                    .iter()
+                    .next()
+                    .expect("walk fixture invariant")
+                    .blocks[0]
+            )
+            .expect("walk fixture invariant")
         );
         assert_eq!(
-            serde_json::to_string(original.iter().next().unwrap()).unwrap(),
+            serde_json::to_string(original.iter().next().expect("walk fixture invariant"))
+                .expect("walk fixture invariant"),
             expected
         );
-        assert!(changed.prepared_bytes().unwrap() <= live.load(Ordering::SeqCst) - before);
+        assert!(
+            changed.prepared_bytes().expect("walk fixture invariant")
+                <= live.load(Ordering::SeqCst) - before
+        );
         drop(context);
         drop(original);
         assert_eq!(live.load(Ordering::SeqCst), 0);
@@ -259,7 +275,7 @@ fn opaque_map_overlay_physical_allocations_fit_admission() {
         let region = stats_alloc::Region::new(&stats_alloc::INSTRUMENTED_SYSTEM);
         context
             .append_system_text("policy", allowance(&live, 64 * 1024))
-            .unwrap();
+            .expect("walk fixture invariant");
         let change = region.change();
         let admitted = live.load(Ordering::SeqCst) - before;
         assert!(
