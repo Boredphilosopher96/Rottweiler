@@ -76,7 +76,7 @@ struct ExecutableBacking {
     #[cfg(not(target_os = "linux"))]
     _directory: Option<tempfile::TempDir>,
     #[cfg(test)]
-    _retirement_probe: Option<images::tests::RetirementProbe>,
+    retirement_probe: Option<images::tests::RetirementProbe>,
     _credit: Option<images::ImageCredit>,
 }
 
@@ -118,7 +118,7 @@ impl ApprovedExecutable {
                 #[cfg(not(target_os = "linux"))]
                 _directory: None,
                 #[cfg(test)]
-                _retirement_probe: None,
+                retirement_probe: None,
                 _credit: None,
             }),
             _origin: None,
@@ -248,7 +248,7 @@ impl ApprovedExecutable {
             #[cfg(not(target_os = "linux"))]
             _directory: Some(directory),
             #[cfg(test)]
-            _retirement_probe: None,
+            retirement_probe: None,
             _credit: credit,
         }))
     }

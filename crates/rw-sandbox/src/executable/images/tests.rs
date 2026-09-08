@@ -101,7 +101,7 @@ fn idle_images_reuse_then_evict_under_exact_byte_and_count_limits() {
 #[test]
 fn simultaneous_origins_share_one_copy_and_release_each_binding() {
     let directory = tempfile::tempdir().expect("directory");
-    let receipt = Arc::new(artifact(directory.path(), "source", &[7; 65_536]));
+    let receipt = Arc::new(artifact(directory.path(), "source", &vec![7; 65_536]));
     let images = Arc::new(owner(1, receipt.bytes));
     let barrier = Arc::new(Barrier::new(8));
     let jobs: Vec<_> = (0..8)
@@ -239,7 +239,7 @@ fn slow_physical_retirement_holds_credit_but_never_the_publication_lock() {
             let mut state = images.state.lock().expect("state");
             let backing = Arc::get_mut(state.entries[0].backing.as_mut().expect("cached backing"))
                 .expect("only cache owns image");
-            backing._retirement_probe = Some(RetirementProbe {
+            backing.retirement_probe = Some(RetirementProbe {
                 entered,
                 released: std::sync::Mutex::new(released),
             });
