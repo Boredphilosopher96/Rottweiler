@@ -66,11 +66,14 @@ pub struct WorktreeLease {
 /// Host-private durable metadata used to rebind a continuable child after restart.
 /// This contains a local path and belongs in session metadata, never model context.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorktreeLeaseRecord {
     path: PathBuf,
     base_commit: String,
     canonical_path: PathBuf,
+    #[serde(deserialize_with = "Option::deserialize")]
     device: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
     inode: Option<u64>,
 }
 

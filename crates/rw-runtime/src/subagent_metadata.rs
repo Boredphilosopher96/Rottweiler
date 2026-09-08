@@ -955,6 +955,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_reader_rejects_nested_unknown_and_omitted_lease_fields() {
+        let root = TempDir::new().expect("root");
+        let store = PrivateSubagentMetadataStore::open(root.path()).expect("store");
+        let mut item = record();
+        item.worktree = Some(
+            serde_json::from_value(serde_json::json!({
+                "path": "/private/worktree", "base_commit": "0123456789abcdef",
+                "canonical_path": "/private/worktree", "device": null, "inode": null
+            }))
+            .expect("complete portable lease record"),
+        );
+        let parent = item.parent_session_id.clone();
+        store.save(item.clone()).await.expect("producer metadata");
+        let path = root.path().join("subagents-v1/parent/child.json");
+        let bytes = std::fs::read(&path).expect("producer bytes");
+        let complete: serde_json::Value = serde_json::from_slice(&bytes).expect("metadata JSON");
+        assert_eq!(
+            store
+                .load_parent_page(&parent, None)
+                .expect("complete record")
+                .records[0]
+                .0,
+            item
+        );
+        for pointer in ["/record/capabilities", "/record/worktree"] {
+            let mut invalid = complete.clone();
+            invalid
+                .pointer_mut(pointer)
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("nested object")
+                .insert("undeclared".into(), true.into());
+            std::fs::write(&path, serde_json::to_vec(&invalid).expect("invalid bytes"))
+                .expect("persist unknown field");
+            let Err(error) = store.load_parent_page(&parent, None) else {
+                panic!("accepted unknown {pointer} field");
+            };
+            assert!(
+                error.to_string().contains("unknown field `undeclared`"),
+                "{error}"
+            );
+        }
+        for field in ["device", "inode"] {
+            let mut invalid = complete.clone();
+            assert_eq!(
+                invalid["record"]["worktree"]
+                    .as_object_mut()
+                    .expect("lease")
+                    .remove(field),
+                Some(serde_json::Value::Null)
+            );
+            std::fs::write(&path, serde_json::to_vec(&invalid).expect("invalid bytes"))
+                .expect("persist omission");
+            let Err(error) = store.load_parent_page(&parent, None) else {
+                panic!("accepted omitted worktree {field}");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("missing field `{field}`")),
+                "{error}"
+            );
+        }
+        std::fs::write(&path, bytes).expect("restore original bytes");
+        assert_eq!(
+            store
+                .load_parent_page(&parent, None)
+                .expect("restored record")
+                .records[0]
+                .0,
+            item
+        );
+    }
+
+    #[tokio::test]
     async fn recovery_metadata_requires_explicit_fields_and_rejects_invalid_policy() {
         let root = TempDir::new().expect("root");
         let store = PrivateSubagentMetadataStore::open(root.path()).expect("store");

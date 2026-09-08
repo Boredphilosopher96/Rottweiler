@@ -18,6 +18,7 @@ use crate::interaction::QuestionAsker;
 
 /// Permission-relevant effects a tool may produce.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityManifest {
     capabilities: Vec<ToolCapability>,
 }
