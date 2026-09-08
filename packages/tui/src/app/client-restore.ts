@@ -78,12 +78,21 @@ export class ClientRestoreController {
   #pendingClientState: AppClientState | null = null
   #pendingAllocation: ClientAllocationLease | null = null
   #pendingMounted = false
+  #transcriptRestored = false
+  #toolsRestored = false
+  #pickerRestored = false
+  #interactionAllocation: ClientAllocationLease | null = null
   #answerGuard: { readonly session: string; readonly control: string; readonly text: string; readonly child: string } | null = null
   #interaction: InteractionSelection | null = null
   constructor(readonly host: ClientRestoreHost) {}
-  discard(): void {
-    this.#pendingClientState = null; this.#interaction = null
+  #discardMountedState(): void {
+    this.#pendingClientState = null
+    this.#transcriptRestored = false; this.#toolsRestored = false; this.#pickerRestored = false
     this.#pendingAllocation?.release(); this.#pendingAllocation = null
+  }
+  discard(): void {
+    this.#discardMountedState(); this.#interaction = null
+    this.#interactionAllocation?.release(); this.#interactionAllocation = null
   }
   dispose(): void { this.discard(); this.#answerGuard = null }
   admitAnswer(content: string): boolean {
@@ -223,7 +232,10 @@ export class ClientRestoreController {
     }
     if (state.child === null) void this.host.history.restoreViewport(directSessionRead(this.host.sessionId), state.history)
     this.#pendingAllocation = owner
-    this.#interaction = state.interaction
+    if (state.interaction !== null) {
+      this.#interactionAllocation = this.host.history.cache.allocations.reserve("drafts", retainedJsonBytes(state.interaction, 4096))
+      this.#interaction = state.interaction
+    }
     this.#pendingClientState = state
     this.host.ui.setState(this.host.ui.state)
     this.host.input.focusForInputMode()
@@ -235,26 +247,27 @@ export class ClientRestoreController {
   /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */
   applyPendingRecycleScroll(): void {
     const state = this.#pendingClientState
-    if (state === null) return
+    if (state === null) { this.#restoreInteraction(); return }
     if (!this.#pendingMounted) {
       if (state.child === null || !this.host.children.restoreRecycleTarget(state.child)) return
       this.#pendingMounted = true
       this.restoreComposerState(state.composer); this.host.submission.restoreInput(state.composer.content)
       void this.host.history.restoreViewport(this.host.children.readTarget, state.history)
     }
-    const selectionReady = this.#interaction === null || this.host.ui.interactionPanel.restoreSelection(this.#interaction)
-    if (selectionReady) this.#interaction = null
+    this.#restoreInteraction()
     const transcriptReady = !this.host.history.snapshot.loading
       && this.host.history.snapshot.page !== null
-    if (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0) {
+    if (!this.#toolsRestored && (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0)) {
       this.host.updateToolsWorkspace(this.host.children.presentedState(), true)
     }
     const toolsReady = state.toolsScrollTop === 0 || this.host.ui.toolsWorkspace.mountedRowCount > 0
-    const transcriptBlocksReady = this.host.ui.transcript.restoreClientState(state.transcript)
-    const toolsBlocksReady = this.host.ui.toolsWorkspace.restoreClientState(state.tools)
-    if (toolsReady) this.host.ui.toolsWorkspace.activityScroller.scrollTo(state.toolsScrollTop)
+    if (!this.#transcriptRestored && transcriptReady) this.#transcriptRestored = this.host.ui.transcript.restoreClientState(state.transcript)
+    if (!this.#toolsRestored && toolsReady) {
+      this.#toolsRestored = this.host.ui.toolsWorkspace.restoreClientState(state.tools)
+      this.host.ui.toolsWorkspace.activityScroller.scrollTo(state.toolsScrollTop)
+    }
     let pickerReady = true
-    if (state.picker !== null && this.host.pickerController.kind === state.picker.kind) {
+    if (!this.#pickerRestored && state.picker !== null && this.host.pickerController.kind === state.picker.kind) {
       const surface = this.clientPickerSurface()
       if (surface !== null) {
         if (state.picker.selectedId !== null) surface.selectById(state.picker.selectedId)
@@ -266,7 +279,13 @@ export class ClientRestoreController {
         pickerReady = state.picker.selectedId === null || index >= 0
       }
     }
-    if (transcriptReady && toolsReady && transcriptBlocksReady && toolsBlocksReady && pickerReady && selectionReady) this.discard()
+    this.#pickerRestored ||= pickerReady
+    if (this.#transcriptRestored && this.#toolsRestored && this.#pickerRestored) this.#discardMountedState()
   }
 
+  #restoreInteraction(): void {
+    if (this.#interaction === null || !this.host.ui.interactionPanel.restoreSelection(this.#interaction)) return
+    this.#interaction = null
+    this.#interactionAllocation?.release(); this.#interactionAllocation = null
+  }
 }

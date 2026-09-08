@@ -83,3 +83,29 @@ for (const kind of ["text", "select_one"] as const) {
     expect(app.historyCache.allocations.usage.bytes).toBe(0)
   })
 }
+
+test("a stale interaction does not replay already adopted history on every frame", async () => {
+  const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+  const app = createRottweilerApp(setup.renderer, { sessionId: "s", sessionReader: emptySessionReader })
+  setup.renderer.root.add(app)
+  try {
+    app.composer.value = "retained draft ".repeat(1024)
+    await setup.flush()
+    const saved = app.recycleState()!
+    const state = { ...saved, interaction: { fingerprint: "f".repeat(64), index: 0, composer: false } }
+    let restorations = 0
+    const restore = app.transcript.restoreClientState.bind(app.transcript)
+    app.transcript.restoreClientState = value => { restorations++; return restore(value) }
+    expect(app.restoreRecycleState(state)).toBe(true)
+    const pendingBytes = app.historyCache.allocations.usage.bytes
+    await setup.flush()
+    for (let frame = 0; frame < 5; frame++) {
+      app.applyPendingRecycleScroll()
+      await setup.renderOnce()
+    }
+    expect(restorations).toBe(1)
+    expect(app.composer.value).toBe(saved.composer.content)
+    expect(pendingBytes - app.historyCache.allocations.usage.bytes).toBeGreaterThan(Buffer.byteLength(saved.composer.content))
+  } finally { app.destroy(); setup.renderer.destroy() }
+  expect(app.historyCache.allocations.usage.bytes).toBe(0)
+})
