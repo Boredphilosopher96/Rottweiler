@@ -12,7 +12,7 @@ import {
   type ServerTransport,
 } from "../src/index"
 const providerRequest: ProviderRequest = {
-  model: "model", turns: [], tools: [], tool_choice: { mode: "auto" },
+  model: "model", turns: [], tools: [], tool_choice: { mode: "auto" }, output: { mode: "text" },
   max_output_tokens: 64, temperature: null, thinking: "off", cache_hint: null,
 }
 

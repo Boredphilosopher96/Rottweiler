@@ -46,6 +46,10 @@ impl ProviderOperations {
         mut request: ProviderRequest,
         entry: AttemptEntry,
     ) -> Result<BoxEventStream, ProviderError> {
+        crate::OutputValidation::preflight(
+            &request,
+            provider.supports_structured_output(&request.model),
+        )?;
         let (finished, wait) = oneshot::channel();
         let completion = async move {
             if let Ok(result) = wait.await {
@@ -98,7 +102,9 @@ impl ProviderOperations {
             scope.open(&mut request)?;
             let attempt = entry.gate.enter(&entry.candidate, &request, entry.number).await?;
             captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).attempt = Some(attempt);
+            let contract = crate::output_schema::fingerprint(&request.output)?;
             let mut stream = invoked.stream(request).await?;
+            crate::OutputValidation::require_installed(&stream, contract)?;
             while let Some(event) = futures_util::StreamExt::next(&mut stream).await {
                 {
                     let mut accounting = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -114,8 +120,8 @@ impl ProviderOperations {
                 yield event;
             }
         };
-        Ok(Box::pin(OwnedProviderStream {
-            inner: Some(Box::pin(inner)),
+        Ok(crate::BoxEventStream::new(OwnedProviderStream {
+            inner: Some(crate::BoxEventStream::new(inner)),
             completion: operation.completion.clone(),
             completion_reported: false,
             terminal: None,
@@ -225,7 +231,7 @@ impl Stream for OwnedProviderStream {
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         while let Some(inner) = &mut self.inner {
-            match inner.as_mut().poll_next(context) {
+            match Pin::new(inner).poll_next(context) {
                 Poll::Ready(Some(Ok(event @ ProviderEvent::Finished { .. })))
                     if self.terminal.is_none() =>
                 {
@@ -318,7 +324,7 @@ mod tests {
         async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
             self.invoked.notify_one();
             if self.panic_on_drop {
-                return Ok(Box::pin(PanicOnDrop));
+                return Ok(crate::BoxEventStream::new(PanicOnDrop));
             }
             std::future::pending().await
         }
@@ -336,6 +342,7 @@ mod tests {
             turns: Vec::new(),
             tools: Vec::new(),
             tool_choice: crate::ToolChoice::None {},
+            output: crate::OutputContract::Text {},
             max_output_tokens: 1,
             temperature: None,
             thinking: rw_types::config::ThinkingLevel::Off,

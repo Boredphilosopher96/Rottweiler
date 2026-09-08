@@ -9,11 +9,13 @@ mod anthropic;
 mod attempt;
 mod auth;
 mod continuation;
+mod event_stream;
 mod github_copilot;
 mod http;
 mod models_dev;
 mod openai;
 mod openai_subscription;
+mod output_schema;
 mod pricing;
 mod proxy;
 mod recording;
@@ -63,6 +65,7 @@ pub use openai_subscription::{
     OpenAiSubscriptionTokenSink, extract_openai_subscription_account_id,
     openai_subscription_oauth_flow, openai_subscription_oauth_flow_with_endpoints,
 };
+pub use output_schema::{OutputContract, OutputField, OutputSchema, OutputValidation};
 pub use pricing::{CostBreakdown, ModelPricing, PricingTable};
 pub use proxy::{ProxyEnvironment, ProxyResolution, ProxySettings, ProxySource};
 pub use recording::{FixtureRedactor, MAX_RECORDING_FIXTURE_BYTES, Recorder, ReplayProvider};

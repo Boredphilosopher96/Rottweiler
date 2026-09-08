@@ -116,6 +116,7 @@ export interface ProviderModelsParams {
 export type ProviderCacheBreakpoints = "none" | "explicit" | "automatic"
 
 export interface ProviderModelCapabilities {
+  readonly structured_output: boolean
   readonly tool_calling: boolean
   readonly vision: boolean
   readonly thinking: boolean
@@ -169,7 +170,7 @@ export interface CommandExecuteParams {
 }
 
 import type { ProviderRequest, ProviderEvent } from "./provider-contract"
-export type { ProviderRequest, ProviderEvent, Turn, TurnMeta, Role, Block, ToolOutput, ToolOutputPart, ImageRef, ToolDefinition, ToolChoice, CacheHint, TokenUsage, FinishReason, ThinkingLevel } from "./provider-contract"
+export type { OutputContract, OutputSchema, OutputField, ProviderRequest, ProviderEvent, Turn, TurnMeta, Role, Block, ToolOutput, ToolOutputPart, ImageRef, ToolDefinition, ToolChoice, CacheHint, TokenUsage, FinishReason, ThinkingLevel } from "./provider-contract"
 
 export interface ProviderCompleteParams {
   readonly alias: string
@@ -314,6 +315,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
         "id": "vision-thinking",
         "display_name": "Vision Thinking",
         "capabilities": {
+          "structured_output": false,
           "tool_calling": true,
           "vision": true,
           "thinking": true,
@@ -464,8 +466,9 @@ const SCHEMA_TEMPLATE: &str = r##"{
     },
     "model_capabilities": {
       "type": "object",
-      "required": ["tool_calling", "vision", "thinking", "cache_breakpoints"],
+      "required": ["structured_output", "tool_calling", "vision", "thinking", "cache_breakpoints"],
       "properties": {
+        "structured_output": { "type": "boolean" },
         "tool_calling": { "type": "boolean" },
         "vision": { "type": "boolean" },
         "thinking": { "type": "boolean" },

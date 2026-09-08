@@ -89,6 +89,7 @@ fn request_bytes(config: &SessionActorConfig, assembled: rw_context::AssembledCo
         turns: assembled.turns,
         tools: assembled.tools,
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: config.max_output_tokens,
         temperature: None,
         thinking: config.thinking,

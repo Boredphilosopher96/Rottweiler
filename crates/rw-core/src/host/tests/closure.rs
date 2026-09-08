@@ -36,7 +36,7 @@ impl ModelDriver for SettlementModel {
         _request: ProviderRequest,
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(stream::empty()))
+        Ok(rw_providers::BoxEventStream::new(stream::empty()))
     }
 
     fn has_model_alias(&self, _alias: &str) -> bool {

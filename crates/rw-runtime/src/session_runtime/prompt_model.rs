@@ -36,7 +36,7 @@ impl PromptRecordingModel {
         let provider = provider.map(str::to_owned);
         let inner = Arc::clone(&self.inner);
         let journal = Arc::clone(&self.journal);
-        Box::pin(async_stream::try_stream! {
+        rw_providers::BoxEventStream::new(async_stream::try_stream! {
             let cache = inner.context_metadata(&alias).cache_breakpoints.unwrap_or(CacheBreakpointSupport::None);
             let request = journal.record_owned(alias.clone(), request, cache).await
                 .map_err(|error| rw_providers::ProviderError::new(rw_providers::ProviderErrorKind::Protocol, format!("request shape commit failed: {error}")))?;

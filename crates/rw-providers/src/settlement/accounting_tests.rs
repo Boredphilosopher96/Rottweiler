@@ -99,7 +99,7 @@ impl Provider for TestProvider {
                 "retryable provider failure",
             ));
         }
-        Ok(Box::pin(futures_util::stream::iter([
+        Ok(crate::BoxEventStream::new(futures_util::stream::iter([
             Ok(ProviderEvent::Usage {
                 usage: crate::TokenUsage {
                     input_tokens: 10,
@@ -120,6 +120,7 @@ fn request() -> ProviderRequest {
         turns: Vec::new(),
         tools: Vec::new(),
         tool_choice: crate::ToolChoice::None {},
+        output: crate::OutputContract::Text {},
         max_output_tokens: 10,
         temperature: None,
         thinking: rw_types::config::ThinkingLevel::Off,

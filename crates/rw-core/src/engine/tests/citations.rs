@@ -38,16 +38,16 @@ impl ModelDriver for CitationModel {
         _: ProviderRequest,
         _: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(futures_util::stream::iter(
-            (0..=MAX_TURN_CITATIONS).map(|index| {
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter((0..=MAX_TURN_CITATIONS).map(|index| {
                 Ok(ProviderEvent::Citation {
                     uri: format!("https://example.test/{index}"),
                     title: None,
                     start_index: None,
                     end_index: None,
                 })
-            }),
-        )))
+            })),
+        ))
     }
 }
 

@@ -83,15 +83,17 @@ impl Provider for StatefulProvider {
                     .push(signature);
             }
         }
-        Ok(Box::pin(futures_util::stream::iter([
-            Ok(ProviderEvent::ThinkingDelta {
-                content: "reason".to_owned(),
-                signature: Some("adapter-payload".to_owned()),
-            }),
-            Ok(ProviderEvent::Finished {
-                reason: FinishReason::Stop,
-            }),
-        ])))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([
+                Ok(ProviderEvent::ThinkingDelta {
+                    content: "reason".to_owned(),
+                    signature: Some("adapter-payload".to_owned()),
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ]),
+        ))
     }
 }
 
@@ -116,6 +118,7 @@ fn request(history: Option<&[ProviderEvent]>) -> ProviderRequest {
         turns,
         tools: vec![],
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 64,
         temperature: None,
         thinking: ThinkingLevel::Low,

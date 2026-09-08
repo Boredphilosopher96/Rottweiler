@@ -104,6 +104,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
             turns: Vec::new(),
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto {},
+            output: rw_providers::OutputContract::Text {},
             max_output_tokens: 64,
             temperature: None,
             thinking: ThinkingLevel::Off,
@@ -134,6 +135,7 @@ async fn typescript_tool_hook_event_push_and_provider_cross_rust_host() {
             turns: Vec::new(),
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto {},
+            output: rw_providers::OutputContract::Text {},
             max_output_tokens: 64,
             temperature: None,
             thinking: ThinkingLevel::Off,
@@ -173,7 +175,7 @@ async fn typescript_numeric_and_escaped_events_replenish_exact_wire_credit() {
         .provider_stream(json!({
             "alias": "fixture-v3/numeric-credit", "request": ProviderRequest {
                 model: "numeric-credit".to_owned(), turns: Vec::new(), tools: Vec::new(),
-                tool_choice: ToolChoice::Auto {}, max_output_tokens: 64,
+                tool_choice: ToolChoice::Auto {}, output: rw_providers::OutputContract::Text {}, max_output_tokens: 64,
                 temperature: None, thinking: ThinkingLevel::Off, cache_hint: None,
             }
         }))
@@ -282,6 +284,7 @@ async fn protocol_three_provider_auth_streams_through_host_without_secret_delive
             turns: Vec::new(),
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto {},
+            output: rw_providers::OutputContract::Text {},
             max_output_tokens: 64,
             temperature: None,
             thinking: ThinkingLevel::Off,
@@ -310,6 +313,7 @@ async fn protocol_three_provider_auth_streams_through_host_without_secret_delive
             turns: Vec::new(),
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto {},
+            output: rw_providers::OutputContract::Text {},
             max_output_tokens: 64,
             temperature: None,
             thinking: ThinkingLevel::Off,
@@ -364,6 +368,7 @@ async fn protocol_three_provider_refuses_undeclared_credential_reference_at_call
             turns: Vec::new(),
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto {},
+            output: rw_providers::OutputContract::Text {},
             max_output_tokens: 64,
             temperature: None,
             thinking: ThinkingLevel::Off,

@@ -155,6 +155,7 @@ async fn infer(provider: &Arc<dyn Provider>) {
         turns: Vec::new(),
         tools: Vec::new(),
         tool_choice: ToolChoice::None {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 16,
         temperature: None,
         thinking: ThinkingLevel::Off,

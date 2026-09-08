@@ -84,14 +84,16 @@ impl Provider for AuthoritativeCatalogProvider {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request.model.clone());
-        Ok(Box::pin(futures_util::stream::iter([
-            Ok(ProviderEvent::MessageStart {
-                model: request.model,
-            }),
-            Ok(ProviderEvent::Finished {
-                reason: FinishReason::Stop,
-            }),
-        ])))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([
+                Ok(ProviderEvent::MessageStart {
+                    model: request.model,
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ]),
+        ))
     }
 }
 
@@ -180,17 +182,19 @@ impl Provider for ExtensionFixtureProvider {
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        Ok(Box::pin(futures_util::stream::iter([
-            Ok(ProviderEvent::MessageStart {
-                model: request.model.clone(),
-            }),
-            Ok(ProviderEvent::TextDelta {
-                text: format!("extension:{}", request.model),
-            }),
-            Ok(ProviderEvent::Finished {
-                reason: FinishReason::Stop,
-            }),
-        ])))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([
+                Ok(ProviderEvent::MessageStart {
+                    model: request.model.clone(),
+                }),
+                Ok(ProviderEvent::TextDelta {
+                    text: format!("extension:{}", request.model),
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ]),
+        ))
     }
 }
 
@@ -567,6 +571,7 @@ fn request(model: &str) -> ProviderRequest {
         }],
         tools: Vec::new(),
         tool_choice: rw_providers::ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 32,
         temperature: None,
         thinking: ThinkingLevel::Off,

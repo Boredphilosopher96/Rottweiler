@@ -5,7 +5,7 @@ import type { ProviderRequest, Block } from "../src/generated/provider-contract"
 
 const request: ProviderRequest = {
   model: "fixture", turns: [{ role: "user", blocks: [{ type: "text", text: "hello" }], meta: { created_at: null, model: null, synthetic: false, summary: false } }],
-  tools: [], tool_choice: { mode: "auto" }, max_output_tokens: 64,
+  tools: [], tool_choice: { mode: "auto" }, output: { mode: "text" }, max_output_tokens: 64,
   temperature: null, thinking: "off", cache_hint: null,
 }
 
@@ -58,3 +58,23 @@ test("conversation metadata and content require explicit nullable fields", () =>
 // @ts-expect-error Provider content is a closed semantic union.
 const unsupported: Block = { type: "audio", data: "opaque" }
 void unsupported
+
+test("finite structured schemas require explicit shape, bounds and tool exclusion", async () => {
+  const { validOutputContract } = await import("../src/output-contract")
+  const input: ProviderRequest = { ...request, tool_choice: { mode: "none" }, output: {
+    mode: "json_schema", name: "result", schema: { type: "object", fields: [
+      { name: "ok", schema: { type: "boolean" } },
+    ] },
+  } }
+  expect(validateRequest(input)).toBe(true)
+  expect(validOutputContract(input)).toBe(true)
+  expect(validOutputContract({ ...input, tool_choice: { mode: "auto" } })).toBe(false)
+  if (input.output.mode !== "json_schema" || input.output.schema.type !== "object") throw new Error("fixture")
+  expect(validOutputContract({ ...input, output: { ...input.output, schema: { type: "object", fields: [
+    { name: "ok", schema: { type: "boolean" } }, { name: "ok", schema: { type: "boolean" } },
+  ] } } })).toBe(false)
+  expect(validateRequest({ ...input, output: { ...input.output, schema: { type: "object", fields: [], additionalProperties: true } } })).toBe(false)
+  let schema: import("../src/generated/provider-contract").OutputSchema = { type: "null" }
+  for (let n = 0; n < 16; n += 1) schema = { type: "array", items: schema }
+  expect(validOutputContract({ ...input, output: { ...input.output, schema: { type: "object", fields: [{ name: "x", schema }] } } })).toBe(false)
+})

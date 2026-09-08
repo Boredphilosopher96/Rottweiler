@@ -27,6 +27,7 @@ fn request() -> ProviderRequest {
         }],
         tools: Vec::new(),
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 32,
         temperature: None,
         thinking: ThinkingLevel::Off,

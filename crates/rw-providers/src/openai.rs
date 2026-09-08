@@ -146,6 +146,10 @@ impl OpenAiCompatibleProvider {
         request: ProviderRequest,
         wire_sink: Option<Arc<dyn WireFrameSink>>,
     ) -> Result<BoxEventStream, ProviderError> {
+        let output = crate::OutputValidation::prepare(
+            &request,
+            self.supports_structured_output(&request.model),
+        )?;
         self.validate_request_capabilities(&request)?;
         require_network(self.config.network_policy)?;
         let reasoning_endpoint = !self.config.supported_reasoning_efforts.is_empty();
@@ -172,6 +176,7 @@ impl OpenAiCompatibleProvider {
         })?;
         object.insert("model".to_owned(), Value::String(wire_model.to_owned()));
         object.extend(self.config.extra_body.clone());
+        crate::output_schema::wire::apply(&request.output, object, self.config.wire_mode);
         apply_auth_request_shape(&mut body, &material);
         if let Some(session_id) = material.openai_subscription_session_id() {
             if self.config.wire_mode != OpenAiWireMode::Responses {
@@ -204,11 +209,13 @@ impl OpenAiCompatibleProvider {
         }
         let chunks = response.bytes_stream();
         let wire_mode = self.config.wire_mode;
+        let structured = matches!(request.output, crate::OutputContract::JsonSchema { .. });
         let stream = async_stream::try_stream! {
             let _network_owner = network_lease;
             let mut chunks = chunks;
             let mut decoder = SseDecoder::default();
             let mut state = OpenAiState::new(wire_mode);
+            state.structured = structured;
             while let Some(chunk) = chunks.next().await {
                 let chunk = chunk.map_err(transport_error)?;
                 for event in decoder.push(&chunk)? {
@@ -235,7 +242,7 @@ impl OpenAiCompatibleProvider {
                 ))?;
             }
         };
-        Ok(Box::pin(stream))
+        Ok(output.attach(crate::BoxEventStream::new(stream)))
     }
 
     fn endpoint_for_model(&self, model: &str) -> Result<Url, ProviderError> {
@@ -484,6 +491,11 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn name(&self) -> &str {
         &self.config.name
+    }
+
+    fn supports_structured_output(&self, _model: &str) -> bool {
+        self.config.wire_mode == OpenAiWireMode::Responses
+            || self.config.chat_request_profile == OpenAiChatRequestProfile::OpenAi
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -853,6 +865,7 @@ struct OpenAiState {
     started: bool,
     finished: bool,
     finish_reason: Option<FinishReason>,
+    structured: bool,
 }
 
 struct OpenAiToolState {
@@ -875,6 +888,7 @@ impl OpenAiState {
             started: false,
             finished: false,
             finish_reason: None,
+            structured: false,
         }
     }
 
@@ -895,6 +909,12 @@ impl OpenAiState {
             return Ok(events);
         }
         let value: Value = parse_openai_json(&event.data)?;
+        if self.structured && crate::output_schema::wire::is_refusal(&value) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "structured output was refused",
+            ));
+        }
         if value.get("error").is_some() {
             return Err(openai_stream_error(&value));
         }
@@ -1030,6 +1050,12 @@ impl OpenAiState {
     #[allow(clippy::too_many_lines)]
     fn handle_responses(&mut self, event: &SseEvent) -> Result<Vec<ProviderEvent>, ProviderError> {
         let value: Value = parse_openai_json(&event.data)?;
+        if self.structured && crate::output_schema::wire::is_refusal(&value) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "structured output was refused",
+            ));
+        }
         let kind = event
             .event
             .as_deref()
@@ -1426,8 +1452,10 @@ fn map_finish(reason: Option<&str>) -> FinishReason {
 pub(crate) fn replay_sse_frames(
     wire_mode: OpenAiWireMode,
     frames: &[RawSseFrame],
+    structured: bool,
 ) -> Vec<Result<ProviderEvent, ProviderError>> {
     let mut state = OpenAiState::new(wire_mode);
+    state.structured = structured;
     let mut items = Vec::new();
     for frame in frames {
         let event = SseEvent {

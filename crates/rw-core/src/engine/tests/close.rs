@@ -135,7 +135,9 @@ impl ModelDriver for FailedModel {
         _: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         self.entered.notify_one();
-        Ok(Box::pin(stream::iter(stop_script("response", &[]))))
+        Ok(rw_providers::BoxEventStream::new(stream::iter(
+            stop_script("response", &[]),
+        )))
     }
     async fn settle_effects(&self) -> Result<(), AgentLoopError> {
         assert!(!self.panic, "fixture model settlement panic");

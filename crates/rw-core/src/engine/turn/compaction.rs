@@ -237,6 +237,7 @@ pub(super) async fn execute_compaction(
             turns: summary_request_turns.clone(),
             tools: Vec::new(),
             tool_choice: ToolChoice::None {},
+            output: rw_providers::OutputContract::Text {},
             max_output_tokens: summary_output_tokens(config, &alias),
             temperature: None,
             thinking: config.thinking,

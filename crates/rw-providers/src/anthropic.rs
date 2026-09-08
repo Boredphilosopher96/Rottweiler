@@ -92,6 +92,7 @@ impl AnthropicProvider {
         request: ProviderRequest,
         wire_sink: Option<Arc<dyn WireFrameSink>>,
     ) -> Result<BoxEventStream, ProviderError> {
+        crate::OutputValidation::preflight(&request, false)?;
         let body = build_request(&request, self.config.thinking_strategy)?;
         require_network(self.config.network_policy)?;
         let material = self.config.auth.material().await?;
@@ -147,7 +148,7 @@ impl AnthropicProvider {
                 ))?;
             }
         };
-        Ok(Box::pin(stream))
+        Ok(crate::BoxEventStream::new(stream))
     }
 
     async fn discover_models_impl(&self) -> Result<DiscoveredProviderCatalog, ProviderError> {
@@ -909,6 +910,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }],
             tool_choice,
+            output: crate::OutputContract::Text {},
             max_output_tokens: 32,
             temperature: None,
             thinking: ThinkingLevel::Off,

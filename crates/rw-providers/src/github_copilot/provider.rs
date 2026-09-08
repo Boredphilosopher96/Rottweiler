@@ -248,6 +248,7 @@ impl GitHubCopilotProvider {
         request: ProviderRequest,
         wire_sink: Option<Arc<dyn WireFrameSink>>,
     ) -> Result<BoxEventStream, ProviderError> {
+        crate::OutputValidation::preflight(&request, false)?;
         if request.model != self.config.model_id {
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidRequest,
@@ -285,7 +286,7 @@ impl GitHubCopilotProvider {
             None => delegate.stream(request).await?,
         };
         let endpoint = resolved.model.endpoint;
-        Ok(Box::pin(stream.map(move |item| {
+        Ok(crate::BoxEventStream::new(stream.map(move |item| {
             item.and_then(|event| rewrite_event_signature(event, endpoint))
         })))
     }
@@ -674,10 +675,10 @@ pub(crate) fn replay_sse_frames(
     let parsed = match endpoint {
         GitHubCopilotEndpoint::Messages => crate::anthropic::replay_sse_frames(frames),
         GitHubCopilotEndpoint::Responses => {
-            crate::openai::replay_sse_frames(OpenAiWireMode::Responses, frames)
+            crate::openai::replay_sse_frames(OpenAiWireMode::Responses, frames, false)
         }
         GitHubCopilotEndpoint::ChatCompletions => {
-            crate::openai::replay_sse_frames(OpenAiWireMode::ChatCompletions, frames)
+            crate::openai::replay_sse_frames(OpenAiWireMode::ChatCompletions, frames, false)
         }
     };
     parsed

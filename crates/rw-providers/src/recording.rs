@@ -2,6 +2,7 @@ mod catalog;
 mod redaction;
 mod replay_reads;
 mod schema;
+mod structured;
 mod writer;
 pub use redaction::*;
 use replay_reads::ReplayReads;
@@ -59,6 +60,12 @@ struct RecordFixture {
 
 impl RecordFixture {
     fn validate(&self) -> Result<(), ProviderError> {
+        crate::OutputValidation::preflight(&self.request, true).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "recorded output contract is invalid",
+            )
+        })?;
         if self.version != FIXTURE_VERSION
             || (self.start_error.is_some() && (!self.raw_sse.is_empty() || !self.items.is_empty()))
             || (self.wire_mode == WireMode::GitHubCopilot && self.start_error.is_none())
@@ -344,6 +351,10 @@ impl Provider for Recorder {
         self.inner.name()
     }
 
+    fn supports_structured_output(&self, model: &str) -> bool {
+        self.inner.supports_structured_output(model)
+    }
+
     fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
     }
@@ -371,6 +382,10 @@ impl Provider for Recorder {
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        crate::OutputValidation::preflight(
+            &request,
+            self.inner.supports_structured_output(&request.model),
+        )?;
         self.ensure_admission()?;
 
         // Reserving bounded writer capacity happens before assigning an
@@ -465,15 +480,35 @@ impl Provider for Recorder {
                 return Err(persist_start_error(context, error).await);
             }
         };
+        let expected = crate::output_schema::fingerprint(
+            &start
+                .context
+                .as_ref()
+                .ok_or_else(writer_state_error)?
+                .request
+                .output,
+        )?;
+        if let Err(error) = crate::OutputValidation::require_installed(&inner_stream, expected) {
+            drop(inner_stream);
+            let mut context = start.context.take().ok_or_else(writer_state_error)?;
+            context.push(&Err(error.clone()));
+            let completion = context.enqueue(None, true).ok_or_else(writer_state_error)?;
+            start.finish_tracking();
+            await_write(completion).await?;
+            return Err(error);
+        }
         let context = start.context.take().ok_or_else(writer_state_error)?;
         start.tracking = false;
-        Ok(Box::pin(RecordingStream {
+        let output_contract = inner_stream.output_contract;
+        let mut stream = crate::BoxEventStream::new(RecordingStream {
             inner: inner_stream,
             context: Some(context),
             activity: Arc::clone(&self.activity),
             completion: None,
             done: false,
-        }))
+        });
+        stream.output_contract = output_contract;
+        Ok(stream)
     }
 }
 
@@ -707,7 +742,7 @@ impl Stream for RecordingStream {
         if self.context.is_none() {
             return self.poll_completion(cx);
         }
-        match self.inner.as_mut().poll_next(cx) {
+        match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(item)) => {
                 if let Some(context) = &mut self.context {
                     context.push(&item);
@@ -811,6 +846,10 @@ impl Provider for ReplayProvider {
         &self.name
     }
 
+    fn supports_structured_output(&self, _model: &str) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         self.capabilities.clone()
     }
@@ -832,6 +871,8 @@ impl Provider for ReplayProvider {
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        let output = crate::OutputValidation::prepare(&request, true)?;
+        let structured = matches!(request.output, crate::OutputContract::JsonSchema { .. });
         let read = self.reads.begin()?;
         let hash = request_hash(&request)?;
         let occurrence_key = occurrence_key(&self.name, &hash);
@@ -878,10 +919,12 @@ impl Provider for ReplayProvider {
                 WireMode::OpenAiChatCompletions => crate::openai::replay_sse_frames(
                     crate::OpenAiWireMode::ChatCompletions,
                     &fixture.raw_sse,
+                    structured,
                 ),
                 WireMode::OpenAiResponses => crate::openai::replay_sse_frames(
                     crate::OpenAiWireMode::Responses,
                     &fixture.raw_sse,
+                    structured,
                 ),
                 WireMode::GitHubCopilot | WireMode::NormalizedReplay => {
                     return Err(ProviderError::new(
@@ -903,9 +946,21 @@ impl Provider for ReplayProvider {
                 ),
             };
             qualify_replayed_bound_identity(&mut parsed, &fixture.items, &self.name);
+            if structured {
+                return Ok(structured::reconcile(
+                    output.attach(crate::BoxEventStream::new(futures_util::stream::iter(
+                        parsed,
+                    ))),
+                    fixture.items,
+                ));
+            }
             reconcile_raw_replay(parsed, fixture.items)?
         };
-        Ok(Box::pin(futures_util::stream::iter(items)))
+        Ok(
+            output.attach(crate::BoxEventStream::new(futures_util::stream::iter(
+                items,
+            ))),
+        )
     }
 }
 

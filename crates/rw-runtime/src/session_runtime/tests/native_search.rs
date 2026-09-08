@@ -88,6 +88,7 @@ async fn mixed_alias_websearch_schema_is_reachable_for_the_selected_model() {
             input_schema: serde_json::json!({"type": "object"}),
         }],
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -159,6 +160,7 @@ fn configured_websearch_schema_is_exposed_for_an_unsupported_alias() {
             input_schema: serde_json::json!({"type": "object"}),
         }],
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -206,6 +208,7 @@ async fn unsupported_alias_prompt_shape_omits_dead_websearch_schema() {
             input_schema: serde_json::json!({"type": "object"}),
         }],
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -298,11 +301,11 @@ impl rw_providers::Provider for NativeProvider {
         &self,
         _request: ProviderRequest,
     ) -> Result<rw_providers::BoxEventStream, rw_providers::ProviderError> {
-        Ok(Box::pin(futures_util::stream::iter([Ok(
-            rw_providers::ProviderEvent::Finished {
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([Ok(rw_providers::ProviderEvent::Finished {
                 reason: rw_providers::FinishReason::Stop,
-            },
-        )])))
+            })]),
+        ))
     }
 }
 

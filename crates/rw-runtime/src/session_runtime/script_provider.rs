@@ -97,7 +97,7 @@ impl Provider for ScriptProvider {
                 )
             })?;
         let delay = self.event_delay;
-        Ok(Box::pin(async_stream::stream! {
+        Ok(rw_providers::BoxEventStream::new(async_stream::stream! {
             for event in events {
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;

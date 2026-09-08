@@ -25,7 +25,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::StreamExt as _;
 use rw_plugin_protocol::validate_provider_alias_prefix;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
@@ -645,6 +644,10 @@ impl Provider for ModelBoundProvider {
             .flatten()
     }
 
+    fn supports_structured_output(&self, model: &str) -> bool {
+        self.inner.supports_structured_output(model)
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         self.validate(&request)?;
         let stream = self.inner.stream(request).await?;
@@ -662,19 +665,8 @@ impl Provider for ModelBoundProvider {
     }
 }
 
-fn qualify_bound_message_start(mut stream: BoxEventStream, candidate: String) -> BoxEventStream {
-    Box::pin(async_stream::try_stream! {
-        while let Some(event) = stream.next().await {
-            match event? {
-                rw_providers::ProviderEvent::MessageStart { .. } => {
-                    yield rw_providers::ProviderEvent::MessageStart {
-                        model: candidate.clone(),
-                    };
-                }
-                event => yield event,
-            }
-        }
-    })
+fn qualify_bound_message_start(stream: BoxEventStream, candidate: String) -> BoxEventStream {
+    stream.with_model_name(candidate)
 }
 
 impl AdapterKind {

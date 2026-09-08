@@ -6,6 +6,7 @@ mod http_authority;
 mod sdk;
 mod settlement;
 mod state;
+mod structured;
 mod tool_effects;
 mod transport;
 

@@ -40,7 +40,7 @@ impl ModelDriver for Driver {
     }
 }
 fn empty() -> BoxEventStream {
-    Box::pin(futures_util::stream::empty())
+    rw_providers::BoxEventStream::new(futures_util::stream::empty())
 }
 
 #[tokio::test]

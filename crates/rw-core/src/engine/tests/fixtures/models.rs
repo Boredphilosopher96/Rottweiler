@@ -63,17 +63,19 @@ impl ModelDriver for DeferredVisionModel {
         _request: ProviderRequest,
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(futures_util::stream::iter([
-            Ok(ProviderEvent::MessageStart {
-                model: "vision/model".to_owned(),
-            }),
-            Ok(ProviderEvent::TextDelta {
-                text: "image received".to_owned(),
-            }),
-            Ok(ProviderEvent::Finished {
-                reason: FinishReason::Stop,
-            }),
-        ])))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([
+                Ok(ProviderEvent::MessageStart {
+                    model: "vision/model".to_owned(),
+                }),
+                Ok(ProviderEvent::TextDelta {
+                    text: "image received".to_owned(),
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ]),
+        ))
     }
 
     async fn prepare_model(&self, _alias: &str) -> Result<(), AgentLoopError> {
@@ -171,7 +173,7 @@ impl ModelDriver for ScriptedModel {
             .expect("script lock")
             .pop_front()
             .ok_or_else(|| AgentLoopError::Provider("missing fixture script".to_owned()))?;
-        Ok(Box::pin(stream::iter(events)))
+        Ok(rw_providers::BoxEventStream::new(stream::iter(events)))
     }
 
     fn title_model_alias(&self) -> Option<String> {
@@ -234,7 +236,9 @@ impl ModelDriver for M3Model {
         let summary = matches!(request.tool_choice, rw_providers::ToolChoice::None {});
         self.requests.lock().expect("request lock").push(request);
         if let Some(script) = self.summary_script.as_ref().filter(|_| summary) {
-            return Ok(Box::pin(stream::iter(script.clone())));
+            return Ok(rw_providers::BoxEventStream::new(stream::iter(
+                script.clone(),
+            )));
         }
         let script = self
             .scripts
@@ -242,7 +246,7 @@ impl ModelDriver for M3Model {
             .expect("script lock")
             .pop_front()
             .ok_or_else(|| AgentLoopError::Provider("missing M3 script".to_owned()))?;
-        Ok(Box::pin(stream::iter(script)))
+        Ok(rw_providers::BoxEventStream::new(stream::iter(script)))
     }
 
     async fn prepare_model(&self, alias: &str) -> Result<(), AgentLoopError> {
@@ -309,7 +313,9 @@ impl Provider for ReplaySourceProvider {
         } else {
             &self.answer
         };
-        Ok(Box::pin(stream::iter(script.clone())))
+        Ok(rw_providers::BoxEventStream::new(stream::iter(
+            script.clone(),
+        )))
     }
 }
 
@@ -416,7 +422,7 @@ impl ModelDriver for RoutedCostModel {
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         self.requests.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::pin(stream::iter([
+        Ok(rw_providers::BoxEventStream::new(stream::iter([
             Ok(ProviderEvent::RouteSelected {
                 route: self.route.to_owned(),
             }),
@@ -492,7 +498,7 @@ impl ModelDriver for DelayedSummaryModel {
         _request: ProviderRequest,
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(
+        Ok(rw_providers::BoxEventStream::new(
             stream::iter([
                 Ok(ProviderEvent::MessageStart {
                     model: "fixture-model".to_owned(),
@@ -529,7 +535,7 @@ impl ModelDriver for PendingModel {
         _request: ProviderRequest,
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(
+        Ok(rw_providers::BoxEventStream::new(
             stream::iter([Ok(ProviderEvent::MessageStart {
                 model: "fixture-model".to_owned(),
             })])
@@ -559,7 +565,7 @@ impl ModelDriver for GatedCompactionModel {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             let started = Arc::clone(&self.started);
             let release = Arc::clone(&self.release);
-            return Ok(Box::pin(
+            return Ok(rw_providers::BoxEventStream::new(
                     stream::once(async move {
                         started.notify_one();
                         release.notified().await;
@@ -572,7 +578,9 @@ impl ModelDriver for GatedCompactionModel {
                     })])),
                 ));
         }
-        Ok(Box::pin(stream::iter(stop_script("queued answer", &[]))))
+        Ok(rw_providers::BoxEventStream::new(stream::iter(
+            stop_script("queued answer", &[]),
+        )))
     }
 }
 
@@ -593,7 +601,7 @@ impl ModelDriver for DelayedFinishModel {
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         let delay = self.delay;
-        Ok(Box::pin(
+        Ok(rw_providers::BoxEventStream::new(
             stream::iter([
                 Ok(ProviderEvent::MessageStart {
                     model: "fixture-model".to_owned(),
@@ -659,7 +667,7 @@ impl ModelDriver for ContinuousDeltaModel {
                 Some((Ok(event), index.saturating_add(1)))
             }
         });
-        Ok(Box::pin(
+        Ok(rw_providers::BoxEventStream::new(
             stream::iter([Ok(ProviderEvent::MessageStart {
                 model: "fixture-model".to_owned(),
             })])
@@ -697,7 +705,9 @@ impl ModelDriver for InstructionModel {
                 "fixture root instruction was absent".to_owned(),
             ));
         }
-        Ok(Box::pin(stream::iter(stop_script("kennel", &[]))))
+        Ok(rw_providers::BoxEventStream::new(stream::iter(
+            stop_script("kennel", &[]),
+        )))
     }
 }
 

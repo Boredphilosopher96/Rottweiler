@@ -74,7 +74,7 @@ test("changing event tags cannot bypass credit or counterfeit stream completion"
   await send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { host: "rottweiler", protocol: 3, max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes } })
   try {
     await send({ jsonrpc: "2.0", id: 2, method: "provider/complete", params: { alias: "probe/model", request: {
-      model: "model", turns: [], tools: [], tool_choice: { mode: "auto" }, max_output_tokens: 64,
+      model: "model", turns: [], tools: [], tool_choice: { mode: "auto" }, output: { mode: "text" }, max_output_tokens: 64,
       cache_hint: null, temperature: null, thinking: "off",
     } } })
     await until(() => reads > 0)

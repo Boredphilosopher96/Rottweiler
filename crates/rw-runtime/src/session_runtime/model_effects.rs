@@ -83,7 +83,7 @@ impl ModelEffects {
             finished: Some(finished),
         };
         let inner = start(cleanup.invocation.driver.as_ref())?;
-        Ok(Box::pin(OwnedModelStream {
+        Ok(rw_providers::BoxEventStream::new(OwnedModelStream {
             inner: Some(inner),
             cleanup: Some(cleanup),
         }))
@@ -153,7 +153,7 @@ impl Stream for OwnedModelStream {
         let Some(inner) = this.inner.as_mut() else {
             return Poll::Ready(None);
         };
-        let result = inner.as_mut().poll_next(cx);
+        let result = Pin::new(inner).poll_next(cx);
         if matches!(result, Poll::Ready(None)) {
             this.finish();
         }

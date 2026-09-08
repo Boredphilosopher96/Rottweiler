@@ -61,14 +61,16 @@ impl ModelDriver for CapturingDriver {
         _invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
         self.requests.lock().expect("requests").push(request);
-        Ok(Box::pin(futures_util::stream::iter([
-            Ok(ProviderEvent::TextDelta {
-                text: "model-ok".to_owned(),
-            }),
-            Ok(ProviderEvent::Finished {
-                reason: FinishReason::Stop,
-            }),
-        ])))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([
+                Ok(ProviderEvent::TextDelta {
+                    text: "model-ok".to_owned(),
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ]),
+        ))
     }
 }
 

@@ -129,6 +129,7 @@ fn initial_memory_is_redacted_and_reframed_before_the_provider_boundary() {
         turns: vec![raw_turn],
         tools: Vec::new(),
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,

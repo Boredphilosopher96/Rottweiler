@@ -303,6 +303,8 @@ impl ProviderRouter {
         request: ProviderRequest,
         gate: Arc<dyn ProviderAttemptGate>,
     ) -> Result<BoxEventStream, RouterError> {
+        crate::OutputValidation::preflight(&request, true)
+            .map_err(|error| RouterError::OperationAdmission(error.to_string()))?;
         if candidates.is_empty() {
             return Err(RouterError::AliasNotConfigured(alias.to_owned()));
         }
@@ -416,7 +418,7 @@ impl ProviderRouter {
                 "all configured model candidates failed before producing output",
             )));
         };
-        Ok(Box::pin(event_stream))
+        Ok(crate::BoxEventStream::new(event_stream))
     }
 }
 
@@ -537,7 +539,7 @@ mod tests {
                     "fixture down",
                 ));
             }
-            Ok(Box::pin(futures_util::stream::iter([
+            Ok(crate::BoxEventStream::new(futures_util::stream::iter([
                 Ok(ProviderEvent::MessageStart {
                     model: request.model,
                 }),
@@ -588,6 +590,7 @@ mod tests {
             turns: Vec::new(),
             tools: Vec::new(),
             tool_choice: crate::ToolChoice::Auto {},
+            output: crate::OutputContract::Text {},
             max_output_tokens: 100,
             temperature: None,
             thinking: ThinkingLevel::Off,

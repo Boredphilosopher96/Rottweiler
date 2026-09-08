@@ -465,6 +465,7 @@ pub(super) async fn run_turn(
             turns: assembled.turns,
             tools: assembled.tools,
             tool_choice: ToolChoice::Auto {},
+            output: rw_providers::OutputContract::Text {},
             max_output_tokens: config.max_output_tokens,
             temperature: None,
             thinking: config.thinking,

@@ -56,26 +56,28 @@ impl Provider for NativeFixtureProvider {
             .request
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
-        Ok(Box::pin(futures_util::stream::iter([
-            Ok(ProviderEvent::TextDelta {
-                text: "bounded answer".to_owned(),
-            }),
-            Ok(ProviderEvent::Citation {
-                uri: "https://example.com/source".to_owned(),
-                title: Some("Example".to_owned()),
-                start_index: Some(0),
-                end_index: Some(7),
-            }),
-            Ok(ProviderEvent::Citation {
-                uri: "https://example.com/source".to_owned(),
-                title: Some("Duplicate".to_owned()),
-                start_index: None,
-                end_index: None,
-            }),
-            Ok(ProviderEvent::Finished {
-                reason: FinishReason::Stop,
-            }),
-        ])))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([
+                Ok(ProviderEvent::TextDelta {
+                    text: "bounded answer".to_owned(),
+                }),
+                Ok(ProviderEvent::Citation {
+                    uri: "https://example.com/source".to_owned(),
+                    title: Some("Example".to_owned()),
+                    start_index: Some(0),
+                    end_index: Some(7),
+                }),
+                Ok(ProviderEvent::Citation {
+                    uri: "https://example.com/source".to_owned(),
+                    title: Some("Duplicate".to_owned()),
+                    start_index: None,
+                    end_index: None,
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ]),
+        ))
     }
 }
 

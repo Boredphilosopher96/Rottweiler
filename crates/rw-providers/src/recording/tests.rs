@@ -1,4 +1,5 @@
 mod ir;
+mod output;
 mod schema;
 
 use std::{
@@ -125,7 +126,7 @@ impl Provider for SequenceProvider {
 
     async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
-        Ok(Box::pin(futures_util::stream::iter([
+        Ok(crate::BoxEventStream::new(futures_util::stream::iter([
             Ok(ProviderEvent::TextDelta {
                 text: format!("response-{call}"),
             }),
@@ -292,7 +293,7 @@ fn flaky_metadata_items(sink: Option<&Arc<dyn WireFrameSink>>) -> BoxEventStream
             data: data.to_owned(),
         })
         .collect::<Vec<_>>();
-    Box::pin(futures_util::stream::iter(
+    crate::BoxEventStream::new(futures_util::stream::iter(
         crate::github_copilot::replay_sse_frames(crate::GitHubCopilotEndpoint::Responses, &raw),
     ))
 }
@@ -332,7 +333,7 @@ impl Provider for RawPrefixProvider {
 }
 
 fn raw_prefix_items() -> BoxEventStream {
-    Box::pin(futures_util::stream::iter([
+    crate::BoxEventStream::new(futures_util::stream::iter([
         Ok(ProviderEvent::MessageStart {
             model: "fixture-model".to_owned(),
         }),
@@ -402,7 +403,7 @@ impl Provider for RestrictedProvider {
     }
 
     async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        Ok(Box::pin(futures_util::stream::iter([
+        Ok(crate::BoxEventStream::new(futures_util::stream::iter([
             Ok(ProviderEvent::TextDelta {
                 text: "restricted".to_owned(),
             }),
@@ -414,7 +415,7 @@ impl Provider for RestrictedProvider {
 }
 
 fn interruptible_raw_items(sink: Option<Arc<dyn WireFrameSink>>) -> BoxEventStream {
-    Box::pin(async_stream::stream! {
+    crate::BoxEventStream::new(async_stream::stream! {
         if let Some(sink) = &sink {
             sink.capture(
                 Some("content_block_delta"),
@@ -453,7 +454,7 @@ impl Provider for DelayedStartProvider {
             self.first_entered.notify_one();
             self.release_first.notified().await;
         }
-        Ok(Box::pin(futures_util::stream::iter([
+        Ok(crate::BoxEventStream::new(futures_util::stream::iter([
             Ok(ProviderEvent::TextDelta {
                 text: format!("response-{call}"),
             }),
@@ -477,7 +478,7 @@ impl Provider for FixtureProvider {
         test_capabilities()
     }
     async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        Ok(Box::pin(futures_util::stream::iter([
+        Ok(crate::BoxEventStream::new(futures_util::stream::iter([
             Ok(ProviderEvent::TextDelta {
                 text: "byte-identical".to_owned(),
             }),
@@ -506,11 +507,11 @@ impl Provider for ResponsesWithoutNativeProvider {
     }
 
     async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
-        Ok(Box::pin(futures_util::stream::iter([Ok(
-            ProviderEvent::Finished {
+        Ok(crate::BoxEventStream::new(futures_util::stream::iter([
+            Ok(ProviderEvent::Finished {
                 reason: FinishReason::Stop,
-            },
-        )])))
+            }),
+        ])))
     }
 }
 
@@ -523,6 +524,7 @@ pub(in crate::recording) fn request() -> ProviderRequest {
         temperature: None,
         thinking: ThinkingLevel::Off,
         tool_choice: ToolChoice::Auto {},
+        output: crate::OutputContract::Text {},
         cache_hint: None,
     }
 }

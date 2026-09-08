@@ -971,6 +971,7 @@ pub enum ProviderCacheBreakpoints {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelCapabilities {
+    pub structured_output: bool,
     pub tool_calling: bool,
     pub vision: bool,
     pub thinking: bool,

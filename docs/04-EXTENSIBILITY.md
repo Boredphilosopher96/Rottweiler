@@ -116,6 +116,49 @@ validator, while the TypeScript SDK pins the matching limit through its protocol
 fixture and conformance tests; downstream composition must not impose a narrower
 private limit after a plugin has been accepted.
 
+### Structured provider output
+
+`ProviderRequest.output` is required. `{ "mode": "text" }` preserves incremental
+text, reasoning, and tool workflows without output buffering or a memory claim.
+`{ "mode": "json_schema", "name": "result", "schema": ... }` requests one
+complete JSON object. Its finite schema uses `string`, `number`, `integer`,
+`boolean`, `null`, `array { items }`, `object { fields }`, and `nullable { value }`.
+Each field is `{ name, schema }`; every field is required and extra properties
+are rejected. Nullable fields must be present with either null or their value.
+There are no references, arbitrary keywords, defaults, or coercions. Numbers
+must be finite; integer validation inspects decimal significance rather than
+rounding a fractional JSON number to an integer.
+
+A schema has at most 256 nodes, depth 16, 64 fields per object, and 64 KiB of
+retained schema storage. Field names contain 1–128 UTF-8 bytes; the schema name
+contains 1–64 ASCII letters, digits, underscores, or hyphens. The root is an
+object. Structured requests require an empty tool list and `tool_choice: {
+"mode": "none" }`; incompatible requests fail before discovery, credentials,
+or inference. OpenAI Chat uses `response_format.json_schema`; Responses uses
+`text.format`, both with strict schemas. Generic compatible Chat, Anthropic,
+and Copilot adapters reject this contract before effects. A provider plugin
+must explicitly advertise `structured_output` in each model's catalog. The
+host accepts structured requests only against already cached model evidence.
+
+The common host validator withholds structured text until normal completion,
+valid JSON, and the full schema all agree. Output is at most 256 KiB, 4,096
+nodes, and 4,096 normalized events. Duplicate keys, undeclared keys, missing
+fields, trailing documents, truncation, refusal, cancellation, and unexpected
+tool events never produce a successful terminal. Valid text is delivered in
+UTF-8 chunks of at most 16 KiB. Usage and reasoning observations can arrive
+before the final object. Raw recording frames remain unchanged; replay applies
+the same validator before comparing the normalized recorded outcome.
+
+A process-wide 16 MiB working owner admits at most eight structured responses,
+with a conservative 2 MiB claim acquired before adapter effects. That claim
+covers the bounded schema and wire projection, 256 KiB accumulation, up to
+512 KiB parser scratch, and temporary publication overlap. Validation borrows
+JSON tokens rather than allocating a second document graph. The admitted CPU
+worker retains schema, accumulated text, and the claim until actual retirement,
+including when its waiter disappears. Recorder and router preserve a private
+contract fingerprint; they do not create a second live output buffer. Provider
+HTTP and RPC transport admission still owns its separate wire bodies.
+
 ### Hook catalog
 
 Plugin tools use typed operation admission. `tool/call` requires

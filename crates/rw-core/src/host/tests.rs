@@ -65,7 +65,7 @@ impl ModelDriver for IdleModel {
         _request: ProviderRequest,
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(stream::empty()))
+        Ok(rw_providers::BoxEventStream::new(stream::empty()))
     }
 
     fn has_model_alias(&self, alias: &str) -> bool {
@@ -85,7 +85,7 @@ impl ModelDriver for SummaryModel {
         _request: ProviderRequest,
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(stream::iter([
+        Ok(rw_providers::BoxEventStream::new(stream::iter([
             Ok(rw_providers::ProviderEvent::TextDelta {
                 text: "durable model handoff".to_owned(),
             }),
@@ -112,7 +112,7 @@ impl ModelDriver for ActivatableModel {
         _request: ProviderRequest,
         _invocation: crate::provider_admission::ProviderInvocation,
     ) -> Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(stream::empty()))
+        Ok(rw_providers::BoxEventStream::new(stream::empty()))
     }
 
     fn has_model_alias(&self, alias: &str) -> bool {

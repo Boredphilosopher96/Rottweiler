@@ -11,6 +11,7 @@ import validateEventOutcome from "./generated/extension-event-outcome-validator.
 import validateEventKind from "./generated/extension-event-kind-validator.js"
 import { hostStateContext, type HostSessionApi, type HostStateApi } from "./host-state"
 import { invokeHook, type HookHandlers } from "./hooks"
+import { validOutputContract } from "./output-contract"
 import validateProviderRequest from "./generated/provider-request-validator.js"
 import { captureProviderEvent } from "./provider-event"
 import validateHookInput from "./generated/hook-input-validator.js"
@@ -476,10 +477,11 @@ function validateProviderModelsResponse(response: ProviderModelsResponse): void 
       throw new Error("provider model capabilities must be an object")
     }
     requireKeys(model.capabilities, "provider model capabilities", [
-      "tool_calling", "vision", "thinking", "cache_breakpoints",
+      "structured_output", "tool_calling", "vision", "thinking", "cache_breakpoints",
     ])
     if (
-      typeof model.capabilities.tool_calling !== "boolean"
+      typeof model.capabilities.structured_output !== "boolean"
+      || typeof model.capabilities.tool_calling !== "boolean"
       || typeof model.capabilities.vision !== "boolean"
       || typeof model.capabilities.thinking !== "boolean"
       || !["none", "explicit", "automatic"].includes(model.capabilities.cache_breakpoints)
@@ -1056,7 +1058,7 @@ export class PluginServer {
   #providerParams(raw: unknown): ProviderCompleteParams {
     const value = object(raw)
     requireRpcKeys(value, "provider/complete params", ["alias", "request"])
-    if (!validateProviderRequest(value.request)) throw new SafeRpcError(-32602, "invalid provider request")
+    if (!validateProviderRequest(value.request) || !validOutputContract(value.request)) throw new SafeRpcError(-32602, "invalid provider request")
     return { alias: string(value.alias, "provider alias"), request: value.request }
   }
 

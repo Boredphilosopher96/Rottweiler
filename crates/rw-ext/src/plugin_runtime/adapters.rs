@@ -213,6 +213,7 @@ struct RpcProviderCatalogCache {
     aggregate_capabilities: Option<Capabilities>,
     single_model_metadata: Option<ProviderModelMetadata>,
     metadata_by_model: BTreeMap<String, ProviderModelMetadata>,
+    structured_models: BTreeSet<String>,
 }
 
 impl RpcProviderAdapter {
@@ -265,6 +266,7 @@ impl RpcProviderAdapter {
                 "plugin provider model catalog exceeds the entry limit",
             ));
         }
+        let mut structured_models = BTreeSet::new();
         let mut ids = BTreeSet::new();
         let mut models = Vec::with_capacity(response.models.len());
         let mut metadata = Vec::with_capacity(response.models.len());
@@ -343,6 +345,9 @@ impl RpcProviderAdapter {
                 },
                 pricing: pricing.clone(),
             };
+            if model.capabilities.structured_output {
+                structured_models.insert(model.id.clone());
+            }
             metadata_by_model.insert(model.id.clone(), model_metadata.clone());
             metadata.push(model_metadata);
             models.push(DiscoveredModel {
@@ -362,6 +367,7 @@ impl RpcProviderAdapter {
             aggregate_capabilities: Some(aggregate_capabilities),
             single_model_metadata: (metadata.len() == 1).then(|| metadata.remove(0)),
             metadata_by_model,
+            structured_models,
         })
     }
 }
@@ -487,7 +493,19 @@ impl Provider for RpcProviderAdapter {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = cache;
         Ok(catalog)
     }
+    fn supports_structured_output(&self, model: &str) -> bool {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .structured_models
+            .contains(model)
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        let output = rw_providers::OutputValidation::prepare(
+            &request,
+            self.supports_structured_output(&request.model),
+        )?;
         let alias = format!("{}{}", self.alias_prefix, request.model);
         let connection = self
             .endpoint
@@ -515,15 +533,17 @@ impl Provider for RpcProviderAdapter {
             )
             .await
             .map_err(|error| provider_rpc_error(&error))?;
-        Ok(Box::pin(events.map(|event| {
-            let value = event.map_err(|error| provider_rpc_error(&error))?;
-            serde_json::from_value(value).map_err(|_| {
-                ProviderError::new(
-                    ProviderErrorKind::Protocol,
-                    "plugin returned an invalid provider event",
-                )
-            })
-        })))
+        Ok(
+            output.attach(rw_providers::BoxEventStream::new(events.map(|event| {
+                let value = event.map_err(|error| provider_rpc_error(&error))?;
+                serde_json::from_value(value).map_err(|_| {
+                    ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "plugin returned an invalid provider event",
+                    )
+                })
+            }))),
+        )
     }
 }
 

@@ -147,6 +147,7 @@ mod tests {
             }],
             tools: vec![],
             tool_choice: crate::ToolChoice::Auto {},
+            output: crate::OutputContract::Text {},
             max_output_tokens: 10,
             temperature: None,
             thinking: rw_types::config::ThinkingLevel::Off,

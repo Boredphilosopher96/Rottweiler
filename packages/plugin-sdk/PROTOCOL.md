@@ -266,3 +266,25 @@ selection and output encoding. Unknown enumerable fields and non-record prototyp
 are rejected. Nested JSON values retain their native serialization semantics;
 this is not a deep clone. The generated ProviderEvent schema owns the permitted
 field set, so schema changes update capture and validation together.
+
+## Structured provider responses
+
+`ProviderRequest.output` is required: use `{ "mode": "text" }` for normal
+streaming. A model catalog's required `structured_output` boolean declares
+support for `{ "mode": "json_schema", "name": "result", "schema": ... }`.
+The finite schema types are exported as `OutputContract`, `OutputSchema`, and
+`OutputField`. Objects require every declared field and reject extras; use
+`nullable` for a present field that can contain null. References, unknown
+keywords and coercions are not accepted. The SDK validates schema shape and
+bounds before invoking the handler. Structured requests require no tools and
+`tool_choice: { "mode": "none" }`.
+
+The host validates the completed text against the same requested schema before
+publishing it. Partial JSON, invalid fields, refusal, truncation, cancellation,
+or unexpected tool events cannot become a successful response. The schema is
+limited to 256 nodes and depth 16; each object has at most 64 uniquely named
+fields, with 1–128 UTF-8 bytes per name. Output is limited to 256 KiB and 4,096
+nodes/events. Send `finished/stop` only for a completed response; report refusal
+as `finished/content_filter`, truncation as `finished/length`, and cancellation
+as the existing cancellation error. Do not turn an unsuccessful outcome into
+JSON that merely fits the schema.

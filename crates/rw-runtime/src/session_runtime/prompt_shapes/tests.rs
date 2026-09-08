@@ -8,6 +8,7 @@ fn request() -> ProviderRequest {
         turns: vec![],
         tools: vec![],
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 128,
         temperature: None,
         thinking: rw_types::config::ThinkingLevel::Off,

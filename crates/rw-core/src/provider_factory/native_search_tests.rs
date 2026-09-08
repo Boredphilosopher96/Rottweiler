@@ -473,11 +473,11 @@ impl Provider for Candidate {
                 "candidate failed",
             ));
         }
-        Ok(Box::pin(futures_util::stream::iter([Ok(
-            rw_providers::ProviderEvent::Finished {
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([Ok(rw_providers::ProviderEvent::Finished {
                 reason: rw_providers::FinishReason::Stop,
-            },
-        )])))
+            })]),
+        ))
     }
 }
 

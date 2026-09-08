@@ -47,7 +47,7 @@ export const plugin = definePlugin({
       "auth-v3/": () => ({ models: [{
         id: "tool-model",
         capabilities: {
-          tool_calling: true,
+          structured_output: false, tool_calling: true,
           vision: false,
           thinking: false,
           cache_breakpoints: "none",

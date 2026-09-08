@@ -482,17 +482,19 @@ impl ModelDriver for QuickConnectedModel {
         _request: ProviderRequest,
         _invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(futures_util::stream::iter([
-            Ok(ProviderEvent::MessageStart {
-                model: "openai/live-model".to_owned(),
-            }),
-            Ok(ProviderEvent::TextDelta {
-                text: "quick-connect-ok".to_owned(),
-            }),
-            Ok(ProviderEvent::Finished {
-                reason: FinishReason::Stop,
-            }),
-        ])))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::iter([
+                Ok(ProviderEvent::MessageStart {
+                    model: "openai/live-model".to_owned(),
+                }),
+                Ok(ProviderEvent::TextDelta {
+                    text: "quick-connect-ok".to_owned(),
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ]),
+        ))
     }
 
     fn has_model_alias(&self, alias: &str) -> bool {
@@ -530,7 +532,9 @@ impl ModelDriver for ExistingRouteModel {
         _request: ProviderRequest,
         _invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(futures_util::stream::empty()))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::empty(),
+        ))
     }
 
     fn has_model_alias(&self, alias: &str) -> bool {
@@ -562,7 +566,9 @@ impl ModelDriver for RejectingPrepareModel {
         _request: ProviderRequest,
         _invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
-        Ok(Box::pin(futures_util::stream::empty()))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::empty(),
+        ))
     }
 
     async fn prepare_model(&self, _alias: &str) -> std::result::Result<(), AgentLoopError> {
@@ -589,6 +595,7 @@ fn quick_connect_request() -> ProviderRequest {
         turns: Vec::new(),
         tools: Vec::new(),
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 1,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -946,6 +953,7 @@ fn nested_instruction_fixture() -> (
         turns: vec![base_agent_system_turn(), root_turn, call],
         tools: Vec::new(),
         tool_choice: ToolChoice::Auto {},
+        output: rw_providers::OutputContract::Text {},
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,
@@ -1029,7 +1037,9 @@ impl ModelDriver for CapturingModel {
             .request
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
-        Ok(Box::pin(futures_util::stream::empty()))
+        Ok(rw_providers::BoxEventStream::new(
+            futures_util::stream::empty(),
+        ))
     }
 }
 

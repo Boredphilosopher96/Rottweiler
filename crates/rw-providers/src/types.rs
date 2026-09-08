@@ -1,7 +1,6 @@
-use std::{fmt, pin::Pin};
+use std::fmt;
 
 use async_trait::async_trait;
-use futures_core::Stream;
 use rw_types::{Turn, config::ThinkingLevel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -165,6 +164,8 @@ pub struct ProviderRequest {
     pub tools: Vec<ToolDefinition>,
     /// Whether the model may, must, must not, or must specifically call a tool.
     pub tool_choice: ToolChoice,
+    /// Required final-output semantics; structured mode forbids tool calls.
+    pub output: crate::OutputContract,
     /// Maximum number of output tokens.
     pub max_output_tokens: u32,
     /// Optional sampling temperature.
@@ -558,8 +559,7 @@ mod web_search_tests {
 }
 
 /// A sendable provider event stream.
-pub type BoxEventStream =
-    Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send + 'static>>;
+pub use crate::event_stream::BoxEventStream;
 
 /// Observer used by record middleware to capture canonical SSE frames without
 /// exposing transport-only values in the engine's normalized event stream.
@@ -597,6 +597,12 @@ pub trait Provider: Send + Sync {
 
     /// Declared features for graceful engine degradation.
     fn capabilities(&self) -> Capabilities;
+
+    /// Synchronous, effect-free structured-output support for an already bound model.
+    /// Unsupported is the conservative contract for adapters without an output dialect.
+    fn supports_structured_output(&self, _model: &str) -> bool {
+        false
+    }
 
     /// Explicit adapter-level provider-native search capability.
     fn native_web_search_capability(&self) -> NativeWebSearchCapability {
