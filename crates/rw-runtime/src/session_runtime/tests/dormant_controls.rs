@@ -68,7 +68,7 @@ fn seed(storage: &Path, child: &SessionId) {
         .expect("persist controls");
     // Drop the writer: discovery and activation must reopen the actual source.
 }
-async fn config(
+pub(super) async fn config(
     owner: &RuntimeWorkspaceRootController,
     storage: &Path,
     session: &SessionId,

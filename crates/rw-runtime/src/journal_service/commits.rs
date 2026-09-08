@@ -304,3 +304,6 @@ fn failure(message: impl Into<String>) -> AgentLoopError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod measurement;
