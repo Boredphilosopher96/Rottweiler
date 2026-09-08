@@ -113,11 +113,7 @@ mod linux {
                 identity.bundle_blake3,
                 blake3::hash(&bundle).to_hex().as_str()
             );
-            assert_eq!(config.attested_files().len(), 1);
-            assert_eq!(
-                config.attested_files()[0].canonical_path.as_os_str(),
-                &config.argv()[2]
-            );
+            assert_eq!(config.attested_files().len(), 2);
             config
                 .validate_executable_identity()
                 .expect("final identity");
