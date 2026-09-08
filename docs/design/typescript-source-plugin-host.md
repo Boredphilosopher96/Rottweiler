@@ -153,6 +153,36 @@ Each active plugin gets a separate host process, process group, sandbox, scratch
 directory, RPC state, and egress policy. The operating system may share immutable
 host code pages, but heaps and authority remain separate.
 
+The application plugin budget owns one inert `ApprovedExecutableImages` registry
+and supplies it to every sandboxed launcher, including source preparation. The
+registry shares only immutable executable backing keyed by SHA-256 and byte
+length. Each acquisition retains its own installation origin and verifies the
+original canonical descriptor, device, inode, length, and complete streamed
+digest. A cached match cannot authorize a replaced or modified source. Code
+views, approval fingerprints, arguments, environment, and sandbox policy remain
+independent for each plugin generation. A first miss copies the approved bytes;
+it never executes or prewarms plugin code.
+
+The registry admits at most 32 physical images and 256 MiB of image content,
+including copies in progress and images removed from the registry while a
+physical launch still owns them. Up to 64 origin bindings have paths of at most
+4096 bytes. These content and metadata bounds are distinct from process RSS.
+Concurrent misses for the same bytes share one copy; waiting has a 30-second
+ceiling and consumes an origin slot. Capacity pressure evicts idle images in
+least-recently-used order. It preserves live reusable entries and rejects when
+physical capacity cannot be recovered. Neither removal nor application shutdown
+refunds image credit before the final file, private directory, and launch
+descriptor are destroyed.
+
+After plugin settlement, application close fences image acquisition and records
+one retirement operation. It moves entries out of the publication lock and
+retires their files in an owned blocking worker. A dropped shutdown waiter cannot
+cancel that worker, start a second close, or turn missing physical proof into
+success. Unproven retirement remains an explicit failed shutdown. An owner with
+no captures fences and closes synchronously without filesystem work or worker
+admission. The registry has no process-global strong cache and no persistent
+image namespace; its constructor starts no work.
+
 A source-plugin preparation, approval, launch, or handshake failure marks only
 that plugin unavailable. It does not stop the engine or tear down unrelated
 plugins. A production crash retains an unavailable generation with the approved

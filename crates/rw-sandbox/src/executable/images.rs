@@ -246,7 +246,12 @@ impl ApprovedExecutableImages {
         let index = state
             .entries
             .iter()
-            .position(|entry| entry.backing.is_some())
+            .position(|entry| {
+                entry
+                    .backing
+                    .as_ref()
+                    .is_some_and(|backing| Arc::strong_count(backing) == 1)
+            })
             .ok_or_else(|| {
                 invalid(
                     "approved executable image capacity remains held by live processes or captures",

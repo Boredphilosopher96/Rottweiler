@@ -55,7 +55,7 @@ fn cached_image_still_rejects_replaced_inode_and_changed_digest() {
 }
 
 #[test]
-fn eviction_does_not_refund_a_live_launch_or_invalidate_its_bytes() {
+fn pressure_preserves_live_image_reuse_without_refunding_its_bytes() {
     let directory = tempfile::tempdir().expect("directory");
     let first = artifact(directory.path(), "first", b"1111");
     let second = artifact(directory.path(), "second", b"2222");
@@ -64,7 +64,12 @@ fn eviction_does_not_refund_a_live_launch_or_invalidate_its_bytes() {
     let launch = approved.launch().expect("launch");
     drop(approved);
     assert!(images.acquire(&second).is_err());
-    assert!(images.state.lock().expect("state").entries.is_empty());
+    assert_eq!(images.state.lock().expect("state").entries.len(), 1);
+    drop(
+        images
+            .acquire(&first)
+            .expect("pressure preserves same-byte reuse"),
+    );
     assert_eq!(images.accounting.bytes.load(Ordering::Acquire), 4);
     assert_eq!(fs::read(launch.path()).expect("still executable"), b"1111");
     drop(launch);
@@ -177,6 +182,7 @@ fn caller_loss_and_application_drop_preserve_physical_worker_image() {
     ready_rx.recv().expect("physical owner ready");
     drop(ready_rx);
     assert!(images.close().is_err());
+    assert!(images.state.lock().expect("state").entries.is_empty());
     drop(images);
     assert_eq!(accounting.bytes.load(Ordering::Acquire), 8);
     release_tx.send(()).expect("release");
