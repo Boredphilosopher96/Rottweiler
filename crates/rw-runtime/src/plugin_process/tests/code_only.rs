@@ -32,6 +32,7 @@ async fn native_workers_deny_ambient_effects_and_execute_only_scoped_host_tools(
     let launcher = SandboxedPluginLauncher::new(
         scratch.path(),
         &helper_executable().expect("fixture helper"),
+        Arc::new(rw_tools::ApprovedExecutableImages::default()),
     )
     .expect("enforced sandbox");
     let manifest = manifest();

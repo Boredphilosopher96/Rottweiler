@@ -78,7 +78,7 @@ async fn dropped_proof_waiter_retains_the_private_runtime_and_its_blocking_work(
     );
     drop(operation);
     drop(other_slots);
-    budget.close().expect("all HTTP effects settled");
+    budget.close().await.expect("all HTTP effects settled");
 }
 
 #[tokio::test]
@@ -106,7 +106,7 @@ async fn panicked_http_worker_keeps_failed_proof_and_aggregate_admission() {
     );
     drop(operation);
     assert!(
-        budget.close().is_err(),
+        budget.close().await.is_err(),
         "unproven slot cannot return to the shared application budget"
     );
 }

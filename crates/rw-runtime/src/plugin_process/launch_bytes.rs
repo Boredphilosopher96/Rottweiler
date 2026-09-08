@@ -1,7 +1,7 @@
 //! Exact approved bytes retained by the physical process, including failed handoff.
 use super::{PluginProcessConfig, PluginProcessError, error, process_error};
 use rw_ext::{PluginSandboxMode, PluginSandboxProfile};
-use rw_tools::{ApprovedCode, ApprovedExecutable, ExecutableLaunch};
+use rw_tools::{ApprovedCode, ApprovedExecutableImages, ExecutableLaunch};
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -35,6 +35,7 @@ impl LaunchBytes {
     pub(super) fn capture(
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        images: &ApprovedExecutableImages,
     ) -> Result<Self, PluginProcessError> {
         #[cfg(target_os = "linux")]
         if let PluginSandboxMode::Preparation { filesystem } = &profile.mode {
@@ -43,10 +44,10 @@ impl LaunchBytes {
             });
         }
         let started = std::time::Instant::now();
-        let executable =
-            ApprovedExecutable::from_artifact(&config.executable_identity().artifact_identity())
-                .and_then(|approved| approved.launch())
-                .map_err(|cause| error(&cause.to_string()))?;
+        let executable = images
+            .acquire(&config.executable_identity().artifact_identity())
+            .and_then(|approved| approved.launch())
+            .map_err(|cause| error(&cause.to_string()))?;
         tracing::debug!(target: "rw_performance", stage = "plugin.executable_capture",
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
         let started = std::time::Instant::now();

@@ -1,5 +1,9 @@
 //! Application-wide plugin preparation, activation, residency and event delivery accounting.
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
+mod images;
 
 use rw_ext::PluginRpcError;
 use rw_tools::CancellationToken;
@@ -20,6 +24,8 @@ pub(super) const ACTIVATION_DEADLINE: Duration = Duration::from_secs(30);
 /// Shared by every configured plugin generation in one application host.
 /// Construction starts no workers and allocates no filesystem resources.
 pub(crate) struct PluginRuntimeBudget {
+    image_retirement: OnceLock<images::ImageRetirement>,
+    pub(crate) images: Arc<rw_tools::ApprovedExecutableImages>,
     pub(crate) ui: Arc<super::ui::UiBudget>,
     pub(crate) delivery: Arc<super::PluginDeliveryBudget>,
     waiters: Arc<Semaphore>,
@@ -32,6 +38,8 @@ pub(crate) struct PluginRuntimeBudget {
 impl Default for PluginRuntimeBudget {
     fn default() -> Self {
         Self {
+            image_retirement: OnceLock::new(),
+            images: Arc::new(rw_tools::ApprovedExecutableImages::default()),
             ui: Arc::new(super::ui::UiBudget::default()),
             delivery: Arc::new(super::PluginDeliveryBudget::default()),
             waiters: Arc::new(Semaphore::new(MAX_WAITERS)),
@@ -44,7 +52,14 @@ impl Default for PluginRuntimeBudget {
     }
 }
 impl PluginRuntimeBudget {
-    pub(crate) fn close(&self) -> Result<(), PluginRpcError> {
+    pub(crate) async fn close(&self) -> Result<(), PluginRpcError> {
+        let image_fence = self
+            .images
+            .fence()
+            .map_err(|cause| super::activation::unsettled(&cause.to_string()));
+        let retirement = self
+            .image_retirement
+            .get_or_init(|| images::ImageRetirement::start(Arc::clone(&self.images)));
         let delivery = self.delivery.close();
         let ui = self.ui.close();
         self.waiters.close();
@@ -52,6 +67,7 @@ impl PluginRuntimeBudget {
         self.execution.close();
         self.residents.close();
         self.http.close();
+        let images = retirement.wait().await;
         if self.waiters.available_permits() != MAX_WAITERS
             || self.starts.available_permits() != MAX_STARTING
             || self.execution.available_permits() != PARALLEL_STARTS
@@ -62,7 +78,7 @@ impl PluginRuntimeBudget {
                 "plugin activation capacity remains owned at application shutdown",
             ));
         }
-        delivery.and(ui)
+        image_fence.and(images).and(delivery).and(ui)
     }
 
     pub(super) fn http(&self) -> Result<OwnedSemaphorePermit, PluginRpcError> {
@@ -156,3 +172,6 @@ fn exhausted() -> PluginRpcError {
         message: "plugin activation capacity is exhausted".to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests;

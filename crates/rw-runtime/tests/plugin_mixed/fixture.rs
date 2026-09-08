@@ -5,6 +5,7 @@ use std::{
     io::Read as _,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
 pub struct Fixture {
@@ -68,10 +69,16 @@ base_url = "http://127.0.0.1:1/v1/chat/completions"
         assert_eq!(catalog.plugins.len(), 3);
         let approvals =
             rw_runtime::PrivatePluginApprovalStore::open(&storage).expect("approval owner");
+        let images = Arc::new(rw_tools::ApprovedExecutableImages::default());
         for plugin in &catalog.plugins {
-            let process = rw_runtime::plugin::resolve_plugin_process(plugin, &storage, &helper)
-                .await
-                .expect("sealed process identity");
+            let process = rw_runtime::plugin::resolve_plugin_process(
+                plugin,
+                &storage,
+                &helper,
+                Arc::clone(&images),
+            )
+            .await
+            .expect("sealed process identity");
             rw_ext::approve_plugin_launch(
                 &approvals,
                 &plugin.load_manifest().expect("manifest"),

@@ -179,6 +179,7 @@ pub(super) async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Res
     if selected.is_empty() {
         return Err(miette!("configured plugin was not found"));
     }
+    let images = std::sync::Arc::new(rw_tools::ApprovedExecutableImages::default());
     for plugin in selected {
         if revoke {
             println!(
@@ -195,8 +196,13 @@ pub(super) async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Res
         let helper =
             rw_tools::SandboxHelper::from_running(&std::env::current_exe().into_diagnostic()?)
                 .into_diagnostic()?;
-        let process =
-            rw_runtime::plugin::resolve_plugin_process(plugin, &storage_root, &helper).await?;
+        let process = rw_runtime::plugin::resolve_plugin_process(
+            plugin,
+            &storage_root,
+            &helper,
+            std::sync::Arc::clone(&images),
+        )
+        .await?;
         let scope = match plugin.origin {
             executable_config::ExecutableConfigOrigin::User(_) => "user",
             executable_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
@@ -245,6 +251,13 @@ pub(super) async fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Res
             plugin.name
         );
     }
+    images.fence().into_diagnostic()?;
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        images.close()
+    })
+    .await
+    .map_err(|cause| miette!(cause.to_string()))?
+    .into_diagnostic()?;
     Ok(())
 }
 

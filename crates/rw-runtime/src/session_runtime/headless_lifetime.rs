@@ -32,7 +32,7 @@ pub(super) fn own(
                 .await?;
                 prove("session finalization", finalize).await
             },
-            async move { plugins.close().map_err(message) },
+            async move { plugins.close().await.map_err(message) },
             async move { wasm.shutdown().await.map_err(message) },
             async move { admission.shutdown().await.map_err(message) },
             async move { journal.commits.shutdown().await.map_err(message) },

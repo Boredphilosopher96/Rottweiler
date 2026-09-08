@@ -292,8 +292,12 @@ fn launcher(
     }
     let helper = recipe.helper.capture().map_err(diagnostic)?;
     Ok(Arc::new(
-        crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &helper)
-            .map_err(diagnostic)?,
+        crate::plugin_process::SandboxedPluginLauncher::new(
+            scratch.path(),
+            &helper,
+            Arc::clone(&recipe.budget.images),
+        )
+        .map_err(diagnostic)?,
     ))
 }
 

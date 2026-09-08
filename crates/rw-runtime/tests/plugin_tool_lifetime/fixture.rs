@@ -89,8 +89,12 @@ impl Fixture {
         config
             .validate_executable_identity()
             .expect("unchanged SDK identity");
-        let launcher =
-            SandboxedPluginLauncher::new(root.path(), &helper).expect("enforced native launcher");
+        let launcher = SandboxedPluginLauncher::new(
+            root.path(),
+            &helper,
+            Arc::new(rw_tools::ApprovedExecutableImages::default()),
+        )
+        .expect("enforced native launcher");
         let manifest = rw_plugin_protocol::PluginManifest::from_slice(&input(
             "ROTTWEILER_LONG_TOOL_MANIFEST",
             256 * 1024,

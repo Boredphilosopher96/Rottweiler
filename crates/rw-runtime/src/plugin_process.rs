@@ -41,6 +41,7 @@ mod pinned_tests;
 pub struct SandboxedPluginLauncher {
     scratch: PathBuf,
     helper: rw_tools::SandboxHelper,
+    images: Arc<rw_tools::ApprovedExecutableImages>,
 }
 
 impl SandboxedPluginLauncher {
@@ -51,6 +52,7 @@ impl SandboxedPluginLauncher {
     pub fn new(
         scratch: &Path,
         helper: &rw_tools::SandboxHelper,
+        images: Arc<rw_tools::ApprovedExecutableImages>,
     ) -> Result<Self, PluginProcessError> {
         let scratch = std::fs::canonicalize(scratch).map_err(|error| process_error(&error))?;
         let helper = helper.clone();
@@ -60,7 +62,11 @@ impl SandboxedPluginLauncher {
         if probe_sandbox().support != SandboxSupport::Enforced {
             return Err(error("OS sandbox enforcement is unavailable for plugins"));
         }
-        Ok(Self { scratch, helper })
+        Ok(Self {
+            scratch,
+            helper,
+            images,
+        })
     }
 }
 
@@ -83,8 +89,9 @@ impl PluginLauncher for SandboxedPluginLauncher {
         let profile = profile.clone();
         let scratch = self.scratch.clone();
         let helper = self.helper.clone();
+        let images = Arc::clone(&self.images);
         handoff_in_worker(config.clone(), helper.clone(), admission, move || {
-            spawn_sandboxed_plugin(&owned_config, &profile, &scratch, &helper)
+            spawn_sandboxed_plugin(&owned_config, &profile, &scratch, &helper, &images)
                 .map_err(PluginLaunchError::Rejected)
         })
         .await
@@ -175,9 +182,10 @@ fn spawn_sandboxed_plugin(
     profile: &PluginSandboxProfile,
     scratch: &Path,
     helper: &rw_tools::SandboxHelper,
+    images: &rw_tools::ApprovedExecutableImages,
 ) -> Result<SpawnedPlugin, PluginProcessError> {
     let roots = approved_write_roots(config, profile, scratch)?;
-    let bytes = Arc::new(LaunchBytes::capture(config, profile)?);
+    let bytes = Arc::new(LaunchBytes::capture(config, profile, images)?);
     spawn_pinned_plugin(config, profile, scratch, helper, bytes, &roots)
 }
 
@@ -600,7 +608,11 @@ mod tests {
     fn intrinsic_runtime_reads_do_not_require_fake_manifest_capability_and_network_fails_closed() {
         let scratch = tempfile::tempdir().expect("scratch");
         let helper = helper_executable().expect("fixture sandbox helper prerequisite");
-        let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
+        let Ok(launcher) = SandboxedPluginLauncher::new(
+            scratch.path(),
+            &helper,
+            Arc::new(rw_tools::ApprovedExecutableImages::default()),
+        ) else {
             return;
         };
         let executable = std::fs::canonicalize("/usr/bin/true").expect("true");
@@ -781,7 +793,11 @@ mod tests {
         let package = workspace.path().join("plugin-code");
         std::fs::create_dir(&package).expect("package directory");
         let helper = helper_executable().expect("fixture sandbox helper prerequisite");
-        let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
+        let Ok(launcher) = SandboxedPluginLauncher::new(
+            scratch.path(),
+            &helper,
+            Arc::new(rw_tools::ApprovedExecutableImages::default()),
+        ) else {
             return;
         };
         let fixtures = [
@@ -844,7 +860,11 @@ mod tests {
         )
         .expect("secret fixture");
         let helper = helper_executable().expect("fixture sandbox helper prerequisite");
-        let Ok(launcher) = SandboxedPluginLauncher::new(scratch.path(), &helper) else {
+        let Ok(launcher) = SandboxedPluginLauncher::new(
+            scratch.path(),
+            &helper,
+            Arc::new(rw_tools::ApprovedExecutableImages::default()),
+        ) else {
             return;
         };
         let config =

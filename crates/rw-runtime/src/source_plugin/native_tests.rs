@@ -59,6 +59,7 @@ async fn source_resolver_seals_current_host_output_after_native_helpers_settle()
             scratch.path(),
             &crate::plugin_process::helper_executable()
                 .expect("fixture sandbox helper prerequisite"),
+            Arc::new(rw_tools::ApprovedExecutableImages::default()),
         )
         .expect("native sandbox launcher"),
         processes: Mutex::new(Vec::new()),
@@ -138,6 +139,7 @@ async fn preparation_directory_grants_do_not_read_siblings_or_recur() {
             scratch.path(),
             &crate::plugin_process::helper_executable()
                 .expect("fixture sandbox helper prerequisite"),
+            Arc::new(rw_tools::ApprovedExecutableImages::default()),
         )
         .expect("sandbox launcher"),
     );

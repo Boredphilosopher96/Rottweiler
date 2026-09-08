@@ -62,6 +62,7 @@ pub async fn resolve_plugin_process(
     plugin: &DiscoveredPlugin,
     private_root: &Path,
     helper: &rw_tools::SandboxHelper,
+    images: Arc<rw_tools::ApprovedExecutableImages>,
 ) -> Result<PluginProcessConfig> {
     if matches!(plugin.target, DiscoveredPluginTarget::Executable { .. }) {
         let plugin = plugin.clone();
@@ -76,7 +77,7 @@ pub async fn resolve_plugin_process(
     let resolver = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
         let scratch = Arc::new(crate::extension_runtime::PrivateMcpScratch::create()?);
         let launcher: Arc<dyn PluginLauncher> = Arc::new(
-            crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &helper)
+            crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), &helper, images)
                 .map_err(|error| miette!(error.to_string()))?,
         );
         let host = helper

@@ -71,6 +71,7 @@ async fn aborted_first_use_waits_for_real_sandboxed_process_handoff_and_reap() {
             scratch.path(),
             &crate::plugin_process::helper_executable()
                 .expect("fixture sandbox helper prerequisite"),
+            Arc::new(rw_tools::ApprovedExecutableImages::default()),
         )
         .expect("native sandbox launcher"),
         _scratch: scratch,
@@ -130,7 +131,10 @@ async fn aborted_first_use_waits_for_real_sandboxed_process_handoff_and_reap() {
         .settle_effects()
         .await
         .expect("actual process group and proxy settled");
-    budget.close().expect("native activation capacity returned");
+    budget
+        .close()
+        .await
+        .expect("native activation capacity returned");
 }
 
 async fn compile_worker(

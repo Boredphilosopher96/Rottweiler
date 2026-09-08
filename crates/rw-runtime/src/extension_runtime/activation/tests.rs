@@ -243,7 +243,7 @@ async fn application_close_rejects_active_capacity_and_prevents_new_admission() 
     let fixture = Fixture::new();
     let waiter = fixture.connect();
     fixture.launcher.admitted.notified().await;
-    assert!(fixture.budget.close().is_err());
+    assert!(fixture.budget.close().await.is_err());
     assert!(fixture.budget.admit().is_err());
     waiter.abort();
     let _ = waiter.await;
@@ -294,7 +294,7 @@ async fn source_and_provider_metadata_registration_performs_no_activation() {
     assert_eq!(runtime.endpoints.len(), 1);
     assert!(runtime.pending.is_empty());
     owner.shutdown().await.expect("never activated");
-    fixture.budget.close().expect("no retained capacity");
+    fixture.budget.close().await.expect("no retained capacity");
 }
 
 #[tokio::test]
@@ -353,7 +353,7 @@ async fn exhausted_waiter_admission_does_not_close_an_inert_generation() {
     fixture.launcher.release.add_permits(1);
     assert!(waiter.await.expect("waiter").is_ok());
     fixture.endpoint.close().await.expect("closed");
-    fixture.budget.close().expect("capacity returned");
+    fixture.budget.close().await.expect("capacity returned");
 }
 
 #[tokio::test]
@@ -401,7 +401,7 @@ async fn zero_ten_and_fifty_installed_plugins_remain_inert() {
             "metadata composition cannot capture executable bytes"
         );
         owner.shutdown().await.expect("inert closure");
-        budget.close().expect("no activation slots consumed");
+        budget.close().await.expect("no activation slots consumed");
     }
 }
 
@@ -431,7 +431,7 @@ async fn development_approval_is_generation_local_and_uses_the_prepared_identity
             .is_none()
     );
     fixture.endpoint.close().await.expect("retired");
-    fixture.budget.close().expect("all capacity returned");
+    fixture.budget.close().await.expect("all capacity returned");
 }
 
 #[tokio::test]
@@ -456,5 +456,5 @@ async fn rejected_activation_does_not_close_another_ready_generation() {
         .expect("still ready");
     second.endpoint.close().await.expect("rejection settled");
     first.endpoint.close().await.expect("first retired");
-    budget.close().expect("all capacity returned");
+    budget.close().await.expect("all capacity returned");
 }

@@ -30,6 +30,7 @@ impl SessionFactory for RuntimeSessionFactory {
         let plugins = self
             .plugin_runtime_budget
             .close()
+            .await
             .map_err(|error| HostError::Persistence(error.to_string()));
         let (wasm, admission, journal) = tokio::join!(
             std::panic::AssertUnwindSafe(self.wasm_workers.shutdown()).catch_unwind(),

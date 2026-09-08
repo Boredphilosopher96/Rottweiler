@@ -101,8 +101,8 @@ pub use worktree::{
 };
 
 pub use rw_sandbox::{
-    ApprovedCode, ApprovedExecutable, ExecutableArtifactIdentity, ExecutableDigest,
-    ExecutableLaunch, SandboxHelper,
+    ApprovedCode, ApprovedExecutable, ApprovedExecutableImages, ExecutableArtifactIdentity,
+    ExecutableDigest, ExecutableImageLimits, ExecutableLaunch, SandboxHelper,
 };
 
 #[cfg(test)]

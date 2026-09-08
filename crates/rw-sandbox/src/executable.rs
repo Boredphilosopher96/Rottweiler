@@ -9,7 +9,9 @@ use std::{
 
 mod code;
 mod identity;
+mod images;
 pub use code::ApprovedCode;
+pub use images::{ApprovedExecutableImages, ExecutableImageLimits};
 
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -35,10 +37,10 @@ pub struct ExecutableDigest {
 /// A pinned launch path whose authority remains owned until process settlement.
 #[derive(Debug)]
 pub struct ExecutableLaunch {
-    owner: ApprovedExecutable,
     path: PathBuf,
     #[cfg(target_os = "linux")]
     _pin: File,
+    owner: ApprovedExecutable,
 }
 impl ExecutableLaunch {
     /// Exact pinned executable path passed to the native process launcher.
@@ -60,6 +62,11 @@ pub struct ApprovedExecutable(Arc<OwnedExecutable>);
 struct OwnedExecutable {
     installation: PathBuf,
     digest: Option<ExecutableDigest>,
+    backing: Arc<ExecutableBacking>,
+    _origin: Option<images::OriginCredit>,
+}
+#[derive(Debug)]
+struct ExecutableBacking {
     #[cfg(target_os = "linux")]
     executable: File,
     #[cfg(not(target_os = "linux"))]
@@ -68,6 +75,9 @@ struct OwnedExecutable {
     launch_path: PathBuf,
     #[cfg(not(target_os = "linux"))]
     _directory: Option<tempfile::TempDir>,
+    #[cfg(test)]
+    _retirement_probe: Option<images::tests::RetirementProbe>,
+    _credit: Option<images::ImageCredit>,
 }
 
 impl ApprovedExecutable {
@@ -98,14 +108,20 @@ impl ApprovedExecutable {
         Ok(Self(Arc::new(OwnedExecutable {
             installation: path.clone(),
             digest: None,
-            #[cfg(target_os = "linux")]
-            executable,
-            #[cfg(not(target_os = "linux"))]
-            _executable: executable,
-            #[cfg(not(target_os = "linux"))]
-            launch_path: path,
-            #[cfg(not(target_os = "linux"))]
-            _directory: None,
+            backing: Arc::new(ExecutableBacking {
+                #[cfg(target_os = "linux")]
+                executable,
+                #[cfg(not(target_os = "linux"))]
+                _executable: executable,
+                #[cfg(not(target_os = "linux"))]
+                launch_path: path,
+                #[cfg(not(target_os = "linux"))]
+                _directory: None,
+                #[cfg(test)]
+                _retirement_probe: None,
+                _credit: None,
+            }),
+            _origin: None,
         })))
     }
 
@@ -116,6 +132,11 @@ impl ApprovedExecutable {
     /// Rejects malformed receipts, replacement, size or digest mismatch, and
     /// failure to establish an immutable private executable.
     pub fn from_artifact(approved: &ExecutableArtifactIdentity) -> Result<Self, SandboxError> {
+        let source = Self::source(approved)?;
+        Self::snapshot(approved, &source)
+    }
+
+    fn source(approved: &ExecutableArtifactIdentity) -> Result<File, SandboxError> {
         if approved.bytes == 0
             || approved.bytes > MAX_EXECUTABLE_BYTES
             || approved.sha256.len() != 64
@@ -128,9 +149,19 @@ impl ApprovedExecutable {
         {
             return Err(SandboxError::UntrustedHelper);
         }
-        let source = File::open(&approved.executable).map_err(invalid)?;
+        let source = File::from(
+            rustix::fs::open(
+                &approved.executable,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::CLOEXEC
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(invalid)?,
+        );
         identity(&source.metadata().map_err(invalid)?)?;
-        Self::snapshot(approved, &source)
+        Ok(source)
     }
 
     // Callers establish authority: external receipts have a hard size bound;
@@ -139,6 +170,34 @@ impl ApprovedExecutable {
         approved: &ExecutableArtifactIdentity,
         source: &File,
     ) -> Result<Self, SandboxError> {
+        Ok(Self::bind(
+            approved,
+            Self::snapshot_backing(approved, source, None)?,
+            None,
+        ))
+    }
+
+    fn bind(
+        approved: &ExecutableArtifactIdentity,
+        backing: Arc<ExecutableBacking>,
+        origin: Option<images::OriginCredit>,
+    ) -> Self {
+        Self(Arc::new(OwnedExecutable {
+            installation: approved.executable.clone(),
+            digest: Some(ExecutableDigest {
+                bytes: approved.bytes,
+                sha256: approved.sha256.clone(),
+            }),
+            backing,
+            _origin: origin,
+        }))
+    }
+
+    fn snapshot_backing(
+        approved: &ExecutableArtifactIdentity,
+        source: &File,
+        credit: Option<images::ImageCredit>,
+    ) -> Result<Arc<ExecutableBacking>, SandboxError> {
         #[cfg(target_os = "linux")]
         let mut executable = File::from(
             rustix::fs::memfd_create(
@@ -179,12 +238,7 @@ impl ApprovedExecutable {
                 | rustix::fs::SealFlags::SEAL,
         )
         .map_err(invalid)?;
-        Ok(Self(Arc::new(OwnedExecutable {
-            installation: approved.executable.clone(),
-            digest: Some(ExecutableDigest {
-                bytes: approved.bytes,
-                sha256: approved.sha256.clone(),
-            }),
+        Ok(Arc::new(ExecutableBacking {
             #[cfg(target_os = "linux")]
             executable,
             #[cfg(not(target_os = "linux"))]
@@ -193,7 +247,10 @@ impl ApprovedExecutable {
             launch_path,
             #[cfg(not(target_os = "linux"))]
             _directory: Some(directory),
-        })))
+            #[cfg(test)]
+            _retirement_probe: None,
+            _credit: credit,
+        }))
     }
 
     /// Opens the fixed installed component and verifies its approved portable digest.
@@ -222,15 +279,15 @@ impl ApprovedExecutable {
         #[cfg(not(target_os = "linux"))]
         let path = self.launch_path().to_path_buf();
         Ok(ExecutableLaunch {
-            owner: self.clone(),
             path,
             #[cfg(target_os = "linux")]
             _pin: pin,
+            owner: self.clone(),
         })
     }
     #[cfg(target_os = "linux")]
     pub(crate) fn sealed_file(&self) -> Result<File, SandboxError> {
-        self.0.executable.try_clone().map_err(invalid)
+        self.0.backing.executable.try_clone().map_err(invalid)
     }
 
     fn same_artifact(&self, other: &Self) -> bool {
@@ -251,7 +308,7 @@ impl ApprovedExecutable {
     #[cfg(target_os = "linux")]
     pub(crate) fn pin(&self) -> Result<(PathBuf, File), SandboxError> {
         use std::os::fd::AsRawFd as _;
-        let file = self.0.executable.try_clone().map_err(invalid)?;
+        let file = self.0.backing.executable.try_clone().map_err(invalid)?;
         rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty()).map_err(invalid)?;
         Ok((
             PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
@@ -260,7 +317,7 @@ impl ApprovedExecutable {
     }
     #[cfg(not(target_os = "linux"))]
     pub(crate) fn launch_path(&self) -> &Path {
-        &self.0.launch_path
+        &self.0.backing.launch_path
     }
 }
 fn identity(metadata: &std::fs::Metadata) -> Result<(u64, u64), SandboxError> {

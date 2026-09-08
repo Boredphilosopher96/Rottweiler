@@ -99,9 +99,14 @@ mod linux {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let config = resolve_plugin_process(&plugin, &root.join("private"), &helper)
-                .await
-                .expect("production source preparation");
+            let config = resolve_plugin_process(
+                &plugin,
+                &root.join("private"),
+                &helper,
+                std::sync::Arc::new(rw_tools::ApprovedExecutableImages::default()),
+            )
+            .await
+            .expect("production source preparation");
             let identity = config.source_identity().expect("sealed source identity");
             assert_eq!(
                 config.argv()[0],
