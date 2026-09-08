@@ -42,7 +42,10 @@ const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShellTarget {
     Local,
-    Remote { host: String },
+    Remote {
+        ssh: crate::remote::SshOptions,
+        host: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -192,9 +195,9 @@ async fn run_launch(
             )
             .await
         }
-        ShellTarget::Remote { host } => {
+        ShellTarget::Remote { ssh, host } => {
             let spawner = TokioTerminalSpawner::for_remote_tty();
-            let argv = remote_tty_argv(host, &launch.command).map_err(|message| {
+            let argv = remote_tty_argv(ssh, host, &launch.command).map_err(|message| {
                 ShellBrokerError::Protocol(format!("invalid remote foreground command: {message}"))
             })?;
             run_argv_after_durable_shell_start(

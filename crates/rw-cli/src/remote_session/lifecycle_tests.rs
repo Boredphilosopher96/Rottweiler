@@ -12,7 +12,10 @@ async fn watchdog_shutdown_reaps_its_tunnel_before_returning() {
         descriptor: root.path().join("runtime.json"),
     };
     let config = remote::RemoteConfig {
-        ssh_executable: "/usr/bin/ssh".into(),
+        ssh: remote::SshOptions {
+            executable: "/usr/bin/ssh".into(),
+            config_file: None,
+        },
         host: "unused".into(),
         remote_rw_executable: "/unused/rw".into(),
         remote_socket: "/unused/engine.sock".into(),

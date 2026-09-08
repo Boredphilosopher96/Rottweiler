@@ -18,6 +18,7 @@ import shutil
 import signal
 import socket
 import statistics
+import stat
 import struct
 import subprocess
 import sys
@@ -876,9 +877,24 @@ def durable_shell_events(home: pathlib.Path) -> list[dict[str, object]]:
     return events
 
 
-def ssh_preflight(host: str) -> None:
+def validate_ssh_config(config: pathlib.Path | None) -> None:
+    if config is None:
+        return
+    if not config.is_absolute():
+        raise ValueError("SSH config must be an absolute readable regular file")
+    descriptor = os.open(config, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("SSH config must be an absolute readable regular file")
+    finally:
+        os.close(descriptor)
+
+
+def ssh_preflight(host: str, config: pathlib.Path | None) -> None:
+    validate_ssh_config(config)
     completed = run_sample(
-        ["/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "--", host, "true"],
+        ["/usr/bin/ssh", *([] if config is None else ["-F", str(config)]),
+         "-T", "-o", "BatchMode=yes", "--", host, "true"],
         cwd=pathlib.Path.cwd(), env=dict(os.environ), timeout=5,
     )
     if completed.returncode != 0:
@@ -895,8 +911,9 @@ def ssh_loopback_gate(
     workspace: pathlib.Path,
     port: int,
     host: str,
+    config: pathlib.Path | None,
 ) -> None:
-    ssh_preflight(host)
+    ssh_preflight(host, config)
     home = root / "ssh-home"
     write_config(home, port)
     wrapper = root / "remote-rw"
@@ -917,6 +934,10 @@ def ssh_loopback_gate(
             "ROTTWEILER_DRIVER_READY_MARKER": DRIVER_READY_MARKER.decode("ascii"),
         }
     )
+    if config is not None:
+        env["ROTTWEILER_SSH_CONFIG"] = str(config)
+    else:
+        env.pop("ROTTWEILER_SSH_CONFIG", None)
     local = spawn_pty(
         rw,
         env,
@@ -1135,6 +1156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-supervisor", action="store_true")
     parser.add_argument("--skip-shell", action="store_true")
     parser.add_argument("--ssh-loopback", metavar="HOST")
+    parser.add_argument("--ssh-config", type=pathlib.Path)
     parser.add_argument("--metrics-json", type=pathlib.Path)
     parser.add_argument("--evidence-json", type=pathlib.Path)
     return parser.parse_args()
@@ -1154,6 +1176,9 @@ def gate_scratch(evidence: GateEvidence):
 
 
 def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
+    validate_ssh_config(args.ssh_config)
+    if args.ssh_config is not None and args.ssh_loopback is None:
+        raise ValueError("--ssh-config requires --ssh-loopback")
     if args.samples < 100 and not args.skip_performance:
         raise RuntimeError("p99 release gate requires at least 100 samples")
     if args.installed_first_samples < 3 and not args.skip_performance:
@@ -1228,7 +1253,7 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
                 shell_handover_gate(rw, tui, root, workspace, port)
             if args.ssh_loopback is not None:
                 evidence.update(phase="ssh_loopback")
-                ssh_loopback_gate(rw, tui, root, workspace, port, args.ssh_loopback)
+                ssh_loopback_gate(rw, tui, root, workspace, port, args.ssh_loopback, args.ssh_config)
     if args.metrics_json is not None:
         metrics["js_bundle_bytes"] = source_tui.stat().st_size + source_tui_native.stat().st_size
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)

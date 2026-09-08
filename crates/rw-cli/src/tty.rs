@@ -767,7 +767,11 @@ impl TerminalSignalSource for UnixTerminalSignals {
 /// side never invokes a shell. The single remote command argument explicitly
 /// selects the remote configured shell and quotes the user's complete command
 /// as the `-lc` payload.
-pub fn remote_tty_argv(host: &str, command: &str) -> Result<Vec<OsString>, String> {
+pub fn remote_tty_argv(
+    ssh: &crate::remote::SshOptions,
+    host: &str,
+    command: &str,
+) -> Result<Vec<OsString>, String> {
     if host.is_empty()
         || host.starts_with('-')
         || host
@@ -776,18 +780,21 @@ pub fn remote_tty_argv(host: &str, command: &str) -> Result<Vec<OsString>, Strin
     {
         return Err("invalid SSH host".to_owned());
     }
+    ssh.validate().map_err(|error| error.to_string())?;
     validate_shell_command(command)?;
     let remote = format!(
         "exec \"${{SHELL:-/bin/sh}}\" -lc {}",
         posix_shell_quote(command)
     );
-    Ok(vec![
-        OsString::from("ssh"),
+    let mut argv = vec![ssh.executable.as_os_str().to_owned()];
+    argv.extend(ssh.arguments());
+    argv.extend([
         OsString::from("-t"),
         OsString::from("--"),
         OsString::from(host),
         OsString::from(remote),
-    ])
+    ]);
+    Ok(argv)
 }
 
 fn posix_shell_quote(value: &str) -> String {
@@ -1029,14 +1036,18 @@ mod tests {
 
     #[test]
     fn argv_parser_and_remote_tty_do_not_invoke_a_shell() {
+        let ssh = crate::remote::SshOptions {
+            executable: "/usr/bin/ssh".into(),
+            config_file: None,
+        };
         assert_eq!(
             parse_command_argv("python -c 'print(1); import os'").expect("argv"),
             ["python", "-c", "print(1); import os"].map(OsString::from)
         );
         assert_eq!(
-            remote_tty_argv("host", "python -q").expect("remote argv"),
+            remote_tty_argv(&ssh, "host", "python -q").expect("remote argv"),
             [
-                "ssh",
+                "/usr/bin/ssh",
                 "-t",
                 "--",
                 "host",
@@ -1045,13 +1056,13 @@ mod tests {
             .map(OsString::from)
         );
         assert_eq!(
-            remote_tty_argv("host", "printf '%s\\n' \"$HOME\" | sed 's/a/b/'")
+            remote_tty_argv(&ssh, "host", "printf '%s\\n' \"$HOME\" | sed 's/a/b/'")
                 .expect("quoted remote argv")[4],
             OsString::from(
                 "exec \"${SHELL:-/bin/sh}\" -lc 'printf '\"'\"'%s\\n'\"'\"' \"$HOME\" | sed '\"'\"'s/a/b/'\"'\"''"
             )
         );
-        assert!(remote_tty_argv("-oProxyCommand=bad", "python").is_err());
+        assert!(remote_tty_argv(&ssh, "-oProxyCommand=bad", "python").is_err());
     }
 
     #[tokio::test]
