@@ -34,7 +34,9 @@ impl CheckpointBlobStore {
         }
         loop {
             let lock = self.existing_read_lock(operation)?;
-            let Some(registered) = self.namespace_registered(namespace, lock.is_some())? else {
+            let Some(registered) =
+                self.namespace_registered(namespace, lock.is_some(), operation)?
+            else {
                 // A first publisher installed its lock and ledger after the
                 // absent-lock observation. Acquire that owner before querying.
                 continue;
@@ -107,6 +109,7 @@ impl CheckpointBlobStore {
         &self,
         namespace: &Path,
         locked: bool,
+        operation: &CheckpointOperation,
     ) -> Result<Option<bool>, CheckpointError> {
         let path = self.root.join("quota.sqlite");
         let file = match regular_read(&path) {
@@ -131,26 +134,50 @@ impl CheckpointBlobStore {
         if file.metadata()?.len() > 64 * 1024 * 1024 {
             return Err(CheckpointError::CorruptBlobQuota);
         }
-        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         connection.busy_timeout(Duration::ZERO)?;
-        connection
-            .execute_batch("PRAGMA query_only=ON; PRAGMA cache_size=-256; PRAGMA mmap_size=0;")?;
-        self.validate_ledger(&connection)?;
-        if !crate::checkpoint::same_open_file_identity(
-            &file.metadata()?,
-            &fs::symlink_metadata(&path)?,
-        ) {
-            return Err(CheckpointError::CorruptBlobQuota);
-        }
-        let namespace = namespace
-            .to_str()
-            .filter(|path| path.len() <= 4096)
-            .ok_or(CheckpointError::CorruptBlobQuota)?;
-        Ok(Some(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM namespaces WHERE path=?1)",
-            [namespace],
-            |row| row.get(0),
-        )?))
+        let cancellation = operation.cancellation();
+        let deadline = operation.deadline();
+        // A corrupt schema can replace the primary-key table with an expensive
+        // view. Limit total VM work as well as the caller's physical deadline.
+        let mut remaining = 1_000_u32;
+        connection.progress_handler(
+            1_000,
+            Some(move || {
+                remaining = remaining.saturating_sub(1);
+                remaining == 0
+                    || cancellation.is_cancelled()
+                    || std::time::Instant::now() >= deadline
+            }),
+        )?;
+        let result = (|| {
+            connection.execute_batch(
+                "PRAGMA query_only=ON; PRAGMA cache_size=-256; PRAGMA mmap_size=0;",
+            )?;
+            self.validate_ledger(&connection)?;
+            if !crate::checkpoint::same_open_file_identity(
+                &file.metadata()?,
+                &fs::symlink_metadata(&path)?,
+            ) {
+                return Err(CheckpointError::CorruptBlobQuota);
+            }
+            let namespace = namespace
+                .to_str()
+                .filter(|path| path.len() <= 4096)
+                .ok_or(CheckpointError::CorruptBlobQuota)?;
+            Ok(Some(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE path=?1)",
+                [namespace],
+                |row| row.get(0),
+            )?))
+        })();
+        operation.check()?;
+        result
     }
 
     fn validate_ledger(&self, connection: &Connection) -> Result<(), CheckpointError> {

@@ -286,3 +286,28 @@ fn first_publication_between_missing_lock_and_ledger_probe_is_not_corruption() -
     assert!(store.recover_rewinds()?.is_empty());
     Ok(())
 }
+
+#[test]
+fn malformed_namespace_view_cannot_run_unbounded_readonly_vm_work() -> TestResult {
+    let fixture = NamespaceFixture::new()?;
+    let store = fixture.open("registered")?;
+    fixture.capture(&store)?;
+    fs::remove_dir(store.root.join("pending"))?;
+    let connection = fixture.blobs.open_ledger()?;
+    connection.execute_batch(
+        "ALTER TABLE namespaces RENAME TO retained_namespaces;
+         CREATE VIEW namespaces AS WITH RECURSIVE spin(n) AS
+             (VALUES(1) UNION ALL SELECT n+1 FROM spin)
+             SELECT CAST(n AS TEXT) AS path FROM spin;",
+    )?;
+    drop(connection);
+    assert!(store.recover_rewinds().is_err());
+    assert!(!store.root.join("pending").exists());
+    let connection = Connection::open(fixture.blobs.root.join("quota.sqlite"))?;
+    let count: u32 =
+        connection.query_row("SELECT count(*) FROM retained_namespaces", [], |row| {
+            row.get(0)
+        })?;
+    assert_eq!(count, 1);
+    Ok(())
+}
