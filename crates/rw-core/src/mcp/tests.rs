@@ -267,8 +267,6 @@ fn overflow_read_requires_the_complete_source_reference_and_cursor_contract() {
 
 #[tokio::test]
 async fn expired_mcp_oauth_refreshes_once_and_persists_rotation() {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
     const INITIAL_REFRESH: &str = "mcp-initial-refresh-canary";
     const ROTATED_REFRESH: &str = "mcp-rotated-refresh-canary";
     const REFRESHED_ACCESS: &str = "mcp-refreshed-access-canary";
@@ -325,27 +323,13 @@ async fn expired_mcp_oauth_refreshes_once_and_persists_rotation() {
         )]),
         redactor.clone(),
     );
-    let responder = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.expect("refresh request");
-        let mut request = vec![0_u8; 16 * 1024];
-        let count = stream.read(&mut request).await.expect("read refresh");
-        let request = String::from_utf8_lossy(&request[..count]);
-        assert!(request.contains("grant_type=refresh_token"));
-        assert!(request.contains(INITIAL_REFRESH));
-        let body = format!(
-            r#"{{"access_token":"{REFRESHED_ACCESS}","refresh_token":"{ROTATED_REFRESH}","expires_in":3600,"token_type":"Bearer"}}"#
-        );
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            )
-            .await
-            .expect("write refresh");
-    });
+    let responder = tokio::spawn(serve_mcp_refresh(
+        listener,
+        INITIAL_REFRESH,
+        REFRESHED_ACCESS,
+        ROTATED_REFRESH,
+    ));
+
     let first = provider
         .token(&server, "https://mcp.example/mcp")
         .await
@@ -370,6 +354,34 @@ async fn expired_mcp_oauth_refreshes_once_and_persists_rotation() {
     assert!(!debug.contains(INITIAL_REFRESH));
     assert!(!debug.contains(ROTATED_REFRESH));
     assert!(!debug.contains(REFRESHED_ACCESS));
+}
+
+async fn serve_mcp_refresh(
+    listener: tokio::net::TcpListener,
+    initial: &str,
+    access: &str,
+    rotated: &str,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (mut stream, _) = listener.accept().await.expect("refresh request");
+    let mut request = vec![0_u8; 16 * 1024];
+    let count = stream.read(&mut request).await.expect("read refresh");
+    let request = String::from_utf8_lossy(&request[..count]);
+    assert!(request.contains("grant_type=refresh_token"));
+    assert!(request.contains(initial));
+    let body = format!(
+        r#"{{"access_token":"{access}","refresh_token":"{rotated}","expires_in":3600,"token_type":"Bearer"}}"#
+    );
+    stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write refresh");
 }
 
 #[test]
