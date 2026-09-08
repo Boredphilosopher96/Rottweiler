@@ -195,8 +195,8 @@ runs. The handler's actual completion owns release of command admission.
 A hook declaration requires `name`, `class`, and `failure_policy`. Classes run in
 this order: `transform`, `policy`; priority and ID order each class.
 Policy hooks require `fail-closed`. Asynchronous observation uses the durable
-event subscriptions described below; `observer` is not a hook class. Event
-delivery runs independently of hook phases, retaining its cursor, acknowledgement
+event subscriptions described below. Event delivery runs independently of hook
+phases, retaining its cursor, acknowledgement
 and physical settlement owner. Transform handlers receive the phase-specific input type and
 return a transformation for that phase. Invocation identity is immutable.
 

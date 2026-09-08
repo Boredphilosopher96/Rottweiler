@@ -139,7 +139,7 @@ classes in that order, then priority, then ID. Policies observe transformed inpu
 and must fail closed. Asynchronous observation uses durable event subscriptions:
 commits wake independent bounded cursor readers, whose acknowledgement, replay
 and physical settlement are owned by the session. Observation cannot delay a
-hook phase or alter its decision. Hooks do not accept an `observer` class.
+hook phase or alter its decision.
 Pre-permission checks and SessionEnd cleanup remain synchronous policy phases;
 they are not asynchronous event subscriptions. Shell and WASM hook components
 participate in synchronous phases; asynchronous event handlers use the RPC tier.

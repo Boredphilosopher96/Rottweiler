@@ -76,8 +76,8 @@ phase's mutable fields; tool-call and session identity stay fixed.
 
 Policy hooks can block an operation. Permission policies return `allow`, `ask`,
 or `deny`, with the strictest result taking precedence. An `ask` result requires
-fresh approval. Use durable event subscriptions for asynchronous observation.
-The `observer` hook class is rejected; event delivery does not block hook phases.
+fresh approval. Use durable event subscriptions for asynchronous observation;
+event delivery does not block hook phases.
 
 Cancellation aborts `context.signal`. The request remains active until the
 handler and its cleanup settle. The host terminates an uncooperative plugin at
