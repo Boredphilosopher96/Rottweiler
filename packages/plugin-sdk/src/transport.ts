@@ -1,3 +1,4 @@
+import { boundedJsonStringify } from "./json-construction"
 import { PROTOCOL_LIMITS, type JsonValue } from "./generated/protocol-3"
 
 export const DEFAULT_MAX_RPC_LINE_BYTES = PROTOCOL_LIMITS.maxLineBytes
@@ -71,6 +72,7 @@ interface PendingWrite {
 
 export class BoundedJsonWriter {
   readonly #encoder = new TextEncoder()
+  #constructing = false
   readonly #queue: PendingWrite[] = []
   readonly #dataQueue: PendingWrite[] = []
   readonly #progressQueue: PendingWrite[] = []
@@ -102,13 +104,8 @@ export class BoundedJsonWriter {
 
   write(value: JsonValue, priority: "control" | "progress" | "data" = "control"): Promise<void> {
     if (this.#error !== undefined) return Promise.reject(this.#error)
-    const serialized = JSON.stringify(value)
-    if (serialized === undefined) return Promise.reject(new TypeError("JSON-RPC value is not serializable"))
-    const payload = this.#encoder.encode(serialized)
-    if (payload.byteLength > this.maxBytes) {
-      return Promise.reject(new LineTooLargeError(this.maxBytes))
-    }
-    const bytes = this.#encoder.encode(`${serialized}\n`)
+    // No user getter/toJSON or native enumeration runs after known exhaustion.
+    if (this.#constructing) return Promise.reject(new OutboundQueueFullError())
     const queue = priority === "control" ? this.#queue : priority === "progress" ? this.#progressQueue : this.#dataQueue
     const active = this.#active?.priority === priority ? 1 : 0
     const queuedBytes = priority === "control" ? this.#queuedBytes : priority === "progress" ? this.#progressBytes : this.#dataBytes
@@ -117,17 +114,43 @@ export class BoundedJsonWriter {
       : PROTOCOL_LIMITS.dataQueueBytes
     const maxFrames = priority === "control" ? this.#maxQueuedFrames
       : priority === "progress" ? PROTOCOL_LIMITS.maxInFlightRequests : PROTOCOL_LIMITS.maxProviderStreams
-    if (priority === "progress" && payload.byteLength > PROTOCOL_LIMITS.maxProgressFrameBytes) {
-      return Promise.reject(new LineTooLargeError(PROTOCOL_LIMITS.maxProgressFrameBytes))
-    }
-    if (queuedBytes + bytes.byteLength > maxBytes || queue.length + active >= maxFrames) {
+    const remaining = maxBytes - queuedBytes
+    if (remaining < 2 || queue.length + active >= maxFrames) {
       const error = new OutboundQueueFullError()
       this.abort(error)
       return Promise.reject(error)
     }
-    if (priority === "control") this.#queuedBytes += bytes.byteLength
-    else if (priority === "progress") this.#progressBytes += bytes.byteLength
-    else this.#dataBytes += bytes.byteLength
+    const lineLimit = priority === "progress" ? Math.min(this.maxBytes, PROTOCOL_LIMITS.maxProgressFrameBytes) : this.maxBytes
+    const constructionLimit = Math.min(lineLimit, remaining - 1)
+    let serialized: { readonly text: string; readonly bytes: number }
+    this.#constructing = true
+    try {
+      serialized = boundedJsonStringify(value, constructionLimit, () =>
+        constructionLimit < lineLimit ? new OutboundQueueFullError() : new LineTooLargeError(lineLimit))
+    } catch (error) {
+      if (error instanceof OutboundQueueFullError) this.abort(error)
+      if (error instanceof OutboundQueueFullError || error instanceof LineTooLargeError) return Promise.reject(error)
+      throw error
+    } finally {
+      this.#constructing = false
+    }
+    if (this.#error !== undefined) return Promise.reject(this.#error)
+    // The exact single output buffer is admitted before allocation. The bounded
+    // native UTF-16 construction string is synchronous scratch, never queued.
+    const size = serialized.bytes + 1
+    if (priority === "control") this.#queuedBytes += size
+    else if (priority === "progress") this.#progressBytes += size
+    else this.#dataBytes += size
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(size)
+      const encoded = this.#encoder.encodeInto(serialized.text, bytes)
+      if (encoded.read !== serialized.text.length || encoded.written !== serialized.bytes) throw new Error("JSON-RPC construction size mismatch")
+      bytes[serialized.bytes] = 0x0a
+    } catch (error) {
+      this.abort(error instanceof Error ? error : new Error("JSON-RPC construction failed"))
+      return Promise.reject(this.#error)
+    }
     const pending = new Promise<void>((resolve, reject) => queue.push({ bytes, priority, resolve, reject }))
     this.#pump()
     return pending

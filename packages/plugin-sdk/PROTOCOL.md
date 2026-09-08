@@ -149,6 +149,17 @@ serialized to a plugin. Plugin environment inheritance is cleared and restored o
 small safe allowlist. Approved network plugins receive only canonical public `allowed_domains`;
 private, local, link-local, and loopback destinations remain denied by the policy proxy.
 
+The SDK writer checks exhausted frame/byte admission before traversing a reply.
+A native JSON counting replacer accounts exact escaped UTF-8 contributions before
+serialization grows them, with at most 128 retained ancestor records. It preserves
+native property ordering, omissions, sparse arrays, primitive coercion, and `toJSON`
+semantics. The admitted result is encoded once into one exact UTF-8 buffer including
+LF; no second full encoding or newline-string copy is retained. Reentrant writes
+from serialization callbacks reject explicitly, so a writer has one construction
+at a time. The bounded native construction string is synchronous scratch alongside
+the admitted queue. Native VM own-key enumeration and plugin-authored getters or
+`toJSON` can allocate independently; this is not a universal plugin-heap limit.
+
 All frame, manifest, capability, name, schema, payload, catalog, token, and pricing bounds come
 from `rw-plugin-protocol` and its generated `PROTOCOL_LIMITS` and schema projections. The Rust
 boundary clamps bounded catalog values, and the SDK rejects values outside the same generated
