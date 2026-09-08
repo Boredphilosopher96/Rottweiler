@@ -121,13 +121,14 @@ use tracing::Instrument as _;
 ///
 /// # Errors
 /// Returns an error when configuration, durable recovery, or composition fails.
-#[tracing::instrument(
-    target = "rw_performance",
-    level = "trace",
-    name = "runtime.local.compose",
-    skip_all
-)]
 pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super::LocalSession> {
+    use tracing::Instrument as _;
+    compose_owned_session(options)
+        .instrument(tracing::trace_span!(target: "rw_performance", "runtime.local.compose"))
+        .await
+}
+
+async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::LocalSession> {
     if options.max_turns == 0 {
         return Err(miette!("--max-turns must be greater than zero"));
     }
@@ -1282,3 +1283,7 @@ pub async fn compose_local_session(options: LocalSessionOptions) -> Result<super
         }
     }
 }
+
+#[cfg(test)]
+#[path = "composition_trace_tests.rs"]
+mod trace_tests;
