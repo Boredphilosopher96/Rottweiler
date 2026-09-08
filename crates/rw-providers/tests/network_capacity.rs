@@ -24,7 +24,7 @@ fn request(address: std::net::SocketAddr) -> GuardedHttpRequest {
         method: GuardedHttpMethod::Get,
         url: format!("http://{address}/owned-body").parse().expect("URL"),
         headers: Vec::new(),
-        body: Vec::new(),
+        body: bytes::Bytes::new(),
         proxy: None,
         proxy_authentication: None,
         dns_pin: None,

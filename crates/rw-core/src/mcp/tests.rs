@@ -66,46 +66,77 @@ struct PolicyClient {
 
 #[async_trait]
 impl rw_mcp::McpClient for PolicyClient {
+    fn response_limits(&self) -> rw_mcp::McpResponseLimits {
+        rw_mcp::McpResponseLimits::new(8 * 1024 * 1024).expect("fixture response limit")
+    }
+
     fn catalog_valid(&self) -> bool {
         true
     }
 
-    async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
+    async fn list_tools(
+        &self,
+        slot: rw_mcp::McpResponseSlot,
+    ) -> Result<rw_mcp::McpResponse<Vec<Value>>, McpError> {
         let names = if self.server == "github" {
             vec!["get_issue", "delete_issue"]
         } else {
             vec!["search_messages"]
         };
-        Ok(names
-            .into_iter()
-            .map(|name| {
-                json!({
-                    "name": name,
-                    "description": format!("fixture {name}"),
-                    "inputSchema": {"type": "object"}
+        slot.adopt(
+            names
+                .into_iter()
+                .map(|name| {
+                    json!({
+                        "name": name,
+                        "description": format!("fixture {name}"),
+                        "inputSchema": {"type": "object"}
+                    })
                 })
-            })
-            .collect())
+                .collect(),
+        )
+        .await
     }
 
-    async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
-        Ok(Vec::new())
+    async fn list_resources(
+        &self,
+        slot: rw_mcp::McpResponseSlot,
+    ) -> Result<rw_mcp::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(Vec::new()).await
     }
 
-    async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
-        Ok(Vec::new())
+    async fn list_prompts(
+        &self,
+        slot: rw_mcp::McpResponseSlot,
+    ) -> Result<rw_mcp::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(Vec::new()).await
     }
 
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: rw_mcp::McpResponseSlot,
+    ) -> Result<rw_mcp::McpResponse<Value>, McpError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(json!({"server": self.server, "name": name, "arguments": arguments}))
+        slot.adopt(json!({"server": self.server, "name": name, "arguments": arguments}))
+            .await
     }
 
-    async fn read_resource(&self, _uri: &str) -> Result<Value, McpError> {
+    async fn read_resource(
+        &self,
+        _uri: &str,
+        _slot: rw_mcp::McpResponseSlot,
+    ) -> Result<rw_mcp::McpResponse<Value>, McpError> {
         unreachable!("policy fixture has no resources")
     }
 
-    async fn get_prompt(&self, _name: &str, _arguments: Value) -> Result<Value, McpError> {
+    async fn get_prompt(
+        &self,
+        _name: &str,
+        _arguments: Value,
+        _slot: rw_mcp::McpResponseSlot,
+    ) -> Result<rw_mcp::McpResponse<Value>, McpError> {
         unreachable!("policy fixture has no prompts")
     }
 
@@ -400,21 +431,6 @@ async fn serve_mcp_refresh(
             )
             .await
             .expect("write refresh");
-}
-
-#[test]
-fn mcp_http_headers_reject_oversized_and_control_ids() {
-    assert!(mcp_http_headers(None, Some("bad id"), None, HashMap::new(), false).is_err());
-    assert!(
-        mcp_http_headers(
-            None,
-            Some("ok-session"),
-            Some("x".repeat(MCP_HTTP_MAX_EVENT_ID_BYTES + 1)),
-            HashMap::new(),
-            false,
-        )
-        .is_err()
-    );
 }
 
 #[test]
@@ -793,16 +809,19 @@ async fn production_connector_drives_real_rmcp_http_with_bearer_canary() {
         tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
     };
     let client = connector.connect(&config).await.expect("MCP initialize");
-    let catalog = client.list_tools().await.expect("MCP tool catalog");
+    let slot = rw_mcp::McpResponseSlot::new(client.response_limits()).expect("catalog admission");
+    let catalog = client.list_tools(slot).await.expect("MCP tool catalog");
     assert!(
         catalog
             .iter()
             .any(|tool| tool.get("name") == Some(&json!("rottweiler_tools_call")))
     );
+    let slot = rw_mcp::McpResponseSlot::new(client.response_limits()).expect("tool admission");
     let result = client
         .call_tool(
             "rottweiler_tools_call",
             json!({"name":"echo","arguments":{"message":"hello over guarded HTTP"}}),
+            slot,
         )
         .await
         .expect("MCP tool call");
@@ -813,7 +832,7 @@ async fn production_connector_drives_real_rmcp_http_with_bearer_canary() {
         .expect("MCP shutdown");
     assert!(bearer_seen.load(Ordering::SeqCst));
     assert!(!bearer_rejected.load(Ordering::SeqCst));
-    let diagnostics = format!("{config:?} {result:?}");
+    let diagnostics = format!("{config:?} {:?}", *result);
     assert!(!diagnostics.contains(HTTP_BEARER_CANARY));
 
     let _ = shutdown_tx.send(true);

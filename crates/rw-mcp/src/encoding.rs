@@ -1,5 +1,5 @@
 //! Prepared source and encoded response ownership across finite CPU work.
-use crate::{McpError, StructuredResponseEncoder, payload_work::Allocation};
+use crate::{McpError, McpResponse, StructuredResponseEncoder, payload_work::Allocation};
 use rw_types::{allocation::AllocationPlan, session_payload::MAX_SESSION_PAYLOAD_BYTES};
 use serde_json::Value;
 use std::sync::Arc;
@@ -43,11 +43,11 @@ impl EncodingWork {
 
 struct EncodingSource {
     encoder: Arc<dyn StructuredResponseEncoder>,
-    value: Value,
+    value: McpResponse<Value>,
 }
 impl EncodingSource {
     fn run(self) -> Result<EncodedPayload, McpError> {
-        let source = AllocationPlan::new(self.value)
+        let source = AllocationPlan::new(self.value.value)
             .map_err(|_| McpError::Encoding("MCP response allocation is unsupported".into()))?;
         let working = self.encoder.working_bytes(source.value())?;
         let bytes = source
@@ -58,18 +58,20 @@ impl EncodingSource {
                 McpError::Encoding("MCP encoding allocation exceeds its contract".into())
             })?;
         let retained = Allocation::new(bytes)?;
-        EncodingWork {
+        let result = EncodingWork {
             encoder: self.encoder,
             source,
             retained,
         }
-        .run()
+        .run();
+        drop(self.value.retained);
+        result
     }
 }
 
 pub(crate) async fn encode(
     encoder: Arc<dyn StructuredResponseEncoder>,
-    value: Value,
+    value: McpResponse<Value>,
 ) -> Result<EncodedPayload, McpError> {
     // Shape/count traversal can scan the whole response. It belongs to the same
     // admitted CPU worker as preparation and encoding, before any new body allocation.

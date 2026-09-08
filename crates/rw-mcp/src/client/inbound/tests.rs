@@ -1,7 +1,30 @@
 #![allow(clippy::expect_used)]
 use super::*;
+use crate::client::ingress::{Ingress, stdio::StdioTransport};
+use crate::{McpClient, McpResponseSlot};
 use rmcp::ServiceExt as _;
 use serde_json::json;
+
+async fn admitted_service(
+    router: McpInboundRouter,
+    stream: tokio::io::DuplexStream,
+) -> (
+    rmcp::service::RunningService<RoleClient, McpInboundRouter>,
+    Arc<Ingress>,
+) {
+    let ingress = Ingress::new(router.clone()).expect("ingress admission");
+    let (reader, writer) = tokio::io::split(stream);
+    let transport = StdioTransport::new(Box::pin(reader), Box::pin(writer), Arc::clone(&ingress))
+        .expect("transport admission");
+    let service = Box::pin(router.serve(transport))
+        .await
+        .expect("client handshake");
+    (service, ingress)
+}
+
+fn slot(client: &impl McpClient) -> McpResponseSlot {
+    McpResponseSlot::new(client.response_limits()).expect("response admission")
+}
 
 #[test]
 fn capability_advertisement_contains_no_unowned_host_authority() {
@@ -62,11 +85,7 @@ async fn actual_connection_negotiates_and_routes_unsolicited_requests() {
             .await
             .expect("server handshake")
     });
-    let client = router
-        .clone()
-        .serve(client_io)
-        .await
-        .expect("client handshake");
+    let (client, _ingress) = admitted_service(router.clone(), client_io).await;
     let server = server.await.expect("server task");
     assert_eq!(
         serde_json::to_value(&server.peer_info().expect("negotiated client").capabilities)
@@ -93,7 +112,6 @@ async fn actual_connection_negotiates_and_routes_unsolicited_requests() {
 
 #[tokio::test]
 async fn absent_server_capabilities_do_not_trigger_catalog_requests() {
-    use crate::McpClient as _;
     struct NoCatalogs;
     impl rmcp::ServerHandler for NoCatalogs {
         async fn list_tools(
@@ -121,27 +139,37 @@ async fn absent_server_capabilities_do_not_trigger_catalog_requests() {
     let (client_io, server_io) = tokio::io::duplex(8 * 1024);
     let server =
         tokio::spawn(async move { NoCatalogs.serve(server_io).await.expect("server handshake") });
-    let service = McpInboundRouter::default()
-        .serve(client_io)
-        .await
-        .expect("client handshake");
+    let (service, ingress) = admitted_service(McpInboundRouter::default(), client_io).await;
     let server = server.await.expect("server task");
     let client = super::super::RmcpClient::new(
         rw_types::McpServerId::new("unary").expect("id"),
         service,
         None,
+        ingress,
     )
     .await;
     assert!(!client.peer.response_cache_config().await.enabled);
-    assert!(client.list_tools().await.expect("no tools").is_empty());
     assert!(
         client
-            .list_resources()
+            .list_tools(slot(&client))
+            .await
+            .expect("no tools")
+            .is_empty()
+    );
+    assert!(
+        client
+            .list_resources(slot(&client))
             .await
             .expect("no resources")
             .is_empty()
     );
-    assert!(client.list_prompts().await.expect("no prompts").is_empty());
+    assert!(
+        client
+            .list_prompts(slot(&client))
+            .await
+            .expect("no prompts")
+            .is_empty()
+    );
     server.cancel().await.expect("server shutdown");
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while client.catalog_valid() {
@@ -150,7 +178,12 @@ async fn absent_server_capabilities_do_not_trigger_catalog_requests() {
     })
     .await
     .expect("disconnection revokes catalog");
-    assert!(client.call_tool("unavailable", json!({})).await.is_err());
+    assert!(
+        client
+            .call_tool("unavailable", json!({}), slot(&client))
+            .await
+            .is_err()
+    );
     client
         .close(std::time::Duration::from_secs(1))
         .await
@@ -159,7 +192,6 @@ async fn absent_server_capabilities_do_not_trigger_catalog_requests() {
 
 #[tokio::test]
 async fn prompt_reads_do_not_reuse_or_fall_back_to_an_uncharged_peer_cache() {
-    use crate::McpClient as _;
     use std::sync::atomic::AtomicUsize;
     struct ChangingPrompt(Arc<AtomicUsize>);
     impl rmcp::ServerHandler for ChangingPrompt {
@@ -193,27 +225,30 @@ async fn prompt_reads_do_not_reuse_or_fall_back_to_an_uncharged_peer_cache() {
     let handler = ChangingPrompt(Arc::clone(&calls));
     let (client_io, server_io) = tokio::io::duplex(8192);
     let server = tokio::spawn(async move { handler.serve(server_io).await.expect("server") });
-    let service = McpInboundRouter::default()
-        .serve(client_io)
-        .await
-        .expect("client");
+    let (service, ingress) = admitted_service(McpInboundRouter::default(), client_io).await;
     let server = server.await.expect("server task");
     let client = super::super::RmcpClient::new(
         rw_types::McpServerId::new("uncached").expect("id"),
         service,
         None,
+        ingress,
     )
     .await;
     for expected in ["1", "2"] {
         assert_eq!(
             client
-                .get_prompt("same", json!({}))
+                .get_prompt("same", json!({}), slot(&client))
                 .await
                 .expect("fresh prompt")["description"],
             expected
         );
     }
-    assert!(client.get_prompt("same", json!({})).await.is_err());
+    assert!(
+        client
+            .get_prompt("same", json!({}), slot(&client))
+            .await
+            .is_err()
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     client
         .close(std::time::Duration::from_secs(1))

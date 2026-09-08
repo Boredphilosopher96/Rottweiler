@@ -631,6 +631,16 @@ an isolated process with stdin closed: it captures events, chooses a question
 answer, resumes durable state, interrupts a pending question, and verifies empty
 stdout and stderr after owned shutdown.
 
+Raw MCP transport tests additionally cover predecode structural pressure,
+unknown/duplicate/numeric-string IDs, response ownership after another receive,
+request retirement after service close, and SSE behavior across every chunk
+boundary. HTTP fixtures exercise accepted replies delivered on GET, empty
+notification success, non-success JSON-RPC errors, exact standard/auth/session
+headers, and one graceful DELETE. A blocked resolver must retain request bytes and
+runtime credit after cancellation until the actual resolver exits and native
+thread joins. Panicked exchanges must fail their callers; cancellation of the
+outer join observer must retain unproven runtime credit.
+
 Durable MCP payload acceptance covers authenticated chunk windows, dense newline
 queries, clipped large lines, UTF-8 cursors, quota refusal, cancellation rollback,
 and independent fork copies. The adapter must prove that an aborted caller keeps

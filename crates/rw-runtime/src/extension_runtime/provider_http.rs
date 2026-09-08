@@ -310,7 +310,7 @@ async fn open(
         method,
         url,
         headers,
-        body,
+        body: body.into(),
         proxy: url::Url::parse(&proxy.url()).ok(),
         proxy_authentication: None,
         dns_pin: None,

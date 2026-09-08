@@ -8,7 +8,7 @@ use rmcp::{
     service::{NotificationContext, RequestContext, RoleClient, Service},
 };
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -18,15 +18,33 @@ use std::sync::{
 #[derive(Clone, Default)]
 pub struct McpInboundRouter {
     invalidated: Arc<AtomicBool>,
+    initialization: Arc<Mutex<Vec<Arc<crate::payload_work::Allocation>>>>,
 }
 
 impl McpInboundRouter {
+    pub(super) fn retain_initialization(
+        &self,
+        retained: Arc<crate::payload_work::Allocation>,
+    ) -> Result<(), crate::McpError> {
+        let mut initialization = self
+            .initialization
+            .lock()
+            .map_err(|_| crate::McpError::Protocol("MCP initialization owner poisoned".into()))?;
+        if initialization.len() >= 2 {
+            return Err(crate::McpError::Protocol(
+                "MCP initialization response admission exceeded".into(),
+            ));
+        }
+        initialization.push(retained);
+        Ok(())
+    }
+
     #[must_use]
     pub fn catalog_valid(&self) -> bool {
         !self.invalidated.load(Ordering::Acquire)
     }
 
-    fn request(request: &ServerRequest) -> Result<ClientResult, ErrorData> {
+    pub(super) fn request(request: &ServerRequest) -> Result<ClientResult, ErrorData> {
         match request {
             ServerRequest::PingRequest(_) => Ok(ClientResult::empty(())),
             _ => Err(ErrorData::new(
@@ -37,7 +55,7 @@ impl McpInboundRouter {
         }
     }
 
-    fn notification(&self, notification: &ServerNotification) {
+    pub(super) fn notification(&self, notification: &ServerNotification) {
         match notification {
             // Cancellation is handled by the RPC request owner. Observations
             // confer no authority and cannot allocate a backlog or expose secrets.
@@ -60,17 +78,22 @@ impl Service<RoleClient> for McpInboundRouter {
     async fn handle_request(
         &self,
         request: ServerRequest,
-        _context: RequestContext<RoleClient>,
+        context: RequestContext<RoleClient>,
     ) -> Result<ClientResult, ErrorData> {
-        Self::request(&request)
+        let response = Self::request(&request);
+        drop(request);
+        drop(context);
+        response
     }
 
     async fn handle_notification(
         &self,
         notification: ServerNotification,
-        _context: NotificationContext<RoleClient>,
+        context: NotificationContext<RoleClient>,
     ) -> Result<(), ErrorData> {
         self.notification(&notification);
+        drop(notification);
+        drop(context);
         Ok(())
     }
 

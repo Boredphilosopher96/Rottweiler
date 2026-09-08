@@ -305,7 +305,7 @@ window. A fork copies only bodies referenced by its selected canonical prefix.
 Slash-command prompt replies are inline-only: an oversized result is rejected
 before payload publication. Full tool responses use the canonical attachment path.
 
-Encoding, redaction and payload windows share a 256 MiB process-wide working-byte
+Ingress, response catalogs, encoding, redaction and payload windows share a 256 MiB process-wide working-byte
 pool with a 128 MiB per-reservation ceiling. CPU and filesystem jobs also acquire
 the finite process-wide resource classes. Their actual workers retain the source,
 allocation and namespace owners through completion when a caller is dropped;
@@ -314,6 +314,48 @@ tool publication. Publication failures before rename refund quota only after
 proving that neither staging nor published bytes remain and syncing the namespace.
 An uncertain publication retains its charge until its immutable identity is
 verified; it is never treated as an evictable cache entry.
+
+
+MCP transport framing reserves encoded capacity and parser scratch before reading
+or growing a frame. Stdio frames are at most 4 MiB, HTTP JSON bodies 64 MiB, and
+SSE events 16 MiB. A structural preflight bounds depth and node counts before
+concrete method-specific decoding; it reserves the simultaneous typed and
+conversion graphs in addition to raw storage. A frame within the wire ceiling
+can still exceed structural or aggregate admission. Such input is rejected
+explicitly. Correlated request owners are registered before the SDK queue, and
+retain the decoded response through oneshot delivery, catalog/value conversion,
+encoding, and canonical tool-result admission. Numeric-string response IDs retain
+the protocol's numeric matching behavior; cancellation IDs use exact matching.
+Unknown or duplicate response IDs close the connection. The SDK response cache is
+disabled, and reviewed catalogs retain their own allocation credit.
+
+Unadvertised host requests are answered under their decoded owner, without
+spawning detached payload handlers. Catalog-change notifications invalidate one
+shared generation bit. A remote cancellation settles its exact pending request;
+its reason is never reflected into another request. Initialization metadata stays
+owned through every private peer holder and the completed service/request joins.
+Connection creation retains pending parse and I/O workers even if its caller exits.
+
+Each HTTP connection owns one private current-thread runtime, with at most one
+resolver thread and 64 active exchanges. The two 2 MiB stacks and bounded runtime
+metadata are admitted from the same MCP pool before startup; a separate 64-worker
+limit bounds service count. No finite Blocking permit surrounds the persistent
+runtime, so resolver admission cannot deadlock its parent. Actual native thread
+join precedes stack refund; an unproven join quarantines its physical owner.
+Request bytes carry their allocation inside the actual network body. Each exchange
+reserves the bounded network chunk overlap before invoking the injected client.
+Cancellation of an exchange retires the connection and fails its pending calls.
+GET network failures drain active exchanges and destroy the failed runtime epoch
+before reconnecting with the same protocol session and retained resume cursor.
+Graceful close sends session DELETE before runtime teardown. No cleanup path
+constructs an ambient client or abandons DNS work on a timeout.
+
+HTTP preserves accepted asynchronous responses, JSON-RPC errors on non-success
+HTTP status, SSE resume/retry semantics, and negotiated protocol/session headers.
+Only minimal validated tool-header annotations are retained alongside the reviewed
+catalog. Outgoing headers are bounded to 32 entries and 32 KiB; incoming metadata
+retains the guarded transport's 128-entry/64 KiB bound. Individual values are at
+most 8 KiB. Namespace/session identifiers have their separate protocol limits.
 
 
 `/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp.prompt <server> <prompt> [JSON object]`; catalog-derived namespaced aliases are conveniences and the stable command resolves the live server state at invocation.

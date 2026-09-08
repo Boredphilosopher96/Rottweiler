@@ -206,6 +206,8 @@ impl Default for McpLimits {
 
 #[derive(Clone, Debug, Error)]
 pub enum McpError {
+    #[error("MCP HTTP transport failed")]
+    Transport,
     #[error("MCP effects unsettled for {server}: {message}")]
     EffectsUnsettled {
         server: McpServerId,

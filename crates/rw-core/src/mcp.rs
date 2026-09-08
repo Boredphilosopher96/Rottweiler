@@ -1,11 +1,11 @@
 mod oauth;
 mod presentation;
 mod resolution;
+mod search;
 pub use oauth::*;
 
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt,
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -13,21 +13,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::{StreamExt as _, stream::BoxStream};
-use http::{HeaderName, HeaderValue};
-use rmcp::{
-    ServiceExt as _,
-    model::{ClientJsonRpcMessage, ServerJsonRpcMessage},
-    transport::streamable_http_client::{
-        SseError, StreamableHttpClient, StreamableHttpClientTransport,
-        StreamableHttpClientTransportConfig, StreamableHttpError, StreamableHttpPostResponse,
-    },
-};
+use futures_util::StreamExt as _;
+
 use rw_context::encode_toon;
 use rw_mcp::{
-    McpAuthorizationProvider, McpConnectionApprovalPolicy, McpConnector, McpError, McpManager,
-    McpServerConfig, McpTransportConfig, OverflowSpool, SecretToken, StructuredResponseEncoder,
-    boxed_running_http_client,
+    McpAuthorizationProvider, McpConnectionApprovalPolicy, McpConnector, McpError, McpHttpClient,
+    McpHttpMethod, McpHttpResponse, McpManager, McpServerConfig, McpTransportConfig, OverflowSpool,
+    SecretToken, StructuredResponseEncoder, connect_http,
 };
 use rw_providers::{
     AuthMaterial, AuthProvider, DEFAULT_OAUTH_CALLBACK_TIMEOUT, OAuthAuthorizationCode,
@@ -46,19 +38,12 @@ use rw_types::{McpServerId, ToolCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sse_stream::{Sse, SseStream};
 use url::Url;
 
 const UNTRUSTED_OPEN: &str = "<rottweiler_untrusted_mcp_output_v1>\n";
 const UNTRUSTED_CLOSE: &str = "\n</rottweiler_untrusted_mcp_output_v1>";
-const MAX_TOOL_SEARCH_WIRE_BYTES: usize = 192 * 1024;
 const MCP_HTTP_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MCP_HTTP_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-const MCP_HTTP_MAX_CUSTOM_HEADERS: usize = 32;
-const MCP_HTTP_MAX_HEADER_BYTES: usize = 32 * 1024;
-const MCP_HTTP_MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
-const MCP_HTTP_MAX_SESSION_ID_BYTES: usize = 256;
-const MCP_HTTP_MAX_EVENT_ID_BYTES: usize = 512;
 
 /// Production rmcp HTTP client backed exclusively by the guarded provider
 /// transport. Direct destinations are DNS-pinned after validating the complete
@@ -189,20 +174,14 @@ impl McpConnector for ProductionMcpHttpConnector {
         } else {
             None
         };
-        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(endpoint.clone());
-        transport_config.channel_buffer_capacity = self.channel_capacity;
-        if let Some(token) = token {
-            transport_config = transport_config.auth_header(token.expose().to_owned());
-        }
-        let transport =
-            StreamableHttpClientTransport::with_client(self.client.clone(), transport_config);
-        let service = rw_mcp::McpInboundRouter::default()
-            .serve(transport)
-            .await
-            .map_err(|_| {
-                McpError::Protocol("remote MCP protocol initialization failed".to_owned())
-            })?;
-        Ok(boxed_running_http_client(config.id.clone(), service).await)
+        connect_http(
+            config.id.clone(),
+            endpoint.clone(),
+            token,
+            Arc::new(self.client.clone()),
+            self.channel_capacity,
+        )
+        .await
     }
 }
 
@@ -236,7 +215,7 @@ impl ProductionMcpHttpClient {
         method: rw_providers::GuardedHttpMethod,
         uri: &str,
         headers: Vec<(String, String)>,
-        body: Vec<u8>,
+        body: bytes::Bytes,
     ) -> Result<rw_providers::GuardedHttpStreamResponse, ProductionMcpHttpError> {
         let url = Url::parse(uri).map_err(|_| ProductionMcpHttpError)?;
         let host = url.host_str().ok_or(ProductionMcpHttpError)?;
@@ -315,238 +294,36 @@ fn mcp_origin(url: &Url) -> Result<String, ProductionMcpHttpError> {
 #[error("guarded MCP HTTP request failed")]
 pub struct ProductionMcpHttpError;
 
-fn mcp_http_headers(
-    auth: Option<String>,
-    session: Option<&str>,
-    last_event: Option<String>,
-    custom: HashMap<HeaderName, HeaderValue>,
-    json_body: bool,
-) -> Result<Vec<(String, String)>, ProductionMcpHttpError> {
-    if custom.len() > MCP_HTTP_MAX_CUSTOM_HEADERS {
-        return Err(ProductionMcpHttpError);
-    }
-    let mut headers = Vec::with_capacity(custom.len() + 5);
-    headers.push((
-        "accept".to_owned(),
-        "text/event-stream, application/json".to_owned(),
-    ));
-    if json_body {
-        headers.push(("content-type".to_owned(), "application/json".to_owned()));
-    }
-    if let Some(token) = auth {
-        if token.is_empty() || token.len() > MCP_HTTP_MAX_HEADER_VALUE_BYTES {
-            return Err(ProductionMcpHttpError);
-        }
-        HeaderValue::from_str(&token).map_err(|_| ProductionMcpHttpError)?;
-        headers.push(("authorization".to_owned(), format!("Bearer {token}")));
-    }
-    if let Some(session) = session {
-        if !valid_mcp_header_id(session, MCP_HTTP_MAX_SESSION_ID_BYTES) {
-            return Err(ProductionMcpHttpError);
-        }
-        HeaderValue::from_str(session).map_err(|_| ProductionMcpHttpError)?;
-        headers.push(("mcp-session-id".to_owned(), session.to_owned()));
-    }
-    if let Some(last_event) = last_event {
-        if !valid_mcp_header_id(&last_event, MCP_HTTP_MAX_EVENT_ID_BYTES) {
-            return Err(ProductionMcpHttpError);
-        }
-        HeaderValue::from_str(&last_event).map_err(|_| ProductionMcpHttpError)?;
-        headers.push(("last-event-id".to_owned(), last_event));
-    }
-    for (name, value) in custom {
-        if matches!(
-            name.as_str(),
-            "authorization" | "accept" | "content-type" | "mcp-session-id" | "last-event-id"
-        ) {
-            return Err(ProductionMcpHttpError);
-        }
-        if value.as_bytes().len() > MCP_HTTP_MAX_HEADER_VALUE_BYTES {
-            return Err(ProductionMcpHttpError);
-        }
-        headers.push((
-            name.to_string(),
-            value
-                .to_str()
-                .map_err(|_| ProductionMcpHttpError)?
-                .to_owned(),
-        ));
-    }
-    if headers.iter().fold(0_usize, |total, (name, value)| {
-        total.saturating_add(name.len()).saturating_add(value.len())
-    }) > MCP_HTTP_MAX_HEADER_BYTES
-    {
-        return Err(ProductionMcpHttpError);
-    }
-    Ok(headers)
-}
-
-fn valid_mcp_header_id(value: &str, limit: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= limit
-        && value.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
-}
-
-fn response_header(
-    response: &rw_providers::GuardedHttpStreamResponse,
-    name: &str,
-) -> Option<String> {
-    response
-        .headers
-        .iter()
-        .find(|(header, _)| header.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.clone())
-}
-
-async fn collect_guarded_body(
-    mut body: rw_providers::GuardedHttpByteStream,
-) -> Result<Vec<u8>, ProductionMcpHttpError> {
-    let mut bytes = Vec::new();
-    while let Some(chunk) = body.next().await {
-        bytes.extend(chunk.map_err(|_| ProductionMcpHttpError)?);
-    }
-    Ok(bytes)
-}
-
-#[allow(clippy::too_many_lines)]
-impl StreamableHttpClient for ProductionMcpHttpClient {
-    type Error = ProductionMcpHttpError;
-
-    async fn post_message(
+#[async_trait]
+impl McpHttpClient for ProductionMcpHttpClient {
+    async fn request(
         &self,
-        uri: Arc<str>,
-        message: ClientJsonRpcMessage,
-        session_id: Option<Arc<str>>,
-        auth_header: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        let body = serde_json::to_vec(&message)
-            .map_err(|_| StreamableHttpError::Client(ProductionMcpHttpError))?;
+        method: McpHttpMethod,
+        uri: &str,
+        headers: Vec<(String, String)>,
+        body: rw_mcp::McpHttpBody,
+    ) -> Result<McpHttpResponse, McpError> {
+        rw_mcp::validate_mcp_http_headers(&headers)
+            .map_err(|_| McpError::Policy("MCP HTTP headers exceed their contract".into()))?;
+        let method = match method {
+            McpHttpMethod::Get => rw_providers::GuardedHttpMethod::Get,
+            McpHttpMethod::Post => rw_providers::GuardedHttpMethod::Post,
+            McpHttpMethod::Delete => rw_providers::GuardedHttpMethod::Delete,
+        };
         let response = self
-            .request(
-                rw_providers::GuardedHttpMethod::Post,
-                &uri,
-                mcp_http_headers(
-                    auth_header,
-                    session_id.as_deref().map(AsRef::as_ref),
-                    None,
-                    custom_headers,
-                    true,
-                )
-                .map_err(StreamableHttpError::Client)?,
-                body,
-            )
+            .request(method, uri, headers, bytes::Bytes::from_owner(body))
             .await
-            .map_err(StreamableHttpError::Client)?;
-        let status = response.status;
-        let content_type = response_header(&response, "content-type");
-        let returned_session = response_header(&response, "mcp-session-id");
-        if returned_session
-            .as_deref()
-            .is_some_and(|session| !valid_mcp_header_id(session, MCP_HTTP_MAX_SESSION_ID_BYTES))
-        {
-            return Err(StreamableHttpError::Client(ProductionMcpHttpError));
-        }
-        if matches!(status, 202 | 204) {
-            return Ok(StreamableHttpPostResponse::Accepted);
-        }
-        if status == 404 && session_id.is_some() {
-            return Err(StreamableHttpError::SessionExpired);
-        }
-        if !(200..300).contains(&status) {
-            return Err(StreamableHttpError::UnexpectedServerResponse(
-                Cow::Borrowed("MCP HTTP server returned an unsuccessful status"),
-            ));
-        }
-        if content_type
-            .as_deref()
-            .is_some_and(|value| value.starts_with("text/event-stream"))
-        {
-            let bytes = response.body.map(|chunk| chunk.map(bytes::Bytes::from));
-            let stream: BoxStream<'static, Result<Sse, SseError>> =
-                SseStream::from_bytes_stream(bytes).boxed();
-            return Ok(StreamableHttpPostResponse::Sse(stream, returned_session));
-        }
-        if content_type
-            .as_deref()
-            .is_some_and(|value| value.starts_with("application/json"))
-        {
-            let bytes = collect_guarded_body(response.body)
-                .await
-                .map_err(StreamableHttpError::Client)?;
-            let message = serde_json::from_slice::<ServerJsonRpcMessage>(&bytes)?;
-            return Ok(StreamableHttpPostResponse::Json(message, returned_session));
-        }
-        Err(StreamableHttpError::UnexpectedContentType(content_type))
-    }
-
-    async fn delete_session(
-        &self,
-        uri: Arc<str>,
-        session_id: Arc<str>,
-        auth_header: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<(), StreamableHttpError<Self::Error>> {
-        let response = self
-            .request(
-                rw_providers::GuardedHttpMethod::Delete,
-                &uri,
-                mcp_http_headers(auth_header, Some(&session_id), None, custom_headers, false)
-                    .map_err(StreamableHttpError::Client)?,
-                Vec::new(),
-            )
-            .await
-            .map_err(StreamableHttpError::Client)?;
-        if response.status == 405 || (200..300).contains(&response.status) {
-            Ok(())
-        } else {
-            Err(StreamableHttpError::UnexpectedServerResponse(
-                Cow::Borrowed("MCP HTTP session deletion failed"),
-            ))
-        }
-    }
-
-    async fn get_stream(
-        &self,
-        uri: Arc<str>,
-        session_id: Option<Arc<str>>,
-        last_event_id: Option<String>,
-        auth_header: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        let response = self
-            .request(
-                rw_providers::GuardedHttpMethod::Get,
-                &uri,
-                mcp_http_headers(
-                    auth_header,
-                    session_id.as_deref(),
-                    last_event_id,
-                    custom_headers,
-                    false,
-                )
-                .map_err(StreamableHttpError::Client)?,
-                Vec::new(),
-            )
-            .await
-            .map_err(StreamableHttpError::Client)?;
-        if response.status == 405 {
-            return Err(StreamableHttpError::ServerDoesNotSupportSse);
-        }
-        if !(200..300).contains(&response.status) {
-            return Err(StreamableHttpError::UnexpectedServerResponse(
-                Cow::Borrowed("MCP HTTP stream request failed"),
-            ));
-        }
-        let content_type = response_header(&response, "content-type");
-        if !content_type
-            .as_deref()
-            .is_some_and(|value| value.starts_with("text/event-stream"))
-        {
-            return Err(StreamableHttpError::UnexpectedContentType(content_type));
-        }
-        let bytes = response.body.map(|chunk| chunk.map(bytes::Bytes::from));
-        Ok(SseStream::from_bytes_stream(bytes).boxed())
+            .map_err(|_| McpError::Protocol("guarded MCP HTTP request failed".into()))?;
+        Ok(McpHttpResponse {
+            status: response.status,
+            headers: response.headers,
+            body: response
+                .body
+                .map(|chunk| {
+                    chunk.map_err(|_| McpError::Protocol("guarded MCP HTTP stream failed".into()))
+                })
+                .boxed(),
+        })
     }
 }
 
@@ -1081,46 +858,7 @@ impl Tool for ToolSearchTool {
         invocation: &ToolContext,
         input: Value,
     ) -> Result<ToolResult, ToolError> {
-        let input: ToolSearchInput = parse(input)?;
-        if input.query.len() > 512 {
-            return Err(ToolError::InvalidInput(
-                "tool_search query exceeds 512 bytes".to_owned(),
-            ));
-        }
-        let server = input
-            .server
-            .map(McpServerId::new)
-            .transpose()
-            .map_err(mcp_tool_error)?;
-        let matches = self
-            .manager
-            .tool_search(&input.query, server.as_ref())
-            .await
-            .into_iter()
-            .filter(|definition| {
-                invocation
-                    .mcp_tool_policy()
-                    .allows(definition.server.as_str(), &definition.name)
-            })
-            .collect::<Vec<_>>();
-        let total_matches = matches.len();
-        let mut retained = Vec::new();
-        for definition in matches {
-            retained.push(definition);
-            if serde_json::to_vec(&retained)
-                .is_ok_and(|encoded| encoded.len() > MAX_TOOL_SEARCH_WIRE_BYTES)
-            {
-                retained.pop();
-                break;
-            }
-        }
-        let truncated = retained.len() < total_matches;
-        let data = json!({
-            "matches": retained,
-            "truncated": truncated,
-        });
-        let content = encode_toon(&data).map_err(|error| ToolError::Output(error.to_string()))?;
-        presentation::SEARCH.attach(untrusted_result(&content, data))
+        search::execute(&self.manager, invocation, parse(input)?).await
     }
 }
 

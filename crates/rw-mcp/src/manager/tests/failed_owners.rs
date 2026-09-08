@@ -8,30 +8,57 @@ struct FailingClient {
 }
 #[async_trait]
 impl McpClient for FailingClient {
+    fn response_limits(&self) -> crate::McpResponseLimits {
+        crate::McpResponseLimits::new(8 * 1024 * 1024).expect("fixture response limit")
+    }
+
     fn catalog_valid(&self) -> bool {
         true
     }
-    async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
+    async fn list_tools(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
         if self.fail_catalog {
             Err(McpError::Policy("catalog rejected".into()))
         } else {
-            Ok(Vec::new())
+            slot.adopt(Vec::new()).await
         }
     }
-    async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
-        Ok(Vec::new())
+    async fn list_resources(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(Vec::new()).await
     }
-    async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
-        Ok(Vec::new())
+    async fn list_prompts(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(Vec::new()).await
     }
-    async fn call_tool(&self, _: &str, _: Value) -> Result<Value, McpError> {
-        Ok(Value::Null)
+    async fn call_tool(
+        &self,
+        _: &str,
+        _: Value,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
+        slot.adopt(Value::Null).await
     }
-    async fn read_resource(&self, _: &str) -> Result<Value, McpError> {
-        Ok(Value::Null)
+    async fn read_resource(
+        &self,
+        _: &str,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
+        slot.adopt(Value::Null).await
     }
-    async fn get_prompt(&self, _: &str, _: Value) -> Result<Value, McpError> {
-        Ok(Value::Null)
+    async fn get_prompt(
+        &self,
+        _: &str,
+        _: Value,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
+        slot.adopt(Value::Null).await
     }
     async fn close(&self, _: Duration) -> Result<(), McpError> {
         self.closed.fetch_add(1, Ordering::SeqCst);

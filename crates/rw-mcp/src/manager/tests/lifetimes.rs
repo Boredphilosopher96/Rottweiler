@@ -62,31 +62,60 @@ impl Default for ControlledClient {
 }
 #[async_trait]
 impl McpClient for ControlledClient {
+    fn response_limits(&self) -> crate::McpResponseLimits {
+        // Fixture catalogs and scalar replies fit this construction allowance.
+        crate::McpResponseLimits::new(64 * 1024).expect("fixture response limit")
+    }
+
     fn catalog_valid(&self) -> bool {
         true
     }
 
-    async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
+    async fn list_tools(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
         self.catalogs.fetch_add(1, Ordering::SeqCst);
-        Ok(vec![json!({"name":"work","inputSchema":{"type":"object"}})])
+        slot.adopt(vec![json!({"name":"work","inputSchema":{"type":"object"}})])
+            .await
     }
-    async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
-        Ok(vec![])
+    async fn list_resources(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(vec![]).await
     }
-    async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
-        Ok(vec![])
+    async fn list_prompts(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(vec![]).await
     }
-    async fn call_tool(&self, _: &str, arguments: Value) -> Result<Value, McpError> {
+    async fn call_tool(
+        &self,
+        _: &str,
+        arguments: Value,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
         self.invocation.run().await;
-        Ok(arguments)
+        slot.adopt(arguments).await
     }
-    async fn read_resource(&self, _: &str) -> Result<Value, McpError> {
+    async fn read_resource(
+        &self,
+        _: &str,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
         self.invocation.run().await;
-        Ok(json!({}))
+        slot.adopt(json!({})).await
     }
-    async fn get_prompt(&self, _: &str, _: Value) -> Result<Value, McpError> {
+    async fn get_prompt(
+        &self,
+        _: &str,
+        _: Value,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
         self.invocation.run().await;
-        Ok(json!({}))
+        slot.adopt(json!({})).await
     }
     async fn close(&self, _: Duration) -> Result<(), McpError> {
         if self.block_close.load(Ordering::SeqCst) {

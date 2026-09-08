@@ -1,7 +1,7 @@
 //! Connect, disable, and shutdown own their actual futures through completion.
 use super::{
-    McpManager, ServerEntry, catalog_fingerprint, client_proof::ClientProof, load_catalog,
-    operations, sanitize_catalog, status_message, transition::Transition,
+    McpManager, ServerEntry, client_proof::ClientProof, load_catalog, operations, prepare_catalog,
+    status_message, transition::Transition,
 };
 use crate::{McpError, McpServerConfig, ServerState};
 use futures_util::future::join_all;
@@ -153,16 +153,14 @@ impl McpManager {
                 .map_err(|_| operations::unsettled(&config.id))?;
             return Err(McpError::Disabled(config.id));
         }
-        let catalog =
-            load_catalog(client.client())
-                .await
-                .and_then(|(tools, resources, prompts)| {
-                    Ok((
-                        sanitize_catalog(tools)?,
-                        sanitize_catalog(resources)?,
-                        sanitize_catalog(prompts)?,
-                    ))
-                });
+        let catalog = async {
+            let (tools, resources, prompts) = load_catalog(client.client()).await?;
+            let tools = prepare_catalog(tools).await?;
+            let resources = prepare_catalog(resources).await?.values;
+            let prompts = prepare_catalog(prompts).await?.values;
+            Ok((tools, resources, prompts))
+        }
+        .await;
         let (tools, resources, prompts) = match catalog {
             Ok(catalog) => catalog,
             Err(error) => {
@@ -181,13 +179,13 @@ impl McpManager {
                 && !transition.cancelled()
                 && client.client().catalog_valid()
             {
-                let fingerprint = catalog_fingerprint(&tools);
+                let fingerprint = tools.fingerprint;
                 if entry.catalog_fingerprint.is_some()
                     && entry.catalog_fingerprint != Some(fingerprint)
                 {
                     entry.pending_catalog = Some(tools);
                 } else {
-                    entry.tools = tools;
+                    entry.tools = tools.values;
                     entry.catalog_fingerprint = Some(fingerprint);
                 }
                 entry.resources = resources;

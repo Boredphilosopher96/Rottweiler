@@ -3,6 +3,10 @@
 
 mod encoding;
 mod payload_work;
+mod response;
+mod http_io;
+pub use http_io::{McpHttpBody, McpHttpClient, McpHttpMethod, McpHttpResponse, MCP_HTTP_MAX_HEADERS, MCP_HTTP_MAX_HEADER_BYTES, MCP_HTTP_MAX_HEADER_VALUE_BYTES, validate_mcp_http_headers};
+pub use response::{McpResponse, McpResponseLimits, McpResponseSlot};
 pub use encoding::EncodedPayload;
 mod client;
 mod manager;
@@ -11,10 +15,10 @@ mod spool;
 mod types;
 
 #[cfg(feature = "test-support")]
-pub use client::{GuardedStreamableHttpConnector, TestOnlyUnsandboxedStdioConnector};
+pub use client::TestOnlyUnsandboxedStdioConnector;
 pub use client::{
     McpAuthorizationProvider, McpClient, McpConnectionApprovalPolicy, McpConnector,
-    McpInboundRouter, SandboxedStdioConnector, boxed_running_http_client, sorted_headers,
+    McpInboundRouter, SandboxedStdioConnector, connect_http, sorted_headers,
 };
 pub use manager::{CompactJsonEncoder, MAX_SERVERS, McpManager, StructuredResponseEncoder};
 pub use server::{

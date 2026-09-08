@@ -737,14 +737,15 @@ impl ToolContext {
 #[ts(rename = "ToolResponse")]
 pub struct ToolResult {
     #[serde(skip)]
-    payloads: crate::ToolResultPayloads,
-    #[serde(skip)]
     presentation: Option<crate::ToolPresentationPlan>,
     pub content: String,
     pub data: Value,
     pub truncated: bool,
     #[serde(skip)]
     protected_framing: Option<ProtectedFraming>,
+    // Native response credit outlives every decoded body field.
+    #[serde(skip)]
+    payloads: crate::ToolResultPayloads,
 }
 
 #[derive(Clone, Debug, PartialEq)]

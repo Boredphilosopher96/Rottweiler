@@ -95,7 +95,12 @@ impl Drop for HeldProcess {
     }
 }
 
-async fn fixture() -> (Arc<ConnectionClosure>, Arc<Completion>, Arc<Completion>) {
+async fn fixture() -> (
+    Arc<ConnectionClosure>,
+    Arc<Completion>,
+    Arc<Completion>,
+    Arc<super::super::ingress::Ingress>,
+) {
     let transport = Arc::new(Completion::default());
     let child = Arc::new(Completion::default());
     let (sender, receiver) = mpsc::channel(4);
@@ -107,13 +112,18 @@ async fn fixture() -> (Arc<ConnectionClosure>, Arc<Completion>, Arc<Completion>)
         })
         .await
         .expect("real rmcp initialize");
-    let closure = ConnectionClosure::new(service, Some(Box::new(HeldProcess(child.clone()))));
-    (Arc::new(closure), transport, child)
+    let ingress = super::super::ingress::Ingress::new(service.service().clone()).expect("ingress");
+    let closure = ConnectionClosure::new(
+        service,
+        Some(Box::new(HeldProcess(child.clone()))),
+        Arc::clone(&ingress),
+    );
+    (Arc::new(closure), transport, child, ingress)
 }
 
 #[tokio::test]
 async fn aborted_close_waiter_retains_actual_rmcp_future_and_process_proof() {
-    let (closure, transport, child) = fixture().await;
+    let (closure, transport, child, _) = fixture().await;
     let first = closure.clone();
     let waiter = tokio::spawn(async move { first.close(Duration::from_secs(3)).await });
     transport.entered.notified().await;
@@ -135,7 +145,7 @@ async fn aborted_close_waiter_retains_actual_rmcp_future_and_process_proof() {
 
 #[tokio::test(start_paused = true)]
 async fn timed_out_proof_stays_failed_while_exact_cleanup_futures_continue() {
-    let (closure, transport, child) = fixture().await;
+    let (closure, transport, child, _) = fixture().await;
     let first = closure.clone();
     let waiter = tokio::spawn(async move { first.close(Duration::from_secs(3)).await });
     transport.entered.notified().await;
@@ -157,4 +167,35 @@ async fn timed_out_proof_stays_failed_while_exact_cleanup_futures_continue() {
         1,
         "actual retirement releases the native handle while the missed deadline stays failed"
     );
+}
+
+#[tokio::test]
+async fn service_shutdown_fences_admission_then_waits_for_owned_request_retirement() {
+    let (closure, transport, child, ingress) = fixture().await;
+    let mut request: rmcp::model::ClientRequest =
+        serde_json::from_value(serde_json::json!({"method":"ping"})).expect("typed request");
+    let state = ingress
+        .requests
+        .prepare(&mut request)
+        .expect("admitted request");
+    let closing = Arc::clone(&closure);
+    let waiter = tokio::spawn(async move { closing.close(Duration::from_secs(3)).await });
+    transport.entered.notified().await;
+    child.entered.notified().await;
+    assert!(ingress.requests.prepare(&mut request).is_err());
+    transport.release.add_permits(1);
+    child.release.add_permits(1);
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(transport.finished.load(Ordering::SeqCst), 1);
+    assert!(
+        !waiter.is_finished(),
+        "transport EOF is not request retirement"
+    );
+    drop(request);
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished(), "request task still owns its state");
+    drop(state);
+    assert!(waiter.await.expect("physical close owner").is_ok());
 }

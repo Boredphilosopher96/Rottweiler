@@ -40,7 +40,9 @@ async fn inline_prompt_rejects_oversize_before_publishing_any_payload()
             .cap(
                 &server,
                 "prompt",
-                json!({"body":"x".repeat(64 * 1024)}),
+                crate::McpResponseSlot::new(crate::McpResponseLimits::new(512 * 1024)?)?
+                    .adopt(json!({"body":"x".repeat(64 * 1024)}))
+                    .await?,
                 use_case
             )
             .await
@@ -48,7 +50,14 @@ async fn inline_prompt_rejects_oversize_before_publishing_any_payload()
     );
     assert_eq!(std::fs::read_dir(&directory)?.count(), before);
     let response = manager
-        .cap(&server, "prompt", json!({"body":"small"}), use_case)
+        .cap(
+            &server,
+            "prompt",
+            crate::McpResponseSlot::new(crate::McpResponseLimits::new(64 * 1024)?)?
+                .adopt(json!({"body":"small"}))
+                .await?,
+            use_case,
+        )
         .await?;
     assert_eq!(response.encoded, r#"{"body":"small"}"#);
     assert!(response.overflow.is_none());

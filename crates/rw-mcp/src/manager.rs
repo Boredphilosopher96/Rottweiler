@@ -1,7 +1,9 @@
+mod catalog;
 mod client_proof;
 mod invocations;
 mod lifecycle;
 mod operations;
+mod search;
 mod transition;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -11,8 +13,10 @@ use tokio::sync::RwLock;
 
 use crate::{
     CappedResponse, DeferredTool, McpCatalogEntry, McpClient, McpConnector, McpError, McpLimits,
-    McpServerConfig, McpToolDefinition, OverflowSpool, ServerState, ServerStatus,
+    McpResponse, McpResponseLimits, McpResponseSlot, McpServerConfig, McpToolDefinition,
+    OverflowSpool, ServerState, ServerStatus,
 };
+use catalog::{PreparedCatalog, prepare_catalog};
 use rw_tools::CapabilityManifest;
 use rw_types::McpServerId;
 
@@ -68,11 +72,11 @@ struct ServerEntry {
     config: McpServerConfig,
     state: ServerState,
     client: Option<Arc<dyn McpClient>>,
-    tools: Vec<Value>,
-    resources: Vec<Value>,
-    prompts: Vec<Value>,
+    tools: McpResponse<Vec<Value>>,
+    resources: McpResponse<Vec<Value>>,
+    prompts: McpResponse<Vec<Value>>,
     catalog_fingerprint: Option<blake3::Hash>,
-    pending_catalog: Option<Vec<Value>>,
+    pending_catalog: Option<PreparedCatalog>,
     generation: u64,
     transition: Option<Arc<transition::Transition>>,
 }
@@ -192,9 +196,9 @@ impl McpManager {
                 config,
                 state,
                 client: None,
-                tools: Vec::new(),
-                resources: Vec::new(),
-                prompts: Vec::new(),
+                tools: McpResponse::empty(),
+                resources: McpResponse::empty(),
+                prompts: McpResponse::empty(),
                 catalog_fingerprint: None,
                 pending_catalog: None,
                 generation: 0,
@@ -252,10 +256,15 @@ impl McpManager {
         let refresh_client = Arc::clone(&client);
         let tools = self
             .invoke(server, Arc::clone(&client), async move {
-                sanitize_catalog(refresh_client.list_tools().await?)
+                prepare_catalog(
+                    refresh_client
+                        .list_tools(McpResponseSlot::new(refresh_client.response_limits())?)
+                        .await?,
+                )
+                .await
             })
             .await?;
-        let fingerprint = catalog_fingerprint(&tools);
+        let fingerprint = tools.fingerprint;
         let mut servers = self.inner.servers.write().await;
         let entry = servers
             .get_mut(server)
@@ -272,7 +281,7 @@ impl McpManager {
             return Ok(false);
         }
         if approve_changes {
-            entry.tools = tools;
+            entry.tools = tools.values;
             entry.catalog_fingerprint = Some(fingerprint);
             entry.pending_catalog = None;
         } else {
@@ -297,8 +306,8 @@ impl McpManager {
         let Some(tools) = entry.pending_catalog.take() else {
             return Ok(false);
         };
-        entry.catalog_fingerprint = Some(catalog_fingerprint(&tools));
-        entry.tools = tools;
+        entry.catalog_fingerprint = Some(tools.fingerprint);
+        entry.tools = tools.values;
         entry.state = ServerState::Ready;
         Ok(true)
     }
@@ -344,74 +353,10 @@ impl McpManager {
         index
     }
 
-    /// Full definitions for the explicit per-server deferred-loading opt-out.
-    #[must_use]
-    pub async fn eager_tool_definitions(&self) -> Vec<McpToolDefinition> {
-        let servers = self.inner.servers.read().await;
-        let mut definitions = Vec::new();
-        for (server, entry) in &*servers {
-            if !entry.config.enabled
-                || entry.config.defer_tools
-                || !matches!(entry.state, ServerState::Ready)
-                || !entry.catalog_valid()
-            {
-                continue;
-            }
-            for tool in &entry.tools {
-                if let Some(definition) = definition(server, tool, &entry.config.tool_capabilities)
-                {
-                    definitions.push(definition);
-                }
-            }
-        }
-        definitions
-    }
-
     /// Exact provider-context fragment used for measured deferred-loading tests.
     pub async fn deferred_prompt(&self) -> Result<String, McpError> {
         serde_json::to_string(&self.deferred_tool_index().await)
             .map_err(|error| McpError::Encoding(error.to_string()))
-    }
-
-    /// Full schemas only for matching tools, implementing the built-in `tool_search` behavior.
-    pub async fn tool_search(
-        &self,
-        query: &str,
-        server_filter: Option<&McpServerId>,
-    ) -> Vec<McpToolDefinition> {
-        let query = query.to_ascii_lowercase();
-        let servers = self.inner.servers.read().await;
-        let mut matches = Vec::new();
-        for (server, entry) in &*servers {
-            if server_filter.is_some_and(|filter| filter != server)
-                || !entry.config.enabled
-                || !matches!(entry.state, ServerState::Ready)
-                || !entry.catalog_valid()
-            {
-                continue;
-            }
-            for tool in &entry.tools {
-                let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
-                let description = tool
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !query.is_empty()
-                    && !name.to_ascii_lowercase().contains(&query)
-                    && !description.to_ascii_lowercase().contains(&query)
-                {
-                    continue;
-                }
-                if let Some(definition) = definition(server, tool, &entry.config.tool_capabilities)
-                {
-                    matches.push(definition);
-                }
-                if matches.len() >= MAX_SEARCH_RESULTS {
-                    return matches;
-                }
-            }
-        }
-        matches
     }
 
     pub async fn resources(&self) -> Vec<McpCatalogEntry> {
@@ -482,7 +427,13 @@ impl McpManager {
         let id = server.clone();
         let name = name.to_owned();
         self.invoke(server, Arc::clone(&client), async move {
-            let value = client.call_tool(&name, arguments).await?;
+            let value = client
+                .call_tool(
+                    &name,
+                    arguments,
+                    McpResponseSlot::new(client.response_limits())?,
+                )
+                .await?;
             manager
                 .cap(
                     &id,
@@ -505,7 +456,9 @@ impl McpManager {
         let id = server.clone();
         let uri = uri.to_owned();
         self.invoke(server, Arc::clone(&client), async move {
-            let value = client.read_resource(&uri).await?;
+            let value = client
+                .read_resource(&uri, McpResponseSlot::new(client.response_limits())?)
+                .await?;
             manager
                 .cap(&id, "resource", value, crate::McpResponseUse::CanonicalTool)
                 .await
@@ -525,7 +478,13 @@ impl McpManager {
         let id = server.clone();
         let name = name.to_owned();
         self.invoke(server, Arc::clone(&client), async move {
-            let value = client.get_prompt(&name, arguments).await?;
+            let value = client
+                .get_prompt(
+                    &name,
+                    arguments,
+                    McpResponseSlot::new(client.response_limits())?,
+                )
+                .await?;
             manager.cap(&id, "prompt", value, destination).await
         })
         .await
@@ -552,7 +511,7 @@ impl McpManager {
         &self,
         server: &McpServerId,
         operation: &str,
-        value: Value,
+        value: McpResponse<Value>,
         destination: crate::McpResponseUse,
     ) -> Result<CappedResponse, McpError> {
         let mut encoded = crate::encoding::encode(Arc::clone(&self.inner.encoder), value).await?;
@@ -577,7 +536,9 @@ impl McpManager {
         } else {
             return self.compact_response(encoded, None);
         };
-        let summary = json!({"truncated":true,"overflow":overflow});
+        let summary = McpResponseSlot::new(McpResponseLimits::new(64 * 1024)?)?
+            .adopt(json!({"truncated":true,"overflow":overflow}))
+            .await?;
         let encoded = crate::encoding::encode(Arc::clone(&self.inner.encoder), summary).await?;
         self.compact_response(encoded, overflow)
     }
@@ -627,7 +588,7 @@ fn status_message(error: &McpError) -> String {
         McpError::Disabled(_) => "MCP server is disabled".to_owned(),
         McpError::NotConnected(_) => "MCP server is not connected".to_owned(),
         McpError::Policy(_) => "MCP transport policy rejected the connection".to_owned(),
-        McpError::Protocol(_) => "MCP protocol operation failed".to_owned(),
+        McpError::Transport | McpError::Protocol(_) => "MCP protocol operation failed".to_owned(),
         McpError::Encoding(_) => "MCP response encoding failed".to_owned(),
         McpError::Spool(_) => "MCP overflow storage failed".to_owned(),
         McpError::InvalidCommand(_) | McpError::DuplicateServer(_) | McpError::UnknownServer(_) => {
@@ -638,18 +599,20 @@ fn status_message(error: &McpError) -> String {
 
 async fn load_catalog(
     client: &dyn McpClient,
-) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>), McpError> {
+) -> Result<
+    (
+        McpResponse<Vec<Value>>,
+        McpResponse<Vec<Value>>,
+        McpResponse<Vec<Value>>,
+    ),
+    McpError,
+> {
     let (tools, resources, prompts) = tokio::join!(
-        client.list_tools(),
-        client.list_resources(),
-        client.list_prompts()
+        client.list_tools(McpResponseSlot::new(client.response_limits())?),
+        client.list_resources(McpResponseSlot::new(client.response_limits())?),
+        client.list_prompts(McpResponseSlot::new(client.response_limits())?)
     );
     Ok((tools?, resources?, prompts?))
-}
-
-fn catalog_fingerprint(tools: &[Value]) -> blake3::Hash {
-    let bytes = serde_json::to_vec(tools).unwrap_or_default();
-    blake3::hash(&bytes)
 }
 
 fn one_line(value: &str) -> String {
@@ -679,31 +642,30 @@ fn definition(
     })
 }
 
-fn sanitize_catalog(values: Vec<Value>) -> Result<Vec<Value>, McpError> {
+fn sanitize_catalog(
+    mut values: McpResponse<Vec<Value>>,
+) -> Result<McpResponse<Vec<Value>>, McpError> {
     if values.len() > MAX_CATALOG_ENTRIES {
         return Err(McpError::Protocol(
-            "MCP catalog entry limit exceeded".to_owned(),
+            "MCP catalog entry limit exceeded".into(),
         ));
     }
-    values
-        .into_iter()
-        .map(|mut value| {
-            let bytes = serde_json::to_vec(&value)
-                .map_err(|error| McpError::Protocol(error.to_string()))?;
-            if bytes.len() > MAX_CATALOG_ENTRY_BYTES {
-                return Err(McpError::Protocol(
-                    "MCP catalog entry size limit exceeded".to_owned(),
-                ));
+    for value in &mut values.value {
+        let mut bytes = rw_types::json_encoding::JsonWriter::count(MAX_CATALOG_ENTRY_BYTES);
+        bytes
+            .serialize(value)
+            .map_err(|_| McpError::Protocol("MCP catalog entry size limit exceeded".into()))?;
+        for key in ["name", "description", "uri"] {
+            let replacement = value.get(key).and_then(Value::as_str).map(|text| {
+                let cap = if key == "description" { 512 } else { 256 };
+                text.chars().take(cap).collect::<String>()
+            });
+            if let Some(text) = replacement {
+                value[key] = Value::String(text);
             }
-            for key in ["name", "description", "uri"] {
-                if let Some(text) = value.get(key).and_then(Value::as_str).map(str::to_owned) {
-                    let cap = if key == "description" { 512 } else { 256 };
-                    value[key] = Value::String(text.chars().take(cap).collect());
-                }
-            }
-            Ok(value)
-        })
-        .collect()
+        }
+    }
+    Ok(values)
 }
 
 #[cfg(test)]

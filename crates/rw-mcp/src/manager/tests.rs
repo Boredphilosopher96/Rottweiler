@@ -28,34 +28,64 @@ struct MockClient {
 
 #[async_trait]
 impl McpClient for MockClient {
+    fn response_limits(&self) -> crate::McpResponseLimits {
+        // Fixture catalogs and scalar replies fit this construction allowance.
+        crate::McpResponseLimits::new(64 * 1024).expect("fixture response limit")
+    }
+
     fn catalog_valid(&self) -> bool {
         !self.invalidated.load(Ordering::Acquire)
     }
 
-    async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
+    async fn list_tools(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
         let version = *self.schema_version.lock().await;
-        Ok(vec![
+        slot.adopt(vec![
             json!({"name":"lookup","description":"Look up records\nwithout loading this large schema.","inputSchema":{"type":"object","properties":{"version":{"const":version},"query":{"type":"string"}}}}),
-        ])
+        ]).await
     }
-    async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
-        Ok(vec![
+    async fn list_resources(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(vec![
             json!({"name":"guide","uri":"memory://guide","description":"Guide"}),
         ])
+        .await
     }
-    async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
-        Ok(vec![
+    async fn list_prompts(
+        &self,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Vec<Value>>, McpError> {
+        slot.adopt(vec![
             json!({"name":"review","description":"Review a change"}),
         ])
+        .await
     }
-    async fn call_tool(&self, _name: &str, arguments: Value) -> Result<Value, McpError> {
-        Ok(arguments)
+    async fn call_tool(
+        &self,
+        _name: &str,
+        arguments: Value,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
+        slot.adopt(arguments).await
     }
-    async fn read_resource(&self, uri: &str) -> Result<Value, McpError> {
-        Ok(json!({"uri":uri,"text":"resource"}))
+    async fn read_resource(
+        &self,
+        uri: &str,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
+        slot.adopt(json!({"uri":uri,"text":"resource"})).await
     }
-    async fn get_prompt(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
-        Ok(json!({"name":name,"arguments":arguments}))
+    async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: crate::McpResponseSlot,
+    ) -> Result<crate::McpResponse<Value>, McpError> {
+        slot.adopt(json!({"name":name,"arguments":arguments})).await
     }
     async fn close(&self, _timeout: Duration) -> Result<(), McpError> {
         self.closed.store(true, Ordering::Release);
@@ -190,7 +220,10 @@ async fn five_servers_stay_deferred_and_support_full_catalog_and_calls() {
     assert!(tokenizer.encode_with_special_tokens(&prompt).len() < 2_000);
     let index_json = serde_json::to_value(manager.deferred_tool_index().await).expect("index");
     assert!(index_json.to_string().find("inputSchema").is_none());
-    let definitions = manager.tool_search("look", None).await;
+    let definitions = manager
+        .tool_search("look", None)
+        .await
+        .expect("admitted tool definitions");
     assert_eq!(definitions.len(), 5);
     assert_eq!(definitions[0].capabilities.capabilities().len(), 2);
     assert_eq!(manager.resources().await.len(), 5);
@@ -274,10 +307,20 @@ async fn changed_schema_stays_inactive_until_approval() {
         manager.call_tool(&id, "lookup", json!({})).await,
         Err(McpError::NotConnected(_))
     ));
-    assert!(manager.tool_search("lookup", Some(&id)).await.is_empty());
+    assert!(
+        manager
+            .tool_search("lookup", Some(&id))
+            .await
+            .expect("admitted tool definitions")
+            .is_empty()
+    );
     assert!(manager.approve_pending_tools(&id).await.expect("approve"));
     assert_eq!(
-        manager.tool_search("lookup", Some(&id)).await[0].input_schema["properties"]["version"]["const"],
+        manager
+            .tool_search("lookup", Some(&id))
+            .await
+            .expect("admitted tool definitions")[0]
+            .input_schema["properties"]["version"]["const"],
         2
     );
     manager.set_enabled(&id, false).await.expect("disable");
@@ -287,7 +330,13 @@ async fn changed_schema_stays_inactive_until_approval() {
         manager.call_tool(&id, "lookup", json!({})).await,
         Err(McpError::NotConnected(_))
     ));
-    assert!(manager.tool_search("lookup", Some(&id)).await.is_empty());
+    assert!(
+        manager
+            .tool_search("lookup", Some(&id))
+            .await
+            .expect("admitted tool definitions")
+            .is_empty()
+    );
     assert!(
         manager
             .approve_pending_tools(&id)
@@ -295,7 +344,11 @@ async fn changed_schema_stays_inactive_until_approval() {
             .expect("approve reconnect")
     );
     assert_eq!(
-        manager.tool_search("lookup", Some(&id)).await[0].input_schema["properties"]["version"]["const"],
+        manager
+            .tool_search("lookup", Some(&id))
+            .await
+            .expect("admitted tool definitions")[0]
+            .input_schema["properties"]["version"]["const"],
         3
     );
 }

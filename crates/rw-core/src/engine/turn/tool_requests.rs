@@ -144,12 +144,13 @@ pub(super) struct CommittedToolExecution {
 }
 
 pub(in crate::engine) struct ToolExecution {
-    pub(super) payloads: rw_tools::ToolResultPayloads,
     pub(super) presentation: Option<rw_tools::ToolPresentationPlan>,
     pub(super) unsettled: bool,
     pub(super) call: PendingToolCall,
     pub(super) output: ToolOutput,
     pub(super) is_error: bool,
+    // Decoded output retires before native response/source owners.
+    pub(super) payloads: rw_tools::ToolResultPayloads,
 }
 
 pub(super) struct AuthorizedToolBinding {

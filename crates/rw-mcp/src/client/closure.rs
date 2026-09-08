@@ -28,10 +28,14 @@ impl ConnectionClosure {
     pub(super) fn new(
         service: RunningService<RoleClient, super::McpInboundRouter>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
+        ingress: Arc<super::ingress::Ingress>,
     ) -> Self {
+        let initialization = service.service().clone();
         Self::from_resources(Resources {
             service: Some(service),
             child,
+            _initialization: Some(initialization),
+            ingress: Some(ingress),
         })
     }
 
@@ -93,6 +97,8 @@ impl Drop for ConnectionClosure {
 struct Resources {
     service: Option<RunningService<RoleClient, super::McpInboundRouter>>,
     child: Option<Box<dyn ProtocolProcessHandle>>,
+    _initialization: Option<super::McpInboundRouter>,
+    ingress: Option<Arc<super::ingress::Ingress>>,
 }
 
 struct CloseOwner {
@@ -140,7 +146,7 @@ impl CloseOwner {
 
     fn retain(&mut self) {
         if let Some(resources) = self.resources.take() {
-            std::mem::forget(resources);
+            let _ = Box::leak(Box::new(resources));
         }
     }
 }
@@ -161,6 +167,9 @@ impl Drop for CloseOwner {
 }
 
 async fn settle(resources: &mut Resources, timeout: Duration) -> Proof {
+    if let Some(ingress) = &resources.ingress {
+        ingress.close();
+    }
     let service = async {
         if let Some(service) = &mut resources.service {
             service
@@ -183,6 +192,13 @@ async fn settle(resources: &mut Resources, timeout: Duration) -> Proof {
         }
     };
     let (service, process) = tokio::join!(prove(service), prove(process));
+    // rmcp must first close pending responders. Awaiting request tasks from
+    // Transport::close would deadlock those same responders.
+    if service.is_ok()
+        && let Some(ingress) = &resources.ingress
+    {
+        ingress.request_jobs.settle().await;
+    }
     service.and(process)
 }
 
@@ -200,6 +216,8 @@ pub(super) async fn retire_process(
     ConnectionClosure::from_resources(Resources {
         service: None,
         child: Some(child),
+        _initialization: None,
+        ingress: None,
     })
     .close(timeout)
     .await

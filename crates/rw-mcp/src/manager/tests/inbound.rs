@@ -35,13 +35,26 @@ async fn revoked_catalog_is_hidden_and_reconnect_requires_schema_approval() {
         .await
         .expect("register");
     manager.set_enabled(&id, true).await.expect("connect");
-    assert_eq!(manager.tool_search("lookup", Some(&id)).await.len(), 1);
+    assert_eq!(
+        manager
+            .tool_search("lookup", Some(&id))
+            .await
+            .expect("admitted tool definitions")
+            .len(),
+        1
+    );
     first.invalidated.store(true, Ordering::Release);
     assert!(matches!(
         manager.statuses().await[0].state,
         ServerState::Failed { .. }
     ));
-    assert!(manager.tool_search("lookup", Some(&id)).await.is_empty());
+    assert!(
+        manager
+            .tool_search("lookup", Some(&id))
+            .await
+            .expect("admitted tool definitions")
+            .is_empty()
+    );
     assert!(manager.resources().await.is_empty());
     assert!(manager.prompts().await.is_empty());
     assert!(manager.call_tool(&id, "lookup", json!({})).await.is_err());
