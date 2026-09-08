@@ -290,7 +290,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io;
-use std::io::Read;
 use std::io::Write;
 #[cfg(test)]
 use std::net::IpAddr;
