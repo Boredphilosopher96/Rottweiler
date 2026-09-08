@@ -5,7 +5,7 @@ use thiserror::Error;
 /// Session log/index failure without transcript contents in diagnostics.
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
-    /// The caller cancelled or the physical SQLite execution budget elapsed.
+    /// The caller cancelled or the physical `SQLite` execution budget elapsed.
     #[error("session index read cancelled or deadline exceeded")]
     IndexReadInterrupted,
     /// More candidate sessions must be inspected than this bounded read permits.

@@ -74,7 +74,7 @@ impl SessionIndexReadControl {
                 }
                 control.stopped()
             }),
-        );
+        )?;
         self.check()
     }
 }
