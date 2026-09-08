@@ -533,6 +533,8 @@ export class ChildUiController {
 
   updateSubagentBanner(state: RottweilerState): void {
     if (this.#activeSubagentId === null) {
+      // The active approval owns the foreground banner until it is resolved.
+      if (Object.values(state.tools).some(tool => tool.status === "awaiting_approval")) return
       const pending = this.#family?.pending.length ?? 0
       if (this.#family?.error !== null && this.#family?.error !== undefined) {
         this.#host.banner.visible = true; this.#host.banner.fg = this.#host.theme.warning

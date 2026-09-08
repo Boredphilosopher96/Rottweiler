@@ -133,3 +133,36 @@ test("leaving a child preserves its unsettled response owner and defers renderer
   } finally { settle.resolve(); app.destroy(); setup.renderer.destroy(); await flush() }
   expect(app.historyCache.allocations.usage.bytes).toBe(0)
 })
+
+for (const discovery of ["error", "pending"] as const) {
+  test(`parent approval stays visible when background child discovery reports ${discovery}`, async () => {
+    const { readControls } = await import("../../src/state/controls")
+    const setup = await createTestRenderer({ width: 100, height: 30, useThread: false })
+    const update = Promise.withResolvers<import("../../../../protocol/types").FamilyControlsSnapshot>()
+    const reader: FamilyControlsReader = {
+      async state() { throw new Error("no child selected") },
+      async scope() { throw new Error("no child selected") },
+      async child() { throw new Error("no child selected") },
+      async watch(_root, after, signal) { return after === null ? update.promise : untilAbort(signal) },
+    }
+    const app = createRottweilerApp(setup.renderer, { sessionId: "root", familyControls: reader,
+      sessionReader: emptySessionReader, onCommand() { return { type: "accepted" } },
+    })
+    setup.renderer.root.add(app)
+    try {
+      const initial = createInitialState()
+      app.setState(readControls({ ...initial, connection: { ...initial.connection, phase: "connected" } }, snapshot("approval")))
+      await flush()
+      expect(app.interactionPanel.visible).toBe(true)
+      expect(app.banner.plainText).toContain("Waiting for approval · Write file")
+      if (discovery === "error") update.reject(new Error("family read temporarily unavailable"))
+      else update.resolve({ revision: "1", children: [{ target, controls: { revision: "1", through: "12", questions: 1, approvals: 0, pending_plan: false, available: true } }] })
+      await flush(); await setup.renderOnce()
+      expect(app.interactionPanel.prompt.plainText).toContain("child.txt")
+      expect(app.banner.plainText).toContain("Waiting for approval · Write file")
+      app.setState({ ...app.state, tools: {} })
+      expect(app.banner.plainText).toContain(discovery === "error" ? "Child controls unavailable" : "child agent needs a response")
+    } finally { app.destroy(); setup.renderer.destroy(); await flush() }
+    expect(app.historyCache.allocations.usage.bytes).toBe(0)
+  })
+}

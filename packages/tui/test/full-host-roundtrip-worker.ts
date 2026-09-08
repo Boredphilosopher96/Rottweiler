@@ -33,6 +33,13 @@ try {
   await setup.renderOnce()
   const approvalBanner = app.banner.plainText
   const approvalPanel = app.interactionPanel.prompt.plainText
+  const approvalObservation = {
+    banner: approvalBanner.slice(0, 4096),
+    panel: approvalPanel.slice(0, 4096),
+    connection: app.state.connection.phase,
+    errors: app.state.errors.slice(-4).map(error => ({ code: error.code, message: error.message.slice(0, 512) })),
+    tools: Object.values(app.state.tools).slice(0, 4).map(tool => ({ name: tool.name, status: tool.status })),
+  }
   app.interactionPanel.select.selectCurrent()
 
   await waitFor("completed turn", () => Object.values(app.state.turns).some((turn) => turn.status === "completed"))
@@ -43,6 +50,7 @@ try {
     commandResult: commandResult(app),
     approvalBanner,
     approvalPanel,
+    approvalObservation,
     toolStatus: tool?.status ?? null,
     toolDisplay: tool?.display ?? null,
     toolSource: tool?.source ?? null,
