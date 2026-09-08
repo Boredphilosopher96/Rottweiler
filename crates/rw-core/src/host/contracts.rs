@@ -188,6 +188,17 @@ impl HostedSession {
             .clone()
     }
 
+    /// Read only the driver identity without cloning session display metadata.
+    #[must_use]
+    pub fn is_driver(&self, client_id: &ClientId) -> bool {
+        self.descriptor
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .driver_client_id
+            .as_ref()
+            == Some(client_id)
+    }
+
     #[must_use]
     pub fn handle(&self) -> SessionHandle {
         self.handle.clone()

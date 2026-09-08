@@ -6,19 +6,18 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use async_trait::async_trait;
 use miette::{Result, miette};
 use rw_core::{
-    BoundClient, ClientCommand, ClientId, CommandMeta, CommandOutcome, EngineEvent, EngineHost,
+    BoundClient, ClientCommand, ClientId, CommandMeta, CommandOutcome, EngineHost,
     EngineHostConfig, PROTOCOL_VERSION, PermissionApprover, PermissionGate, PermissionOutcome,
     PermissionRequest, RequestId,
 };
 use rw_mcp::{
-    BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServerFactory,
-    SessionSummary, serve_stdio,
+    BridgeError, EngineMcpBridge, EngineTool, MAX_SERVER_SESSIONS, McpResponse, McpResponseLimits,
+    McpResponseSlot, McpServerAuthority, RottweilerMcpServerFactory, SessionSummary, serve_stdio,
 };
 use rw_tools::{GlobTool, GrepTool, LsTool, ReadTool, Tool, ToolContext, ToolLimits, ToolRegistry};
 use rw_types::{ApprovalDecision, PermissionModeDescriptor};
@@ -26,8 +25,8 @@ use serde_json::{Value, json};
 
 use rw_runtime::{RuntimeHostOptions, RuntimeSessionFactory, session::HostedProviderMode};
 
-const HOST_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_EXPOSED_TOOLS: usize = 32;
+mod construction;
+use construction::{Construction, WORKING_BYTES};
 
 /// Inputs for one stdio MCP server process.
 pub(crate) struct StdioServerOptions {
@@ -71,57 +70,6 @@ impl CliMcpBridge {
         }
     }
 
-    async fn dispatch_with_sessions(
-        &self,
-        command: ClientCommand,
-    ) -> Result<Vec<rw_core::SessionDescriptor>, BridgeError> {
-        let request_id = command.meta().request_id.clone();
-        let mut events = self
-            .host
-            .subscribe(self.bound.clone(), None, None)
-            .await
-            .map_err(|_| BridgeError::safe("engine session query is unavailable"))?;
-        let response = self.host.dispatch(self.bound.clone(), command).await;
-        require_accepted(&response.outcome, "engine session request was rejected")?;
-        let reply: rw_core::CommandReply = serde_json::from_slice(&response.bytes)
-            .map_err(|_| BridgeError::safe("engine session reply is invalid"))?;
-        if let rw_core::CommandReply::Read { events, .. } = reply {
-            return events
-                .into_iter()
-                .find_map(|event| match event {
-                    EngineEvent::SessionsListed { meta, sessions }
-                        if meta.request_id == request_id =>
-                    {
-                        Some(sessions)
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| BridgeError::safe("engine session reply has no session list"));
-        }
-        tokio::time::timeout(HOST_RESULT_TIMEOUT, async {
-            while let Some(event) = events.recv().await {
-                let event = event.map_err(|_| {
-                    BridgeError::safe("engine session result stream is unavailable")
-                })?;
-                let event: EngineEvent = serde_json::from_slice(&event.json)
-                    .map_err(|_| BridgeError::safe("engine session result JSON is invalid"))?;
-                match event {
-                    EngineEvent::SessionsListed { meta, sessions }
-                        if meta.request_id == request_id =>
-                    {
-                        return Ok(sessions);
-                    }
-                    _ => {}
-                }
-            }
-            Err(BridgeError::safe(
-                "engine session result stream ended unexpectedly",
-            ))
-        })
-        .await
-        .unwrap_or_else(|_| Err(BridgeError::safe("engine session request timed out")))
-    }
-
     async fn shutdown(&self) {
         let _ = self
             .host
@@ -147,34 +95,43 @@ fn require_accepted(
 
 #[async_trait]
 impl EngineMcpBridge for CliMcpBridge {
-    async fn tools(&self) -> Result<Vec<EngineTool>, BridgeError> {
-        Ok(self
-            .registry
-            .descriptors()
-            .into_iter()
-            .take(MAX_EXPOSED_TOOLS)
-            .map(|descriptor| EngineTool {
-                name: descriptor.name,
-                description: descriptor.description,
-                input_schema: descriptor.input_schema,
-            })
-            .collect())
+    fn response_limits(&self) -> McpResponseLimits {
+        McpResponseLimits::new(WORKING_BYTES).expect("fixed CLI bridge construction limit")
     }
 
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, BridgeError> {
+    async fn tools(
+        &self,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<EngineTool>>, BridgeError> {
+        Construction::new(Arc::clone(&self.registry), slot)
+            .map_cpu(construction::tool_descriptors)
+            .await?
+            .adopt()
+            .await
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, BridgeError> {
+        let work = Construction::new(arguments, slot)
+            .map_cpu(construction::tool_arguments)
+            .await?;
         let tool = self
             .registry
             .resolve(name)
             .ok_or_else(|| BridgeError::safe("tool is unavailable"))?;
         let capabilities = tool
-            .invocation_capabilities(&arguments)
+            .invocation_capabilities(&work.value.0)
             .map_err(|_| BridgeError::safe("tool input could not be authorized"))?;
         let request_id = self.next_meta().request_id.0;
         let request = PermissionRequest {
             invocation_id: rw_types::ToolInvocationId(request_id.clone()),
             id: request_id,
             tool_name: name.to_owned(),
-            arguments: arguments.clone(),
+            arguments: work.value.1,
             capabilities: capabilities.capabilities().to_vec(),
             approval_diff: None,
         };
@@ -182,56 +139,60 @@ impl EngineMcpBridge for CliMcpBridge {
             return Err(BridgeError::safe("tool invocation was denied by policy"));
         }
         let output = tool
-            .execute(&self.tool_context, arguments)
+            .execute(&self.tool_context, work.value.0)
             .await
             .map_err(|_| BridgeError::safe("tool execution failed"))?;
-        Ok(json!({
-            "content": output.content,
-            "data": output.data,
-            "truncated": output.truncated,
-        }))
-    }
-
-    async fn create_session(&self, _title: Option<String>) -> Result<SessionSummary, BridgeError> {
-        let sessions = self
-            .dispatch_with_sessions(ClientCommand::CreateSession {
-                meta: self.next_meta(),
-                cwd: self.workspace.clone(),
-                model: None,
+        Construction::new(output, work.slot)
+            .map_cpu(|output| {
+                Ok(json!({
+                    "content": output.content,
+                    "data": output.data,
+                    "truncated": output.truncated,
+                }))
             })
-            .await?;
-        let session = sessions
-            .into_iter()
-            .next()
-            .ok_or_else(|| BridgeError::safe("engine did not return the created session"))?;
-        Ok(SessionSummary {
-            id: session.session_id.0,
-            state: "driver".to_owned(),
-        })
+            .await?
+            .adopt()
+            .await
     }
 
-    async fn list_sessions(&self) -> Result<Vec<SessionSummary>, BridgeError> {
-        self.dispatch_with_sessions(ClientCommand::ListSessions {
-            meta: self.next_meta(),
-        })
-        .await
-        .map(|sessions| {
-            sessions
-                .into_iter()
-                .map(|session| SessionSummary {
-                    state: if session.driver_client_id.as_ref() == Some(&self.bound.client_id) {
+    async fn create_session(
+        &self,
+        _title: Option<String>,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<SessionSummary>, BridgeError> {
+        construction::create_session(self, slot).await
+    }
+
+    async fn list_sessions(
+        &self,
+        mut authorized: Vec<String>,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<SessionSummary>>, BridgeError> {
+        construction::validate_authorized(&mut authorized)?;
+        let mut sessions = Vec::with_capacity(authorized.len());
+        for id in authorized {
+            let id = rw_core::SessionId(id);
+            if let Some(session) = self.host.session(&id).await {
+                sessions.push(SessionSummary {
+                    id: id.0,
+                    state: if session.is_driver(&self.bound.client_id) {
                         "driver"
                     } else {
                         "idle"
                     }
                     .to_owned(),
-                    id: session.session_id.0,
-                })
-                .collect()
-        })
+                });
+            }
+        }
+        Construction::new(sessions, slot).adopt().await
     }
 
-    async fn send_message(&self, session_id: &str, message: &str) -> Result<Value, BridgeError> {
+    async fn send_message(
+        &self,
+        session_id: &str,
+        message: &str,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, BridgeError> {
         let outcome = self
             .host
             .dispatch(
@@ -245,7 +206,9 @@ impl EngineMcpBridge for CliMcpBridge {
             )
             .await;
         require_accepted(&outcome.outcome, "engine rejected the session message")?;
-        Ok(json!({"accepted": true, "session_id": session_id}))
+        Construction::new(json!({"accepted": true, "session_id": session_id}), slot)
+            .adopt()
+            .await
     }
 }
 
@@ -290,7 +253,10 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
             .map_err(|_| miette!("MCP engine host could not initialize"))?,
     );
     let host = rw_runtime::HeadlessRuntimeBuilder::new(factory)
-        .with_config(EngineHostConfig::default())
+        .with_config(EngineHostConfig {
+            max_sessions: MAX_SERVER_SESSIONS,
+            ..EngineHostConfig::default()
+        })
         .build()
         .map_err(|_| miette!("MCP engine host could not initialize"))?;
     let registry = read_only_tools()?;
@@ -327,3 +293,6 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
     bridge.shutdown().await;
     result.map_err(|_| miette!("Rottweiler MCP stdio service ended abnormally"))
 }
+
+#[cfg(test)]
+mod tests;
