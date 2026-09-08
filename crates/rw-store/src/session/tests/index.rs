@@ -424,3 +424,39 @@ fn checkpoint(session: &str, next: u64) -> Vec<u8> {
     }))
     .expect("explicit claim checkpoint at synthetic store prefix")
 }
+
+#[test]
+fn source_hits_share_snapshot_select_numeric_first_body_and_preserve_title_null() {
+    let root = tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
+    let mut source = projection(summary("source", "needle titleword", 1), 12);
+    source.source.digest = [17; 32];
+    index
+        .apply_page(None, &source, |writer| {
+            writer.text(2, SequenceId(10), 0, "needle late")?;
+            writer.text(1, SequenceId(2), 0, "needle early")
+        })
+        .expect("source");
+    let hits =
+        SessionIndex::search_hits_read_only(root.path(), "needle titleword", 10).expect("hits");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].source, source.source);
+    assert_eq!(hits[0].sequence, Some(SequenceId(2)));
+    assert_eq!(
+        SessionIndex::search_hits_read_only(root.path(), "titleword", 10).expect("title")[0]
+            .sequence,
+        None
+    );
+    let prior = source.source;
+    source.source.next_sequence = 13;
+    source.source.digest = [18; 32];
+    index
+        .apply_page(Some(prior), &source, |writer| writer.rewind(0))
+        .expect("rewind");
+    let hits =
+        SessionIndex::search_hits_read_only(root.path(), "needle", 10).expect("title remains");
+    assert_eq!(hits[0].source, source.source);
+    assert_eq!(hits[0].sequence, None);
+    assert!(SessionIndex::search_hits_read_only(root.path(), &"x".repeat(513), 1).is_err());
+    assert!(SessionIndex::search_hits_read_only(root.path(), "needle", 1002).is_err());
+}

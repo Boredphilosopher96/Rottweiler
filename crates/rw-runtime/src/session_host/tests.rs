@@ -311,7 +311,8 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
         .expect("search created session");
     assert!(!truncated);
     assert_eq!(created.len(), 1);
-    assert_eq!(created[0].session_id, session_id);
+    assert_eq!(created[0].session.session_id, session_id);
+    assert!(created[0].r#match.is_none(), "title-only search");
     assert_eq!(
         hosted
             .handle()
@@ -344,8 +345,12 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
         .expect("search renamed session");
     assert!(!truncated);
     assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0].session_id, session_id);
-    assert_eq!(matches[0].title, "Durable Search Rename");
+    assert_eq!(matches[0].session.session_id, session_id);
+    assert_eq!(matches[0].session.title, "Durable Search Rename");
+    assert!(matches[0].r#match.is_none());
+    let mut wire = serde_json::to_value(&matches[0]).expect("search wire");
+    wire.as_object_mut().expect("hit").remove("match");
+    assert!(serde_json::from_value::<rw_types::session_search::SessionSearchHit>(wire).is_err());
 }
 
 #[tokio::test]

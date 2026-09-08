@@ -188,7 +188,7 @@ pub enum EngineEvent {
     SessionsSearchReady {
         meta: CommandAckMeta,
         query: String,
-        sessions: Vec<SessionDescriptor>,
+        hits: Vec<crate::session_search::SessionSearchHit>,
         truncated: bool,
     },
     CommandDescriptorsListed {

@@ -56,7 +56,11 @@ pub(super) fn read(
     let head = index.head().map_err(storage)?;
     let current = view(session, &head);
     let invalidation = invalidation(index, journal, request.known_view.as_ref(), &current)?;
-    let (window, anchor) = position(index, &head, &request.position, maximum)?;
+    let (window, anchor) = if let TranscriptPosition::SearchMatch { source } = &request.position {
+        search_position(index, journal, session, source, maximum)?
+    } else {
+        position(index, &head, &request.position, maximum)?
+    };
     if matches!(request.position, TranscriptPosition::AtOrdinal { generation, .. } if generation != current.generation)
     {
         return Ok(TranscriptReadResult::OrderingChanged { view: current });
@@ -193,6 +197,9 @@ fn position(
 ) -> Result<(Window, TranscriptAnchor), HostError> {
     let count = u64::try_from(maximum).map_err(|_| invalid("item limit"))?;
     match position {
+        TranscriptPosition::SearchMatch { .. } => {
+            Err(invalid("search position requires source qualification"))
+        }
         TranscriptPosition::First {} => Ok((Window::From(0), TranscriptAnchor::Unspecified {})),
         TranscriptPosition::Latest {} => Ok((
             Window::Before(head.total_rows),
@@ -245,4 +252,45 @@ pub(super) fn storage(error: impl std::fmt::Display) -> HostError {
 }
 fn invalid(message: &str) -> HostError {
     HostError::Protocol(message.to_owned())
+}
+
+fn search_position(
+    index: &TranscriptIndex,
+    journal: &JournalReadView,
+    session: &SessionId,
+    source: &rw_types::session_search::SessionSearchMatch,
+    maximum: usize,
+) -> Result<(Window, TranscriptAnchor), HostError> {
+    if source.session_id != *session || source.source_sequence > source.through {
+        return Err(invalid("invalid search source identity"));
+    }
+    let next_sequence = source
+        .through
+        .0
+        .checked_add(1)
+        .ok_or_else(|| invalid("search prefix overflow"))?;
+    let pinned = journal
+        .at_prefix(JournalPrefixIdentity {
+            next_sequence,
+            digest: source.digest,
+        })
+        .map_err(|_| invalid("search prefix is stale"))?;
+    let event = pinned
+        .record_with_decode_limit::<rw_types::EngineEvent>(source.source_sequence, 64 * 1024 * 1024)
+        .map_err(storage)?
+        .envelope
+        .event;
+    if event.meta().is_none_or(|meta| {
+        meta.session_id != *session || meta.sequence_id != source.source_sequence
+    }) {
+        return Err(invalid("search event identity mismatch"));
+    }
+    let row = rw_core::transcript::search_source_row(index, &event).map_err(storage)?;
+    let count = u64::try_from(maximum).map_err(|_| invalid("item limit"))?;
+    Ok((
+        Window::From(row.ordinal.saturating_sub(count / 2)),
+        TranscriptAnchor::Exact {
+            item: TranscriptItemId(row.source),
+        },
+    ))
 }

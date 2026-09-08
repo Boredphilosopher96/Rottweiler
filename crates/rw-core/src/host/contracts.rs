@@ -311,18 +311,7 @@ pub trait SessionFactory: Send + Sync + 'static {
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<(Vec<SessionDescriptor>, bool), HostError> {
-        let query = query.to_ascii_lowercase();
-        let mut sessions = self.persisted_sessions().await?;
-        sessions.retain(|session| {
-            session.session_id.0.to_ascii_lowercase().contains(&query)
-                || session.workspace_name.to_ascii_lowercase().contains(&query)
-        });
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        let truncated = sessions.len() > limit;
-        sessions.truncate(limit);
-        Ok((sessions, truncated))
-    }
+    ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), HostError>;
 
     /// Settle every factory-owned operation before reporting success.
     async fn shutdown(&self) -> Result<(), HostError>;

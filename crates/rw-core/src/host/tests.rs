@@ -265,6 +265,13 @@ impl StubFactory {
 
 #[async_trait]
 impl SessionFactory for StubFactory {
+    async fn search_persisted_sessions(
+        &self,
+        _query: &str,
+        _limit: u32,
+    ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), HostError> {
+        Ok((Vec::new(), false))
+    }
     async fn load_fork_operation(
         &self,
         key: &ForkOperationKey,

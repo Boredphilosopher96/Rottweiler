@@ -329,7 +329,7 @@ impl SessionFactory for RuntimeSessionFactory {
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<(Vec<SessionDescriptor>, bool), HostError> {
+    ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), HostError> {
         tokio::time::timeout(
             SESSION_QUERY_DEADLINE,
             self.search_sessions_with_retry(query, limit),

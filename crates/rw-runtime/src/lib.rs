@@ -136,6 +136,13 @@ mod tests {
 
     #[async_trait]
     impl SessionFactory for EmptyFactory {
+        async fn search_persisted_sessions(
+            &self,
+            _query: &str,
+            _limit: u32,
+        ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), HostError> {
+            Ok((Vec::new(), false))
+        }
         async fn fork(
             &self,
             _request: rw_core::ForkSessionRequest,

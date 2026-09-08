@@ -853,36 +853,62 @@ impl RuntimeSessionFactory {
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<(Vec<SessionDescriptor>, bool), SessionStoreError> {
+    ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), SessionStoreError> {
         let requested =
             usize::try_from(limit).map_err(|_| SessionStoreError::SearchLimitTooLarge)?;
-        let rows = SessionIndex::search_read_only(
+        let rows = SessionIndex::search_hits_read_only(
             &self.options.storage_root,
             query,
             requested.saturating_add(1),
         )?;
         let truncated = rows.len() > requested;
-        let descriptors = rows
+        let descriptors: Result<Vec<_>, SessionStoreError> = rows
             .into_iter()
             .take(requested)
-            .filter_map(|row| self.persisted_descriptor(&row.id).ok())
+            .map(|row| {
+                let session = self
+                    .persisted_descriptor(&row.summary.id)
+                    .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
+                let matched = row
+                    .sequence
+                    .map(|sequence| {
+                        let through = row
+                            .source
+                            .next_sequence
+                            .checked_sub(1)
+                            .map(rw_types::SequenceId)
+                            .ok_or(SessionStoreError::CorruptProjectionWatermark)?;
+                        Ok::<_, SessionStoreError>(rw_types::session_search::SessionSearchMatch {
+                            session_id: session.session_id.clone(),
+                            source_sequence: sequence,
+                            through,
+                            digest: row.source.digest,
+                        })
+                    })
+                    .transpose()?;
+                Ok(rw_types::session_search::SessionSearchHit {
+                    session,
+                    r#match: matched,
+                })
+            })
             .collect();
-        Ok((descriptors, truncated))
+        Ok((descriptors?, truncated))
     }
 
     async fn search_sessions_with_retry(
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<(Vec<SessionDescriptor>, bool), HostError> {
+    ) -> Result<(Vec<rw_types::session_search::SessionSearchHit>, bool), HostError> {
         for attempt in 1..=SESSION_INDEX_SEARCH_MAX_ATTEMPTS {
             let factory = self.clone();
             let query = query.to_owned();
-            let result = tokio::task::spawn_blocking(move || {
-                factory.search_sessions_blocking(&query, limit)
-            })
-            .await
-            .map_err(|_| HostError::Query("session search worker failed".to_owned()))?;
+            let result =
+                rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                    factory.search_sessions_blocking(&query, limit)
+                })
+                .await
+                .map_err(|_| HostError::Query("session search worker failed".to_owned()))?;
             match result {
                 Ok((rows, _)) if rows.is_empty() && attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS => {
                     tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await;

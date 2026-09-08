@@ -777,3 +777,6 @@ async fn active_children_query_is_mode_free_bounded_and_source_qualified() {
             .is_err()
     );
 }
+
+#[path = "tests/search.rs"]
+mod search;

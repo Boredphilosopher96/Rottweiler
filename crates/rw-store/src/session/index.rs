@@ -28,6 +28,14 @@ pub struct SessionSummary {
     pub turn_count: i64,
 }
 
+/// Search document identity and the exact complete projection which selected it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionSearchRow {
+    pub summary: SessionSummary,
+    pub source: JournalPrefixIdentity,
+    pub sequence: Option<SequenceId>,
+}
+
 /// Bounded listing state for one exact journal prefix. Search documents live in `SQLite`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionProjection {
@@ -223,6 +231,7 @@ impl SessionIndex {
         limit: usize,
     ) -> Result<Vec<SessionSummary>, SessionStoreError> {
         query_search(&self.connection()?, query, limit)
+            .map(|rows| rows.into_iter().map(|row| row.summary).collect())
     }
 
     /// Searches an existing index through a `SQLite` read-only connection.
@@ -246,6 +255,18 @@ impl SessionIndex {
         if limit > 1_001 {
             return Err(SessionStoreError::SearchLimitTooLarge);
         }
+        Self::search_hits_read_only(root, query, limit)
+            .map(|rows| rows.into_iter().map(|row| row.summary).collect())
+    }
+
+    /// Select bounded source-qualified hits in one `SQLite` read snapshot.
+    /// # Errors
+    /// Rejects invalid query/limit, malformed source identity and unsafe storage.
+    pub fn search_hits_read_only(
+        root: &Path,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionSearchRow>, SessionStoreError> {
         read_index(root, |connection| query_search(connection, query, limit))
     }
 
@@ -297,7 +318,7 @@ fn query_search(
     connection: &Connection,
     query: &str,
     limit: usize,
-) -> Result<Vec<SessionSummary>, SessionStoreError> {
+) -> Result<Vec<SessionSearchRow>, SessionStoreError> {
     if query.len() > 512 {
         return Err(SessionStoreError::SearchQueryTooLarge);
     }
@@ -313,8 +334,9 @@ fn query_search(
     }
     sqlite_schema::validate_sessions(connection)?;
     let sets = (1..=terms.len()).map(|number| format!("SELECT d.session_id FROM sessions_fts JOIN search_documents d ON d.rowid=sessions_fts.rowid WHERE sessions_fts MATCH ?{number}")).collect::<Vec<_>>().join(" INTERSECT ");
+    let bodies = (1..=terms.len()).map(|number| format!("SELECT d.session_id,d.sequence_id FROM sessions_fts JOIN search_documents d ON d.rowid=sessions_fts.rowid WHERE d.kind=1 AND sessions_fts MATCH ?{number}")).collect::<Vec<_>>().join(" UNION ");
     let sql = format!(
-        "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count FROM sessions s JOIN ({sets}) matching ON matching.session_id=s.id WHERE s.search_complete=1 ORDER BY s.updated_unix_ms DESC,s.id ASC LIMIT ?{}",
+        "WITH body_matches AS ({bodies}) SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count,s.next_sequence,s.source_digest,(SELECT sequence_id FROM body_matches b WHERE b.session_id=s.id ORDER BY length(sequence_id),sequence_id LIMIT 1) FROM sessions s JOIN ({sets}) matching ON matching.session_id=s.id WHERE s.search_complete=1 ORDER BY s.updated_unix_ms DESC,s.id ASC LIMIT ?{}",
         terms.len() + 1
     );
     let mut arguments = terms
@@ -325,8 +347,45 @@ fn query_search(
         i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?,
     ));
     let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(arguments), summary_from_row)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    let rows = statement.query_map(rusqlite::params_from_iter(arguments), |row| {
+        Ok((
+            summary_from_row(row)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (summary, next, digest, sequence) = row?;
+        let next_sequence = parse_sequence(&next)?;
+        let sequence = sequence
+            .map(|value| parse_sequence(&value).map(SequenceId))
+            .transpose()?;
+        if sequence.is_some_and(|value| value.0 >= next_sequence) {
+            return Err(SessionStoreError::CorruptProjectionWatermark);
+        }
+        Ok(SessionSearchRow {
+            summary,
+            sequence,
+            source: JournalPrefixIdentity {
+                next_sequence,
+                digest: digest
+                    .try_into()
+                    .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?,
+            },
+        })
+    })
+    .collect()
+}
+
+fn parse_sequence(value: &str) -> Result<u64, SessionStoreError> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| SessionStoreError::CorruptProjectionWatermark)?;
+    if parsed.to_string() != value {
+        return Err(SessionStoreError::CorruptProjectionWatermark);
+    }
+    Ok(parsed)
 }
 
 fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {

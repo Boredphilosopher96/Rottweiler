@@ -20,8 +20,10 @@ mod tail;
 pub use projector::{TranscriptProjectionProgress, TranscriptProjector};
 pub use tail::{TailState, read_transcript_tail, validate_tail_read};
 mod content;
+mod search;
 mod source;
 pub use content::{TranscriptDocument, TranscriptDocumentChunk};
+pub use search::search_source_row;
 
 /// Constant-sized state; mutable entity bindings belong to the derived index.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

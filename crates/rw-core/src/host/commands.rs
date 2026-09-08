@@ -375,7 +375,7 @@ impl EngineHost {
                         "session search query or limit is invalid".to_owned(),
                     ));
                 }
-                let (sessions, truncated) = self
+                let (hits, truncated) = self
                     .factory
                     .search_persisted_sessions(&query, limit)
                     .await?;
@@ -385,7 +385,7 @@ impl EngineHost {
                     vec![EngineEvent::SessionsSearchReady {
                         meta: ack_meta(&meta, &*self.clock),
                         query,
-                        sessions,
+                        hits,
                         truncated,
                     }],
                 ))

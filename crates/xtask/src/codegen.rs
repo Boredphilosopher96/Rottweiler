@@ -614,6 +614,8 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::transcript::TranscriptOrdinal);
     declaration!(rw_types::transcript::TranscriptGeneration);
     declaration!(rw_types::transcript::TranscriptView);
+    declaration!(rw_types::session_search::SessionSearchMatch);
+    declaration!(rw_types::session_search::SessionSearchHit);
     declaration!(rw_types::transcript::TranscriptPosition);
     declaration!(rw_types::transcript::TranscriptRead);
     declaration!(rw_types::transcript::TranscriptItem);
@@ -1398,7 +1400,10 @@ fn contract_fixture() -> ContractFixture {
                     emitted_at: "2026-01-01T00:00:00Z".to_owned(),
                 },
                 query: "protocol".to_owned(),
-                sessions: vec![session_descriptor],
+                hits: vec![rw_types::session_search::SessionSearchHit {
+                    session: session_descriptor,
+                    r#match: None,
+                }],
                 truncated: false,
             },
         ],

@@ -225,6 +225,9 @@ pub struct TranscriptView {
 pub enum TranscriptPosition {
     First {},
     Latest {},
+    SearchMatch {
+        source: crate::session_search::SessionSearchMatch,
+    },
     Before {
         item: TranscriptItemId,
     },
