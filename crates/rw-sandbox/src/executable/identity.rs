@@ -89,7 +89,7 @@ fn file_identity(metadata: &std::fs::Metadata) -> Result<(u64, u64), SandboxErro
     }
 }
 
-fn copy_digest(
+pub(super) fn copy_digest(
     mut source: &File,
     bytes: u64,
     destination: &mut impl Write,

@@ -10,6 +10,8 @@ use std::{
 mod code;
 mod identity;
 mod images;
+#[cfg(target_os = "macos")]
+mod snapshot;
 pub use code::ApprovedCode;
 pub use images::{ApprovedExecutableImages, ExecutableImageLimits};
 
@@ -206,17 +208,20 @@ impl ApprovedExecutable {
             )
             .map_err(invalid)?,
         );
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let (directory, launch_path, executable) = snapshot::create(approved, source)?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let directory = tempfile::tempdir().map_err(invalid)?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let launch_path = directory.path().join("approved-executable");
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let mut executable = File::options()
             .create_new(true)
             .write(true)
             .read(true)
             .open(&launch_path)
             .map_err(invalid)?;
+        #[cfg(not(target_os = "macos"))]
         identity::verify_copy(approved, source, &mut executable)?;
         // The execution path must match the canonical private path granted by
         // the sandbox, without asking the worker to traverse temp-dir aliases.
