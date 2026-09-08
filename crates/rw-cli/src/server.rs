@@ -1,5 +1,6 @@
 mod client_authority;
 mod command_input;
+mod connections;
 use client_authority::{AuthenticatedClient, ClientAuthority, ClientCapability};
 pub(crate) use command_input::LANE_HEADER as COMMAND_LANE_HEADER;
 use std::{
@@ -424,7 +425,7 @@ impl ServerEngine for HostedEngine {
         mpsc::Receiver<std::result::Result<rw_core::HostEvent, String>>,
         EventSubscriptionError,
     > {
-        let mut source = self
+        let source = self
             .host
             .subscribe(
                 rw_core::BoundClient {
@@ -438,19 +439,7 @@ impl ServerEngine for HostedEngine {
                 rw_core::HostError::ReplayCursorAhead => EventSubscriptionError::ReplayCursorAhead,
                 other => EventSubscriptionError::Other(other.to_string()),
             })?;
-        let (send, receive) = mpsc::channel(HOST_EVENT_FORWARD_CAPACITY);
-        tokio::spawn(async move {
-            while let Some(event) = source.recv().await {
-                if send
-                    .send(event.map_err(|error| error.to_string()))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
-        Ok(receive)
+        Ok(connections::forward_events(source))
     }
 
     async fn complete_shell(
@@ -602,50 +591,12 @@ impl ServerState {
 pub async fn serve(
     listener: std::os::unix::net::UnixListener,
     state: ServerState,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let listener = UnixListener::from_std(listener).into_diagnostic()?;
-    loop {
-        tokio::select! {
-            () = state.shutdown_notifier.notified() => return Ok(()),
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return Ok(());
-                }
-            }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted.into_diagnostic()?;
-                let Ok(connection_permit) = state.connections.clone().try_acquire_owned() else { continue; };
-                let connection_state = state.clone();
-                tokio::spawn(async move {
-                    let _connection_permit = connection_permit;
-                    let shutdown_state = connection_state.clone();
-                    let connection_shutdown = Arc::new(AtomicBool::new(false));
-                    let request_shutdown = Arc::clone(&connection_shutdown);
-                    let service = service_fn(move |request| {
-                        handle_request(
-                            request,
-                            connection_state.clone(),
-                            Arc::clone(&request_shutdown),
-                        )
-                    });
-                    if let Err(error) = http1::Builder::new()
-                        .keep_alive(true)
-                        .max_buf_size(16 * 1024)
-                        .timer(hyper_util::rt::TokioTimer::new())
-                        .header_read_timeout(std::time::Duration::from_secs(3))
-                        .serve_connection(TokioIo::new(stream), service)
-                        .await
-                    {
-                        tracing::debug!(reason = %error, "engine client connection closed");
-                    }
-                    if connection_shutdown.load(Ordering::Acquire) {
-                        shutdown_state.shutdown_notifier.notify_one();
-                    }
-                });
-            }
-        }
-    }
+    crate::tui_session::own(move |stop| {
+        Box::pin(connections::serve_owned(listener, state, shutdown, stop))
+    })
+    .await
 }
 
 #[allow(clippy::collapsible_else_if, clippy::too_many_lines)]
@@ -852,23 +803,16 @@ async fn handle_request(
                                     let api_key = ProviderApiKey::from_terminal_input(api_key);
                                     let result = match api_key {
                                         Ok(api_key) => {
-                                            let engine = Arc::clone(&state.engine);
-                                            tokio::spawn(async move {
-                                                let _attempt_guard = attempt_guard;
-                                                engine
-                                                    .submit_provider_api_key(
-                                                        client.client_id,
-                                                        SessionId(session_id),
-                                                        provider,
-                                                        api_key,
-                                                    )
-                                                    .await
-                                            })
-                                            .await
-                                            .unwrap_or_else(|_| {
-                                                Err("provider credential submission failed"
-                                                    .to_owned())
-                                            })
+                                            let _attempt_guard = attempt_guard;
+                                            state
+                                                .engine
+                                                .submit_provider_api_key(
+                                                    client.client_id,
+                                                    SessionId(session_id),
+                                                    provider,
+                                                    api_key,
+                                                )
+                                                .await
                                         }
                                         Err(_) => Err("API key must not be empty".to_owned()),
                                     };

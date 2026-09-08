@@ -238,6 +238,14 @@ and a connection cap bound incomplete requests. Runtime client identities and
 capabilities are authenticated together with a runtime-scoped key, without retaining
 a registration for every connection ever opened.
 
+The HTTP server owns every accepted connection and every admitted request until
+they finish. Transport shutdown closes and joins HTTP/SSE tasks first, then waits
+for request effects, including credential writes, to settle. A disconnected
+request retains its connection slot and its independent request admission permit;
+reconnecting cannot bypass those bounds. Losing the server caller requests this
+same cleanup from its owning task. Idle event forwarding stops when its receiver
+closes.
+
 Host event fanout shares encoded JSON bytes through every intermediate queue and
 the final SSE frame. A 96 MiB host-wide owner covers prepared copies, encoding
 scratch, and retained output; four encoders and 64 subscriptions (four per client)
