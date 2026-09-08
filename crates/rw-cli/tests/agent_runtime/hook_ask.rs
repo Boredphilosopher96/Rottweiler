@@ -10,6 +10,7 @@ use std::{
 };
 use tempfile::tempdir;
 
+#[path = "hook_ask/output.rs"]
 mod output;
 use output::bounded_output;
 
