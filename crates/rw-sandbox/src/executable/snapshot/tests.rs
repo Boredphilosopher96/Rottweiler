@@ -4,7 +4,10 @@ use crate::{ApprovedExecutable, ExecutableArtifactIdentity};
 use std::{
     fs,
     io::{Seek as _, SeekFrom, Write as _},
-    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    os::unix::{
+        ffi::OsStrExt as _,
+        fs::{MetadataExt as _, PermissionsExt as _},
+    },
 };
 
 fn fixture() -> (tempfile::TempDir, ExecutableArtifactIdentity, File) {
@@ -91,7 +94,11 @@ fn changed_source_after_clone_is_rejected_and_directory_removed() {
     let (_root, approved, source) = fixture();
     let mut retained_parent = None;
     let outcome = create_with(&approved, &source, |source, parent| {
-        retained_parent = Some(parent.try_clone().expect("observe directory retirement"));
+        let path = rustix::fs::getpath(parent).expect("exact private directory path");
+        retained_parent = Some((
+            parent.try_clone().expect("observe directory retirement"),
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())),
+        ));
         clone(source, parent)?;
         fs::write(&approved.executable, b"replacement mutable bytes").expect("change after clone");
         fs::set_permissions(&approved.executable, Permissions::from_mode(0o500))
@@ -99,13 +106,22 @@ fn changed_source_after_clone_is_rejected_and_directory_removed() {
         Ok(())
     });
     assert!(outcome.is_err());
+    let (parent, path) = retained_parent.expect("directory was created");
     assert_eq!(
-        retained_parent
-            .expect("directory was created")
-            .metadata()
-            .expect("unlinked directory")
-            .nlink(),
-        0
+        fs::symlink_metadata(&path)
+            .expect_err("private directory removed")
+            .kind(),
+        std::io::ErrorKind::NotFound,
+    );
+    assert_eq!(
+        rustix::fs::openat(
+            &parent,
+            NAME,
+            OFlags::RDONLY | OFlags::NOFOLLOW,
+            Mode::empty()
+        )
+        .expect_err("pinned directory contains no failed snapshot"),
+        rustix::io::Errno::NOENT,
     );
 }
 
