@@ -127,6 +127,7 @@ async fn run_status(
         let mut reads = 0;
         let mut todo_commits = 0;
         let mut todo_calls = 0;
+        let mut todo_invocations = std::collections::HashSet::new();
         let mut summary = None;
         loop {
             match events
@@ -137,6 +138,13 @@ async fn run_status(
                 .clone()
             {
                 EngineEvent::ToolCallStarted { name, .. } if name == "read" => reads += 1,
+                EngineEvent::ToolCallStarted {
+                    name,
+                    invocation_id,
+                    ..
+                } if name == "todo" => {
+                    assert!(todo_invocations.insert(invocation_id));
+                }
                 EngineEvent::TodoStateCommitted { snapshot, .. } => {
                     assert_eq!(todo_calls, 0, "shared task commit precedes its tool result");
                     assert_eq!(
@@ -149,7 +157,11 @@ async fn run_status(
                     );
                     todo_commits += 1;
                 }
-                EngineEvent::ToolCallFinished { name, is_error, .. } if name == "todo" => {
+                EngineEvent::ToolCallFinished {
+                    invocation_id,
+                    is_error,
+                    ..
+                } if todo_invocations.remove(&invocation_id) => {
                     assert!(!is_error, "SDK executes the ordinary built-in task tool");
                     todo_calls += 1;
                 }
@@ -164,6 +176,10 @@ async fn run_status(
                     summary = Some((presentation, invocation_id));
                 }
                 EngineEvent::CommandFinished { name, .. } if name == "task-workflow" => {
+                    assert!(
+                        todo_invocations.is_empty(),
+                        "shared task calls settle before the command"
+                    );
                     assert_eq!(
                         todo_calls,
                         if argument == "start" { 2 } else { 1 },
