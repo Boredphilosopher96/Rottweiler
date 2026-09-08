@@ -195,7 +195,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_process_scope.py", "scripts/perf_process_wait.py", "scripts/native_candidate.py",
+        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_scratch.py", "scripts/perf_process_scope.py", "scripts/perf_process_wait.py", "scripts/native_candidate.py",
                          "scripts/opentui_native.py", "scripts/native_profile.py", "scripts/native-linux-unwind.ld", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
             destination = fixture.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -222,7 +222,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         }
         return fixture, gate, output, env
 
-    def test_standalone_sigterm_reaps_sample_before_scratch_cleanup(self) -> None:
+    def test_standalone_sigterm_reaps_sample_and_retains_failed_scratch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "sample.pid"
             fixture, gate, output, env = self.prepared_gate(
@@ -240,7 +240,9 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertNotEqual(owner.wait(timeout=5), 0)
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(int(pid_path.read_text()), 0)
-                self.assertEqual(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*")), [])
+                retained = list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*"))
+                self.assertEqual(len(retained), 1)
+                self.assertEqual(json.loads(output.with_suffix(".failed-scratch.json").read_text())["retained_scratch"], str(retained[0]))
                 evidence = json.loads(output.with_name("headless.evidence.json").read_text())
                 self.assertEqual(evidence["status"], "fail")
             finally:
@@ -248,7 +250,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                     os.killpg(owner.pid, signal.SIGKILL)
                     owner.wait()
 
-    def test_cancelled_gate_reaps_sample_before_removing_private_scratch(self) -> None:
+    def test_cancelled_gate_reaps_sample_and_retains_failed_scratch(self) -> None:
         from perf_process import run_sample
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "sample.pid"
@@ -261,10 +263,25 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             pid = int(pid_path.read_text())
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
-            self.assertEqual(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*")), [])
+            self.assertEqual(len(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*"))), 1)
             evidence = json.loads(output.with_name("headless.evidence.json").read_text())
             self.assertEqual(evidence["status"], "fail")
             self.assertEqual(evidence["phase"], "warmup")
+
+    def test_unproven_sample_closure_retains_headless_storage(self):
+        fixture, gate, output, env = self.prepared_gate("#!/bin/sh\nexit 99\n")
+        site = Path(env["PYTHONPATH"]) / "sitecustomize.py"
+        with site.open("a") as stream:
+            stream.write("from perf_process_scope import UnsettledScope\n"
+                         "def unsettled(*args, **kwargs): raise UnsettledScope('unacknowledged fixture child')\n"
+                         "perf_process.run_sample = unsettled\n")
+        result = subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env,
+                                capture_output=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"UnsettledScope", result.stderr)
+        retained = Path(json.loads(output.with_suffix(".failed-scratch.json").read_text())["retained_scratch"])
+        self.assertTrue((retained / "rw").is_file())
+        self.assertEqual(json.loads(output.with_name("headless.evidence.json").read_text())["phase"], "warmup")
 
     def test_prebuilt_gate_keeps_metrics_schema_and_writes_ordered_evidence(self) -> None:
         from test_native_candidate import native_candidate
@@ -272,6 +289,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             "#!/bin/sh\nprintf 'ready\\n'\nprintf 'rw_perf_zero_latency_turn_us=100\\n' >&2\n"
         )
         subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env, check=True)
+        self.assertEqual(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*")), [])
         metrics = json.loads(output.read_text())
         self.assertEqual(set(metrics), {"schema_version", "metrics"})
         evidence = json.loads(output.with_name("headless.evidence.json").read_text())

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import shutil
 import unittest
 from unittest.mock import patch
 
@@ -59,6 +60,9 @@ class ClientInputProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "candidate changed"):
                     PROBE.run(root, root / "evidence")
                 self.assertEqual(verify.call_count, 2)
+                retained = Path((root / "evidence/failed-scratch.txt").read_text().strip())
+                self.assertTrue(retained.is_dir())
+                shutil.rmtree(retained)
 
     def test_changed_artifact_receipt_cannot_qualify(self):
         receipt = {"identity_sha256": "identity", "identity": {"source": {"commit": "exact"}},
@@ -72,6 +76,7 @@ class ClientInputProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "candidate changed"):
                     PROBE.run(root, root / "evidence")
             self.assertFalse((root / "evidence/summary.json").exists())
+            shutil.rmtree(Path((root / "evidence/failed-scratch.txt").read_text().strip()))
 
     def test_runner_uses_verified_shared_host_with_explicit_role_and_private_environment(self) -> None:
         receipt = {"identity_sha256": "identity", "identity": {"source": {"commit": "exact"}},

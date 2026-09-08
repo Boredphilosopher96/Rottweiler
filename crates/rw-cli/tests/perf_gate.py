@@ -11,11 +11,10 @@ import statistics
 import sys
 import time
 
-import tempfile
-
 repo = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo / "scripts"))
 from perf_process import run_sample, wait_between_samples
+from perf_scratch import retained_scratch
 from release_contract import load_contract
 from native_candidate import verify as verify_candidate
 
@@ -25,15 +24,27 @@ def main():
         raise SystemExit("usage: perf_gate.py VERIFIED_CANDIDATE_DIRECTORY")
     os.environ["ROTTWEILER_CREDENTIAL_BACKEND"] = "file"
     parent = os.environ.get("RUNNER_TEMP") or os.environ.get("TMPDIR") or "/tmp"
-    with tempfile.TemporaryDirectory(prefix="rottweiler-perf.", suffix=".noindex", dir=parent) as directory:
-        measure(pathlib.Path(directory))
-
-
-def measure(root):
-    output_name = os.environ.get("ROTTWEILER_PERF_OUTPUT")
-    output = pathlib.Path(output_name) if output_name else None
     candidate = pathlib.Path(sys.argv[1])
     receipt = verify_candidate(candidate, repo)
+    def retain(root):
+        record = {"retained_scratch": str(root)}
+        output = os.environ.get("ROTTWEILER_PERF_OUTPUT")
+        if output:
+            destination = pathlib.Path(output).with_suffix(".failed-scratch.json")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(record) + "\n")
+        print(json.dumps(record), file=sys.stderr)
+    with retained_scratch("rottweiler-perf.", parent=pathlib.Path(parent), evidence=retain) as root:
+        try:
+            measure(root, candidate, receipt)
+        finally:
+            if verify_candidate(candidate, repo) != receipt:
+                raise ValueError("candidate changed during headless samples")
+
+
+def measure(root, candidate, receipt):
+    output_name = os.environ.get("ROTTWEILER_PERF_OUTPUT")
+    output = pathlib.Path(output_name) if output_name else None
     engine = receipt["components"]["engine"]
     built_binary = candidate / engine["path"]
     binary = root / "rw"

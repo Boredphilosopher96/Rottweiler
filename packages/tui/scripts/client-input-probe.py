@@ -9,12 +9,12 @@ import os
 from pathlib import Path
 import platform
 import sys
-import tempfile
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 import native_candidate
 from perf_process import run_sample
+from perf_scratch import retained_scratch
 from perf_report import read_report, INPUT_REPORT_BYTES
 from release_contract import load_contract
 
@@ -59,8 +59,8 @@ def run(candidate: Path, output: Path) -> None:
     report = output / "input.json"
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(("ROTTWEILER_", "OTUI_", "OPENTUI_")) and key != "BUN_OPTIONS"}
-    with tempfile.TemporaryDirectory(prefix="rw-client-input-", dir="/tmp") as temporary:
-        private = Path(temporary)
+    with retained_scratch("rw-client-input-", parent=Path("/tmp"),
+                          evidence=lambda path: (output / "failed-scratch.txt").write_text(str(path) + "\n")) as private:
         environment.update(ROTTWEILER_HOME=str(private / "home"),
                            ROTTWEILER_CLIENT_INPUT_PROBE_REPORT=str(report),
                            ROTTWEILER_CLIENT_INPUT_PROBE_DIRECTORY=str(private))
@@ -71,17 +71,17 @@ def run(candidate: Path, output: Path) -> None:
         finally:
             if native_candidate.verify(candidate, REPO) != receipt:
                 raise ValueError("candidate changed during compiled input probe")
-    data = read_report(report, INPUT_REPORT_BYTES) if report.exists() else None
-    summary = {"schema_version": 1, "candidate_identity": receipt["identity_sha256"],
-               "source": receipt["identity"]["source"], "exit_code": result.returncode,
-               "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
-               "qualification": "Compiled near-limit App key-to-native-frame wall clock; startup and RSS are separate gates",
-               "process": data}
-    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    if result.returncode != 0 or data is None:
-        raise ValueError(f"compiled input probe exited {result.returncode}; inspect input.log and raw input.json")
-    validate(data)
-    print(json.dumps({key: value for key, value in summary.items() if key != "process"}, sort_keys=True))
+        data = read_report(report, INPUT_REPORT_BYTES) if report.exists() else None
+        summary = {"schema_version": 1, "candidate_identity": receipt["identity_sha256"],
+                   "source": receipt["identity"]["source"], "exit_code": result.returncode,
+                   "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
+                   "qualification": "Compiled near-limit App key-to-native-frame wall clock; startup and RSS are separate gates",
+                   "process": data}
+        (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        if result.returncode != 0 or data is None:
+            raise ValueError(f"compiled input probe exited {result.returncode}; inspect input.log and raw input.json")
+        validate(data)
+        print(json.dumps({key: value for key, value in summary.items() if key != "process"}, sort_keys=True))
 
 
 def main() -> None:

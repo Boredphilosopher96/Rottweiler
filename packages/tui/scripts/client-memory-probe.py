@@ -7,12 +7,12 @@ import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 import native_candidate
 from perf_process import run_sample
+from perf_scratch import retained_scratch
 from perf_report import read_report, MEMORY_REPORT_BYTES
 from release_contract import load_contract
 
@@ -47,8 +47,8 @@ def run(candidate: Path, output: Path, cycles: int, generations: int, collect: b
     executable = candidate / receipt["components"]["js_host"]["path"]
     output.mkdir(parents=True, exist_ok=False)
     reports = []
-    with tempfile.TemporaryDirectory(prefix="rw-client-memory-", dir="/tmp") as temporary:
-        private = Path(temporary)
+    with retained_scratch("rw-client-memory-", parent=Path("/tmp"),
+                          evidence=lambda path: (output / "failed-scratch.txt").write_text(str(path) + "\n")) as private:
         for generation in range(generations):
             report = output / f"process-{generation}.json"
             recycle = generation + 1 < generations
@@ -90,8 +90,8 @@ def run_held(candidate: Path, output: Path, cycles: int, view: str, collect: boo
     executable = candidate / receipt["components"]["js_host"]["path"]
     output.mkdir(parents=True, exist_ok=False)
     report = output / f"held-{view}.json"
-    with tempfile.TemporaryDirectory(prefix="rw-held-memory-", dir="/tmp") as temporary:
-        private = Path(temporary)
+    with retained_scratch("rw-held-memory-", parent=Path("/tmp"),
+                          evidence=lambda path: (output / "failed-scratch.txt").write_text(str(path) + "\n")) as private:
         environment = dict(probe_environment(), ROTTWEILER_HOME=str(private / "home"),
                            ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT=str(report),
                            ROTTWEILER_CLIENT_MEMORY_PROBE_DIRECTORY=str(private),

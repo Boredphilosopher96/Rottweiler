@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import shutil
 import unittest
 from unittest.mock import patch
 
@@ -44,6 +45,9 @@ class ClientMemoryProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "candidate changed"):
                     PROBE.run(root, root / "evidence", 2, 3)
                 self.assertEqual(verify.call_count, 2)
+                retained = Path((root / "evidence/failed-scratch.txt").read_text().strip())
+                self.assertTrue(retained.is_dir())
+                shutil.rmtree(retained)
 
     def test_probe_refuses_stale_evidence_without_overwriting_it(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -86,6 +90,7 @@ class ClientMemoryProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "exited 1"):
                     PROBE.run_held(root, output, 2, "review")
             self.assertEqual(json.loads((output / "held-review.json").read_text()), {"failure": "retained"})
+            shutil.rmtree(Path((output / "failed-scratch.txt").read_text().strip()))
 
 
 if __name__ == "__main__":

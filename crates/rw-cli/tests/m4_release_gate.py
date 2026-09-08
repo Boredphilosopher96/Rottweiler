@@ -21,7 +21,6 @@ import statistics
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import termios
@@ -32,6 +31,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 from journal_observer import observed_envelopes, session_journals
 from m4_transcript import fixture_turns
 from m4_output import EngineErrorLog
+from perf_scratch import retained_scratch
 from perf_process_wait import observe_exit
 from perf_process_scope import UnsettledScope
 from perf_process import run_sample, delegated_success_scope, check_sample_cancellation
@@ -1148,16 +1148,9 @@ def opentui_native_library_name() -> str:
     return "libopentui.so"
 
 
-@contextlib.contextmanager
 def gate_scratch(evidence: GateEvidence):
-    root = pathlib.Path(tempfile.mkdtemp(prefix="rw4-", dir="/tmp"))
-    try:
-        yield str(root)
-    except BaseException:
-        evidence.update(retained_scratch=str(root))
-        raise
-    else:
-        shutil.rmtree(root)
+    return retained_scratch("rw4-", parent=pathlib.Path("/tmp"),
+                            evidence=lambda root: evidence.update(retained_scratch=str(root)))
 
 
 def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:

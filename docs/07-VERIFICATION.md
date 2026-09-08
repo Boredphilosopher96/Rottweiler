@@ -307,6 +307,13 @@ precedes leader reaping, and bounded signal-zero checks then require group
 disappearance. Persistent zombies or reused group numbers fail as `UNSETTLED`;
 they never authorize another real signal.
 
+Headless, M4, and compiled client probes share one scratch lifetime owner.
+Successful scopes remove their private files after process and oracle checks;
+failed or unproven scopes retain them and report the exact path. Headless and
+compiled client probes revalidate candidate bytes after execution, including
+failure paths. Retained scratch requires identity-qualified cleanup after the
+physical owners are investigated.
+
 M4 observes PTY exits without reaping and retains each leader through its final
 group signal. A successful gate acknowledges closure only after local group and
 remote-runtime lifecycle checks finish. Failed or cancelled gates retain their
