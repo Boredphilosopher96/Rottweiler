@@ -7,13 +7,17 @@ from contextlib import contextmanager
 import errno
 import hashlib
 import json
+import io
 import os
 from pathlib import Path
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
+import tomllib
+
+import native_candidate
+from perf_process import run_sample
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = "rw-sandbox-helper"
@@ -22,25 +26,117 @@ BINARIES = (BINARY, FIXTURE)
 ENVIRONMENT_KEY = "ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT"
 
 
-def build() -> dict[str, Path]:
-    command = ["cargo", "build", "--locked", "--all-features", "-p", "rw-sandbox",
-               "--bin", BINARY, "--bin", FIXTURE, "--message-format=json-render-diagnostics"]
-    executables: dict[str, Path] = {}
-    # Select both artifacts from this one Cargo invocation, never a target search.
-    with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, text=True) as process:
-        assert process.stdout is not None
-        for line in process.stdout:
-            message = json.loads(line)
-            target = message.get("target", {})
-            if (message.get("reason") == "compiler-artifact"
-                    and target.get("name") in BINARIES
-                    and "bin" in target.get("kind", []) and message.get("executable")):
-                executables[target["name"]] = Path(message["executable"]).resolve(strict=True)
-        if process.wait() != 0:
-            raise RuntimeError("sandbox test prerequisite build failed")
-    if set(executables) != set(BINARIES):
-        raise RuntimeError("Cargo did not produce both sandbox test artifacts")
+def dev_profile(environment: dict[str, str]) -> dict:
+    """Read the workspace's native debug profile, including explicit env overrides."""
+    profile = tomllib.loads((ROOT / "Cargo.toml").read_text()).get("profile", {}).get("dev", {})
+    defaults = {"opt-level": 0, "debug": 2, "debug-assertions": True, "overflow-checks": True}
+    values = {key: environment.get("CARGO_PROFILE_DEV_" + key.upper().replace("-", "_"),
+                                  profile.get(key, default)) for key, default in defaults.items()}
+    for key in ("debug-assertions", "overflow-checks"):
+        if values[key] in ("true", "false"):
+            values[key] = values[key] == "true"
+        if type(values[key]) is not bool:
+            raise ValueError("sandbox prerequisite profile requires boolean checks")
+    debug = str(values["debug"]).lower()
+    levels = {"false": 0, "none": 0, "0": 0, "limited": 1, "1": 1,
+              "true": 2, "full": 2, "2": 2, "line-tables-only": "line-tables-only",
+              "line-directives-only": "line-directives-only"}
+    if debug not in levels or str(values["opt-level"]) not in {"0", "1", "2", "3", "s", "z"}:
+        raise ValueError("sandbox prerequisite profile is unsupported")
+    return {"opt_level": str(values["opt-level"]), "debuginfo": levels[debug],
+            "debug_assertions": values["debug-assertions"],
+            "overflow_checks": values["overflow-checks"], "test": False}
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Cargo JSON message has duplicate keys")
+        result[key] = value
+    return result
+
+
+def cargo_artifacts(code: int, stdout: bytes, target: Path, profile: dict) -> dict[str, Path]:
+    """Select two exact native artifacts from one completed Cargo invocation."""
+    executables = {}
+    finished = []
+    manifest = (ROOT / "crates/rw-sandbox/Cargo.toml").resolve(strict=True)
+    sources = {BINARY: manifest.parent / "src/bin/rw-sandbox-helper.rs",
+               FIXTURE: manifest.parent / "tests/fixtures/ownership.rs"}
+    target = target.resolve(strict=True)
+    stream = io.BytesIO(stdout)
+    while line := stream.readline(1024 * 1024 + 1):
+        if len(line) > 1024 * 1024:
+            raise ValueError("Cargo JSON message exceeds 1 MiB")
+        event = json.loads(line, object_pairs_hook=unique_object)
+        if not isinstance(event, dict):
+            raise ValueError("Cargo output requires object messages")
+        if finished:
+            raise ValueError("Cargo emitted output after build-finished")
+        if event.get("reason") == "build-finished":
+            finished.append(event.get("success") is True)
+            continue
+        description = event.get("target", {})
+        if not isinstance(description, dict):
+            raise ValueError("Cargo artifact target must be an object")
+        name = description.get("name")
+        if event.get("reason") != "compiler-artifact" or name not in BINARIES:
+            continue
+        actual = event.get("profile", {})
+        if (not isinstance(actual, dict) or any(type(actual.get(key)) is not type(value)
+                or actual.get(key) != value for key, value in profile.items())):
+            raise ValueError("sandbox prerequisite artifact has the wrong profile")
+        if (name in executables or description.get("kind") != ["bin"]
+                or description.get("crate_types") != ["bin"]
+                or Path(event["manifest_path"]).resolve(strict=True) != manifest
+                or Path(description["src_path"]).resolve(strict=True) != sources[name].resolve(strict=True)):
+            raise ValueError("sandbox prerequisite artifact is duplicated or has the wrong source")
+        path = Path(event["executable"])
+        if path.is_symlink():
+            raise ValueError("sandbox prerequisite artifact cannot be a symlink")
+        executable = path.resolve(strict=True)
+        if executable.parent != target or executable.name != name or not executable.is_file():
+            raise ValueError("sandbox prerequisite artifact is outside the requested target")
+        executables[name] = executable
+    if code != 0 or finished != [True] or set(executables) != set(BINARIES):
+        raise ValueError("sandbox prerequisite requires exactly two artifacts and one successful Cargo completion")
     return executables
+
+
+def build() -> dict[str, Path]:
+    environment = dict(os.environ)
+    target = Path(environment.get("CARGO_TARGET_DIR", ROOT / "target"))
+    target = (ROOT / target).resolve() if not target.is_absolute() else target.resolve()
+    target_triple = environment.get("CARGO_BUILD_TARGET")
+    if target_triple is not None and (not target_triple or Path(target_triple).name != target_triple
+            or not all(character.isascii() and (character.isalnum() or character in "-_")
+                       for character in target_triple)):
+        raise ValueError("sandbox prerequisite requires a native target triple")
+    artifact_root = target / target_triple / "debug" if target_triple else target / "debug"
+    profile = dev_profile(environment)
+    identity = native_candidate.source_identity(ROOT)
+    configuration = native_candidate.configuration_fingerprints(ROOT)
+    command = ["cargo", "build", "--locked", "--all-features", "--target-dir", str(target),
+               "-p", "rw-sandbox", "--bin", BINARY, "--bin", FIXTURE,
+               "--message-format=json-render-diagnostics"]
+    evidence = Path(tempfile.mkdtemp(prefix="rw-test-helper-build-"))
+    (evidence / "inputs.json").write_text(json.dumps({"source": identity,
+        "configuration": configuration, "profile": profile, "command": command,
+        "target": target_triple, "rustflags": environment.get("RUSTFLAGS"),
+        "encoded_rustflags": environment.get("CARGO_ENCODED_RUSTFLAGS")}, sort_keys=True) + "\n")
+    print(f"sandbox prerequisite build evidence: {evidence}", file=sys.stderr)
+    # Parsing never owns a live Cargo child. Shared cleanup also covers a malformed
+    # producer that keeps its pipes open, output floods, and caller cancellation.
+    with (evidence / "drain.log").open("wb") as log:
+        result = run_sample(command, cwd=ROOT, env=environment, timeout=7200,
+                            output_limit=64 * 1024 * 1024, log=log)
+    (evidence / "stdout.jsonl").write_bytes(result.stdout)
+    (evidence / "stderr.log").write_bytes(result.stderr)
+    if (native_candidate.source_identity(ROOT) != identity
+            or native_candidate.configuration_fingerprints(ROOT) != configuration):
+        raise ValueError("sandbox prerequisite source or Cargo configuration changed during build")
+    return cargo_artifacts(result.returncode, result.stdout, artifact_root, profile)
 
 
 def sync_directory(path: Path) -> None:
@@ -167,6 +263,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
         print(f"sandbox test prerequisite: {error}", file=sys.stderr)
         raise SystemExit(1) from error

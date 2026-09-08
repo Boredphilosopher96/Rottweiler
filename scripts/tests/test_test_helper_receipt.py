@@ -6,9 +6,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 import threading
 import unittest
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 SPEC = importlib.util.spec_from_file_location(
     "build_test_helper", Path(__file__).resolve().parents[1] / "build-test-helper.py")
