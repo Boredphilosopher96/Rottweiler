@@ -421,4 +421,5 @@ use process::TestProcess;
 mod print_output;
 
 #[cfg(unix)]
+#[path = "agent_runtime/host_restart.rs"]
 mod host_restart;
