@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used)]
 
+mod common;
+
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -8,8 +10,8 @@ use std::{
 
 use async_trait::async_trait;
 use rw_mcp::{
-    CompactJsonEncoder, FilesystemSpool, McpConnectionApprovalPolicy, McpError, McpLimits,
-    McpManager, McpServerConfig, McpTransportConfig, TestOnlyUnsandboxedStdioConnector,
+    CompactJsonEncoder, McpConnectionApprovalPolicy, McpError, McpLimits, McpManager,
+    McpServerConfig, McpTransportConfig, TestOnlyUnsandboxedStdioConnector,
 };
 use rw_types::McpServerId;
 
@@ -32,11 +34,7 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
         ApprovedFixture(executable.clone()),
     )));
     let directory = tempfile::tempdir().expect("temp");
-    let spool = Arc::new(
-        FilesystemSpool::new(directory.path().to_path_buf())
-            .await
-            .expect("spool"),
-    );
+    let spool = common::spool(directory.path());
     let manager = McpManager::new(
         connector,
         spool,

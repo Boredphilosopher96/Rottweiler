@@ -26,10 +26,10 @@ pub(super) static PROMPT: BuiltinToolPresentation =
 pub(super) static OVERFLOW: BuiltinToolPresentation =
     BuiltinToolPresentation::new("mcp_overflow_read", "MCP result content", || {
         vec![
-            fields::text("artifact", "Artifact", &["artifact_id"]),
+            fields::text("artifact", "Artifact", &["reference", "digest"]),
             fields::text("offset", "Offset", &["offset"]),
             fields::text("bytes", "Returned bytes", &["returned_bytes"]),
-            fields::text("total", "Total bytes", &["original_bytes"]),
+            fields::text("total", "Total bytes", &["reference", "bytes"]),
         ]
     });
 fn result_fields() -> Vec<UiField> {
@@ -38,7 +38,7 @@ fn result_fields() -> Vec<UiField> {
         fields::text("operation", "Operation", &["operation"]),
         fields::badge("format", "Format", &["format"]),
         fields::badge("truncated", "Truncated", &["truncated"]),
-        fields::text("overflow", "Full result artifact", &["overflow", "id"]),
+        fields::text("overflow", "Full result artifact", &["overflow", "digest"]),
     ]
 }
 

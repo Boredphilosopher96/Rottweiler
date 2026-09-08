@@ -418,13 +418,19 @@ pub(crate) async fn compose_hosted_actor(
         }
         catalog
     };
+    let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
+        fixture_redactor.clone(),
+    ));
     let sandbox_helper = crate::extension_runtime::SandboxHelperSource::pending();
     let mcp_runtime = {
         let runtime = Arc::new(
             crate::extension_runtime::McpSessionRuntime::start_production(
                 &executable_catalog.mcp_servers,
                 &workspace_roots,
-                &options.storage_root.join("sessions").join(&session_id),
+                Arc::new(rw_mcp::FilesystemSpool::new(
+                    options.journal_service.payload_source(&session_id)?,
+                    plugin_redactor.clone(),
+                )),
                 &sandbox_helper,
                 &options.credentials_path,
                 root_global_proxy
@@ -471,9 +477,6 @@ pub(crate) async fn compose_hosted_actor(
         ) as Arc<dyn rw_core::HostMcpService>
     });
     let session_ui = Arc::new(crate::extension_runtime::ui::UiSessionBudget::default());
-    let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
-        fixture_redactor.clone(),
-    ));
     let native_extensions = crate::extension_runtime::generations::PluginGenerationOwner::compose(
         crate::extension_runtime::generations::PluginGenerationConfig {
             private_root: options.storage_root.clone(),

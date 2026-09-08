@@ -25,6 +25,7 @@ const MAX_SEARCH_RESULTS: usize = 32;
 
 /// Boundary implemented by `rw-core`'s pinned TOON encoder.
 pub trait StructuredResponseEncoder: Send + Sync {
+    fn working_bytes(&self, value: &Value) -> Result<usize, McpError>;
     fn encode(&self, value: &Value) -> Result<Vec<u8>, McpError>;
     fn format(&self) -> &'static str;
 }
@@ -33,8 +34,30 @@ pub trait StructuredResponseEncoder: Send + Sync {
 pub struct CompactJsonEncoder;
 
 impl StructuredResponseEncoder for CompactJsonEncoder {
+    fn working_bytes(&self, value: &Value) -> Result<usize, McpError> {
+        let mut writer = rw_types::json_encoding::JsonWriter::count(
+            rw_types::session_payload::MAX_SESSION_PAYLOAD_BYTES,
+        );
+        writer
+            .serialize(value)
+            .map_err(|error| McpError::Encoding(error.to_string()))?;
+        writer
+            .written()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(4096))
+            .ok_or_else(|| McpError::Encoding("MCP JSON allocation overflow".into()))
+    }
     fn encode(&self, value: &Value) -> Result<Vec<u8>, McpError> {
-        serde_json::to_vec(value).map_err(|error| McpError::Encoding(error.to_string()))
+        let mut bytes = Vec::new();
+        rw_types::json_encoding::JsonWriter::buffer(
+            &mut bytes,
+            rw_types::session_payload::MAX_SESSION_PAYLOAD_BYTES,
+            1024,
+        )
+        .map_err(|error| McpError::Encoding(error.to_string()))?
+        .serialize(value)
+        .map_err(|error| McpError::Encoding(error.to_string()))?;
+        Ok(bytes)
     }
     fn format(&self) -> &'static str {
         "json"
@@ -460,7 +483,14 @@ impl McpManager {
         let name = name.to_owned();
         self.invoke(server, Arc::clone(&client), async move {
             let value = client.call_tool(&name, arguments).await?;
-            manager.cap(&id, "tool result", &value).await
+            manager
+                .cap(
+                    &id,
+                    "tool result",
+                    value,
+                    crate::McpResponseUse::CanonicalTool,
+                )
+                .await
         })
         .await
     }
@@ -476,7 +506,9 @@ impl McpManager {
         let uri = uri.to_owned();
         self.invoke(server, Arc::clone(&client), async move {
             let value = client.read_resource(&uri).await?;
-            manager.cap(&id, "resource", &value).await
+            manager
+                .cap(&id, "resource", value, crate::McpResponseUse::CanonicalTool)
+                .await
         })
         .await
     }
@@ -486,6 +518,7 @@ impl McpManager {
         server: &McpServerId,
         name: &str,
         arguments: Value,
+        destination: crate::McpResponseUse,
     ) -> Result<CappedResponse, McpError> {
         let client = self.client(server).await?;
         let manager = self.clone();
@@ -493,7 +526,7 @@ impl McpManager {
         let name = name.to_owned();
         self.invoke(server, Arc::clone(&client), async move {
             let value = client.get_prompt(&name, arguments).await?;
-            manager.cap(&id, "prompt", &value).await
+            manager.cap(&id, "prompt", value, destination).await
         })
         .await
     }
@@ -519,30 +552,70 @@ impl McpManager {
         &self,
         server: &McpServerId,
         operation: &str,
-        value: &Value,
+        value: Value,
+        destination: crate::McpResponseUse,
     ) -> Result<CappedResponse, McpError> {
-        let encoded = self.inner.encoder.encode(value)?;
-        if encoded.len() <= self.inner.limits.response_bytes {
-            return Ok(CappedResponse {
-                encoded: String::from_utf8_lossy(&encoded).into_owned(),
-                format: self.inner.encoder.format().to_owned(),
-                truncated: false,
-                overflow: None,
-            });
+        let mut encoded = crate::encoding::encode(Arc::clone(&self.inner.encoder), value).await?;
+        if let crate::McpResponseUse::Inline { max_bytes } = destination {
+            if max_bytes > self.inner.limits.response_bytes || encoded.bytes.len() > max_bytes {
+                return Err(McpError::Encoding(
+                    "inline MCP result exceeds its destination limit".into(),
+                ));
+            }
+            // Retained through bounded JSON encoding and escaped command framing.
+            encoded.retained.resize(
+                encoded
+                    .bytes
+                    .capacity()
+                    .saturating_add(max_bytes.saturating_mul(3))
+                    .saturating_add(4096),
+            )?;
+            return self.compact_response(encoded, None);
         }
-        let overflow = self.inner.spool.write(server, operation, &encoded).await?;
-        let summary = json!({"truncated":true,"original_bytes":encoded.len(),"overflow":{"id":overflow.id,"bytes":overflow.bytes}});
-        let summary = self.inner.encoder.encode(&summary)?;
-        if summary.len() > self.inner.limits.response_bytes {
+        let overflow = if encoded.bytes.len() > self.inner.limits.response_bytes {
+            Some(self.inner.spool.write(server, operation, encoded).await?)
+        } else {
+            return self.compact_response(encoded, None);
+        };
+        let summary = json!({"truncated":true,"overflow":overflow});
+        let encoded = crate::encoding::encode(Arc::clone(&self.inner.encoder), summary).await?;
+        self.compact_response(encoded, overflow)
+    }
+
+    fn compact_response(
+        &self,
+        mut encoded: crate::EncodedPayload,
+        overflow: Option<rw_types::SessionPayloadReference>,
+    ) -> Result<CappedResponse, McpError> {
+        if encoded.bytes.len() > self.inner.limits.response_bytes {
             return Err(McpError::Encoding(
-                "overflow reference exceeds MCP response cap".to_owned(),
+                "overflow reference exceeds MCP response cap".into(),
             ));
         }
+        // Covers the protected framing copy and compact metadata until core admits its result.
+        encoded
+            .retained
+            .ensure(
+                encoded
+                    .bytes
+                    .capacity()
+                    .saturating_mul(3)
+                    .saturating_add(4096),
+            )
+            .map_err(|error| McpError::Encoding(error.to_string()))?;
+        let text = String::from_utf8(encoded.bytes)
+            .map_err(|_| McpError::Encoding("MCP response is not UTF-8".into()))?;
+        let payloads = rw_tools::ToolResultPayloads::retained(
+            overflow.iter().cloned().collect(),
+            Arc::new((encoded.retained, Arc::clone(&self.inner.spool))),
+        )
+        .map_err(|error| McpError::Spool(error.to_string()))?;
         Ok(CappedResponse {
-            encoded: String::from_utf8_lossy(&summary).into_owned(),
+            encoded: text,
             format: self.inner.encoder.format().to_owned(),
-            truncated: true,
-            overflow: Some(overflow),
+            truncated: overflow.is_some(),
+            overflow,
+            payloads,
         })
     }
 }

@@ -295,6 +295,27 @@ queries return at most 192 KiB, with explicit byte cursors and an indication whe
 a matching line itself was clipped. Queries have a 512-byte limit and never
 materialize the full body or an intermediate list of matches.
 
+MCP overflow uses this session namespace, rather than a process-global temporary
+spool. Namespace creation and inventory occur on first payload access in an
+admitted I/O worker; an unused MCP catalog creates no payload directory. The
+shared live secret registry redacts the encoded body before its durable identity
+is computed. `mcp_overflow_read` requires `reference`, `offset`, and nullable
+`query`; it returns `next_offset`, `has_more`, and `line_truncated` with the bounded
+window. A fork copies only bodies referenced by its selected canonical prefix.
+Slash-command prompt replies are inline-only: an oversized result is rejected
+before payload publication. Full tool responses use the canonical attachment path.
+
+Encoding, redaction and payload windows share a 256 MiB process-wide working-byte
+pool with a 128 MiB per-reservation ceiling. CPU and filesystem jobs also acquire
+the finite process-wide resource classes. Their actual workers retain the source,
+allocation and namespace owners through completion when a caller is dropped;
+returned windows and compact results retain their allocation through canonical
+tool publication. Publication failures before rename refund quota only after
+proving that neither staging nor published bytes remain and syncing the namespace.
+An uncertain publication retains its charge until its immutable identity is
+verified; it is never treated as an evictable cache entry.
+
+
 `/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp.prompt <server> <prompt> [JSON object]`; catalog-derived namespaced aliases are conveniences and the stable command resolves the live server state at invocation.
 
 Stdio activation copies the exact approved executable and attested interpreter inputs into private snapshots before starting the server. The physical process retains those snapshots through process and proxy settlement. The captured command also binds literal arguments, resolved environment, working directory, and sandbox grants; a different launch request cannot reuse it. Executables must support relocation without changing their approved bytes. macOS system executables with location-constrained signatures are unsupported by this snapshot path; launch refusal does not fall back to the installation path. Stdio keeps its declared workspace working directory and filesystem grants while file arguments point to their attested snapshots.

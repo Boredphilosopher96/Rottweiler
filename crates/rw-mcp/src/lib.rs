@@ -1,6 +1,9 @@
 //! MCP client/server integration with deferred schemas and fail-closed transport boundaries.
 #![allow(clippy::missing_errors_doc)]
 
+mod encoding;
+mod payload_work;
+pub use encoding::EncodedPayload;
 mod client;
 mod manager;
 mod server;
@@ -18,7 +21,9 @@ pub use server::{
     BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServer,
     RottweilerMcpServerFactory, SessionSummary, serve_stdio,
 };
-pub use spool::{FilesystemSpool, OverflowSpool};
+pub use spool::{
+    FilesystemSpool, OverflowSpool, PayloadRedactor, PayloadSource, RetainedPayloadWindow,
+};
 pub use types::*;
 
 pub const COMPONENT: &str = "mcp";

@@ -26,8 +26,8 @@ use rmcp::{
 use rw_context::encode_toon;
 use rw_mcp::{
     McpAuthorizationProvider, McpConnectionApprovalPolicy, McpConnector, McpError, McpManager,
-    McpServerConfig, McpTransportConfig, OverflowReference, OverflowSpool, SecretToken,
-    StructuredResponseEncoder, boxed_running_http_client,
+    McpServerConfig, McpTransportConfig, OverflowSpool, SecretToken, StructuredResponseEncoder,
+    boxed_running_http_client,
 };
 use rw_providers::{
     AuthMaterial, AuthProvider, DEFAULT_OAUTH_CALLBACK_TIMEOUT, OAuthAuthorizationCode,
@@ -52,7 +52,6 @@ use url::Url;
 const UNTRUSTED_OPEN: &str = "<rottweiler_untrusted_mcp_output_v1>\n";
 const UNTRUSTED_CLOSE: &str = "\n</rottweiler_untrusted_mcp_output_v1>";
 const MAX_TOOL_SEARCH_WIRE_BYTES: usize = 192 * 1024;
-const MAX_OVERFLOW_READ_BYTES: usize = 192 * 1024;
 const MCP_HTTP_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MCP_HTTP_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MCP_HTTP_MAX_CUSTOM_HEADERS: usize = 32;
@@ -958,6 +957,16 @@ where
 pub struct ToonMcpEncoder;
 
 impl StructuredResponseEncoder for ToonMcpEncoder {
+    fn working_bytes(&self, value: &Value) -> Result<usize, McpError> {
+        let plan = rw_context::ToonAllocation::for_value(value)
+            .ok_or_else(|| McpError::Encoding("unsupported MCP TOON shape".into()))?;
+        if plan.prompt_bytes > rw_types::session_payload::MAX_SESSION_PAYLOAD_BYTES {
+            return Err(McpError::Encoding(
+                "MCP TOON output exceeds payload byte limit".into(),
+            ));
+        }
+        Ok(plan.working_bytes)
+    }
     fn encode(&self, value: &Value) -> Result<Vec<u8>, McpError> {
         encode_toon(value)
             .map(String::into_bytes)
@@ -1005,11 +1014,9 @@ struct McpPromptInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct McpOverflowInput {
-    id: String,
-    bytes: usize,
-    #[serde(default)]
+    reference: rw_types::SessionPayloadReference,
+    #[serde(deserialize_with = "Option::deserialize")]
     query: Option<String>,
-    #[serde(default)]
     offset: usize,
 }
 
@@ -1239,7 +1246,12 @@ impl Tool for McpPromptTool {
         let server = McpServerId::new(input.server).map_err(mcp_tool_error)?;
         let response = self
             .manager
-            .get_prompt(&server, &input.name, input.arguments)
+            .get_prompt(
+                &server,
+                &input.name,
+                input.arguments,
+                rw_mcp::McpResponseUse::CanonicalTool,
+            )
             .await
             .map_err(mcp_tool_error)?;
         presentation::PROMPT.attach(capped_result(&server, &input.name, response))
@@ -1252,8 +1264,11 @@ struct McpOverflowReadTool {
 
 #[async_trait]
 impl Tool for McpOverflowReadTool {
-    async fn settle_effects(&self) -> std::result::Result<(), rw_tools::ToolError> {
-        Ok(())
+    async fn settle_effects(&self) -> Result<(), ToolError> {
+        self.spool
+            .settle_effects()
+            .await
+            .map_err(|_| ToolError::EffectsUnsettled("MCP payload effects remain owned".to_owned()))
     }
 
     fn descriptor(&self) -> ToolDescriptor {
@@ -1270,37 +1285,29 @@ impl Tool for McpOverflowReadTool {
         WorkspaceBinding::RootIndependent
     }
 
-    async fn execute(&self, _context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         let input: McpOverflowInput = parse(input)?;
-        if input.id.len() > 256 || input.query.as_ref().is_some_and(|query| query.len() > 512) {
-            return Err(ToolError::InvalidInput(
-                "MCP overflow reference or query is oversized".to_owned(),
-            ));
-        }
-        let reference = OverflowReference {
-            id: input.id,
-            bytes: input.bytes,
-        };
-        let bytes = self.spool.read(&reference).await.map_err(mcp_tool_error)?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| ToolError::Output("MCP overflow payload is not UTF-8".to_owned()))?;
-        let selected = if let Some(query) = input.query {
-            text.lines()
-                .filter(|line| line.contains(&query))
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            text.get(input.offset..).unwrap_or_default().to_owned()
-        };
-        let selected = truncate_utf8(&selected, MAX_OVERFLOW_READ_BYTES);
+        let retained = self
+            .spool
+            .window(
+                input.reference.clone(),
+                input.offset,
+                input.query,
+                context.cancellation.clone(),
+            )
+            .await
+            .map_err(mcp_tool_error)?;
+        let window = retained.window;
         let data = json!({
-            "artifact_id": reference.id,
-            "original_bytes": reference.bytes,
+            "reference": input.reference,
             "offset": input.offset,
-            "returned_bytes": selected.len(),
-            "truncated": selected.len() < text.len().saturating_sub(input.offset),
+            "returned_bytes": window.content.len(),
+            "next_offset": window.next_offset,
+            "has_more": window.has_more,
+            "line_truncated": window.line_truncated,
         });
-        presentation::OVERFLOW.attach(untrusted_result(&selected, data))
+        presentation::OVERFLOW
+            .attach(untrusted_result(&window.content, data).with_payloads(retained.payloads))
     }
 }
 
@@ -1323,6 +1330,7 @@ fn capped_result(
         format,
         truncated,
         overflow,
+        payloads,
     } = response;
     let data = json!({
         "server": server,
@@ -1331,7 +1339,7 @@ fn capped_result(
         "truncated": truncated,
         "overflow": overflow,
     });
-    untrusted_result(&encoded, data)
+    untrusted_result(&encoded, data).with_payloads(payloads)
 }
 
 fn untrusted_result(content: &str, data: Value) -> ToolResult {
@@ -1366,17 +1374,6 @@ fn mcp_tool_error(_error: impl std::fmt::Display) -> ToolError {
     // secrets echoed by a server. Detailed diagnostics remain in bounded host
     // status; the model-facing tool error stays constant.
     ToolError::Output("MCP operation failed; inspect /mcp status for details".to_owned())
-}
-
-fn truncate_utf8(value: &str, limit: usize) -> String {
-    if value.len() <= limit {
-        return value.to_owned();
-    }
-    let mut end = limit;
-    while !value.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    value[..end].to_owned()
 }
 
 #[cfg(test)]

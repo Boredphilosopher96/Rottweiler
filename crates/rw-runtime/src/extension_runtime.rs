@@ -53,8 +53,8 @@ use rw_ext::{
     CommandRegistryError,
 };
 use rw_mcp::{
-    FilesystemSpool, McpClient, McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits,
-    McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerState,
+    McpClient, McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits, McpManager,
+    McpServerConfig, McpTransportConfig, OverflowSpool, ServerState,
 };
 use rw_plugin_protocol::{
     METHOD_EVENT_READ, METHOD_EXTENSION_STATE_COMMIT, METHOD_EXTENSION_STATE_READ,
@@ -608,6 +608,20 @@ impl SharedPluginRedactor {
             .0
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = redactor;
+    }
+}
+impl rw_mcp::PayloadRedactor for SharedPluginRedactor {
+    fn redact(
+        &self,
+        text: &str,
+        max_bytes: usize,
+        admit: &mut dyn FnMut(usize) -> std::io::Result<()>,
+    ) -> std::io::Result<String> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .redact_text_admitted(text, max_bytes, admit)
+            .map_err(std::io::Error::other)
     }
 }
 impl PluginBoundaryRedactor for SharedPluginRedactor {

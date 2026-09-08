@@ -138,18 +138,22 @@ struct PolicySpool;
 impl OverflowSpool for PolicySpool {
     async fn write(
         &self,
-        _server: &McpServerId,
-        _operation: &str,
-        _bytes: &[u8],
-    ) -> Result<OverflowReference, McpError> {
-        unreachable!("policy fixture responses remain below the overflow limit")
+        _: &McpServerId,
+        _: &str,
+        _: rw_mcp::EncodedPayload,
+    ) -> std::result::Result<rw_types::SessionPayloadReference, McpError> {
+        unreachable!("fixture does not produce overflow")
     }
-
-    async fn read(&self, _reference: &OverflowReference) -> Result<Vec<u8>, McpError> {
-        unreachable!("policy fixture never creates overflow references")
+    async fn window(
+        &self,
+        _: rw_types::SessionPayloadReference,
+        _: usize,
+        _: Option<String>,
+        _: rw_tools::CancellationToken,
+    ) -> std::result::Result<rw_mcp::RetainedPayloadWindow, McpError> {
+        unreachable!("fixture does not read overflow")
     }
-
-    async fn remove(&self, _reference: &OverflowReference) -> Result<(), McpError> {
+    async fn settle_effects(&self) -> std::result::Result<(), McpError> {
         Ok(())
     }
 }

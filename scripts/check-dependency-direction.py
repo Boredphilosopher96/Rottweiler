@@ -22,7 +22,7 @@ ALLOWED = {
     "rw-sandbox": {"rw-types", "rw-macos-bootstrap"},
     "rw-intel": {"rw-types"},
     "rw-tools": {"rw-resources", "rw-operation-contract", "rw-intel", "rw-sandbox", "rw-types"},
-    "rw-mcp": {"rw-tools", "rw-types"},
+    "rw-mcp": {"rw-resources", "rw-store", "rw-tools", "rw-types"},
     "rw-ext": {"rw-resources", "rw-operation-contract", "rw-plugin-protocol", "rw-providers", "rw-tools", "rw-types"},
     "rw-core": {
         "rw-resources",

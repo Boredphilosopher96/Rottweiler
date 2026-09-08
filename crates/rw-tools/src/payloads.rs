@@ -9,10 +9,35 @@ use std::sync::Arc;
 pub struct ToolResultPayloads(Option<Arc<Vec<Attachment>>>);
 #[derive(Clone)]
 struct Attachment {
-    reference: SessionPayloadReference,
+    reference: Option<SessionPayloadReference>,
     _retained: Arc<dyn Send + Sync>,
 }
 impl ToolResultPayloads {
+    /// Retains one native result owner even when no durable body attachment is needed.
+    /// # Errors
+    /// Rejects malformed references and more than the shared attachment limit.
+    pub fn retained(
+        references: Vec<SessionPayloadReference>,
+        retained: Arc<dyn Send + Sync>,
+    ) -> Result<Self, ToolError> {
+        if references.len() > MAX_TOOL_PAYLOADS {
+            return Err(ToolError::Output(
+                "tool payload reference limit exceeded".into(),
+            ));
+        }
+        let mut carrier = Self::default();
+        for reference in references {
+            carrier.attach(reference, Arc::clone(&retained))?;
+        }
+        if carrier.0.is_none() {
+            carrier.0 = Some(Arc::new(vec![Attachment {
+                reference: None,
+                _retained: retained,
+            }]));
+        }
+        Ok(carrier)
+    }
+
     pub(crate) fn attach(
         &mut self,
         reference: SessionPayloadReference,
@@ -21,13 +46,20 @@ impl ToolResultPayloads {
         reference
             .validate()
             .map_err(|message| ToolError::Output(message.to_owned()))?;
-        if self.0.as_ref().map_or(0, |attachments| attachments.len()) == MAX_TOOL_PAYLOADS {
+        if self
+            .0
+            .iter()
+            .flat_map(|attachments| attachments.iter())
+            .filter(|attachment| attachment.reference.is_some())
+            .count()
+            == MAX_TOOL_PAYLOADS
+        {
             return Err(ToolError::Output(
                 "tool payload reference limit exceeded".to_owned(),
             ));
         }
         Arc::make_mut(self.0.get_or_insert_with(|| Arc::new(Vec::new()))).push(Attachment {
-            reference,
+            reference: Some(reference),
             _retained: retained,
         });
         Ok(())
@@ -40,7 +72,7 @@ impl ToolResultPayloads {
         self.0
             .iter()
             .flat_map(|attachments| attachments.iter())
-            .map(|attachment| attachment.reference.clone())
+            .filter_map(|attachment| attachment.reference.clone())
             .collect()
     }
 }
@@ -52,22 +84,23 @@ impl std::fmt::Debug for ToolResultPayloads {
                 self.0
                     .iter()
                     .flat_map(|attachments| attachments.iter())
-                    .map(|attachment| &attachment.reference),
+                    .filter_map(|attachment| attachment.reference.as_ref()),
             )
             .finish()
     }
 }
+impl Eq for ToolResultPayloads {}
 impl PartialEq for ToolResultPayloads {
     fn eq(&self, other: &Self) -> bool {
         self.0
             .iter()
             .flat_map(|attachments| attachments.iter())
-            .map(|attachment| &attachment.reference)
+            .filter_map(|attachment| attachment.reference.as_ref())
             .eq(other
                 .0
                 .iter()
                 .flat_map(|attachments| attachments.iter())
-                .map(|attachment| &attachment.reference))
+                .filter_map(|attachment| attachment.reference.as_ref()))
     }
 }
 
@@ -81,6 +114,18 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
         }
+    }
+    #[test]
+    fn compact_result_keeps_allocation_without_minting_attachment() -> Result<(), ToolError> {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let carrier =
+            ToolResultPayloads::retained(Vec::new(), Arc::new(Retained(dropped.clone())))?;
+        assert_eq!(carrier, ToolResultPayloads::default());
+        assert!(carrier.references().is_empty());
+        assert!(!dropped.load(Ordering::Acquire));
+        drop(carrier);
+        assert!(dropped.load(Ordering::Acquire));
+        Ok(())
     }
     #[test]
     fn result_attachment_is_not_forgeable_through_extension_response_json()

@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used)]
 
+mod common;
+
 use std::{
     collections::BTreeSet,
     net::TcpListener,
@@ -9,9 +11,9 @@ use std::{
 
 use async_trait::async_trait;
 use rw_mcp::{
-    CompactJsonEncoder, FilesystemSpool, McpConnectionApprovalPolicy, McpError, McpLimits,
-    McpManager, McpServerConfig, McpStdioSandboxPolicy, McpTransportConfig,
-    SandboxedStdioConnector, ServerState,
+    CompactJsonEncoder, McpConnectionApprovalPolicy, McpError, McpLimits, McpManager,
+    McpServerConfig, McpStdioSandboxPolicy, McpTransportConfig, SandboxedStdioConnector,
+    ServerState,
 };
 use rw_tools::SandboxedProtocolLauncher;
 use rw_types::McpServerId;
@@ -178,11 +180,7 @@ async fn acceptance_harness(executable: &Path, directory: &Path) -> AcceptanceHa
         }),
     ));
     std::fs::create_dir(directory.join("spool")).expect("spool directory");
-    let spool = Arc::new(
-        FilesystemSpool::new(directory.join("spool"))
-            .await
-            .expect("spool"),
-    );
+    let spool = common::spool(&directory.join("spool"));
     let manager = McpManager::new(
         connector,
         spool,

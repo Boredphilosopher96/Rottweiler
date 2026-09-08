@@ -301,11 +301,11 @@ fn production_roots() -> (
 #[cfg(unix)]
 #[tokio::test]
 async fn empty_or_http_only_production_runtime_never_launches_the_helper() {
-    let (_root, workspace, session, helper, credentials) = production_roots();
+    let (_root, workspace, _session, helper, credentials) = production_roots();
     let empty = McpSessionRuntime::start_production(
         &[],
         std::slice::from_ref(&workspace),
-        &session,
+        Arc::new(MemorySpool),
         &helper,
         &credentials,
         None,
@@ -343,7 +343,7 @@ async fn empty_or_http_only_production_runtime_never_launches_the_helper() {
     let http_runtime = McpSessionRuntime::start_production(
         &[http],
         &[workspace],
-        &session,
+        Arc::new(MemorySpool),
         &helper,
         &credentials,
         None,
@@ -397,7 +397,7 @@ async fn deferred_startup_does_not_resolve_mcp_credentials_or_connect() {
     let runtime = McpSessionRuntime::start_deferred(
         std::slice::from_ref(&config),
         Arc::new(NoConnect),
-        root.path(),
+        Arc::new(MemorySpool),
         move |reference| {
             assert_eq!(reference, "private-token");
             resolver_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -522,15 +522,21 @@ impl OverflowSpool for MemorySpool {
         &self,
         _: &McpServerId,
         _: &str,
-        _: &[u8],
-    ) -> std::result::Result<rw_mcp::OverflowReference, McpError> {
-        unreachable!()
+        _: rw_mcp::EncodedPayload,
+    ) -> std::result::Result<rw_types::SessionPayloadReference, McpError> {
+        unreachable!("fixture does not produce overflow")
     }
-    async fn read(&self, _: &rw_mcp::OverflowReference) -> std::result::Result<Vec<u8>, McpError> {
-        unreachable!()
+    async fn window(
+        &self,
+        _: rw_types::SessionPayloadReference,
+        _: usize,
+        _: Option<String>,
+        _: rw_tools::CancellationToken,
+    ) -> std::result::Result<rw_mcp::RetainedPayloadWindow, McpError> {
+        unreachable!("fixture does not read overflow")
     }
-    async fn remove(&self, _: &rw_mcp::OverflowReference) -> std::result::Result<(), McpError> {
-        unreachable!()
+    async fn settle_effects(&self) -> std::result::Result<(), McpError> {
+        Ok(())
     }
 }
 
@@ -953,7 +959,7 @@ async fn repeated_exact_approval_reconnects_after_the_first_connection_failure()
     let runtime = McpSessionRuntime::start(
         std::slice::from_ref(&config),
         Arc::new(FailFirstCatalogConnector(Arc::clone(&connection_attempts))),
-        root.path(),
+        Arc::new(MemorySpool),
         |_| unreachable!(),
         Arc::clone(&approvals),
         PrivateMcpScratch::create().expect("scratch"),
@@ -1099,7 +1105,7 @@ async fn three_mock_deferred_catalogs_unit_path_is_framed_and_under_2k() {
     let runtime = McpSessionRuntime::start(
         &configs,
         Arc::new(CatalogConnector),
-        root.path(),
+        Arc::new(MemorySpool),
         |_| unreachable!(),
         approvals,
         PrivateMcpScratch::create().expect("scratch"),
@@ -1168,7 +1174,7 @@ async fn mcp_prompt_commands_are_namespaced_bounded_and_fail_when_disabled() {
     let runtime = McpSessionRuntime::start(
         std::slice::from_ref(&config),
         Arc::new(CatalogConnector),
-        root.path(),
+        Arc::new(MemorySpool),
         |_| unreachable!(),
         approvals,
         PrivateMcpScratch::create().expect("scratch"),

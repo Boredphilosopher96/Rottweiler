@@ -790,16 +790,11 @@ impl McpSessionRuntime {
     pub(crate) async fn start(
         configs: &[DiscoveredMcpServer],
         connector: Arc<dyn McpConnector>,
-        private_session_root: &Path,
+        spool: Arc<dyn OverflowSpool>,
         resolve_credential: impl Fn(&str) -> Result<String>,
         approvals: Arc<McpApprovalStore>,
         scratch: PrivateMcpScratch,
     ) -> Result<Self> {
-        let spool = Arc::new(
-            FilesystemSpool::new(private_session_root.to_path_buf())
-                .await
-                .map_err(|error| miette!(error.to_string()))?,
-        );
         let manager = Arc::new(McpManager::new(
             connector,
             spool.clone(),
@@ -833,17 +828,12 @@ impl McpSessionRuntime {
     pub(super) async fn start_deferred(
         configs: &[DiscoveredMcpServer],
         connector: Arc<dyn McpConnector>,
-        private_session_root: &Path,
+        spool: Arc<dyn OverflowSpool>,
         resolve_credential: impl Fn(&str) -> Result<String> + Send + Sync + 'static,
         approvals: Arc<McpApprovalStore>,
         scratch: PrivateMcpScratch,
         stdio_environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
     ) -> Result<Self> {
-        let spool = Arc::new(
-            FilesystemSpool::new(private_session_root.to_path_buf())
-                .await
-                .map_err(|error| miette!(error.to_string()))?,
-        );
         let bindings = configs
             .iter()
             .map(|config| {
@@ -928,7 +918,7 @@ impl McpSessionRuntime {
     pub(crate) async fn start_production(
         configs: &[DiscoveredMcpServer],
         workspace_roots: &[PathBuf],
-        private_session_root: &Path,
+        spool: Arc<dyn OverflowSpool>,
         helper: &Arc<super::SandboxHelperSource>,
         credentials_path: &Path,
         upstream_proxy: Option<UpstreamProxy>,
@@ -988,7 +978,7 @@ impl McpSessionRuntime {
         Self::start_deferred(
             configs,
             connector,
-            private_session_root,
+            spool,
             move |reference| {
                 credentials
                     .resolve(&CredentialReference::new(reference))

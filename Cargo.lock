@@ -2815,6 +2815,8 @@ dependencies = [
  "getrandom 0.4.3",
  "rmcp",
  "rustix",
+ "rw-resources",
+ "rw-store",
  "rw-tools",
  "rw-types",
  "serde",

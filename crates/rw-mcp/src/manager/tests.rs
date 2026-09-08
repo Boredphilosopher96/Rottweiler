@@ -2,6 +2,7 @@
 mod failed_owners;
 mod inbound;
 mod lifetimes;
+mod payloads;
 
 use std::{
     collections::BTreeMap,
@@ -16,7 +17,7 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify};
 
 use super::*;
-use crate::{McpStdioSandboxPolicy, McpTransportConfig, OverflowReference};
+use crate::{McpStdioSandboxPolicy, McpTransportConfig};
 
 struct MockClient {
     schema_version: Arc<Mutex<u8>>,
@@ -105,26 +106,27 @@ struct MemorySpool {
 impl OverflowSpool for MemorySpool {
     async fn write(
         &self,
-        server: &McpServerId,
-        _operation: &str,
-        bytes: &[u8],
-    ) -> Result<OverflowReference, McpError> {
-        self.values.lock().await.push(bytes.to_vec());
-        Ok(OverflowReference {
-            id: format!("opaque-{server}"),
-            bytes: bytes.len(),
-        })
+        _: &McpServerId,
+        _: &str,
+        bytes: crate::EncodedPayload,
+    ) -> Result<rw_types::SessionPayloadReference, McpError> {
+        let reference = rw_types::SessionPayloadReference {
+            digest: "a".repeat(64),
+            bytes: bytes.as_bytes().len(),
+        };
+        self.values.lock().await.push(bytes.as_bytes().to_vec());
+        Ok(reference)
     }
-    async fn read(&self, reference: &OverflowReference) -> Result<Vec<u8>, McpError> {
-        self.values
-            .lock()
-            .await
-            .iter()
-            .find(|value| value.len() == reference.bytes)
-            .cloned()
-            .ok_or_else(|| McpError::Spool("missing".to_owned()))
+    async fn window(
+        &self,
+        _: rw_types::SessionPayloadReference,
+        _: usize,
+        _: Option<String>,
+        _: rw_tools::CancellationToken,
+    ) -> Result<crate::RetainedPayloadWindow, McpError> {
+        unreachable!("catalog fixture does not read overflow")
     }
-    async fn remove(&self, _reference: &OverflowReference) -> Result<(), McpError> {
+    async fn settle_effects(&self) -> Result<(), McpError> {
         Ok(())
     }
 }
@@ -211,7 +213,12 @@ async fn five_servers_stay_deferred_and_support_full_catalog_and_calls() {
     );
     assert!(
         manager
-            .get_prompt(&server, "review", json!({"large":"x".repeat(512)}))
+            .get_prompt(
+                &server,
+                "review",
+                json!({"large":"x".repeat(512)}),
+                crate::McpResponseUse::CanonicalTool
+            )
             .await
             .expect("prompt")
             .truncated

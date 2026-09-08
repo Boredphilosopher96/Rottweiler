@@ -165,7 +165,16 @@ async fn abandoned_invocations_keep_effects_owned_and_refuse_new_work_until_reti
             match kind {
                 "tool" => worker.call_tool(&server, "work", json!({})).await,
                 "resource" => worker.read_resource(&server, "fixture://resource").await,
-                _ => worker.get_prompt(&server, "work", json!({})).await,
+                _ => {
+                    worker
+                        .get_prompt(
+                            &server,
+                            "work",
+                            json!({}),
+                            crate::McpResponseUse::CanonicalTool,
+                        )
+                        .await
+                }
             }
         });
         connector.client.invocation.started.notified().await;

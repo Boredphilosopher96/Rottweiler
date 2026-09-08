@@ -1,5 +1,6 @@
 //! Runtime-owned journal commit admission and acknowledged read prefixes.
 mod commits;
+mod payloads;
 mod projection_order;
 pub(crate) use projection_order::{ProjectionOrder, ProjectionPermit};
 use projection_order::{ProjectionOrders, projection_order};
@@ -24,7 +25,8 @@ pub(crate) struct JournalService {
     pub(crate) commits: Arc<JournalCommits>,
     retained_history: retained::HistoryRetentions,
     search_index: search::SearchIndex,
-    root: JournalRoot,
+    root: Arc<JournalRoot>,
+    payload_sources: Mutex<HashMap<String, Weak<payloads::SessionPayloadSource>>>,
     active: Mutex<HashMap<String, Weak<JournalPublication>>>,
     child_projection_orders: ProjectionOrders,
     routing_projection_orders: ProjectionOrders,
@@ -108,8 +110,11 @@ impl JournalService {
             commits: JournalCommits::new(),
             retained_history: retained::HistoryRetentions::new(),
             search_index: search::SearchIndex::new(root),
-            root: JournalRoot::open(root)
-                .map_err(|error| miette!("journal root could not open: {error}"))?,
+            root: Arc::new(
+                JournalRoot::open(root)
+                    .map_err(|error| miette!("journal root could not open: {error}"))?,
+            ),
+            payload_sources: Mutex::new(HashMap::new()),
             active: Mutex::new(HashMap::new()),
             child_projection_orders: Mutex::new(HashMap::new()),
             routing_projection_orders: Mutex::new(HashMap::new()),

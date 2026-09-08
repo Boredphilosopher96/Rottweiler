@@ -766,6 +766,12 @@ impl ToolResult {
         Ok(self)
     }
 
+    #[must_use]
+    pub fn with_payloads(mut self, payloads: crate::ToolResultPayloads) -> Self {
+        self.payloads = payloads;
+        self
+    }
+
     pub fn take_payloads(&mut self) -> crate::ToolResultPayloads {
         std::mem::take(&mut self.payloads)
     }

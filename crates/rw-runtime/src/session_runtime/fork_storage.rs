@@ -20,6 +20,7 @@ use miette::IntoDiagnostic;
 use miette::Result;
 use miette::miette;
 use rw_core::ClientId;
+
 use rw_core::EngineEvent;
 use rw_core::SequenceId;
 use rw_store::session::SessionEventLog;
@@ -104,6 +105,10 @@ pub(crate) fn fork_hosted_session_storage(
             open_checkpoint_stores(storage_root, &target_checkpoint_root, &fork_roots)?;
         let child_id = SessionId(child_session_id.to_owned());
         let child_id_for_map = child_id.clone();
+        let payloads = ForkPayloads {
+            source: journal_service.payload_source(parent_session_id)?,
+            target: journal_service.payload_source(child_session_id)?,
+        };
         let log = SessionEventLog::fork_mapped_view::<EngineEvent, _>(
             storage_root,
             parent_session_id,
@@ -111,6 +116,7 @@ pub(crate) fn fork_hosted_session_storage(
             &route.lease.view,
             through_sequence,
             move |mut event| {
+                payloads.copy(&event)?;
                 let meta = event.meta_mut().ok_or(SessionStoreError::CorruptEvent(
                     "fork source contains a connection-scoped event",
                 ))?;
@@ -245,3 +251,28 @@ pub(super) fn persist_forked_session_metadata(
         persist_session_metadata_portable(&directory, &path, &bytes)
     }
 }
+
+/// Copies only references admitted by the selected canonical prefix. Empty histories do no I/O.
+struct ForkPayloads {
+    source: std::sync::Arc<dyn rw_mcp::PayloadSource>,
+    target: std::sync::Arc<dyn rw_mcp::PayloadSource>,
+}
+impl ForkPayloads {
+    fn copy(&self, event: &EngineEvent) -> std::result::Result<(), SessionStoreError> {
+        let EngineEvent::ToolCallFinished { payloads, .. } = event else {
+            return Ok(());
+        };
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let source = self.source.open()?;
+        let target = self.target.open()?;
+        for reference in payloads {
+            source.copy_to(reference, &target, &|| false)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod payload_tests;
