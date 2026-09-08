@@ -286,9 +286,10 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
     });
     let server = RottweilerMcpServerFactory::new(bridge.clone(), move || {
         McpServerAuthority::new(allowed_tools.clone(), std::iter::empty())
-            .with_session_access(true, true, true)
+            .map(|authority| authority.with_session_access(true, true, true))
     })
-    .create();
+    .create()
+    .map_err(|_| miette!("MCP server authority could not initialize"))?;
     let result = serve_stdio(server).await;
     bridge.shutdown().await;
     result.map_err(|_| miette!("Rottweiler MCP stdio service ended abnormally"))
