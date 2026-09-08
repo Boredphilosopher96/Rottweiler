@@ -170,6 +170,7 @@ mod tests {
             "workload must reserve real map capacity"
         );
         let mut execution = ToolExecution {
+            payloads: rw_tools::ToolResultPayloads::default(),
             call: PendingToolCall {
                 id: "call".into(),
                 invocation_id: rw_types::ToolInvocationId("invocation".into()),

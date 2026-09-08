@@ -24,6 +24,7 @@ fn source_start() -> PendingEvent {
 }
 fn source_finish() -> PendingEvent {
     PendingEvent::ToolCallFinished {
+        payloads: Vec::new(),
         turn: 1,
         id: "call".into(),
         invocation_id: ToolInvocationId("host-owned".into()),

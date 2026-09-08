@@ -44,6 +44,7 @@ pub fn corpus() -> Vec<EngineEvent> {
         call_index: 0,
     });
     events.push(EngineEvent::ToolCallFinished {
+        payloads: Vec::new(),
         meta,
         turn_id,
         tool_call_id: ToolCallId("call".into()),

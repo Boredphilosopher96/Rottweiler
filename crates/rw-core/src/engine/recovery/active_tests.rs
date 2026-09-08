@@ -17,6 +17,21 @@ fn start(invocation: &str) -> PendingEvent {
     }
 }
 
+fn finish_first() -> PendingEvent {
+    PendingEvent::ToolCallFinished {
+        payloads: Vec::new(),
+        presentation: None,
+        turn: 1,
+        id: "reused-provider-id".into(),
+        invocation_id: ToolInvocationId("first".into()),
+        output: ToolOutput::Text {
+            text: "result".into(),
+        },
+        is_error: false,
+        index: 0,
+    }
+}
+
 #[test]
 fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invocations() {
     let root = tempdir().expect("root");
@@ -52,17 +67,7 @@ fn interrupted_inputs_keep_only_uncommitted_fragments_and_unresolved_host_invoca
                 turn: answer.clone(),
             }),
             SourceEvent::event(start("first")),
-            SourceEvent::event(PendingEvent::ToolCallFinished {
-                presentation: None,
-                turn: 1,
-                id: "reused-provider-id".into(),
-                invocation_id: ToolInvocationId("first".into()),
-                output: ToolOutput::Text {
-                    text: "result".into(),
-                },
-                is_error: false,
-                index: 0,
-            }),
+            SourceEvent::event(finish_first()),
             SourceEvent::event(PendingEvent::ConversationToolResultsCommitted {
                 agent_turn: 1,
                 results: vec![rw_types::conversation_input::ToolResultReference {

@@ -96,6 +96,7 @@ fn search_finished_tool_anchors_its_started_row_and_rejects_non_document_sources
                 call_index: 0,
             },
             EngineEvent::ToolCallFinished {
+                payloads: Vec::new(),
                 meta: meta(2),
                 turn_id: rw_types::TurnId("1".into()),
                 tool_call_id: rw_types::ToolCallId("provider".into()),

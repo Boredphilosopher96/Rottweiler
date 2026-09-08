@@ -234,6 +234,7 @@ pub(super) async fn execute_tool_calls(
         let committed = persist_event(
             signals,
             PendingEvent::ToolCallFinished {
+                payloads: execution.payloads.references(),
                 presentation,
                 turn,
                 id: execution.call.id.clone(),

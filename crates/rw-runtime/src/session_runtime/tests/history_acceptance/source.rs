@@ -176,6 +176,7 @@ impl Seed {
         .expect("tool result receipt");
         let finished_source = SequenceId(self.sequence);
         self.push(batch, |meta| EngineEvent::ToolCallFinished {
+            payloads: Vec::new(),
             meta,
             turn_id,
             tool_call_id: id,

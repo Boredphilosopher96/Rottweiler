@@ -14,6 +14,8 @@ mod files;
 mod intelligence;
 mod interaction;
 mod invocation_effects;
+mod payloads;
+pub use payloads::ToolResultPayloads;
 pub mod presentation;
 mod protocol;
 pub use presentation::ToolPresentationPlan;

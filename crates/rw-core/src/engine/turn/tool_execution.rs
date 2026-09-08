@@ -362,10 +362,11 @@ pub(super) async fn execute_prepared_tool(
     };
     let unproven = matches!(&result, Err(ToolError::EffectsUnsettled(_)));
     let tool_cancelled = matches!(&result, Err(ToolError::Cancelled));
-    let (output, is_error, presentation) = match result {
+    let (output, is_error, presentation, payloads) = match result {
         Ok(mut result) => {
             let presentation = result.take_presentation();
-            (tool_result_output(result), false, presentation)
+            let payloads = result.take_payloads();
+            (tool_result_output(result), false, presentation, payloads)
         }
         Err(error) => (
             ToolOutput::Text {
@@ -373,9 +374,11 @@ pub(super) async fn execute_prepared_tool(
             },
             true,
             None,
+            rw_tools::ToolResultPayloads::default(),
         ),
     };
     let mut execution = ToolExecution {
+        payloads,
         presentation,
         unsettled: false,
         call,

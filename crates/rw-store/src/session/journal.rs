@@ -128,6 +128,21 @@ impl JournalRoot {
         })
     }
 
+    /// Opens the session's durable payload namespace beneath this pinned storage root.
+    /// The returned owner must be shared by all active users of the same session.
+    /// # Errors
+    /// Rejects invalid session identifiers, unsafe components and competing payload owners.
+    #[cfg(unix)]
+    pub fn payloads(
+        &self,
+        session_id: &str,
+    ) -> Result<super::payloads::SessionPayloadStore, SessionStoreError> {
+        super::validate_session_id(session_id)?;
+        let sessions = super::open_or_create_directory(&self.file, "sessions")?;
+        let session = super::open_or_create_directory(&sessions, session_id)?;
+        Ok(super::payloads::SessionPayloadStore::open(session)?)
+    }
+
     /// Tests for a segmented session without reading payloads or taking its writer lock.
     ///
     /// # Errors

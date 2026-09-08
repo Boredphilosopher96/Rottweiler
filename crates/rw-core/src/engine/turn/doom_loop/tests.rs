@@ -4,6 +4,7 @@ use rw_types::ToolInvocationId;
 
 fn execution(text: String) -> ToolExecution {
     ToolExecution {
+        payloads: rw_tools::ToolResultPayloads::default(),
         presentation: None,
         unsettled: false,
         call: PendingToolCall {

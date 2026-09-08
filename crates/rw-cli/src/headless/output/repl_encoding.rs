@@ -153,6 +153,7 @@ mod tests {
             unreachable!("fixture variant");
         };
         let ignored = EngineEvent::ToolCallFinished {
+            payloads: Vec::new(),
             meta,
             turn_id,
             tool_call_id: ToolCallId("call".into()),

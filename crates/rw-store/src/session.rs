@@ -13,6 +13,9 @@ mod index_read;
 /// Segmented journal storage and bounded read views.
 pub mod journal;
 mod journal_io;
+/// Immutable session payload attachments and bounded verified retrieval.
+#[cfg(unix)]
+pub mod payloads;
 /// Bounded canonical recovery checkpoints and source-reference index storage.
 #[cfg(unix)]
 pub mod recovery_index;

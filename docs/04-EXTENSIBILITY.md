@@ -280,6 +280,21 @@ and `src/index.ts` as one package. It cannot be combined with `argv`, `manifest`
 or `cwd`. The separate any-language executable target uses literal `argv` plus
 one `manifest`; it is not a fallback for an invalid source target.
 
+Durable tool attachments use the required `ToolCallFinished.payloads` list. Each
+session-scoped reference contains a lowercase digest and an exact byte length;
+provider conversation IR continues to contain only the compact tool response.
+The digest authenticates a versioned manifest containing the length and checksums
+of every 64 KiB body chunk. Bounded reads verify the manifest and each fetched
+chunk, so modifying both a chunk and its adjacent checksum cannot change a
+journal-retained identity. The descriptor-bound session store admits at most
+512 immutable objects and 256 MiB of logical body bytes; individual objects are
+at most 64 MiB. Quota exhaustion rejects publication rather than evicting a
+history-referenced body. Reopen preserves published objects. Fork payload copies
+use independent files and bounded buffers. Raw UTF-8 windows and literal line
+queries return at most 192 KiB, with explicit byte cursors and an indication when
+a matching line itself was clipped. Queries have a 512-byte limit and never
+materialize the full body or an intermediate list of matches.
+
 `/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp.prompt <server> <prompt> [JSON object]`; catalog-derived namespaced aliases are conveniences and the stable command resolves the live server state at invocation.
 
 Stdio activation copies the exact approved executable and attested interpreter inputs into private snapshots before starting the server. The physical process retains those snapshots through process and proxy settlement. The captured command also binds literal arguments, resolved environment, working directory, and sandbox grants; a different launch request cannot reuse it. Executables must support relocation without changing their approved bytes. macOS system executables with location-constrained signatures are unsupported by this snapshot path; launch refusal does not fall back to the installation path. Stdio keeps its declared workspace working directory and filesystem grants while file arguments point to their attested snapshots.

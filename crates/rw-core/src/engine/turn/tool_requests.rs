@@ -144,6 +144,7 @@ pub(super) struct CommittedToolExecution {
 }
 
 pub(in crate::engine) struct ToolExecution {
+    pub(super) payloads: rw_tools::ToolResultPayloads,
     pub(super) presentation: Option<rw_tools::ToolPresentationPlan>,
     pub(super) unsettled: bool,
     pub(super) call: PendingToolCall,
@@ -181,6 +182,7 @@ impl PreparedToolCall {
 
 pub(super) fn failed_execution(call: PendingToolCall, message: impl Into<String>) -> ToolExecution {
     ToolExecution {
+        payloads: rw_tools::ToolResultPayloads::default(),
         presentation: None,
         unsettled: false,
         call,

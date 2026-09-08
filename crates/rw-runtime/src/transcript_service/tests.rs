@@ -358,6 +358,7 @@ fn late_tool_final_invalidates_its_stable_item_without_changing_order() {
     fixture
         .journal
         .append(&EngineEvent::ToolCallFinished {
+            payloads: Vec::new(),
             presentation: None,
             meta: meta(4),
             turn_id: rw_types::TurnId("1".into()),
@@ -535,6 +536,7 @@ async fn tool_action_presentation_requires_exact_prefix_and_effective_invocation
                 call_index: 0,
             },
             EngineEvent::ToolCallFinished {
+                payloads: Vec::new(),
                 meta: meta(2),
                 turn_id: TurnId("1".into()),
                 tool_call_id: ToolCallId("provider-reused".into()),

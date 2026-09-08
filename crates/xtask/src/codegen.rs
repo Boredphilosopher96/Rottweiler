@@ -1183,6 +1183,7 @@ fn contract_fixture() -> ContractFixture {
                 chunk: "running tests".to_owned(),
             },
             EngineEvent::ToolCallFinished {
+                payloads: Vec::new(),
                 presentation: None,
                 meta: event_meta(),
                 turn_id: TurnId("turn-fixture".to_owned()),

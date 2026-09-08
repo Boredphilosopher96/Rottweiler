@@ -504,6 +504,9 @@ pub enum EngineEvent {
         chunk: String,
     },
     ToolCallFinished {
+        #[serde(deserialize_with = "crate::session_payload::deserialize_references")]
+        #[schemars(length(max = crate::session_payload::MAX_TOOL_PAYLOADS))]
+        payloads: Vec<crate::SessionPayloadReference>,
         #[ts(optional = false)]
         #[serde(deserialize_with = "Option::deserialize")]
         #[schemars(

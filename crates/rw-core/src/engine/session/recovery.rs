@@ -34,6 +34,7 @@ pub(in crate::engine) fn interrupted_tool_recovery_events(
         });
     }
     events.push(PendingEvent::ToolCallFinished {
+        payloads: Vec::new(),
         presentation: None,
         turn: repair.agent_turn,
         id: repair.tool_call_id.0.clone(),

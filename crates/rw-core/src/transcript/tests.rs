@@ -38,6 +38,7 @@ pub(super) fn start(sequence: u64, call_index: u32) -> EngineEvent {
 }
 pub(super) fn finish(sequence: u64, call_index: u32, text: &str) -> EngineEvent {
     EngineEvent::ToolCallFinished {
+        payloads: Vec::new(),
         presentation: None,
         meta: meta(sequence),
         turn_id: TurnId("1".into()),

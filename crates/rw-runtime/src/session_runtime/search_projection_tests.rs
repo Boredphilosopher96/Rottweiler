@@ -29,6 +29,7 @@ fn start(sequence: u64, turn: u64, invocation: &str) -> EngineEvent {
 }
 fn finish(sequence: u64, turn: u64, invocation: &str, output: ToolOutput) -> EngineEvent {
     EngineEvent::ToolCallFinished {
+        payloads: Vec::new(),
         meta: meta(sequence),
         turn_id: TurnId(turn.to_string()),
         tool_call_id: ToolCallId("provider-call".into()),

@@ -736,6 +736,8 @@ impl ToolContext {
 #[ts(rename = "ToolResponse")]
 pub struct ToolResult {
     #[serde(skip)]
+    payloads: crate::ToolResultPayloads,
+    #[serde(skip)]
     presentation: Option<crate::ToolPresentationPlan>,
     pub content: String,
     pub data: Value,
@@ -751,6 +753,22 @@ struct ProtectedFraming {
 }
 
 impl ToolResult {
+    /// Binds a session-owned durable payload and its retained owners to this native result.
+    /// # Errors
+    /// Rejects malformed references and more than the shared maximum attachments.
+    pub fn with_payload(
+        mut self,
+        reference: rw_types::SessionPayloadReference,
+        retained: Arc<dyn Send + Sync>,
+    ) -> Result<Self, ToolError> {
+        self.payloads.attach(reference, retained)?;
+        Ok(self)
+    }
+
+    pub fn take_payloads(&mut self) -> crate::ToolResultPayloads {
+        std::mem::take(&mut self.payloads)
+    }
+
     #[must_use]
     pub fn with_presentation(mut self, presentation: crate::ToolPresentationPlan) -> Self {
         self.presentation = Some(presentation);
@@ -768,6 +786,7 @@ impl ToolResult {
             truncated: false,
             protected_framing: None,
             presentation: None,
+            payloads: crate::ToolResultPayloads::default(),
         }
     }
 

@@ -213,6 +213,7 @@ pub(in crate::engine) fn recovered_pending_event(
             diff: diff.clone(),
         },
         EngineEvent::ToolCallFinished {
+            payloads,
             presentation,
             turn_id,
             tool_call_id,
@@ -222,6 +223,7 @@ pub(in crate::engine) fn recovered_pending_event(
             call_index,
             ..
         } => PendingEvent::ToolCallFinished {
+            payloads: payloads.clone(),
             presentation: presentation.clone(),
             turn: parse_turn_id(turn_id)?,
             id: tool_call_id.0.clone(),

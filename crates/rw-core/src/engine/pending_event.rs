@@ -170,6 +170,7 @@ pub(super) enum PendingEvent {
         chunk: String,
     },
     ToolCallFinished {
+        payloads: Vec<rw_types::SessionPayloadReference>,
         presentation: Option<rw_types::extension_ui::UiPresentation>,
         turn: u64,
         id: String,
@@ -572,6 +573,7 @@ impl PendingEvent {
                 chunk,
             },
             Self::ToolCallFinished {
+                payloads,
                 presentation,
                 turn,
                 id,
@@ -580,6 +582,7 @@ impl PendingEvent {
                 is_error,
                 index,
             } => EngineEvent::ToolCallFinished {
+                payloads,
                 presentation,
                 meta,
                 turn_id: wire_turn_id(turn),

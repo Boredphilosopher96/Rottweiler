@@ -35,6 +35,7 @@ pub(in crate::engine) fn events(first: u64, agent_turn: u64, turn: &Turn) -> Vec
             finished_source: SequenceId(first + events.len() as u64),
         });
         events.push(PendingEvent::ToolCallFinished {
+            payloads: Vec::new(),
             presentation: None,
             turn: agent_turn,
             id: id.0.clone(),
