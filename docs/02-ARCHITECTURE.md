@@ -505,8 +505,10 @@ transaction replaces the canonical conversation generation.
   Captured committed-prefix views support bounded cursor pages (ADR-029).
 - Derived recovery and transcript rows publish atomically after their journal prefix is durable.
   Their persistence batches contain at most eight transactions or four MiB of charged
-  mutations and checkpoint data, bounding pending database transaction metadata.
-  Reaching either threshold flushes the batch; clean close flushes the remainder.
+  mutations and checkpoint data. These are application commit and input limits,
+  not measurements of physical pages; database cache, row and file bounds still apply.
+  Reaching either threshold flushes the batch and releases unpinned retired pages;
+  successful close flushes the remainder. Live read snapshots retain their own pages.
   This cadence applies only to rebuildable indexes, never to canonical journal appends.
 - Derived projection databases refuse database-wide crash repair. An unclean
   projection resets only its verified descriptor while retaining the writer lock,

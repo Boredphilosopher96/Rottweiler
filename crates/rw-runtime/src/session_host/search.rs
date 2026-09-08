@@ -1,4 +1,4 @@
-//! Session search shares posting work and keeps physical cancellation with SQLite.
+//! Session search shares posting work and keeps physical cancellation with `SQLite`.
 use super::{
     HostError, RuntimeSessionFactory, SESSION_INDEX_SEARCH_MAX_ATTEMPTS,
     SESSION_INDEX_SEARCH_RETRY_DELAY, SessionIndex, SessionStoreError, load_session_metadata_any,
@@ -117,13 +117,13 @@ impl RuntimeSessionFactory {
                 .map_err(|_| HostError::Query("session search worker failed".into()))?;
             match result {
                 Ok((rows, _)) if rows.is_empty() && attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS => {
-                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await
+                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await;
                 }
                 Ok(result) => return Ok(result),
                 Err(SearchFailure::Index(SessionStoreError::UnsafeSessionIndex))
                     if attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS =>
                 {
-                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await
+                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await;
                 }
                 Err(SearchFailure::Metadata(error)) => return Err(error),
                 Err(SearchFailure::Index(error)) => {

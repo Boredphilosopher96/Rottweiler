@@ -11,9 +11,11 @@ struct Pending {
     mutation_bytes: usize,
 }
 
-/// Bounds redb's pending transaction records and periodically releases their pages.
+/// Bounds application commits pending a flush and releases unpinned retired pages.
 /// The source journal is already durable before any of these updates are admitted.
-/// Clean database close flushes remaining updates; a crash rebuilds from that source.
+/// Successful database close flushes remaining updates; a crash or failed close
+/// rebuilds from that source. Mutation charges do not measure physical database
+/// pages, and live read snapshots retain their pages independently of this policy.
 #[derive(Default)]
 pub(crate) struct DerivedCommitPolicy(Mutex<Pending>);
 
