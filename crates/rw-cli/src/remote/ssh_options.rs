@@ -81,7 +81,7 @@ mod tests {
             [OsString::from("-F"), config.as_os_str().to_owned()]
         );
         if rustix::process::geteuid().as_raw() != 0 {
-            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0))
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o0))
                 .expect("deny read");
             assert_eq!(options.validate(), Err(RemoteError::SshConfig));
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
