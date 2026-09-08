@@ -115,7 +115,7 @@ impl WebSearchFixtureDirectory {
             let path = self.fixture_path();
             let metadata = match std::fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(miette!("web-search fixture could not inspect: {error}")),
             };
             if metadata.file_type().is_symlink() || !metadata.is_file() {
