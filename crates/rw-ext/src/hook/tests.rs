@@ -426,3 +426,34 @@ fn hook_payload_ceiling_counts_json_escaping() {
 }
 
 mod phase_scale;
+
+struct FailedCleanup;
+#[async_trait]
+impl HookHandler for FailedCleanup {
+    async fn invoke(&self, _: HookInvocation<'_>) -> Result<HookDirective, HookError> {
+        Ok(HookDirective::Continue {})
+    }
+    async fn settle_effects(&self) -> Result<(), HookError> {
+        Err(HookError::new("native_proof", "supervisor receipt missing"))
+    }
+}
+
+#[tokio::test]
+async fn closed_hook_admission_retains_the_original_cleanup_failure() {
+    let mut dispatcher = HookDispatcher::new();
+    must(dispatcher.register(
+        HookRegistration::new("failed", HookEvent::UserPromptSubmit, HookClass::Policy),
+        FailedCleanup,
+    ));
+    let Err(first) = dispatcher.dispatch(prompt("input")).await else {
+        panic!("failed proof accepted");
+    };
+    assert!(first.to_string().contains("supervisor receipt missing"));
+    for _ in 0..2 {
+        let Err(proof) = dispatcher.settle_effects(HookEvent::UserPromptSubmit).await else {
+            panic!("closed proof accepted");
+        };
+        assert_eq!(proof, first);
+    }
+    assert!(dispatcher.dispatch(prompt("late")).await.is_err());
+}

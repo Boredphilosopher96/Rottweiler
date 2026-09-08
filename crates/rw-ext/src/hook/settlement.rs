@@ -77,7 +77,9 @@ impl HookRuntime {
                     "hook invocation or cleanup remains active",
                 )
             })?
-            .map_err(|_| HookError::new("effects_unsettled", "hook effect settlement failed"))?;
+            .ok();
+        // Closing admission prevents new effects; it does not erase the owned
+        // cleanup result that explains why the boundary was closed.
         let cleanup = self
             .cleanup
             .lock()
@@ -94,8 +96,16 @@ impl HookRuntime {
                 })?,
             None => Ok(()),
         };
+        let admission_closed = permit.is_none();
         drop(permit);
-        result
+        result?;
+        if admission_closed {
+            return Err(HookError::new(
+                "effects_unsettled",
+                "hook effect settlement failed",
+            ));
+        }
+        Ok(())
     }
 }
 
