@@ -10,14 +10,13 @@ use rw_store::session::{
 use rw_types::{Block, Role, SequenceId, ToolOutput, ToolOutputPart};
 use std::path::Path;
 
-pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) -> Result<()> {
-    let index = match SessionIndex::open(root) {
-        Ok(index) => index,
-        Err(SessionStoreError::UnsupportedSqliteSchema {
-            table: "sessions" | "search_documents" | "sessions_fts" | "search_invocations",
-        }) => SessionIndex::reset_derived(root).into_diagnostic()?,
-        Err(error) => return Err(error).into_diagnostic(),
-    };
+pub(super) fn synchronize(
+    index: &SessionIndex,
+    root: &Path,
+    session: &str,
+    source: &JournalReadView,
+) -> Result<()> {
+    let _projection = tracing::trace_span!(target: "rw_performance", "search.project", session_id = session, next_sequence = source.prefix_identity().next_sequence).entered();
     let mut stored = index.projection(session).into_diagnostic()?;
     if let Some(projection) = &stored
         && source.at_prefix(projection.source).is_err()
@@ -41,6 +40,7 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
             .next_sequence
             .checked_sub(1)
             .map(SequenceId);
+        let read = tracing::trace_span!(target: "rw_performance", "search.source_read").entered();
         let verified = source
             .verified_page::<EngineEvent>(
                 after,
@@ -51,6 +51,8 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
                 },
             )
             .into_diagnostic()?;
+        drop(read);
+        let fold = tracing::trace_span!(target: "rw_performance", "search.source_fold").entered();
         let page = verified.page();
         let checkpoint = rw_core::recovery::InputClaimCheckpoint::decode(
             &projection.input_claims,
@@ -92,6 +94,7 @@ pub(super) fn synchronize(root: &Path, session: &str, source: &JournalReadView) 
             .prefix_identity();
         projection.summary.updated_unix_ms =
             session_projection_updated_at(&root.join("sessions").join(session).join("journal"));
+        drop(fold);
         index
             .apply_page(expected, &projection, |writer| {
                 for checked in checked {

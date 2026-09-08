@@ -4,6 +4,7 @@ mod projection_order;
 pub(crate) use projection_order::{ProjectionOrder, ProjectionPermit};
 use projection_order::{ProjectionOrders, projection_order};
 mod retained;
+mod search;
 use commits::JournalCommits;
 
 use miette::{Result, miette};
@@ -22,6 +23,7 @@ pub(crate) const MAX_PROJECTION_WAITERS: usize = 8;
 pub(crate) struct JournalService {
     pub(crate) commits: Arc<JournalCommits>,
     retained_history: retained::HistoryRetentions,
+    search_index: search::SearchIndex,
     root: JournalRoot,
     active: Mutex<HashMap<String, Weak<JournalPublication>>>,
     child_projection_orders: ProjectionOrders,
@@ -105,6 +107,7 @@ impl JournalService {
         Ok(Arc::new(Self {
             commits: JournalCommits::new(),
             retained_history: retained::HistoryRetentions::new(),
+            search_index: search::SearchIndex::new(root),
             root: JournalRoot::open(root)
                 .map_err(|error| miette!("journal root could not open: {error}"))?,
             active: Mutex::new(HashMap::new()),

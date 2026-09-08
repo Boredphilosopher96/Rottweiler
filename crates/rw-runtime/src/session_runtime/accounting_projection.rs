@@ -21,7 +21,7 @@ pub(super) fn inherited_journal_through(
 }
 
 pub(super) fn refresh_session_index(storage_root: &Path) -> Result<()> {
-    SessionIndex::reset_derived(storage_root).into_diagnostic()?;
+    let index = SessionIndex::reset_derived(storage_root).into_diagnostic()?;
     match std::fs::read_dir(storage_root.join("sessions")) {
         Ok(entries) => {
             for entry in entries {
@@ -34,7 +34,7 @@ pub(super) fn refresh_session_index(storage_root: &Path) -> Result<()> {
                 };
                 let log = SessionEventLog::open(storage_root, &id).into_diagnostic()?;
                 let source = log.read_view();
-                super::search_projection::synchronize(storage_root, &id, &source)?;
+                super::search_projection::synchronize(&index, storage_root, &id, &source)?;
                 reconcile_source_accounting(storage_root, &id, &source)?;
             }
         }

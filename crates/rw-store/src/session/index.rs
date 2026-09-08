@@ -1,17 +1,13 @@
 //! Rebuildable session listing and full-text search; accounting authority is preserved.
 use super::{
-    SessionIndexReadControl, SessionStoreError,
-    index_read::read_index,
-    journal::JournalPrefixIdentity,
-    journal_io::validate_session_id,
-    sqlite_schema::{self, configure_connection, ensure_accounting_schema},
+    SessionIndexReadControl, SessionStoreError, index_read::read_index,
+    journal::JournalPrefixIdentity, journal_io::validate_session_id, sqlite_schema,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use rw_types::SequenceId;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{path::Path, sync::Arc};
+
+mod writer;
 
 const MAX_SEARCH_CANDIDATES: usize = 10_000;
 
@@ -70,7 +66,7 @@ pub enum ProjectionStatus {
 /// `SQLite` projection for session listing and full-text search.
 #[derive(Clone, Debug)]
 pub struct SessionIndex {
-    path: PathBuf,
+    writer: Arc<writer::IndexWriter>,
 }
 
 impl SessionIndex {
@@ -80,12 +76,9 @@ impl SessionIndex {
     ///
     /// Returns an I/O or `SQLite` initialization error.
     pub fn open(root: &Path) -> Result<Self, SessionStoreError> {
-        fs::create_dir_all(root)?;
-        let index = Self {
-            path: root.join("index.sqlite"),
-        };
-        index.connection()?;
-        Ok(index)
+        Ok(Self {
+            writer: Arc::new(writer::IndexWriter::open(root, false)?),
+        })
     }
 
     /// Atomically writes bounded listing metadata and its title document.
@@ -95,6 +88,7 @@ impl SessionIndex {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         upsert_projection(&transaction, projection)?;
+        let _commit = tracing::trace_span!(target: "rw_performance", "search.commit").entered();
         transaction.commit()?;
         Ok(())
     }
@@ -123,19 +117,9 @@ impl SessionIndex {
     /// # Errors
     /// Rejects unsupported authoritative schemas and failed `SQLite` writes.
     pub fn reset_derived(root: &Path) -> Result<Self, SessionStoreError> {
-        fs::create_dir_all(root)?;
-        let index = Self {
-            path: root.join("index.sqlite"),
-        };
-        let mut connection = Connection::open(&index.path)?;
-        sqlite_schema::validate_accounting(&connection)?;
-        configure_connection(&connection)?;
-        ensure_accounting_schema(&connection)?;
-        let transaction = connection.transaction()?;
-        transaction.execute_batch("DROP TRIGGER IF EXISTS search_documents_ai; DROP TRIGGER IF EXISTS search_documents_ad; DROP TRIGGER IF EXISTS search_documents_au; DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS search_documents; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS search_invocations;")?;
-        sqlite_schema::create_sessions_schema(&transaction)?;
-        transaction.commit()?;
-        Ok(index)
+        Ok(Self {
+            writer: Arc::new(writer::IndexWriter::open(root, true)?),
+        })
     }
 
     /// Reads bounded metadata and its exact source identity.
@@ -143,7 +127,7 @@ impl SessionIndex {
     /// Rejects corrupt identities and failed `SQLite` reads.
     pub fn projection(&self, id: &str) -> Result<Option<SessionProjection>, SessionStoreError> {
         validate_session_id(id)?;
-        read_projection(&self.connection()?, id)
+        read_projection(&*self.connection()?, id)
     }
 
     /// Compares one row's source watermark with the authoritative log.
@@ -179,6 +163,8 @@ impl SessionIndex {
         apply: impl FnOnce(&SearchDocumentWriter<'_>) -> Result<(), SessionStoreError>,
     ) -> Result<(), SessionStoreError> {
         let mut connection = self.connection()?;
+        let _transaction =
+            tracing::trace_span!(target: "rw_performance", "search.transaction").entered();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let actual =
@@ -192,18 +178,13 @@ impl SessionIndex {
         };
         apply(&writer)?;
         upsert_projection(&transaction, projection)?;
+        let _commit = tracing::trace_span!(target: "rw_performance", "search.commit").entered();
         transaction.commit()?;
         Ok(())
     }
 
-    fn connection(&self) -> Result<Connection, SessionStoreError> {
-        let connection = Connection::open(&self.path)?;
-        sqlite_schema::validate_accounting(&connection)?;
-        sqlite_schema::validate_sessions(&connection)?;
-        configure_connection(&connection)?;
-        ensure_accounting_schema(&connection)?;
-        sqlite_schema::ensure_sessions_schema(&connection)?;
-        Ok(connection)
+    fn connection(&self) -> Result<writer::WriterGuard<'_>, SessionStoreError> {
+        self.writer.acquire()
     }
 
     /// Lists newest sessions with a deterministic id tie-break.
@@ -232,7 +213,7 @@ impl SessionIndex {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SessionSummary>, SessionStoreError> {
-        query_search(&self.connection()?, query, limit)
+        query_search(&*self.connection()?, query, limit)
             .map(|rows| rows.into_iter().map(|row| row.summary).collect())
     }
 

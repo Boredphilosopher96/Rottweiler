@@ -5,6 +5,9 @@ use thiserror::Error;
 /// Session log/index failure without transcript contents in diagnostics.
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
+    /// The bounded search writer could not be acquired, or its task panicked.
+    #[error("session index writer unavailable; retry the operation")]
+    IndexWriterUnavailable,
     /// The caller cancelled or the physical `SQLite` execution budget elapsed.
     #[error("session index read cancelled or deadline exceeded")]
     IndexReadInterrupted,

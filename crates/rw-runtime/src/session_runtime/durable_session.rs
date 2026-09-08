@@ -139,15 +139,26 @@ impl DurableEventSink {
     }
 
     pub(super) fn synchronize_search(&self) -> Result<()> {
+        let _search = tracing::trace_span!(target: "rw_performance", "search.synchronize", session_id = %self.session_id).entered();
+        let wait = tracing::trace_span!(target: "rw_performance", "search.session_wait").entered();
         let _update = self
             .search_update
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(wait);
         let lease = self
             .journal_service
             .admit_read()?
             .capture(&self.session_id)?;
-        super::search_projection::synchronize(&self.storage_root, &self.session_id, &lease.view)
+        let index = self
+            .journal_service
+            .search_index(&self.session_id, &lease.view)?;
+        super::search_projection::synchronize(
+            &index,
+            &self.storage_root,
+            &self.session_id,
+            &lease.view,
+        )
     }
 
     fn update_search(&self, persisted: &[EngineEvent]) {

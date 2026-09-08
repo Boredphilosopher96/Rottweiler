@@ -545,6 +545,16 @@ transaction replaces the canonical conversation generation.
   by their agent-turn identity in the same transaction as the source watermark.
   Catch-up reads at most 128 events and 16 MiB per page; incomplete projections
   stay out of search/list results until their captured source is covered.
+  The storage-root journal service lazily retains one writer connection shared
+  across its session family. Clones share that connection; bounded writer waits
+  run inside the admitted blocking worker. Initialization validates schemas once,
+  and reuse checks the pinned directory/database identities and schema cookie.
+  Changed schemas are revalidated before publication; failed page transactions
+  roll back without advancing their source cursor. FULL synchronous commits remain
+  the durability contract for this database, including its accounting tables.
+  The writer uses a 1 MiB page-cache target with memory mapping disabled. This
+  target excludes SQLite scratch and WAL frames retained by concurrent snapshots.
+  Search reads own separate connections and cancellation handlers.
   Live SQLite read transactions use a 1 MiB page cache and disabled memory mapping,
   so search does not copy the lifetime database or retain transcript bodies.
   Read-only handles cannot write stored rows; SQLite may maintain its ephemeral

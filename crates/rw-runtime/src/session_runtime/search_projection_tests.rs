@@ -44,6 +44,7 @@ fn finish(sequence: u64, turn: u64, invocation: &str, output: ToolOutput) -> Eng
 #[test]
 fn pages_resume_from_exact_source_without_duplicate_documents() {
     let root = tempfile::tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     for batch in 0..3 {
         journal
@@ -56,9 +57,8 @@ fn pages_resume_from_exact_source_without_duplicate_documents() {
             }))
             .expect("append");
     }
-    synchronize(root.path(), "search", &journal.read_view()).expect("paged catchup");
-    synchronize(root.path(), "search", &journal.read_view()).expect("warm repeated read");
-    let index = SessionIndex::open(root.path()).expect("index");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("paged catchup");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("warm repeated read");
     assert_eq!(
         index
             .search("unique299 unique0", 10)
@@ -79,7 +79,8 @@ fn pages_resume_from_exact_source_without_duplicate_documents() {
     journal
         .append_batch(user(600, 301, "freshneedle"))
         .expect("append after restart");
-    synchronize(root.path(), "search", &journal.read_view()).expect("incremental resumed source");
+    synchronize(&index, root.path(), "search", &journal.read_view())
+        .expect("incremental resumed source");
     assert_eq!(
         index
             .search("freshneedle unique299", 10)
@@ -92,6 +93,7 @@ fn pages_resume_from_exact_source_without_duplicate_documents() {
 #[test]
 fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
     let root = tempfile::tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     let mut events = user(0, 1, &format!("{} deepneedle", "title ".repeat(30))).to_vec();
     events.extend([
@@ -135,8 +137,7 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
         start(10, 2, "pending"),
     ]);
     journal.append_batch(events).expect("append");
-    synchronize(root.path(), "search", &journal.read_view()).expect("search source");
-    let index = SessionIndex::open(root.path()).expect("index");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("search source");
     assert_eq!(
         index
             .search("deepneedle interoperability discardedresult 42", 10)
@@ -176,7 +177,7 @@ fn committed_words_and_structured_fields_are_searchable_across_rewinds() {
     journal
         .append_batch(events)
         .expect("rewind and replacement");
-    synchronize(root.path(), "search", &journal.read_view()).expect("rewind source");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("rewind source");
     for absent in ["discardedmessage", "discardedresult", "latepoison"] {
         assert!(index.search(absent, 10).expect("removed source").is_empty());
     }
@@ -206,7 +207,7 @@ fn reject_stale_completion(
             },
         )])
         .expect("invalid source fixture");
-    assert!(synchronize(root, "search", &journal.read_view()).is_err());
+    assert!(synchronize(index, root, "search", &journal.read_view()).is_err());
     assert_eq!(
         index.projection("search").expect("unchanged index"),
         published
@@ -222,12 +223,12 @@ fn reject_stale_completion(
 #[test]
 fn failed_page_keeps_cursor_and_documents_atomic_then_resumes() {
     let root = tempfile::tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     journal
         .append_batch(user(0, 1, "retainedneedle"))
         .expect("first");
-    synchronize(root.path(), "search", &journal.read_view()).expect("initial");
-    let index = SessionIndex::open(root.path()).expect("index");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("initial");
     let old = index
         .projection("search")
         .expect("projection")
@@ -263,7 +264,7 @@ fn failed_page_keeps_cursor_and_documents_atomic_then_resumes() {
     journal
         .append_batch(user(2, 2, "completedneedle"))
         .expect("next");
-    synchronize(root.path(), "search", &journal.read_view()).expect("resume");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("resume");
     assert_eq!(
         index
             .search("retainedneedle completedneedle", 10)
@@ -276,6 +277,7 @@ fn failed_page_keeps_cursor_and_documents_atomic_then_resumes() {
 #[test]
 fn referenced_input_searches_selected_text() {
     let root = tempfile::tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     journal
         .append_batch([
@@ -303,8 +305,7 @@ fn referenced_input_searches_selected_text() {
             },
         ])
         .expect("input");
-    synchronize(root.path(), "search", &journal.read_view()).expect("projection");
-    let index = SessionIndex::open(root.path()).expect("index");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("projection");
     assert!(
         index
             .search("unselectedneedle", 10)
@@ -320,11 +321,11 @@ fn referenced_input_searches_selected_text() {
 #[test]
 fn search_rejects_unclaimed_cross_turn_input_without_publishing_a_new_prefix() {
     let root = tempfile::tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     let [accepted, mut commit] = user(0, 1, "body needle");
     journal.append_batch([accepted]).expect("accepted source");
-    synchronize(root.path(), "search", &journal.read_view()).expect("pending checkpoint");
-    let index = SessionIndex::open(root.path()).expect("index");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("pending checkpoint");
     let before = index
         .projection("search")
         .expect("projection")
@@ -333,7 +334,7 @@ fn search_rejects_unclaimed_cross_turn_input_without_publishing_a_new_prefix() {
         *agent_turn = 2;
     }
     journal.append_batch([commit]).expect("raw invalid event");
-    assert!(synchronize(root.path(), "search", &journal.read_view()).is_err());
+    assert!(synchronize(&index, root.path(), "search", &journal.read_view()).is_err());
     let after = index
         .projection("search")
         .expect("projection")
@@ -345,11 +346,12 @@ fn search_rejects_unclaimed_cross_turn_input_without_publishing_a_new_prefix() {
 #[test]
 fn search_rejects_reusing_a_consumed_source_after_restart() {
     let root = tempfile::tempdir().expect("root");
+    let index = SessionIndex::open(root.path()).expect("index");
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("journal");
     let events = user(0, 1, "only once");
     let mut duplicate = events[1].clone();
     journal.append_batch(events).expect("committed input");
-    synchronize(root.path(), "search", &journal.read_view()).expect("published input");
+    synchronize(&index, root.path(), "search", &journal.read_view()).expect("published input");
     let expected = journal.read_view().prefix_identity();
     drop(journal);
     let mut journal = SegmentedJournal::open(root.path(), "search").expect("reopen");
@@ -357,7 +359,7 @@ fn search_rejects_reusing_a_consumed_source_after_restart() {
     journal
         .append_batch([duplicate])
         .expect("duplicate source claim");
-    assert!(synchronize(root.path(), "search", &journal.read_view()).is_err());
+    assert!(synchronize(&index, root.path(), "search", &journal.read_view()).is_err());
     assert_eq!(
         SessionIndex::open(root.path())
             .expect("index")
