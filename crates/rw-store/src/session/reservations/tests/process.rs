@@ -1,4 +1,4 @@
-//! Independent SQLite clients must retain liabilities across abrupt process exit.
+//! Independent `SQLite` clients must retain liabilities across abrupt process exit.
 use super::*;
 use rw_resources::process::BlockingProcess;
 use std::{

@@ -2,7 +2,7 @@
 use super::*;
 use rw_resources::process::BlockingProcess;
 use rw_types::{ClientCommand, ClientId, CommandMeta, CommandOutcome, CommandReply, RequestId};
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::os::unix::net::UnixStream;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

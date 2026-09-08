@@ -56,7 +56,7 @@ fn open(root: &Path, workspace: &Path) -> Result<CheckpointStore> {
 #[ignore = "optimized large-file and monorepo checkpoint preparation measurement"]
 fn qualify_checkpoint_preparation() -> Result<()> {
     let mut samples = Vec::new();
-    for files in [100, 1_000, 10_000] {
+    for files in [100_usize, 1_000, 10_000] {
         let root = tempfile::tempdir()?;
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace)?;
@@ -114,6 +114,19 @@ fn qualify_checkpoint_preparation() -> Result<()> {
                 "command_preparation_us": preparation_us, "finish_us": finish_us}));
         }
     }
+    let (capture_us, refusal_us) = qualify_large_file()?;
+    println!(
+        "{}",
+        json!({"checkpoint_preparation": samples,
+        "sparse_bytes": super::MAX_CAPTURE_FILE_BYTES, "sparse_capture_us": capture_us,
+        "oversized_bytes": 1024 * 1024 * 1024_u64, "oversized_refusal_us": refusal_us,
+        "capture_chunk_bytes": super::CAPTURE_CHUNK_BYTES,
+        "physical_read_bytes": null, "cache_state": "fresh fixture; OS cache not evicted"})
+    );
+    Ok(())
+}
+
+fn qualify_large_file() -> Result<(u128, u128)> {
     let root = tempfile::tempdir()?;
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -134,7 +147,7 @@ fn qualify_checkpoint_preparation() -> Result<()> {
     assert_eq!(*bytes, super::MAX_CAPTURE_FILE_BYTES);
     // Stream the oracle too: do not inflate this process's peak with a 64 MiB Vec.
     let mut saved = File::open(store.blobs.directory().join(&blob[..2]).join(blob))?;
-    let mut chunk = [0; super::CAPTURE_CHUNK_BYTES];
+    let mut chunk = vec![0; super::CAPTURE_CHUNK_BYTES];
     let mut observed = 0_u64;
     loop {
         let count = saved.read(&mut chunk)?;
@@ -168,13 +181,5 @@ fn qualify_checkpoint_preparation() -> Result<()> {
         Err(CheckpointError::Cancelled)
     ));
     assert!(!store.pending_path("cancelled", 1).exists());
-    println!(
-        "{}",
-        json!({"checkpoint_preparation": samples,
-        "sparse_bytes": super::MAX_CAPTURE_FILE_BYTES, "sparse_capture_us": capture_us,
-        "oversized_bytes": 1024 * 1024 * 1024_u64, "oversized_refusal_us": refusal_us,
-        "capture_chunk_bytes": super::CAPTURE_CHUNK_BYTES,
-        "physical_read_bytes": null, "cache_state": "fresh fixture; OS cache not evicted"})
-    );
-    Ok(())
+    Ok((capture_us, refusal_us))
 }
