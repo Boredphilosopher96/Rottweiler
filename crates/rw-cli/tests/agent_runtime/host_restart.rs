@@ -301,6 +301,13 @@ fn bootstrap_session() -> rw_types::SessionId {
 
 impl NativeHost {
     fn take_driver(&self, request: &str) -> TestResult {
+        let ready = self.dispatch(&ClientCommand::ResumeSession {
+            meta: self.meta(&format!("{request}-resume")),
+            session_id: bootstrap_session(),
+            last_seen_sequence: None,
+            role: rw_types::ClientRole::Observer,
+        })?;
+        assert_eq!(ready.outcome(), &CommandOutcome::Accepted {});
         let reply = self.dispatch(&ClientCommand::TakeDriver {
             meta: self.meta(request),
             session_id: bootstrap_session(),
