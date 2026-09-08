@@ -62,6 +62,20 @@ fn copied_code_contains_only_attested_files_and_rejects_precapture_replacement()
     assert_eq!(fs::read(entry).expect("pinned copy"), b"printf approved");
 }
 
+#[test]
+fn primary_replacement_is_rejected_by_final_capture_without_duplicate_attestation() {
+    let (_directory, config) = fixture("printf approved");
+    assert_eq!(config.attested_files().len(), 1);
+    let approved = LaunchBytes::capture(&config, &profile()).expect("approved capture");
+    fs::write(config.executable(), b"replacement executable").expect("replace primary");
+    assert!(config.validate_executable_identity().is_err());
+    assert!(LaunchBytes::capture(&config, &profile()).is_err());
+    assert_ne!(
+        fs::read(approved.program(&config)).expect("retained executable"),
+        b"replacement executable"
+    );
+}
+
 #[tokio::test]
 async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execution() {
     let _admission = crate::native_fixture::admit().await;
