@@ -196,13 +196,14 @@ impl InitialSessionContext {
         });
         let count = self.segments().len() + extra;
         allowance.resize(node_bytes(count, copied)?)?;
-        let mut turn = source
-            .map(crate::engine::context_copy::turn_with_policy_slot)
-            .unwrap_or_else(|| Turn {
+        let mut turn = source.map_or_else(
+            || Turn {
                 role: Role::System,
                 blocks: Vec::new(),
                 meta: TurnMeta::default(),
-            });
+            },
+            crate::engine::context_copy::turn_with_policy_slot,
+        );
         turn.blocks.push(Block::Text {
             text: text.to_owned(),
         });
