@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use super::*;
 
 #[tokio::test]
@@ -39,6 +41,7 @@ async fn session_listing_reads_only_exact_authorized_live_sessions() {
         .build()
         .expect("host");
     let bridge = CliMcpBridge {
+        response_limits: McpResponseLimits::new(WORKING_BYTES).expect("response limit"),
         host,
         registry: read_only_tools().expect("tools"),
         tool_context: ToolContext::from_workspace_roots(std::slice::from_ref(&workspace))

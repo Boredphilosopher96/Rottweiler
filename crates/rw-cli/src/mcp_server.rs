@@ -50,6 +50,7 @@ impl PermissionApprover for DenyPrompt {
 }
 
 struct CliMcpBridge {
+    response_limits: McpResponseLimits,
     host: EngineHost,
     registry: Arc<ToolRegistry>,
     tool_context: ToolContext,
@@ -96,7 +97,7 @@ fn require_accepted(
 #[async_trait]
 impl EngineMcpBridge for CliMcpBridge {
     fn response_limits(&self) -> McpResponseLimits {
-        McpResponseLimits::new(WORKING_BYTES).expect("fixed CLI bridge construction limit")
+        self.response_limits
     }
 
     async fn tools(
@@ -273,6 +274,8 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
     getrandom::fill(&mut request_entropy)
         .map_err(|_| miette!("MCP request identity entropy is unavailable"))?;
     let bridge = Arc::new(CliMcpBridge {
+        response_limits: McpResponseLimits::new(WORKING_BYTES)
+            .map_err(|_| miette!("MCP response construction limit is invalid"))?,
         host,
         registry,
         tool_context,

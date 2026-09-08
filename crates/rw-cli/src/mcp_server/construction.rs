@@ -141,7 +141,7 @@ pub(super) async fn create_session(
         while let Some(event) = events.recv().await {
             let request = request.clone();
             let work = Construction::new(event.map_err(|_| unavailable())?, slot)
-                .map_cpu(move |event| created_session(event, &request))
+                .map_cpu(move |event| created_session(&event, &request))
                 .await?;
             if let Some(session) = work.value {
                 return Construction::new(session, work.slot).adopt().await;
@@ -155,7 +155,7 @@ pub(super) async fn create_session(
 }
 
 fn created_session(
-    event: HostEvent,
+    event: &HostEvent,
     request: &RequestId,
 ) -> Result<Option<SessionSummary>, BridgeError> {
     // Preflight itself can use twice the encoded size for escaped-string scratch.
@@ -180,17 +180,17 @@ fn created_session(
         return Err(unavailable());
     }
     let decoded: EngineEvent = serde_json::from_slice(&event.json).map_err(|_| unavailable())?;
-    if let EngineEvent::SessionsListed { meta, mut sessions } = decoded {
-        if meta.request_id == *request {
-            if sessions.len() != 1 {
-                return Err(unavailable());
-            }
-            let session = sessions.pop().ok_or_else(unavailable)?;
-            return Ok(Some(SessionSummary {
-                id: session.session_id.0,
-                state: "driver".to_owned(),
-            }));
+    if let EngineEvent::SessionsListed { meta, mut sessions } = decoded
+        && meta.request_id == *request
+    {
+        if sessions.len() != 1 {
+            return Err(unavailable());
         }
+        let session = sessions.pop().ok_or_else(unavailable)?;
+        return Ok(Some(SessionSummary {
+            id: session.session_id.0,
+            state: "driver".to_owned(),
+        }));
     }
     Ok(None)
 }
