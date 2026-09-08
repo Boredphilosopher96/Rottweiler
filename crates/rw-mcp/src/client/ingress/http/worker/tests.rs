@@ -101,7 +101,7 @@ async fn abandoned_initial_handshake_retains_ingress_until_its_resolver_and_runt
     )?;
     let caller = tokio::spawn(crate::client::start::start(
         rw_types::McpServerId::new("handshake")?,
-        transport,
+        crate::client::transport::ClientTransport::Http(transport),
         ingress,
         None,
     ));
