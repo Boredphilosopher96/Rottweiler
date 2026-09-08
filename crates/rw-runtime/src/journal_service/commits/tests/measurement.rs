@@ -225,7 +225,7 @@ fn submit(
         let work = AppendWork {
             journal,
             batch: Arc::clone(&batch),
-            times: Arc::clone(&times),
+            times: Arc::clone(times),
             gate: Arc::clone(&stall.0),
             index,
         };
@@ -339,7 +339,7 @@ fn report(round: usize, elapsed: Duration, times: &[Timing], observed: &Observat
             "schema_version": 1, "round": round, "batches": MAX_BATCHES, "events_per_batch": EVENTS,
             "max_admitted_batches": MAX_BATCHES, "max_admitted_bytes": MAX_BYTES, "max_executing": MAX_EXECUTING,
             "injected_storage_delay_us": DELAY.as_micros(), "elapsed_us": elapsed.as_micros(),
-            "events_per_second_including_injected_stall": (MAX_BATCHES * EVENTS) as f64 / elapsed.as_secs_f64(),
+            "events_per_second_including_injected_stall": f64::from(u32::try_from(MAX_BATCHES * EVENTS).expect("bounded event count")) / elapsed.as_secs_f64(),
             "peak_admitted_batches": observed.peak_items, "peak_admitted_bytes": observed.peak_bytes,
             "peak_admitted_not_executing_batches": observed.peak_queued,
             "sampled_oldest_admitted_not_executing_us": observed.oldest_queued_us,

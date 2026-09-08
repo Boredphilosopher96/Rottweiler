@@ -724,4 +724,5 @@ fn frame_step_input(request: &WorkflowStepRequest) -> Result<String, WorkflowSte
 mod tests;
 
 #[cfg(all(test, unix))]
+#[path = "workflow_runtime/tests/process_restart.rs"]
 mod process_restart_tests;

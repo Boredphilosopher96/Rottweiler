@@ -306,4 +306,5 @@ fn failure(message: impl Into<String>) -> AgentLoopError {
 mod tests;
 
 #[cfg(test)]
+#[path = "commits/tests/measurement.rs"]
 mod measurement;
