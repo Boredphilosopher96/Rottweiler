@@ -2799,7 +2799,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "http",
- "nix",
+ "nix 0.31.3",
  "rmcp",
  "rustix",
  "rw-resources",
