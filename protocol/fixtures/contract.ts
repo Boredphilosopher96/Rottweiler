@@ -615,6 +615,7 @@ export const contractFixture = {
     },
     {
       "type": "tool_call_finished",
+      "payloads": [],
       "presentation": null,
       "meta": {
         "protocol_version": 1,

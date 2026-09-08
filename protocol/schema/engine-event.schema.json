@@ -2115,6 +2115,13 @@
     {
       "type": "object",
       "properties": {
+        "payloads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionPayloadReference"
+          },
+          "maxItems": 8
+        },
         "presentation": {
           "anyOf": [
             {
@@ -2156,6 +2163,7 @@
       "additionalProperties": false,
       "required": [
         "type",
+        "payloads",
         "presentation",
         "meta",
         "turn_id",
@@ -8813,6 +8821,29 @@
       "enum": [
         "stdout",
         "stderr"
+      ]
+    },
+    "SessionPayloadReference": {
+      "description": "The digest binds the payload's length and immutable chunk checksums.\nA reference resolves only within its owning session's durable payload directory.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "maximum": 67108864
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "digest",
+        "bytes"
       ]
     },
     "Answer": {
