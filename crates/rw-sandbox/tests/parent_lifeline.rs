@@ -182,6 +182,34 @@ fn normal_child_exit_preserves_nonzero_status() {
 }
 
 #[test]
+fn long_temporary_directory_preserves_supervised_exit() {
+    let root = tempfile::tempdir_in("/tmp").expect("fixture root");
+    let temporary = root.path().join("x".repeat(120));
+    fs::create_dir(&temporary).expect("valid long temporary directory");
+    let child = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "normal_child_exit_preserves_nonzero_status",
+            "--nocapture",
+        ])
+        .env("TMPDIR", &temporary)
+        .stdin(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("isolated temporary-directory environment");
+    let mut owner = Controller(child);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = owner.0.try_wait().expect("controller status") {
+            assert!(status.success(), "supervised exit under long TMPDIR failed");
+            break;
+        }
+        assert!(Instant::now() < deadline, "controller did not retire");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn supervisor_refuses_a_process_creating_policy() {
     let helper = common::helper();
     let root = tempfile::tempdir().expect("scratch");

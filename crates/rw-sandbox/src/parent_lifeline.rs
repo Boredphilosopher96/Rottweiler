@@ -32,7 +32,9 @@ impl PluginRendezvous {
     pub fn bind() -> io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix("rw-plugin-owner-")
-            .tempdir()?;
+            // Unix socket addresses have a small fixed path capacity. The
+            // private namespace uses /tmp independently of ambient TMPDIR.
+            .tempdir_in("/tmp")?;
         let listener = UnixListener::bind(directory.path().join("owner.sock"))?;
         listener.set_nonblocking(true)?;
         Ok(Self {
@@ -213,5 +215,33 @@ impl Drop for ChildGroup {
         if !self.retired {
             self.retire();
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn rendezvous_namespace_is_private_and_removed_with_owner() {
+        let owner = PluginRendezvous::bind().expect("rendezvous");
+        let path = owner.directory.path().to_owned();
+        assert_eq!(path.parent(), Some(std::path::Path::new("/tmp")));
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("private directory")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert!(path.join("owner.sock").exists());
+        drop(owner);
+        assert!(
+            !path.exists(),
+            "dropping owner removes the socket namespace"
+        );
     }
 }
