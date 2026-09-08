@@ -56,7 +56,9 @@ async fn payload_is_redacted_before_durable_identity_and_retrievable_after_reope
     assert!(!root.path().join("sessions/session/payloads").exists());
     let encoded = encoding::encode(
         Arc::new(CompactJsonEncoder),
-        crate::McpResponseSlot::new(crate::McpResponseLimits::new(64 * 1024)?)?.adopt(serde_json::json!({"value":"private-secret"})).await?,
+        crate::McpResponseSlot::new(crate::McpResponseLimits::new(64 * 1024)?)?
+            .adopt(serde_json::json!({"value":"private-secret"}))
+            .await?,
     )
     .await?;
     let server = McpServerId::new("fixture")?;

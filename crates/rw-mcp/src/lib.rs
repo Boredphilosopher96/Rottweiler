@@ -2,12 +2,15 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod encoding;
+mod http_io;
 mod payload_work;
 mod response;
-mod http_io;
-pub use http_io::{McpHttpBody, McpHttpClient, McpHttpMethod, McpHttpResponse, MCP_HTTP_MAX_HEADERS, MCP_HTTP_MAX_HEADER_BYTES, MCP_HTTP_MAX_HEADER_VALUE_BYTES, validate_mcp_http_headers};
-pub use response::{McpResponse, McpResponseLimits, McpResponseSlot};
 pub use encoding::EncodedPayload;
+pub use http_io::{
+    MCP_HTTP_MAX_HEADER_BYTES, MCP_HTTP_MAX_HEADER_VALUE_BYTES, MCP_HTTP_MAX_HEADERS, McpHttpBody,
+    McpHttpClient, McpHttpMethod, McpHttpResponse, validate_mcp_http_headers,
+};
+pub use response::{McpResponse, McpResponseLimits, McpResponseSlot};
 mod client;
 mod manager;
 mod server;

@@ -106,7 +106,14 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
             "connected server retains its kernel lifetime lock"
         );
     }
-    assert_eq!(manager.tool_search("echo", None).await.expect("admitted tool search").len(), 3);
+    assert_eq!(
+        manager
+            .tool_search("echo", None)
+            .await
+            .expect("admitted tool search")
+            .len(),
+        3
+    );
     assert_eq!(manager.resources().await.len(), 3);
     assert_eq!(manager.prompts().await.len(), 3);
     assert!(

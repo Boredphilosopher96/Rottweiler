@@ -275,7 +275,10 @@ async fn five_distinct_production_sandboxed_servers_remain_deferred_and_bounded(
     );
 
     let target = McpServerId::new("repository").expect("target id");
-    let selected = manager.tool_search("echo_repository", Some(&target)).await.expect("admitted tool search");
+    let selected = manager
+        .tool_search("echo_repository", Some(&target))
+        .await
+        .expect("admitted tool search");
     assert_eq!(selected.len(), 1);
     let called = manager
         .call_tool(
