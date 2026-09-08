@@ -76,5 +76,6 @@ async fn native_hooks_do_not_receive_sibling_tool_effect_authority() {
     }
     budget
         .close()
+        .await
         .expect("registration starts no native workers");
 }

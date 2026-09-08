@@ -329,6 +329,7 @@ async fn cancelling_queued_generation_releases_its_slots_without_native_launch()
     second.endpoint.close().await.expect("second closed");
     budget
         .close()
+        .await
         .expect("all queued and running capacity returned");
 }
 
