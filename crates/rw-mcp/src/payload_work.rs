@@ -75,20 +75,20 @@ impl Drop for Caller {
     }
 }
 struct Work<F> {
-    work: F,
+    operation: F,
     cancelled: CancellationToken,
-    _job: Job,
-    _resource: ResourceLease,
+    job: Job,
+    resource: ResourceLease,
 }
 impl<F> Work<F> {
     fn run<T>(self) -> T
     where
         F: FnOnce(&CancellationToken) -> T,
     {
-        let result = (self.work)(&self.cancelled);
+        let result = (self.operation)(&self.cancelled);
         // These fields remain in this physical scope on success, error and unwinding.
-        drop(self._resource);
-        drop(self._job);
+        drop(self.resource);
+        drop(self.job);
         result
     }
 }
@@ -116,10 +116,10 @@ impl Jobs {
         .await
         .map_err(|error| McpError::Spool(error.to_string()))?;
         let owner = Work {
-            work,
+            operation: work,
             cancelled,
-            _job: job,
-            _resource: resource,
+            job,
+            resource,
         };
         let result = tokio::task::spawn_blocking(move || owner.run())
             .await

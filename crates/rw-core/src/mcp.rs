@@ -1016,6 +1016,7 @@ struct McpPromptInput {
 struct McpOverflowInput {
     reference: rw_types::SessionPayloadReference,
     #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "rw_types::schema::required_nullable::<String>")]
     query: Option<String>,
     offset: usize,
 }
