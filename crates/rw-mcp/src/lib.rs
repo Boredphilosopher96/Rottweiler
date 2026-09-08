@@ -12,6 +12,7 @@ pub use http_io::{
 };
 pub use response::{McpResponse, McpResponseLimits, McpResponseSlot};
 mod client;
+mod ingress;
 mod manager;
 mod server;
 mod spool;
@@ -26,7 +27,7 @@ pub use client::{
 pub use manager::{CompactJsonEncoder, MAX_SERVERS, McpManager, StructuredResponseEncoder};
 pub use server::{
     BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServer,
-    RottweilerMcpServerFactory, SessionSummary, serve_stdio,
+    RottweilerMcpServerFactory, SessionSummary, MAX_SERVER_SESSIONS, serve_stdio,
 };
 pub use spool::{
     FilesystemSpool, OverflowSpool, PayloadRedactor, PayloadSource, RetainedPayloadWindow,

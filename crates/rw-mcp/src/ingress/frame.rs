@@ -1,22 +1,22 @@
 //! Encoded ingress storage is admitted before capacity grows.
 use crate::{McpError, payload_work::Allocation};
 
-pub(super) const READ_SCRATCH_BYTES: usize = 16 * 1024;
-pub(super) const STDIO_FRAME_BYTES: usize = 4 * 1024 * 1024;
-pub(super) const HTTP_BODY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const READ_SCRATCH_BYTES: usize = 16 * 1024;
+pub(crate) const STDIO_FRAME_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const HTTP_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Includes encoded storage and geometric escaped-string parser scratch.
 /// The typed decoder adds its own checked working requirement before decoding.
-pub(super) struct RawFrame {
-    pub(super) bytes: Vec<u8>,
-    pub(super) retained: Allocation,
-    pub(super) parser_scratch: Allocation,
+pub(crate) struct RawFrame {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) retained: Allocation,
+    pub(crate) parser_scratch: Allocation,
     _read_scratch: Allocation,
     limit: usize,
 }
 
 impl RawFrame {
-    pub(super) fn new(limit: usize) -> Result<Self, McpError> {
+    pub(crate) fn new(limit: usize) -> Result<Self, McpError> {
         if limit == 0 || limit > HTTP_BODY_BYTES {
             return Err(invalid_frame());
         }
@@ -29,7 +29,7 @@ impl RawFrame {
         })
     }
 
-    pub(super) fn append(&mut self, input: &[u8]) -> Result<(), McpError> {
+    pub(crate) fn append(&mut self, input: &[u8]) -> Result<(), McpError> {
         let length = self
             .bytes
             .len()
@@ -52,7 +52,7 @@ impl RawFrame {
     }
 
     #[cfg(test)]
-    pub(super) fn parser_working_bytes(&self) -> Result<usize, McpError> {
+    pub(crate) fn parser_working_bytes(&self) -> Result<usize, McpError> {
         self.bytes
             .capacity()
             .checked_mul(3)

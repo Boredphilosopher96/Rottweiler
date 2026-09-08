@@ -4,8 +4,7 @@ use std::io;
 
 use rmcp::model::ServerJsonRpcMessage;
 
-mod envelope;
-mod header;
+use crate::ingress::envelope;
 mod messages;
 mod profile;
 #[cfg(test)]

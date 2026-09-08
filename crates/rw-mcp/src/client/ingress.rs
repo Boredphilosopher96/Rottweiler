@@ -1,6 +1,6 @@
 //! Encoded frames, correlated requests, and decoded messages share MCP admission.
 pub(crate) mod decode;
-mod frame;
+use crate::ingress::frame;
 pub(super) mod http;
 mod http_headers;
 mod message;

@@ -329,6 +329,19 @@ the protocol's numeric matching behavior; cancellation IDs use exact matching.
 Unknown or duplicate response IDs close the connection. The SDK response cache is
 disabled, and reviewed catalogs retain their own allocation credit.
 
+The `rw` MCP server uses an owned stdio dispatcher with the same raw-frame and
+working-byte pool. It admits at most 64 outstanding requests before task creation,
+rejects duplicate active IDs, and retains each decoded body through bridge work
+and physical reply output. Each bridge declares and acquires its construction
+allowance before producing a response; result text and structured JSON are bounded
+before duplication. Wrapper `rottweiler_tools_call` requires both `name` and
+`arguments`. A connection owns at most 32 explicit or newly created session IDs.
+Cancellation suppresses only that request's reply. Deadlines can report failure
+while accepted engine work remains owned; disconnect joins that work before
+returning. A wakeable stdio worker preserves pipe and regular-file input, restores
+descriptor flags, and joins before refunding its fixed 2 MiB stack. The shipped
+server exposes stdio; no unowned HTTP `ServerHandler` adapter is exported.
+
 Unadvertised host requests are answered under their decoded owner, without
 spawning detached payload handlers. Catalog-change notifications invalidate one
 shared generation bit. A remote cancellation settles its exact pending request;

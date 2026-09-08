@@ -30,7 +30,7 @@ impl BorrowedId<'_> {
     pub fn numeric_value(&self) -> io::Result<Option<i64>> {
         header::numeric_id(self.0.get())
     }
-    pub(super) fn owned(self) -> io::Result<RequestId> {
+    pub(crate) fn owned(self) -> io::Result<RequestId> {
         header::id(self.0.get())
     }
 }
@@ -38,7 +38,7 @@ impl BorrowedId<'_> {
 // Raw fields preserve presence, including explicit null. Derive rejects duplicate
 // known keys (including escaped spellings) before choosing a routing identity.
 #[derive(Deserialize)]
-pub(super) struct Envelope<'a> {
+pub(crate) struct Envelope<'a> {
     #[serde(borrow)]
     jsonrpc: &'a RawValue,
     #[serde(default, borrow, deserialize_with = "present")]

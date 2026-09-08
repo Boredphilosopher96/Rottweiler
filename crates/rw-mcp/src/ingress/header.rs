@@ -7,7 +7,7 @@ use serde::{
 };
 use std::{fmt, io, sync::Arc};
 
-pub(super) fn id(raw: &str) -> io::Result<RequestId> {
+pub(crate) fn id(raw: &str) -> io::Result<RequestId> {
     struct Id;
     impl Visitor<'_> for Id {
         type Value = RequestId;
@@ -32,7 +32,7 @@ pub(super) fn id(raw: &str) -> io::Result<RequestId> {
     Ok(result)
 }
 
-pub(super) fn method(raw: &str) -> io::Result<String> {
+pub(crate) fn method(raw: &str) -> io::Result<String> {
     struct Method;
     impl Visitor<'_> for Method {
         type Value = String;
@@ -51,7 +51,7 @@ pub(super) fn method(raw: &str) -> io::Result<String> {
         .map_err(json_error)
 }
 
-pub(super) fn version(raw: &str) -> io::Result<()> {
+pub(crate) fn version(raw: &str) -> io::Result<()> {
     struct Version;
     impl Visitor<'_> for Version {
         type Value = bool;
@@ -72,7 +72,7 @@ pub(super) fn version(raw: &str) -> io::Result<()> {
     }
 }
 
-pub(super) fn numeric_id(raw: &str) -> io::Result<Option<i64>> {
+pub(crate) fn numeric_id(raw: &str) -> io::Result<Option<i64>> {
     struct Numeric;
     impl Visitor<'_> for Numeric {
         type Value = Option<i64>;
@@ -96,7 +96,7 @@ pub(super) fn numeric_id(raw: &str) -> io::Result<Option<i64>> {
         .map_err(json_error)
 }
 
-pub(super) fn matches_id(raw: &str, request: &RequestId) -> io::Result<bool> {
+pub(crate) fn matches_id(raw: &str, request: &RequestId) -> io::Result<bool> {
     struct Matches<'a>(&'a RequestId);
     impl Visitor<'_> for Matches<'_> {
         type Value = bool;
