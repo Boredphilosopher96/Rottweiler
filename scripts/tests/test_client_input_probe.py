@@ -47,6 +47,19 @@ class ClientInputProbeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     PROBE.validate(bad)
 
+    def test_changed_artifact_receipt_cannot_qualify(self):
+        receipt = {"identity_sha256": "identity", "identity": {"source": {"commit": "exact"}},
+                   "components": {"js_host": {"path": "host", "sha256": "original"}}}
+        changed = copy.deepcopy(receipt)
+        changed["components"]["js_host"]["sha256"] = "changed"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(PROBE.native_candidate, "verify", side_effect=[receipt, changed]), \
+                    patch.object(PROBE, "run_sample", return_value=SimpleNamespace(returncode=0)):
+                with self.assertRaisesRegex(ValueError, "candidate changed"):
+                    PROBE.run(root, root / "evidence")
+            self.assertFalse((root / "evidence/summary.json").exists())
+
     def test_runner_uses_verified_shared_host_with_explicit_role_and_private_environment(self) -> None:
         receipt = {"identity_sha256": "identity", "identity": {"source": {"commit": "exact"}},
                    "components": {"js_host": {"path": "bin/rottweiler-js-host"}}}
@@ -58,26 +71,33 @@ class ClientInputProbeTests(unittest.TestCase):
                 self.assertEqual(argv, [str(candidate / "bin/rottweiler-js-host"), PROBE.TUI_ROLE])
                 self.assertEqual(options["timeout"], 120)
                 self.assertNotIn("ROTTWEILER_PERF_SMOKE", options["env"])
+                self.assertNotIn("OTUI_ASSET_ROOT", options["env"])
+                self.assertNotIn("OPENTUI_LIBC", options["env"])
+                self.assertNotIn("BUN_OPTIONS", options["env"])
                 self.assertNotIn("ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT", options["env"])
                 self.assertEqual(Path(options["env"]["ROTTWEILER_CLIENT_INPUT_PROBE_DIRECTORY"]), options["cwd"])
                 Path(options["env"]["ROTTWEILER_CLIENT_INPUT_PROBE_REPORT"]).write_text(json.dumps(report()))
                 return SimpleNamespace(returncode=0)
 
             with patch.object(PROBE.native_candidate, "verify", return_value=receipt) as verify, \
-                    patch.object(PROBE.subprocess, "run", side_effect=launch), \
-                    patch.dict(PROBE.os.environ, {"ROTTWEILER_PERF_SMOKE": "1", "ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT": "wrong"}):
+                    patch.object(PROBE, "run_sample", side_effect=launch), \
+                    patch.dict(PROBE.os.environ, {"ROTTWEILER_PERF_SMOKE": "1", "ROTTWEILER_CLIENT_MEMORY_PROBE_REPORT": "wrong", "OTUI_ASSET_ROOT": "stale", "OPENTUI_LIBC": "stale", "BUN_OPTIONS": "--preload=foreign"}):
                 PROBE.run(candidate, output)
-            verify.assert_called_once_with(candidate, REPO)
+            self.assertEqual(verify.call_count, 2)
+            verify.assert_called_with(candidate, REPO)
             summary = json.loads((output / "summary.json").read_text())
             self.assertEqual(summary["candidate_identity"], "identity")
             self.assertEqual(len(summary["process"]["trials"]), 3)
 
-            # A failed run cannot reuse that successful raw report.
+            # Existing evidence is never overwritten, including on failure.
+            original = (output / "summary.json").read_bytes()
             with patch.object(PROBE.native_candidate, "verify", return_value=receipt), \
-                    patch.object(PROBE.subprocess, "run", return_value=SimpleNamespace(returncode=1)):
-                with self.assertRaises(ValueError):
+                    patch.object(PROBE, "run_sample") as launch:
+                with self.assertRaises(FileExistsError):
                     PROBE.run(candidate, output)
-            self.assertIsNone(json.loads((output / "summary.json").read_text())["process"])
+                launch.assert_not_called()
+            self.assertEqual((output / "summary.json").read_bytes(), original)
+
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ class ClientMemoryProbeTests(unittest.TestCase):
             retained.write_text("retained failure evidence")
             receipt = {"components": {"js_host": {"path": "host"}}}
             with patch.object(PROBE.native_candidate, "verify", return_value=receipt), \
-                    patch.object(PROBE.subprocess, "run") as launch:
+                    patch.object(PROBE, "run_sample") as launch:
                 for action in (lambda: PROBE.run(root, output, 2, 3),
                                lambda: PROBE.run_held(root, output, 2, "output")):
                     with self.assertRaises(FileExistsError):
@@ -52,7 +52,7 @@ class ClientMemoryProbeTests(unittest.TestCase):
             inherited = {"ROTTWEILER_PERF_SMOKE": "1", "ROTTWEILER_CLIENT_INPUT_PROBE_REPORT": "wrong",
                          "ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE": "1"}
             with patch.object(PROBE.native_candidate, "verify", return_value=receipt), \
-                    patch.object(PROBE.subprocess, "run", side_effect=launch), \
+                    patch.object(PROBE, "run_sample", side_effect=launch), \
                     patch.dict(PROBE.os.environ, inherited):
                 with self.assertRaisesRegex(ValueError, "exited 1"):
                     PROBE.run_held(root, output, 2, "review")

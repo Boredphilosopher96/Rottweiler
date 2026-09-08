@@ -8,13 +8,13 @@ import math
 import os
 from pathlib import Path
 import platform
-import subprocess
 import sys
 import tempfile
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 import native_candidate
+from perf_process import run_sample
 from release_contract import load_contract
 
 TUI_ROLE = load_contract(REPO / "contracts/release-contract.json").js_host_roles["tui"]
@@ -54,21 +54,20 @@ def validate(data: dict) -> None:
 def run(candidate: Path, output: Path) -> None:
     receipt = native_candidate.verify(candidate, REPO)
     executable = candidate / receipt["components"]["js_host"]["path"]
-    output.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=False)
     report = output / "input.json"
-    # Prevent a failed process from qualifying with evidence left by an earlier run.
-    report.unlink(missing_ok=True)
-    (output / "summary.json").unlink(missing_ok=True)
     environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith("ROTTWEILER_")}
+                   if not key.startswith(("ROTTWEILER_", "OTUI_", "OPENTUI_")) and key != "BUN_OPTIONS"}
     with tempfile.TemporaryDirectory(prefix="rw-client-input-", dir="/tmp") as temporary:
         private = Path(temporary)
         environment.update(ROTTWEILER_HOME=str(private / "home"),
                            ROTTWEILER_CLIENT_INPUT_PROBE_REPORT=str(report),
                            ROTTWEILER_CLIENT_INPUT_PROBE_DIRECTORY=str(private))
         with (output / "input.log").open("wb") as log:
-            result = subprocess.run([str(executable), TUI_ROLE], cwd=private, env=environment,
-                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=120)
+            result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
+                                    log=log, output_limit=2 * 1024 * 1024, timeout=120)
+    if native_candidate.verify(candidate, REPO) != receipt:
+        raise ValueError("candidate changed during compiled input probe")
     data = json.loads(report.read_text()) if report.exists() else None
     summary = {"schema_version": 1, "candidate_identity": receipt["identity_sha256"],
                "source": receipt["identity"]["source"], "exit_code": result.returncode,

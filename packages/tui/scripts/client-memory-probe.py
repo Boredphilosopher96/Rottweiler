@@ -6,13 +6,13 @@ import argparse
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 import native_candidate
+from perf_process import run_sample
 from release_contract import load_contract
 
 TUI_ROLE = load_contract(REPO / "contracts/release-contract.json").js_host_roles["tui"]
@@ -34,8 +34,10 @@ def run(candidate: Path, output: Path, cycles: int, generations: int) -> None:
                                ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
                                ROTTWEILER_CLIENT_MEMORY_PROBE_RECYCLE="1" if recycle else "0")
             with (output / f"process-{generation}.log").open("wb") as log:
-                result = subprocess.run([str(executable), TUI_ROLE], cwd=private, env=environment,
-                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=180)
+                result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
+                                        log=log, output_limit=2 * 1024 * 1024, timeout=180)
+            if native_candidate.verify(candidate, REPO) != receipt:
+                raise ValueError("candidate changed during compiled memory probe")
             if result.returncode != (75 if recycle else 0):
                 raise ValueError(f"compiled memory probe generation {generation} exited {result.returncode}; see its log")
             data = json.loads(report.read_text())
@@ -68,8 +70,10 @@ def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
                            ROTTWEILER_CLIENT_MEMORY_PROBE_CYCLES=str(cycles),
                            ROTTWEILER_CLIENT_MEMORY_HELD_VIEW=view)
         with (output / f"held-{view}.log").open("wb") as log:
-            result = subprocess.run([str(executable), TUI_ROLE], cwd=private, env=environment,
-                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=300)
+            result = run_sample([str(executable), TUI_ROLE], cwd=private, env=environment,
+                                    log=log, output_limit=2 * 1024 * 1024, timeout=300)
+        if native_candidate.verify(candidate, REPO) != receipt:
+            raise ValueError("candidate changed during held-view probe")
         if result.returncode != 0:
             raise ValueError(f"held {view} probe exited {result.returncode}; see its log")
         data = json.loads(report.read_text())
@@ -86,7 +90,7 @@ def run_held(candidate: Path, output: Path, cycles: int, view: str) -> None:
 
 def probe_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items()
-            if not key.startswith("ROTTWEILER_")}
+            if not key.startswith(("ROTTWEILER_", "OTUI_", "OPENTUI_")) and key != "BUN_OPTIONS"}
 
 
 def main() -> None:

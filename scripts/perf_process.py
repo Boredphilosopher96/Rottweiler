@@ -9,11 +9,13 @@ import selectors
 import signal
 import subprocess
 import time
+from typing import BinaryIO
 
 
 def run_sample(
     command: list[str], *, cwd: Path, env: dict[str, str],
     timeout: float = 5.0, output_limit: int = 64 * 1024,
+    log: BinaryIO | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Drain both pipes within fixed budgets and reap the child on every path."""
     if not math.isfinite(timeout) or timeout <= 0 or output_limit <= 0:
@@ -59,6 +61,9 @@ def run_sample(
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
+                    if log is not None:
+                        log.write(chunk[:max(0, output_limit - len(key.data))])
+                        log.flush()
                     key.data.extend(chunk)
                     if len(key.data) > output_limit:
                         raise ValueError(f"performance sample exceeded {output_limit} output bytes per stream")

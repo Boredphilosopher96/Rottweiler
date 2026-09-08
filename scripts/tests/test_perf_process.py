@@ -27,6 +27,13 @@ class PerformanceProcessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "output bytes"):
             self.run_python("import os\nwhile True: os.write(1, b'x'*4096)", output_limit=8192)
 
+    def test_flood_keeps_a_bounded_diagnostic_log(self):
+        with tempfile.TemporaryFile() as log:
+            with self.assertRaisesRegex(ValueError, "output bytes"):
+                self.run_python("import os\nwhile True: os.write(1,b'x'*4096)", output_limit=8192, log=log)
+            log.seek(0)
+            self.assertEqual(log.read(), b"x" * 8192)
+
     def test_timeout_reaps_the_child_before_returning(self):
         with tempfile.TemporaryDirectory() as temporary:
             pid_file = Path(temporary) / "pid"
