@@ -28,6 +28,7 @@ from perf_process_scope import UnsettledScope
 from perf_process_wait import observe_exit
 from perf_scratch import retained_scratch
 from soak_process import terminate_supervisor, kill_direct_child
+from soak_identity import SoakInputs, verify_unchanged
 
 TUI_ROLE = load_contract(Path(__file__).resolve().parents[1] / "contracts/release-contract.json").js_host_roles["tui"]
 
@@ -281,8 +282,6 @@ def run_soak(
             rw, tui, duration, sample_seconds, rss_limit, turn_seconds,
             compact_every, tool_every, restart_after_turns, script_delay_ms, progress,
         )
-        if progress_path is not None:
-            write_result(progress_path, result)
         return result
     except BaseException as error:
         details = progress.snapshot()
@@ -824,6 +823,10 @@ def main() -> None:
         type=Path,
         help="development-only TUI override; release bundles discover the private sibling",
     )
+    identity = parser.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--candidate", type=Path)
+    identity.add_argument("--release-archive", type=Path)
+    parser.add_argument("--release-version")
     parser.add_argument("--duration-seconds", type=float, default=DEFAULT_SECONDS)
     parser.add_argument("--sample-seconds", type=float, default=5.0)
     parser.add_argument("--rss-limit-mib", type=int, default=DEFAULT_RSS_LIMIT_MIB)
@@ -835,7 +838,13 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
+    inputs = SoakInputs(Path(__file__).resolve().parents[1], args.rw, args.js_host,
+                        args.candidate, args.release_archive, args.release_version)
+    before = None
+    result = None
+    error = None
     try:
+        before = inputs.verify()
         result = run_soak(
             args.rw,
             args.js_host,
@@ -849,12 +858,27 @@ def main() -> None:
             args.script_delay_ms,
             progress_path=args.output,
         )
-    except Exception as error:
-        result = failure_result(error)
+    except BaseException as failure:
+        error = failure
+        result = failure_result(failure)
+    finally:
+        if result is None:
+            result = {"schema_version": 1, "status": "fail"}
+        if before is not None:
+            result["artifact_identity_before"] = before
+            try:
+                result["artifact_identity_after"] = verify_unchanged(inputs, before)
+            except BaseException as failure:
+                result["artifact_verification_error"] = redact_diagnostic(str(failure))
+                if result["status"] != "UNSETTLED":
+                    result["status"] = "fail"
+                error = failure
         try:
             write_result(args.output, result)
         except OSError as write_error:
             result["evidence_write_error"] = type(write_error).__name__
+            error = write_error
+    if error is not None:
         print(json.dumps(result, sort_keys=True), file=sys.stderr)
         raise SystemExit(1) from None
     print(json.dumps(result, sort_keys=True))

@@ -427,10 +427,13 @@ workflows run it for 28,800 seconds on dedicated self-hosted runners labeled
 checked against the platform's measured `soak` suite in
 `benchmarks/performance-baseline.json`; bootstrap provenance deliberately
 blocks nightly and release completion. Tag-release soaks install and run
-the exact already-built archive that publication will sign. Nightly soaks use
-the current default-branch Rust binaries built in isolated hosted build jobs,
-verify their checksums on the protected runners, and build the current OpenTUI
-client locally. Dedicated
+the exact already-built archive that publication will sign. `run-soak.py`
+requires either `--candidate` with a verified native receipt, or
+`--release-archive` and `--release-version` with exact installed-member comparison.
+Both modes verify before launching and again after physical shutdown, including
+the renderer, helper identity, and licenses; changed inputs cannot produce a
+passing result. Nightly soaks consume the complete native candidate built in
+isolated build jobs. No compilation occurs inside the soak. Dedicated
 runners are required because hosted Actions jobs cannot sustain one continuous
 eight-hour process.
 

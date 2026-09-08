@@ -141,6 +141,7 @@ jobs:
         run: >-
           python3 scripts/ci_evidence.py --gate soak --output soak-gate.json --
           python3 scripts/run-soak.py
+          --candidate "$RUNNER_TEMP/native-candidate.noindex"
           --rw "${{ steps.components.outputs.engine }}"
           --js-host "${{ steps.components.outputs.js_host }}"
           --duration-seconds 28800

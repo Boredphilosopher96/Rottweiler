@@ -167,9 +167,12 @@ class SoakProcessTests(unittest.TestCase):
             host.write_text(f"#!{sys.executable}\n")
             rw.chmod(0o700)
             host.chmod(0o700)
-            gate = subprocess.Popen([sys.executable, str(SCRIPTS / "run-soak.py"),
-                                     "--rw", str(rw), "--duration-seconds", "20",
-                                     "--output", str(result)], stdout=subprocess.DEVNULL,
+            fixture_gate = (
+                "import runpy\n"
+                f"module=runpy.run_path({str(SCRIPTS / 'run-soak.py')!r})\n"
+                f"module['run_soak'](module['Path']({str(rw)!r}), None, 20, 5, 600*1024*1024, progress_path=module['Path']({str(result)!r}))\n"
+            )
+            gate = subprocess.Popen([sys.executable, "-c", fixture_gate], stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
             try:
                 self.wait_ready(ready)
