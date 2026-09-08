@@ -424,3 +424,5 @@ fn hook_payload_ceiling_counts_json_escaping() {
     assert_eq!(rejected.code, "payload_limit");
     assert_eq!(rejected.message, "hook payload exceeds its byte limit");
 }
+
+mod phase_scale;

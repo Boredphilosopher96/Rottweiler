@@ -423,3 +423,6 @@ mod print_output;
 #[cfg(unix)]
 #[path = "agent_runtime/host_restart.rs"]
 mod host_restart;
+
+#[path = "agent_runtime/hook_ask.rs"]
+mod hook_ask;

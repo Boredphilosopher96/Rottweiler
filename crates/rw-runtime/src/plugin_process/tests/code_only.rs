@@ -72,7 +72,7 @@ async fn native_workers_deny_ambient_effects_and_execute_only_scoped_host_tools(
     for (name, input, expected) in [
         (
             "scoped_read",
-            json!({"path":"secret","line_count":null}),
+            json!({"path":"secret","line_count":null,"forbidden_path":workspace.path().join("read-only-denied")}),
             "workspace canary",
         ),
         (
@@ -101,10 +101,23 @@ async fn native_workers_deny_ambient_effects_and_execute_only_scoped_host_tools(
             .await
             .expect("brokered tool result");
         assert!(result.content.contains(expected), "{}", result.content);
+        if name == "scoped_read" {
+            assert_read_only_denials(&result, workspace.path(), &output);
+        }
     }
     assert_eq!(
         std::fs::read_to_string(output).expect("owned write"),
         "owned mutation"
     );
     host.shutdown().await.expect("whole host proof");
+}
+
+fn assert_read_only_denials(result: &rw_tools::ToolResult, workspace: &Path, output: &Path) {
+    assert_eq!(result.data, json!({"ambientDenied":true,"hostDenied":true}));
+    assert!(!workspace.join("read-only-denied.ambient").exists());
+    assert!(!workspace.join("read-only-denied.host").exists());
+    assert!(
+        !output.exists(),
+        "read-only invocation cannot use sibling write authority"
+    );
 }

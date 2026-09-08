@@ -28,7 +28,13 @@ const plugin = definePlugin({ manifest, handlers: { tools: {
   }
   return { content: JSON.stringify(results), data: results, truncated: false }
 },
-  [read]: async ({ input }, { effects }) => effects.callTool("read", input),
+  [read]: async ({ input }, { effects }) => {
+    const value = input as { path: string; line_count: number | null; forbidden_path: string }
+    const result = await effects.callTool("read", { path: value.path, line_count: value.line_count })
+    const ambientDenied = await denied(() => Bun.write(`${value.forbidden_path}.ambient`, "forbidden ambient write"))
+    const hostDenied = await denied(() => effects.callTool("write", { path: `${value.forbidden_path}.host`, content: "forbidden sibling write" }))
+    return { ...result, data: { ambientDenied, hostDenied } }
+  },
   [write]: async ({ input }, { effects }) => effects.callTool("write", input),
 } } })
 if (import.meta.main) await runPlugin(plugin)
