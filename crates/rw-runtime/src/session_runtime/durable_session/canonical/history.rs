@@ -72,7 +72,8 @@ impl SessionHistory for DurableEventSink {
 }
 
 // The Arc is the concrete view. Cloning it retains one admission, never another
-// uncharged history transaction. Individual jobs also have bounded read admission.
+// uncharged history transaction. Jobs retain that lease and use ReadOperations
+// for execution admission; they do not open another history transaction.
 #[async_trait]
 impl SessionHistoryView for CapturedHistory {
     fn through(&self) -> Option<SequenceId> {
@@ -192,14 +193,13 @@ impl CapturedHistory {
         + 'static,
     ) -> Result<HistoryRead<T>, AgentLoopError> {
         let retention = self.journal.retain_history().await?;
-        let admission = self.journal.admit_read().map_err(persistence)?;
         let lease = self.lease.clone();
         // The transaction must remain owned by the worker if its waiter drops.
         let history = Arc::clone(&self.history);
         self.reads
             .run(
-                (history, lease, admission, Some(retention)),
-                move |(history, _lease, _admission, retention)| {
+                (history, lease, Some(retention)),
+                move |(history, _lease, retention)| {
                     let history = history
                         .lock()
                         .map_err(|_| persistence("history reader poisoned"))?;

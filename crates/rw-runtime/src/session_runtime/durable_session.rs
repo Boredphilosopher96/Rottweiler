@@ -293,13 +293,9 @@ impl SessionEventSink for DurableEventSink {
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let root = self.storage_root.clone();
         let session = self.session_id.clone();
-        let admission = self
-            .journal_service
-            .admit_read()
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let totals = self
             .reads
-            .run(admission, move |_| {
+            .run((), move |()| {
                 AccountingLedger::open(&root)
                     .and_then(|ledger| {
                         ledger.totals(&session, &day_start.utc_day(), &trailing_start, &now)

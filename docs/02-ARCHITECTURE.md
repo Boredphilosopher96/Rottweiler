@@ -552,6 +552,11 @@ transaction replaces the canonical conversation generation.
   stable `writer.lock`. An append batch is synchronized before publication.
   Captured committed-prefix views support bounded cursor pages (ADR-029).
 - Derived recovery and transcript rows publish atomically after their journal prefix is durable.
+  A captured history transaction retains one of eight journal-view credits.
+  Queries clone that owned lease through worker completion and acquire separate
+  physical execution and result-byte admission; querying a retained transaction
+  does not reserve another view. Metadata and accounting jobs use their bounded
+  worker owner without consuming journal-view capacity.
   Their persistence batches contain at most eight transactions or four MiB of charged
   mutations and checkpoint data. These are application commit and input limits,
   not measurements of physical pages; database cache, row and file bounds still apply.

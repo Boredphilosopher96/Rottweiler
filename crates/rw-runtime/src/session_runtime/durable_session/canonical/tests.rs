@@ -377,3 +377,52 @@ async fn captured_semantic_history_preserves_pages_and_charges_its_read_lifetime
     drop((pages, bootstraps));
     current.settle_effects().await.expect("read jobs settled");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admitted_history_views_can_read_when_every_view_credit_is_retained() {
+    use rw_core::recovery::SessionHistory;
+
+    let root = tempfile::tempdir().expect("root");
+    let current = sink(root.path());
+    let mut views = Vec::new();
+    for _ in 0..8 {
+        views.push(current.capture_history().await.expect("admitted view"));
+    }
+    assert!(current.capture_history().await.is_err());
+
+    let mut queries = tokio::task::JoinSet::new();
+    for view in &views {
+        let view = Arc::clone(view);
+        queries.spawn(async move { view.bootstrap().await });
+    }
+    while let Some(result) = queries.join_next().await {
+        assert_eq!(
+            result
+                .expect("query task")
+                .expect("owned view query")
+                .head
+                .next_sequence,
+            0
+        );
+    }
+    // Accounting reads have their own physical worker owner; they open no
+    // journal prefix or canonical history transaction.
+    assert!(
+        current
+            .budget_totals(rw_core::BudgetLedgerQuery {
+                now_unix_ms: 1_788_825_600_000,
+                utc_day_start_unix_ms: 1_788_825_600_000,
+                trailing_minute_start_unix_ms: 1_788_825_540_000,
+            })
+            .await
+            .expect("accounting progresses with retained views")
+            .authoritative
+    );
+    assert!(current.capture_history().await.is_err());
+    current
+        .settle_effects()
+        .await
+        .expect("physical reads settled");
+    drop(views);
+    current.capture_history().await.expect("released credit");
+}
