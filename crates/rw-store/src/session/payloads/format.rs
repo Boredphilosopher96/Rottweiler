@@ -186,7 +186,7 @@ pub(super) fn open_file(
     parent: &File,
     name: &str,
     flags: rustix::fs::OFlags,
-    mode: u32,
+    mode: rustix::fs::Mode,
 ) -> io::Result<File> {
     Ok(File::from(rustix::fs::openat(
         parent,
@@ -195,7 +195,7 @@ pub(super) fn open_file(
             | rustix::fs::OFlags::NOFOLLOW
             | rustix::fs::OFlags::CLOEXEC
             | rustix::fs::OFlags::NONBLOCK,
-        rustix::fs::Mode::from_raw_mode(mode),
+        mode,
     )?))
 }
 pub(super) fn corrupt(message: &'static str) -> io::Error {

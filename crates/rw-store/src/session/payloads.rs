@@ -47,12 +47,17 @@ impl SessionPayloadStore {
             &root,
             "lock",
             rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE,
-            0o600,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
         )?;
         checked_file(&lock_file, 0o600)?;
         let lock = AdvisoryFileLock::try_exclusive(lock_file)?;
         // A crash may leave only the private staging object. Published objects are never purged.
-        match open_file(&root, STAGING, rustix::fs::OFlags::RDONLY, 0) {
+        match open_file(
+            &root,
+            STAGING,
+            rustix::fs::OFlags::RDONLY,
+            rustix::fs::Mode::empty(),
+        ) {
             Ok(file) => {
                 checked_file(&file, 0o600).or_else(|_| checked_file(&file, 0o400))?;
                 rustix::fs::unlinkat(&root, STAGING, rustix::fs::AtFlags::empty())?;
@@ -163,7 +168,7 @@ impl SessionPayloadStore {
             &self.0.root,
             &format!("{}.payload", reference.digest),
             rustix::fs::OFlags::RDONLY,
-            0,
+            rustix::fs::Mode::empty(),
         )?;
         PayloadReader::open(file, reference)
     }
@@ -173,7 +178,7 @@ impl SessionPayloadStore {
             &self.0.parent,
             DIRECTORY,
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
-            0,
+            rustix::fs::Mode::empty(),
         )?;
         let stat = rustix::fs::fstat(&current)?;
         if (stat.st_dev, stat.st_ino) != self.0.identity {
@@ -225,7 +230,7 @@ impl SessionPayloadStore {
             &self.0.root,
             STAGING,
             rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
-            0o600,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
         )?;
         let result = (|| {
             file.write_all(&manifest.encode())?;
@@ -275,7 +280,12 @@ fn inventory(root: &File) -> io::Result<BTreeMap<String, usize>> {
         let digest = name
             .strip_suffix(".payload")
             .ok_or_else(|| corrupt("unknown session payload entry"))?;
-        let file = open_file(root, name, rustix::fs::OFlags::RDONLY, 0)?;
+        let file = open_file(
+            root,
+            name,
+            rustix::fs::OFlags::RDONLY,
+            rustix::fs::Mode::empty(),
+        )?;
         let manifest = Manifest::read(&file)?;
         let reference = manifest.reference();
         if digest != reference.digest {
