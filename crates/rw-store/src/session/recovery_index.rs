@@ -213,8 +213,8 @@ impl RecoveryIndex {
     ) -> Result<(), RecoveryIndexError> {
         use std::os::unix::fs::MetadataExt as _;
         let incoming = advance.next().derived_directory()?.metadata()?;
-        let owned = self.owner.directory().metadata()?;
-        if incoming.dev() != owned.dev() || incoming.ino() != owned.ino() {
+        let namespace = self.owner.directory().metadata()?;
+        if incoming.dev() != namespace.dev() || incoming.ino() != namespace.ino() {
             return Err(RecoveryIndexError::Invalid("foreign journal"));
         }
         if checkpoint.len() > MAX_RECOVERY_HEAD_BYTES
@@ -358,8 +358,8 @@ impl RecoveryReadView {
     ) -> Result<JournalReadView, RecoveryIndexError> {
         use std::os::unix::fs::MetadataExt as _;
         let incoming = source.derived_directory()?.metadata()?;
-        let owned = self.owner.directory().metadata()?;
-        if incoming.dev() != owned.dev() || incoming.ino() != owned.ino() {
+        let namespace = self.owner.directory().metadata()?;
+        if incoming.dev() != namespace.dev() || incoming.ino() != namespace.ino() {
             return Err(RecoveryIndexError::Invalid("foreign journal"));
         }
         Ok(source.at_prefix(self.head.prefix)?)
