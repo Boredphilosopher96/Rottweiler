@@ -466,34 +466,50 @@ async fn descriptor_relative_queries_do_not_escape_during_directory_swap_race() 
 #[cfg(unix)]
 #[test]
 fn failed_git_branch_query_does_not_launch_a_detached_head_fallback() {
-    let root = tempdir().expect("fixture root");
-    let git = root.path().join("git-query");
-    let calls = root.path().join("calls");
-    fs::write(
-        &git,
-        format!(
-            "#!/bin/sh\nprintf call >> '{}'\nexit 128\n",
-            calls.display()
-        ),
-    )
-    .expect("fixture query");
-    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).expect("fixture executable");
+    use std::{os::unix::process::ExitStatusExt as _, process::ExitStatus};
+    for status in [Some(128 << 8), Some(15), None] {
+        let mut calls = 0;
+        let branch = crate::session_host::git::read_git_branch_with(|arguments, _| {
+            calls += 1;
+            assert_eq!(arguments[0], OsStr::new("symbolic-ref"));
+            status.map(|status| crate::session_host::git::GitCommandOutput {
+                status: ExitStatus::from_raw(status),
+                stdout: Vec::new(),
+                overflow: false,
+            })
+        });
+        assert_eq!(branch, None);
+        assert_eq!(
+            calls, 1,
+            "failed, signalled and unadmitted queries stop here"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_head_queries_the_revision_after_a_symbolic_ref_miss() {
+    use std::{os::unix::process::ExitStatusExt as _, process::ExitStatus};
+    let mut calls = Vec::new();
+    let branch = crate::session_host::git::read_git_branch_with(|arguments, maximum| {
+        calls.push((arguments[0].to_owned(), maximum));
+        let symbolic = arguments[0] == OsStr::new("symbolic-ref");
+        Some(crate::session_host::git::GitCommandOutput {
+            status: ExitStatus::from_raw(if symbolic { 1 << 8 } else { 0 }),
+            stdout: if symbolic {
+                Vec::new()
+            } else {
+                b"0123456789ab\n".to_vec()
+            },
+            overflow: false,
+        })
+    });
+    assert_eq!(branch.as_deref(), Some("detached@0123456789ab"));
     assert_eq!(
-        crate::session_host::git::read_git_branch_using(root.path(), &git),
-        None
+        calls,
+        [
+            (OsStr::new("symbolic-ref").to_owned(), 512),
+            (OsStr::new("rev-parse").to_owned(), 64)
+        ]
     );
-    assert_eq!(fs::read(&calls).expect("executed query"), b"call");
-    fs::write(
-        &git,
-        format!(
-            "#!/bin/sh\nprintf call >> '{}'\nkill -TERM $$\n",
-            calls.display()
-        ),
-    )
-    .expect("signalled query");
-    assert_eq!(
-        crate::session_host::git::read_git_branch_using(root.path(), &git),
-        None
-    );
-    assert_eq!(fs::read(&calls).expect("executed queries"), b"callcall");
 }

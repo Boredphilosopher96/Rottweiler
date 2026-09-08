@@ -497,13 +497,22 @@ pub(super) fn read_git_branch(workspace: &Path) -> Result<Option<String>, HostEr
 
 #[cfg(unix)]
 pub(super) fn read_git_branch_using(workspace: &Path, git: &Path) -> Option<String> {
+    read_git_branch_with(|arguments, maximum| {
+        run_bounded_git(git, workspace, arguments, maximum, GIT_STATUS_DEADLINE)
+    })
+}
+
+#[cfg(unix)]
+pub(super) fn read_git_branch_with(
+    mut query: impl FnMut(&[&OsStr], usize) -> Option<GitCommandOutput>,
+) -> Option<String> {
     let symbolic = [
         OsStr::new("symbolic-ref"),
         OsStr::new("--quiet"),
         OsStr::new("--short"),
         OsStr::new("HEAD"),
     ];
-    let output = run_bounded_git(git, workspace, &symbolic, 512, GIT_STATUS_DEADLINE)?;
+    let output = query(&symbolic, 512)?;
     if output.overflow {
         return None;
     }
@@ -521,7 +530,7 @@ pub(super) fn read_git_branch_using(workspace: &Path, git: &Path) -> Option<Stri
         OsStr::new("--short=12"),
         OsStr::new("HEAD"),
     ];
-    let output = run_bounded_git(git, workspace, &detached, 64, GIT_STATUS_DEADLINE)?;
+    let output = query(&detached, 64)?;
     if output.status.success() && !output.overflow {
         return safe_git_label(&output.stdout).map(|revision| format!("detached@{revision}"));
     }
