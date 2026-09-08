@@ -536,6 +536,31 @@ forced termination, reaping and group absence. These phases consume the same
 deadline. A late acknowledgement cannot qualify a forced wrapper exit. Workload
 and measured performance deadlines remain separate.
 
+M8 qualification consumes a verified native candidate and the immutable MCP
+fixture receipt produced by `scripts/prepare-m8-fixture.py` before measurement.
+The preparer selects the executable from that Cargo invocation and binds its
+source, compiler, native profile and hash to the candidate. Gate entry and exit
+verify both inputs; missing or changed identities reject qualification. The
+Linux performance container runs those prepared bytes without compilation.
+Its separate functional-only CI lane explicitly builds nonqualifying fixtures.
+The shell entrypoints use `exec`; the Python gate owns private copies until
+normal EOF shutdown, exact child-group absence and input revalidation complete.
+Only unreaped direct owners authorize signals. Observed MCP process groups are
+absence checks, never cleanup targets. Failed or unproven runs retain scratch
+and stop subsequent qualification. Terminal output has a 4 MiB admission bound;
+raw prompt-ready samples and before/after identity remain in the evidence sidecar.
+
+The supervised application soak records bounded per-generation process-start,
+driver-ready and visible-input markers on its monotonic receive clock. Restoration
+is new-process marker to driver-ready; the forced fault additionally records its
+actual signal interval and fault-to-visible-input blackout. For natural restarts,
+the old-process exit timestamp is not observed: reports retain blackout bounds
+from the last confirmed ready generation through the new-process marker and
+visible acknowledgement, rather than inventing an exact retirement time. Progress
+keeps the latest sixteen records; final or failed evidence keeps every admitted
+generation, up to 4,096. Missing post-restart input acknowledgement fails the soak.
+The 600 MiB combined RSS and 384 MiB product recycling policy are unchanged.
+
 The privileged M8 gate also owns its daemon container, independently of the
 Docker CLI process. Creation returns the full immutable container ID before
 workload start. Cancellation requires removal by that ID and a successful

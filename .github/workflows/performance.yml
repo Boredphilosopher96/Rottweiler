@@ -98,11 +98,19 @@ jobs:
         run: |
           library=$(python3 scripts/build-opentui-native.py)
           echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
+      - name: Prepare MCP acceptance fixture before measurement
+        id: mcp-fixture
+        run: >-
+          python3 scripts/prepare-m8-fixture.py
+          --candidate "$RUNNER_TEMP/native-candidate.noindex"
+          --output "$RUNNER_TEMP/m8-fixture.noindex"
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
+          --github-output "$GITHUB_OUTPUT"
       - run: crates/rw-cli/tests/m4_release_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m4.json
       - name: M8 production-composition performance gate (Linux)
-        run: crates/rw-cli/tests/m8_release_gate_linux.sh
+        run: crates/rw-cli/tests/m8_release_gate_linux.sh "$RUNNER_TEMP/native-candidate.noindex" "${{ steps.mcp-fixture.outputs.receipt }}"
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-candidate
@@ -174,12 +182,13 @@ jobs:
       - name: Prepare MCP acceptance fixture before measurement
         id: mcp-fixture
         run: |
-          scripts/cargo-release.sh build --locked --release -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture
-          release_dir=$(scripts/cargo-release.sh artifact-dir)
-          echo "executable=$release_dir/rw-mcp-fixture" >> "$GITHUB_OUTPUT"
+          python3 scripts/prepare-m8-fixture.py \
+            --candidate "${{ steps.candidate.outputs.candidate }}" \
+            --output "$RUNNER_TEMP/m8-fixture.noindex" \
+            --target-dir "$GITHUB_WORKSPACE/target/native-candidate" \
+            --github-output "$GITHUB_OUTPUT"
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-candidate
-          CARGO_PROFILE_RELEASE_DEBUG: 0
       - name: Retain native candidate identity
         run: |
           cp "${{ steps.candidate.outputs.candidate }}/build.json" perf-results/native-build.json
@@ -200,8 +209,7 @@ jobs:
           ROTTWEILER_PERF_OUTPUT: perf-results/m4.json
       - name: M8 production-composition performance gate (macOS)
         run: |
-          engine=$(python3 scripts/native_candidate.py path "${{ steps.candidate.outputs.candidate }}" engine)
-          crates/rw-cli/tests/m8_release_gate.sh "$engine" "${{ steps.mcp-fixture.outputs.executable }}"
+          crates/rw-cli/tests/m8_release_gate.sh "${{ steps.candidate.outputs.candidate }}" "${{ steps.mcp-fixture.outputs.receipt }}"
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-candidate

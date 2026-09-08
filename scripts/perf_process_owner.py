@@ -20,9 +20,11 @@ class OwnedProcess:
 
     def __init__(self, command: list[str], *, cwd: Path, env: dict[str, str],
                  delegated: bool = False, output: str = "capture",
-                 cleanup_of: str | None = None):
+                 cleanup_of: str | None = None, terminal: int | None = None):
         if output not in {"capture", "combined", "inherit", "stdout"}:
             raise ValueError("unknown physical process output mode")
+        if terminal is not None and (output != "capture" or delegated):
+            raise ValueError("a terminal uses captured stderr and a direct process owner")
         self.registration = SCOPE.starting(cleanup_of=cleanup_of)
         self.scope = None
         self.process = None
@@ -39,8 +41,8 @@ class OwnedProcess:
                 os.set_blocking(descriptor, False)
                 environment[SCOPE_FD] = str(writer)
             self.process = subprocess.Popen(
-                command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
-                stdout=None if output == "inherit" else subprocess.PIPE,
+                command, cwd=cwd, env=environment, stdin=subprocess.DEVNULL if terminal is None else terminal,
+                stdout=terminal if terminal is not None else (None if output == "inherit" else subprocess.PIPE),
                 stderr=None if output in {"inherit", "stdout"} else (subprocess.STDOUT if output == "combined" else subprocess.PIPE),
                 start_new_session=True, pass_fds=() if writer is None else (writer,),
             )
