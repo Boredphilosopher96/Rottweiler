@@ -224,7 +224,6 @@ impl Drop for ChildGroup {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn rendezvous_namespace_is_private_and_removed_with_owner() {
