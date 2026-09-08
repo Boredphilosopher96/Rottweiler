@@ -610,6 +610,18 @@ an isolated process with stdin closed: it captures events, chooses a question
 answer, resumes durable state, interrupts a pending question, and verifies empty
 stdout and stderr after owned shutdown.
 
+Durable MCP payload acceptance covers authenticated chunk windows, dense newline
+queries, clipped large lines, UTF-8 cursors, quota refusal, cancellation rollback,
+and independent fork copies. The adapter must prove that an aborted caller keeps
+its physical worker and allocation alive until settlement, and that an inline
+prompt refusal publishes no payload object. Runtime tests resolve a vault
+credential before an echoed oversized result, inspect both the authenticated
+window and raw stored bytes for secret leakage, and reopen a fork after deleting
+its parent. Creating an unused payload capability must perform no namespace I/O.
+These contracts run in `rw-store` payload tests, the `rw-mcp` library suite, and
+runtime `payloads`/`payload_tests` fixtures; they do not compile native artifacts
+inside a measurement window.
+
 
 ### Native Linux code generation
 
