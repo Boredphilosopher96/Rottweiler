@@ -362,6 +362,15 @@ async fn assert_lifeline_retirement(kill_supervisor: bool) {
             launched.process.settle_effects().await.is_err(),
             "missing proof stays unsettled"
         );
+        // This fixture does not change groups. Drain its independent negative
+        // test obligation even though the product correctly retains admission.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            super::lifeline::group_absent(Some(pid.as_raw_nonzero().get().unsigned_abs())),
+        )
+        .await
+        .expect("negative fixture group retired")
+        .expect("group absence");
     } else {
         settlement.expect("receipt proves settlement");
         assert_eq!(
