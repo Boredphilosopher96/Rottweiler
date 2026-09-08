@@ -1,100 +1,150 @@
 #!/usr/bin/env python3
-"""Build the native sandbox test prerequisite and publish its immutable artifact receipt."""
+"""Build and atomically publish the sandbox helper and native ownership fixture."""
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
-import stat
-import tempfile
 import shutil
+import stat
+import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = "rw-sandbox-helper"
+FIXTURE = "rw-sandbox-ownership-fixture"
+BINARIES = (BINARY, FIXTURE)
 ENVIRONMENT_KEY = "ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT"
 
 
-def build() -> Path:
+def build() -> dict[str, Path]:
     command = ["cargo", "build", "--locked", "--all-features", "-p", "rw-sandbox",
-               "--bin", BINARY, "--message-format=json-render-diagnostics"]
-    executable = None
-    # Inherit this worktree's target/profile and stream Cargo output. The helper
-    # is a test prerequisite; acceptance measurements never compile it implicitly.
+               "--bin", BINARY, "--bin", FIXTURE, "--message-format=json-render-diagnostics"]
+    executables: dict[str, Path] = {}
+    # Select both artifacts from this one Cargo invocation, never a target search.
     with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, text=True) as process:
         assert process.stdout is not None
         for line in process.stdout:
             message = json.loads(line)
+            target = message.get("target", {})
             if (message.get("reason") == "compiler-artifact"
-                    and message.get("target", {}).get("name") == BINARY
-                    and "bin" in message.get("target", {}).get("kind", [])
-                    and message.get("executable")):
-                executable = Path(message["executable"])
+                    and target.get("name") in BINARIES
+                    and "bin" in target.get("kind", []) and message.get("executable")):
+                executables[target["name"]] = Path(message["executable"]).resolve(strict=True)
         if process.wait() != 0:
-            raise RuntimeError("sandbox test helper build failed")
-    if executable is None or not executable.is_file() or not os.access(executable, os.X_OK):
-        raise RuntimeError("Cargo did not produce an executable sandbox test helper")
-    return executable.resolve(strict=True)
+            raise RuntimeError("sandbox test prerequisite build failed")
+    if set(executables) != set(BINARIES):
+        raise RuntimeError("Cargo did not produce both sandbox test artifacts")
+    return executables
 
 
-def write_receipt(executable: Path) -> Path:
-    """Publish independent bytes so later Cargo feature builds cannot replace them."""
-    executable = executable.resolve(strict=True)
-    base = executable.parent / ".rw-test-helpers"
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def regular_file(path: Path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise RuntimeError("sandbox test artifact must be a regular file")
+        yield source
+
+
+def copy_artifact(executable: Path, snapshot: Path) -> str:
+    with regular_file(executable) as source, snapshot.open("xb") as output:
+        before = os.fstat(source.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_size <= 0
+                or before.st_size > 256 * 1024 * 1024 or before.st_mode & 0o111 == 0):
+            raise RuntimeError("sandbox test artifact size or mode is invalid")
+        digest = hashlib.sha256()
+        copied = 0
+        while chunk := source.read(64 * 1024):
+            copied += len(chunk)
+            if copied > before.st_size:
+                raise RuntimeError("sandbox test artifact changed while copying")
+            digest.update(chunk)
+            output.write(chunk)
+        os.fchmod(output.fileno(), 0o500)
+        output.flush()
+        os.fsync(output.fileno())
+        after = os.fstat(source.fileno())
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if copied != before.st_size or any(getattr(before, key) != getattr(after, key) for key in fields):
+        raise RuntimeError("sandbox test artifact changed while producing its receipt")
+    return digest.hexdigest()
+
+
+def identity_body(snapshot: Path, published: Path, digest: str) -> str:
+    if snapshot.is_symlink():
+        raise RuntimeError("sandbox test snapshot must be a regular file")
+    with regular_file(snapshot) as source:
+        metadata = os.fstat(source.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_size <= 0 or metadata.st_size > 256 * 1024 * 1024
+                or metadata.st_mode & 0o777 != 0o500
+                or hashlib.file_digest(source, "sha256").hexdigest() != digest):
+            raise RuntimeError("sandbox test snapshot identity does not match approved bytes")
+    body = {"executable": str(published), "device": metadata.st_dev,
+            "inode": metadata.st_ino, "bytes": metadata.st_size, "sha256": digest}
+    return json.dumps(body, separators=(",", ":")) + "\n"
+
+
+def verify_bundle(generation: Path, digests: dict[str, str]) -> None:
+    expected = set(BINARIES) | {name + ".identity.json" for name in BINARIES}
+    if generation.is_symlink() or not generation.is_dir() or {
+            child.name for child in generation.iterdir()} != expected:
+        raise RuntimeError("sandbox test snapshot bundle is incomplete or invalid")
+    for name in BINARIES:
+        snapshot = generation / name
+        encoded = identity_body(snapshot, snapshot, digests[name])
+        receipt = generation / (name + ".identity.json")
+        if receipt.is_symlink() or not receipt.is_file() or receipt.stat().st_size > 4096:
+            raise RuntimeError("sandbox test snapshot receipt is invalid")
+        with regular_file(receipt) as source:
+            if source.read(4097) != encoded.encode():
+                raise RuntimeError("sandbox test snapshot receipt identity is invalid")
+
+
+def write_receipt(executable: Path, fixture: Path) -> Path:
+    """The flat helper receipt stays stable; its sibling belongs to the same bundle."""
+    inputs = {BINARY: executable.resolve(strict=True), FIXTURE: fixture.resolve(strict=True)}
+    base = inputs[BINARY].parent / ".rw-test-helpers"
     base.mkdir(mode=0o700, exist_ok=True)
     if base.is_symlink() or not base.is_dir():
-        raise RuntimeError("sandbox helper snapshot directory is invalid")
+        raise RuntimeError("sandbox test snapshot directory is invalid")
+    sync_directory(base.parent)
     temporary = Path(tempfile.mkdtemp(prefix=".building-", dir=base))
     try:
-        snapshot = temporary / BINARY
-        with executable.open("rb") as source, snapshot.open("xb") as output:
-            before = os.fstat(source.fileno())
-            if (not stat.S_ISREG(before.st_mode) or before.st_size <= 0
-                    or before.st_size > 256 * 1024 * 1024 or before.st_mode & 0o111 == 0):
-                raise RuntimeError("sandbox helper artifact size or mode is invalid")
-            digest = hashlib.sha256()
-            copied = 0
-            while chunk := source.read(64 * 1024):
-                copied += len(chunk)
-                if copied > before.st_size:
-                    raise RuntimeError("sandbox helper changed while copying its bytes")
-                digest.update(chunk)
-                output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-            after = os.fstat(source.fileno())
-        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if copied != before.st_size or any(getattr(before, key) != getattr(after, key) for key in fields):
-            raise RuntimeError("sandbox helper changed while producing its receipt")
-        snapshot.chmod(0o500)
-        generation = base / digest.hexdigest()
-        if not generation.exists() and not generation.is_symlink():
-            temporary.rename(generation)
-        if generation.is_symlink() or not generation.is_dir():
-            raise RuntimeError("sandbox helper snapshot generation is invalid")
-        snapshot = generation / BINARY
-        if snapshot.is_symlink():
-            raise RuntimeError("sandbox helper snapshot must be a regular file")
-        with snapshot.open("rb") as source:
-            metadata = os.fstat(source.fileno())
-            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-                    or metadata.st_size != copied or metadata.st_mode & 0o777 != 0o500
-                    or hashlib.file_digest(source, "sha256").hexdigest() != digest.hexdigest()):
-                raise RuntimeError("sandbox helper snapshot identity does not match approved bytes")
-        receipt = generation / (BINARY + ".identity.json")
-        body = {"executable": str(snapshot), "device": metadata.st_dev,
-                "inode": metadata.st_ino, "bytes": metadata.st_size, "sha256": digest.hexdigest()}
-        encoded = json.dumps(body, separators=(",", ":")) + "\n"
-        if receipt.exists():
-            if receipt.is_symlink() or receipt.read_text() != encoded:
-                raise RuntimeError("sandbox helper snapshot receipt identity is invalid")
-        else:
-            with receipt.open("x") as output:
+        digests = {name: copy_artifact(inputs[name], temporary / name) for name in BINARIES}
+        # Ordered fixed-width digests bind both members, without changing either
+        # flat artifact receipt consumed by the runtime and native acceptance.
+        generation = base / (digests[BINARY] + "-" + digests[FIXTURE])
+        for name in BINARIES:
+            encoded = identity_body(temporary / name, generation / name, digests[name])
+            with (temporary / (name + ".identity.json")).open("x") as output:
                 output.write(encoded)
-        return receipt
+                output.flush()
+                os.fsync(output.fileno())
+        sync_directory(temporary)
+        if not generation.exists() and not generation.is_symlink():
+            try:
+                temporary.rename(generation)
+            except OSError as error:
+                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+        verify_bundle(generation, digests)
+        sync_directory(base)
+        return generation / (BINARY + ".identity.json")
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
@@ -104,7 +154,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--github-env", type=Path)
     args = parser.parse_args()
-    receipt = write_receipt(build())
+    artifacts = build()
+    receipt = write_receipt(artifacts[BINARY], artifacts[FIXTURE])
     if args.github_env is not None:
         if any(character in str(receipt) for character in "\r\n"):
             raise ValueError("helper executable path cannot contain a line break")

@@ -4,7 +4,7 @@ use super::{
     LaunchBytes, PluginProcessConfig, PluginSandboxProfile, SpawnedPlugin, attach_supervisor,
     helper_executable, process_fixture_lease, spawn_pinned_plugin,
 };
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf, sync::Arc, time::Duration};
 use tokio::io::AsyncReadExt as _;
 
 fn profile() -> PluginSandboxProfile {
@@ -17,34 +17,43 @@ fn profile() -> PluginSandboxProfile {
 }
 
 fn fixture(script: &str) -> (tempfile::TempDir, PluginProcessConfig) {
-    fixture_with_executable(std::path::Path::new("/bin/sh"), script)
+    let path = std::path::Path::new("/bin/sh")
+        .canonicalize()
+        .expect("system shell");
+    let identity = rw_tools::ExecutableArtifactIdentity::capture(&path, 32 * 1024 * 1024)
+        .expect("system shell identity");
+    fixture_with_executable(&identity, script)
 }
 
 fn native_fixture(script: &str) -> (tempfile::TempDir, PluginProcessConfig) {
-    let path = std::env::var_os("PATH").expect("PATH");
-    let bun = std::env::split_paths(&path)
-        .map(|directory| directory.join("bun"))
-        .find(|path| path.is_file())
-        .expect("Bun is required for native plugin conformance");
-    fixture_with_executable(&bun, script)
+    let identity = crate::native_fixture::ownership_fixture_identity()
+        .expect("explicit ownership fixture prerequisite");
+    fixture_with_executable(&identity, script)
 }
 
 fn fixture_with_executable(
-    source: &std::path::Path,
+    source: &rw_tools::ExecutableArtifactIdentity,
     script: &str,
 ) -> (tempfile::TempDir, PluginProcessConfig) {
     let directory = tempfile::tempdir().expect("code fixture");
     let root = directory.path().canonicalize().expect("canonical code");
     let executable = root.join("interpreter");
-    fs::copy(source, &executable).expect("fixture executable");
-    fs::write(root.join("entry.js"), script).expect("approved entry");
+    let mut output = fs::File::create(&executable).expect("fixture executable");
+    source
+        .copy_verified(&mut output)
+        .expect("exact fixture bytes");
+    output
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .expect("executable fixture");
+    drop(output);
+    fs::write(root.join("entry.data"), script).expect("approved entry");
     fs::write(root.join("unlisted"), b"not approved").expect("unlisted file");
     let config = PluginProcessConfig::new(executable)
         .and_then(|config| config.with_cwd(&root))
         .and_then(|config| config.with_code_root(&root))
-        .and_then(|config| config.with_argv(["entry.js"]))
+        .and_then(|config| config.with_argv(["entry.data"]))
         .and_then(|config| {
-            config.with_attested_files([root.join("interpreter"), root.join("entry.js")])
+            config.with_attested_files([root.join("interpreter"), root.join("entry.data")])
         })
         .expect("approved fixture config");
     (directory, config)
@@ -57,7 +66,7 @@ fn copied_code_contains_only_attested_files_and_rejects_precapture_replacement()
     let entry = PathBuf::from(&bytes.args(&config)[0]);
     assert_eq!(fs::read(&entry).expect("copy"), b"printf approved");
     assert!(!bytes.cwd(&config).join("unlisted").exists());
-    fs::write(config.cwd().join("entry.js"), "printf replaced").expect("same-length replacement");
+    fs::write(config.cwd().join("entry.data"), "printf replaced").expect("same-length replacement");
     assert!(LaunchBytes::capture(&config, &profile()).is_err());
     assert_eq!(fs::read(entry).expect("pinned copy"), b"printf approved");
 }
@@ -79,14 +88,12 @@ fn primary_replacement_is_rejected_by_final_capture_without_duplicate_attestatio
 #[tokio::test]
 async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execution() {
     let _admission = crate::native_fixture::admit().await;
-    let (_directory, config) = native_fixture(
-        "import { existsSync } from 'node:fs'; if (existsSync('unlisted')) process.exit(9); process.stdout.write('approved');",
-    );
+    let (_directory, config) = native_fixture("approved\n");
     let profile = profile();
     let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
     fs::write(config.executable(), b"not an executable anymore").expect("replace executable bytes");
-    fs::write(config.cwd().join("entry.js"), "printf replaced").expect("replace code bytes");
+    fs::write(config.cwd().join("entry.data"), "printf replaced").expect("replace code bytes");
     let scratch = tempfile::tempdir().expect("scratch");
     let helper = helper_executable().expect("explicit immutable helper prerequisite");
     let SpawnedPlugin {
@@ -152,9 +159,7 @@ async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execu
 #[tokio::test]
 async fn dropped_handoff_keeps_code_until_physical_retirement() {
     let _admission = crate::native_fixture::admit().await;
-    let (_directory, config) = native_fixture(
-        "process.stdout.write('ready'); await new Promise(() => { setInterval(() => {}, 1000); });",
-    );
+    let (_directory, config) = native_fixture("hold\n");
     let profile = profile();
     let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();
@@ -211,9 +216,7 @@ fn writable_scratch_cannot_include_or_replace_the_approved_code_view() {
 #[tokio::test]
 async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
     let _admission = crate::native_fixture::admit().await;
-    let (_directory, config) = native_fixture(
-        "process.stdout.write('ready'); await new Promise(() => { setInterval(() => {}, 1000); });",
-    );
+    let (_directory, config) = native_fixture("hold\n");
     let profile = profile();
     let bytes = Arc::new(LaunchBytes::capture(&config, &profile).expect("capture"));
     let pinned_root = bytes.cwd(&config).to_path_buf();

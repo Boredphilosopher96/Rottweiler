@@ -481,14 +481,27 @@ compiler from `fuzz/rust-toolchain.toml`.
 
 Rust tests that launch native plugins require an explicit sandbox worker binary.
 Run `ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT="$(python3 scripts/build-test-helper.py)" && export ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT`
-with the worktree's Cargo target before those tests. The script builds the
-`rw-sandbox-helper` binary and selects its executable from Cargo's artifact
-message, copies its bytes into a content-addressed target directory, and writes
-that snapshot's device, inode, byte count, and SHA-256 receipt. Repeated builds
-reuse equal snapshots; subsequent Cargo feature builds cannot replace them. The
-fixture host validates that receipt and owns a private executable snapshot; Linux
-seals its bytes against mutation. CI and coverage build this prerequisite before their test command;
-the product executable owns its own worker entrypoint.
+with the worktree's Cargo target before those tests. The script builds
+`rw-sandbox-helper` and the non-shipped `rw-sandbox-ownership-fixture` in one
+invocation and selects both executables from Cargo artifact messages. It publishes
+independent executable copies and their flat device/inode/size/SHA-256 receipts
+by one atomic directory rename, after syncing every member. The generation name
+is `<helper SHA-256>-<fixture SHA-256>`; the required sibling receipt is
+`rw-sandbox-ownership-fixture.identity.json`. The environment variable still
+names the ordinary flat `rw-sandbox-helper.identity.json` receipt. Equal complete
+bundles are reused; incomplete or corrupt bundles are rejected without repair.
+Subsequent Cargo feature builds cannot replace the published bytes.
+
+Pinned process-ownership tests verify-copy the declared fixture and its bounded
+attested data (`approved\n` exits after writing `approved`; `hold\n` writes
+`ready` and waits for termination). They prove source replacement, denied unlisted
+files, and physical retirement under the existing deadlines. They neither search
+for target binaries nor compile during execution. Production Bun/TypeScript
+sandbox conformance and SDK workflows still run independently. The fixture host
+validates the helper receipt and owns a private executable snapshot; Linux seals
+its bytes against mutation. CI and coverage build these prerequisites before the
+test command. The product executable retains its own worker entrypoint; neither
+fixture nor a fixture role is added to the shipped product bundle.
 
 `scripts/ci_evidence.py` preserves command exit status and writes bounded partial
 and final diagnostics with source/run/lock identity. Each gate retains an 8 MiB
