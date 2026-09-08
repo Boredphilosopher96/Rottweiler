@@ -97,6 +97,10 @@ fn run_native_ask(root: &tempfile::TempDir) {
     );
     let output = bounded_output(
         base_command(&run.workspace, &run.home)
+            .env(
+                "RUST_LOG",
+                "warn,rw_performance=debug,rw_runtime::extension_runtime::activation=debug",
+            )
             .args([
                 "-p",
                 "attempt the write",
