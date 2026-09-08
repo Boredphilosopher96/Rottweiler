@@ -12,6 +12,7 @@ import time
 from typing import BinaryIO
 
 from perf_process_scope import SCOPE_FD, ScopeReader, inherited_scope
+from perf_process_wait import observe_exit, signal_owned_group
 
 _SCOPE = inherited_scope()
 
@@ -69,7 +70,7 @@ def run_sample(
     stdout, stderr = bytearray(), bytearray()
 
     def deadline_error(pending: int) -> TimeoutError:
-        status = process.poll()
+        status = observe_exit(process.pid)
         leader = "running" if status is None else f"exited:{status}"
         return TimeoutError(
             f"performance sample exceeded {timeout:g}s "
@@ -124,30 +125,29 @@ def run_sample(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise deadline_error(0)
-                try:
-                    returncode = process.wait(timeout=min(remaining, .05))
+                returncode = observe_exit(process.pid)
+                if returncode is not None:
                     break
-                except subprocess.TimeoutExpired:
-                    continue
+                time.sleep(min(remaining, .001))
         return subprocess.CompletedProcess(command, returncode, bytes(stdout), bytes(stderr))
     finally:
-        # A cooperative wrapper must let its actual Popen owners settle their
-        # separately grouped children before it exits. Never signal a delegated
-        # PID from a registration: that PID may already have been reused.
-        if scope is not None and process.poll() is None:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
-            settle_by = time.monotonic() + 5
-            while process.poll() is None and time.monotonic() < settle_by:
-                scope.drain()
-                for stream in (process.stdout, process.stderr):
-                    if stream is not None and not os.get_blocking(stream.fileno()):
-                        with contextlib.suppress(BlockingIOError):
-                            os.read(stream.fileno(), 16 * 1024)
-                time.sleep(.01)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
         try:
+            # A cooperative wrapper must let its actual Popen owners settle their
+            # separately grouped children before it exits. Never signal a delegated
+            # PID from a registration: that PID may already have been reused.
+            if scope is not None and observe_exit(process.pid) is None:
+                signal_owned_group(process.pid, signal.SIGTERM)
+                settle_by = time.monotonic() + 5
+                while observe_exit(process.pid) is None and time.monotonic() < settle_by:
+                    scope.drain()
+                    for stream in (process.stdout, process.stderr):
+                        if stream is not None and not os.get_blocking(stream.fileno()):
+                            with contextlib.suppress(BlockingIOError):
+                                os.read(stream.fileno(), 16 * 1024)
+                    time.sleep(.01)
+            # WNOWAIT keeps the leader unreaped: its PID anchors this exact group
+            # until the last signal. Never signal a group after releasing that PID.
+            signal_owned_group(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
             if scope is not None:
                 scope.require_closed()

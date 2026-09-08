@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import time
 import unittest
 from unittest.mock import patch
@@ -74,6 +75,32 @@ else:
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"ready")
         self.assertEqual(result.stderr, b"marker")
+
+    def test_closed_output_live_leader_finishes_its_work_before_reaping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            effect = Path(directory) / "effect"
+            result = self.run_python(
+                f"import os,time; os.close(1); os.close(2); time.sleep(.1); open({str(effect)!r}, 'w').write('done'); os._exit(7)"
+            )
+            self.assertEqual(result.returncode, 7)
+            self.assertEqual(effect.read_text(), "done")
+
+    def test_all_group_signals_precede_the_only_reap(self):
+        from perf_process_wait import observe_exit
+        original = perf_process.signal_owned_group
+        observed = []
+        def signal(pid, number):
+            # A reaped child would raise ECHILD here; WNOWAIT must preserve the
+            # identity across both observations and the final group signal.
+            first = observe_exit(pid)
+            second = observe_exit(pid)
+            observed.append((first, second))
+            original(pid, number)
+        with patch.object(perf_process, "signal_owned_group", side_effect=signal), \
+                patch.object(subprocess.Popen, "poll", side_effect=AssertionError("premature reap")):
+            result = self.run_python("raise SystemExit(7)")
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(observed, [(7, 7)])
 
     def test_timeout_diagnostics_identify_process_and_pipe_state_without_payloads(self):
         with self.assertRaisesRegex(TimeoutError, r"leader=running, pending_pipes=2, stdout_bytes=6") as failure:

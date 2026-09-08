@@ -191,7 +191,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_process_scope.py", "scripts/native_candidate.py",
+        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_process_scope.py", "scripts/perf_process_wait.py", "scripts/native_candidate.py",
                          "scripts/opentui_native.py", "scripts/native_profile.py", "scripts/native-linux-unwind.ld", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
             destination = fixture.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
