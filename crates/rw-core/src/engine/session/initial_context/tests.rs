@@ -175,3 +175,100 @@ fn missing_system_policy_is_inserted_before_other_sources() {
         .expect("policy");
     assert_eq!(texts(&context), vec![vec!["policy"], vec!["input"]]);
 }
+
+fn reserved_map() -> serde_json::Value {
+    let mut map = serde_json::Map::with_capacity(262_144);
+    map.insert("removed".into(), serde_json::Value::Null);
+    map.remove("removed");
+    map.insert("z".into(), serde_json::json!([{"inner": 1}]));
+    map.insert("a".into(), serde_json::Value::Bool(true));
+    serde_json::Value::Object(map)
+}
+fn opaque_source(live: &Arc<AtomicUsize>, mixed: bool) -> InitialSessionContext {
+    use rw_types::{ToolCallId, ToolOutput, ToolOutputPart};
+    let block = if mixed {
+        Block::ToolResult {
+            id: ToolCallId("tool".into()),
+            output: ToolOutput::Mixed {
+                parts: vec![ToolOutputPart::Structured {
+                    value: reserved_map(),
+                }],
+            },
+            is_error: false,
+        }
+    } else {
+        Block::ToolCall {
+            id: ToolCallId("tool".into()),
+            name: "tool".into(),
+            args: reserved_map(),
+        }
+    };
+    let value = Turn {
+        role: Role::System,
+        blocks: vec![block],
+        meta: TurnMeta::default(),
+    };
+    // The source producer owns its deliberately oversized opaque map. Overlay
+    // admission is separate and may only cover normalized destination storage.
+    let mut retained = allowance(live, usize::MAX);
+    retained.resize(64 * 1024 * 1024).unwrap();
+    InitialSessionContext::from_owned(
+        HistoryRead::new(vec![value], retained),
+        allowance(live, usize::MAX),
+    )
+    .unwrap()
+}
+
+#[test]
+fn policy_overlay_rebuilds_opaque_maps_and_preserves_wire_order() {
+    let live = Arc::new(AtomicUsize::new(0));
+    for mixed in [false, true] {
+        let mut context = opaque_source(&live, mixed);
+        let original = context.clone();
+        let expected = serde_json::to_string(original.iter().next().unwrap()).unwrap();
+        let before = live.load(Ordering::SeqCst);
+        context
+            .append_system_text("policy", allowance(&live, 64 * 1024))
+            .unwrap();
+        let changed = context.iter().next().unwrap();
+        assert_eq!(changed.blocks.len(), 2);
+        assert_eq!(
+            serde_json::to_string(&changed.blocks[0]).unwrap(),
+            serde_json::to_string(&original.iter().next().unwrap().blocks[0]).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(original.iter().next().unwrap()).unwrap(),
+            expected
+        );
+        assert!(changed.prepared_bytes().unwrap() <= live.load(Ordering::SeqCst) - before);
+        drop(context);
+        drop(original);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(feature = "allocation-measurement")]
+#[test]
+#[ignore = "requires isolated allocation counters: --exact --ignored --test-threads=1"]
+fn opaque_map_overlay_physical_allocations_fit_admission() {
+    let live = Arc::new(AtomicUsize::new(0));
+    for mixed in [false, true] {
+        let mut context = opaque_source(&live, mixed);
+        let original = context.clone();
+        let before = live.load(Ordering::SeqCst);
+        let region = stats_alloc::Region::new(&stats_alloc::INSTRUMENTED_SYSTEM);
+        context
+            .append_system_text("policy", allowance(&live, 64 * 1024))
+            .unwrap();
+        let change = region.change();
+        let admitted = live.load(Ordering::SeqCst) - before;
+        assert!(
+            change.bytes_allocated <= admitted,
+            "opaque source capacity escaped copy admission: allocated={} admitted={admitted}",
+            change.bytes_allocated
+        );
+        drop(original);
+        drop(context);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+}

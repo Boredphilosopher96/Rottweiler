@@ -291,7 +291,7 @@ fn tool_definitions(config: &SessionActorConfig) -> Vec<rw_providers::ToolDefini
         .map(|tool| rw_providers::ToolDefinition {
             name: tool.name.clone(),
             description: tool.description.clone(),
-            input_schema: normalized_json_copy(&tool.input_schema),
+            input_schema: crate::engine::context_copy::json(&tool.input_schema),
         })
         .collect()
 }
@@ -689,21 +689,6 @@ fn block_source(
             AgentLoopError::Persistence("canonical context block index exceeds its contract".into())
         })?,
     })
-}
-
-fn normalized_json_copy(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(normalized_json_copy).collect())
-        }
-        serde_json::Value::Object(values) => serde_json::Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), normalized_json_copy(value)))
-                .collect(),
-        ),
-        value => value.clone(),
-    }
 }
 
 #[cfg(test)]
