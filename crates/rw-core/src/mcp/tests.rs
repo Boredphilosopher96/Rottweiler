@@ -246,6 +246,24 @@ fn protected_mcp_framing_is_stable() {
 }
 
 #[test]
+fn maximum_payload_window_framing_stays_inside_its_working_reservation() {
+    let content = "x".repeat(rw_types::session_payload::MAX_PAYLOAD_WINDOW_BYTES);
+    let result = untrusted_result(&content, json!({}));
+    assert_eq!(
+        result.content.len(),
+        UNTRUSTED_OPEN.len() + content.len() + UNTRUSTED_CLOSE.len()
+    );
+    assert!(
+        content.capacity() + result.content.capacity()
+            < rw_store::session::payloads::PAYLOAD_WINDOW_WORKING_BYTES
+    );
+    assert_eq!(
+        &result.content[UNTRUSTED_OPEN.len()..result.content.len() - UNTRUSTED_CLOSE.len()],
+        content
+    );
+}
+
+#[test]
 fn overflow_read_requires_the_complete_source_reference_and_cursor_contract() {
     let reference = json!({"digest":"a".repeat(64),"bytes":1});
     assert!(parse::<McpOverflowInput>(json!({"reference":reference,"offset":0})).is_err());

@@ -1349,8 +1349,13 @@ fn capped_result(
 }
 
 fn untrusted_result(content: &str, data: Value) -> ToolResult {
-    ToolResult::new(format!("{UNTRUSTED_OPEN}{content}{UNTRUSTED_CLOSE}"), data)
-        .with_protected_framing(UNTRUSTED_OPEN, UNTRUSTED_CLOSE)
+    // Avoid geometric growth while the admitted source window is still retained.
+    let mut framed =
+        String::with_capacity(UNTRUSTED_OPEN.len() + content.len() + UNTRUSTED_CLOSE.len());
+    framed.push_str(UNTRUSTED_OPEN);
+    framed.push_str(content);
+    framed.push_str(UNTRUSTED_CLOSE);
+    ToolResult::new(framed, data).with_protected_framing(UNTRUSTED_OPEN, UNTRUSTED_CLOSE)
 }
 
 fn validate_wire_name(name: &str, kind: &str) -> Result<(), ToolError> {
