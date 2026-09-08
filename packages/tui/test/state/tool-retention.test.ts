@@ -12,7 +12,7 @@ function start(state: RottweilerState, sequence: number, invocation: string): Ro
 
 function finish(state: RottweilerState, sequence: number, invocation: string): RottweilerState {
   return reduce(state, {
-    type: "tool_call_finished", meta: meta(String(sequence)), turn_id: "turn",
+    type: "tool_call_finished", payloads: [], meta: meta(String(sequence)), turn_id: "turn",
     tool_call_id: "reused-provider-id", invocation_id: invocation, call_index: 0,
     output: { type: "text", text: "done" }, is_error: false, presentation: null,
   })

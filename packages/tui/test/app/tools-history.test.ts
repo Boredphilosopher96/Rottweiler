@@ -198,7 +198,7 @@ describe("Rottweiler tools-history", () => {
     const original = app.state.tools["tools-0"]!
     if (original.toolCallId === null) throw new Error("fixture requires provider correlation")
     app.handleEvent({
-      type: "tool_call_finished",
+      type: "tool_call_finished", payloads: [],
       meta: { protocol_version: PROTOCOL_VERSION, session_id: "session-tools", sequence_id: "100", emitted_at: "2026-01-01T12:01:00Z" },
       turn_id: original.turnId, tool_call_id: original.toolCallId, invocation_id: original.invocationId,
       output: { type: "text", text: "bounded preview" }, presentation: null, is_error: false, call_index: 0,

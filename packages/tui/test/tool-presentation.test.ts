@@ -7,7 +7,7 @@ import { meta, reduce } from "./state/fixtures"
 
 function finish(output: import("../src/protocol").ToolOutput, presentation: import("../src/protocol").UiPresentation | null = null) {
   return reduce(createInitialState(), {
-    type: "tool_call_finished", meta: meta("1"), turn_id: "turn", tool_call_id: "provider",
+    type: "tool_call_finished", payloads: [], meta: meta("1"), turn_id: "turn", tool_call_id: "provider",
     invocation_id: "invocation", output, presentation, is_error: false, call_index: 0,
   }).tools.invocation!
 }
@@ -102,7 +102,7 @@ test("completed and late diffs release large approval metadata while preserving 
     capabilities: ["write_filesystem"], rationale: "r".repeat(64 * 1024), diff })
   expect(state.tools.invocation?.diff).toBe(diff)
   expect(state.tools.invocation?.rationale).toHaveLength(64 * 1024)
-  state = reduce(state, { type: "tool_call_finished", meta: meta("2"), turn_id: "turn", tool_call_id: "provider",
+  state = reduce(state, { type: "tool_call_finished", payloads: [], meta: meta("2"), turn_id: "turn", tool_call_id: "provider",
     invocation_id: "invocation", output: { type: "text", text: "updated" }, presentation: null, is_error: false, call_index: 0 })
   expect(state.tools.invocation?.diff).toBeNull()
   expect(state.tools.invocation?.rationale).toBeNull()

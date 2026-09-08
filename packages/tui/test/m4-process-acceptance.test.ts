@@ -201,7 +201,7 @@ describe("M4 transport and process acceptance", () => {
     engine.emit({ type: "tool_approval_resolved", meta: meta(4), turn_id: "turn-approval",
       tool_call_id: "mutating-tool", invocation_id: "mutating-tool", decision: "allow_once" })
     engine.emit({
-      type: "tool_call_finished", presentation: null,
+      type: "tool_call_finished", payloads: [], presentation: null,
       meta: meta(5),
       turn_id: "turn-approval",
       tool_call_id: "mutating-tool",

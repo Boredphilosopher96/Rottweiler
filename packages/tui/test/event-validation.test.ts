@@ -13,7 +13,7 @@ describe("generated engine event validation", () => {
     }
   })
 
-  test("rejects the reproduced known discriminator without its required payload", () => {
+  test("rejects a known discriminator without its required payload", () => {
     expect(normalizeWireEngineEvent({ type: "command_acknowledged" })).toBeNull()
     expect(isWireEngineEvent({ type: "command_acknowledged" })).toBeFalse()
   })
@@ -57,6 +57,23 @@ describe("generated engine event validation", () => {
     for (const sequence of ["", "01", "-1", "18446744073709551616", 1, "bad"]) {
       expect(normalizeWireEngineEvent({ ...event, meta: { ...event.meta, sequence_id: sequence } })).toBeNull()
     }
+  })
+
+  test("requires bounded authenticated identities for durable tool payloads", () => {
+    const event = contractFixture.engine_events.find(event => event.type === "tool_call_finished")
+    if (event === undefined) throw new Error("missing tool completion fixture")
+    const reference = { digest: "a".repeat(64), bytes: 64 * 1024 * 1024 }
+    const valid = { ...event, payloads: Array.from({ length: 8 }, () => reference) }
+    expect(normalizeWireEngineEvent(valid)).toBe(valid)
+    for (const payloads of [
+      null,
+      Array.from({ length: 9 }, () => reference),
+      [{ ...reference, digest: "A".repeat(64) }],
+      [{ ...reference, digest: "a".repeat(63) }],
+      [{ ...reference, bytes: reference.bytes + 1 }],
+      [{ ...reference, bytes: "1" }],
+      [{ ...reference, path: "/untrusted" }],
+    ]) expect(normalizeWireEngineEvent({ ...event, payloads })).toBeNull()
   })
 
   test("rejects unsupported discriminators and undeclared object fields", () => {
