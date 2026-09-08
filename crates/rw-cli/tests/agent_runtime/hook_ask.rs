@@ -1,38 +1,17 @@
 //! The actual print client resolves a native hook's Ask without terminal input.
-use super::{TestProcess, TestRun, base_command, parse_stream, text_events, write_script};
+use super::{TestRun, base_command, parse_stream, text_events, write_script};
 use rw_core::{EngineEvent, TurnStatus};
 use rw_providers::{FinishReason, ProviderEvent};
 use serde_json::json;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    process::Command,
 };
 use tempfile::tempdir;
 
-fn bounded_output(command: &mut Command) -> Vec<u8> {
-    let output = tempfile::NamedTempFile::new().expect("bounded child output");
-    command
-        .stdin(Stdio::null())
-        .stdout(output.reopen().expect("output descriptor"));
-    let mut process = TestProcess::spawn(command);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        if let Some(status) = process.child.try_wait().expect("child status") {
-            break status;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "headless client/build must terminate without input"
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
-    assert!(status.success(), "child failed: {status}");
-    assert!(output.as_file().metadata().expect("output metadata").len() <= 1024 * 1024);
-    fs::read(output.path()).expect("bounded output bytes")
-}
+mod output;
+use output::bounded_output;
 
 fn configure_hook(root: &Path, run: &TestRun) {
     let bun = std::env::split_paths(&std::env::var_os("PATH").expect("fixture PATH"))
