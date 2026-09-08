@@ -6,7 +6,7 @@ async fn protocol_three_provider_catalog_is_bounded_and_cached() {
         "id":"capable",
         "display_name":"Capable",
         "capabilities":{
-            "structured_output":false,"tool_calling":true,
+            "structured_output":"unsupported","tool_calling":true,
             "vision":true,
             "thinking":true,
             "cache_breakpoints":"explicit"
@@ -55,7 +55,7 @@ async fn protocol_three_catalog_caches_metadata_per_model() {
     let provider = catalog_adapter(json!({"models":[{
         "id":"text-only",
         "capabilities":{
-            "structured_output":false,"tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"
+            "structured_output":"unsupported","tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"
         },
         "pricing":{
             "input_per_million_micros_usd":1_000_000,
@@ -64,7 +64,7 @@ async fn protocol_three_catalog_caches_metadata_per_model() {
     },{
         "id":"vision-thinking",
         "capabilities":{
-            "structured_output":false,"tool_calling":true,"vision":true,"thinking":true,"cache_breakpoints":"explicit"
+            "structured_output":"unsupported","tool_calling":true,"vision":true,"thinking":true,"cache_breakpoints":"explicit"
         },
         "pricing":{
             "input_per_million_micros_usd":3_000_000,
@@ -109,12 +109,12 @@ async fn malformed_provider_catalog_degrades_only_that_adapter() {
     let provider = catalog_adapter(json!({"models":[{
         "id":"duplicate",
         "capabilities":{
-            "structured_output":false,"tool_calling":true,"vision":false,"thinking":false,"cache_breakpoints":"none"
+            "structured_output":"unsupported","tool_calling":true,"vision":false,"thinking":false,"cache_breakpoints":"none"
         }
     },{
         "id":"duplicate",
         "capabilities":{
-            "structured_output":false,"tool_calling":true,"vision":false,"thinking":false,"cache_breakpoints":"none"
+            "structured_output":"unsupported","tool_calling":true,"vision":false,"thinking":false,"cache_breakpoints":"none"
         }
     }]}));
     let error = provider
@@ -140,7 +140,7 @@ async fn malformed_provider_catalog_degrades_only_that_adapter() {
 #[tokio::test]
 async fn structured_rpc_support_requires_explicit_cached_catalog_evidence() {
     let provider = catalog_adapter(json!({"models":[{"id":"structured","capabilities":{
-        "structured_output":true,"tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"
+        "structured_output":"json_schema","tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"
     }}]}));
     assert!(!provider.supports_structured_output("structured"));
     provider

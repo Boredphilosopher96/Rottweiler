@@ -968,10 +968,18 @@ pub enum ProviderCacheBreakpoints {
     Automatic,
 }
 
+/// Exact output dialect advertised by a plugin model.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStructuredOutputSupport {
+    Unsupported,
+    JsonSchema,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelCapabilities {
-    pub structured_output: bool,
+    pub structured_output: ProviderStructuredOutputSupport,
     pub tool_calling: bool,
     pub vision: bool,
     pub thinking: bool,

@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt as _;
 
 /// Injectable production provider-composition boundary.
 pub struct ProviderFactory<E = SystemEnvironment, K = NoExternalCredentialStore> {

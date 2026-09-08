@@ -480,35 +480,7 @@ impl Provider for Recorder {
                 return Err(persist_start_error(context, error).await);
             }
         };
-        let expected = crate::output_schema::fingerprint(
-            &start
-                .context
-                .as_ref()
-                .ok_or_else(writer_state_error)?
-                .request
-                .output,
-        )?;
-        if let Err(error) = crate::OutputValidation::require_installed(&inner_stream, expected) {
-            drop(inner_stream);
-            let mut context = start.context.take().ok_or_else(writer_state_error)?;
-            context.push(&Err(error.clone()));
-            let completion = context.enqueue(None, true).ok_or_else(writer_state_error)?;
-            start.finish_tracking();
-            await_write(completion).await?;
-            return Err(error);
-        }
-        let context = start.context.take().ok_or_else(writer_state_error)?;
-        start.tracking = false;
-        let output_contract = inner_stream.output_contract;
-        let mut stream = crate::BoxEventStream::new(RecordingStream {
-            inner: inner_stream,
-            context: Some(context),
-            activity: Arc::clone(&self.activity),
-            completion: None,
-            done: false,
-        });
-        stream.output_contract = output_contract;
-        Ok(stream)
+        start.finish_stream(inner_stream).await
     }
 }
 
@@ -635,6 +607,41 @@ struct StartGuard {
 }
 
 impl StartGuard {
+    async fn finish_stream(
+        mut self,
+        inner_stream: BoxEventStream,
+    ) -> Result<BoxEventStream, ProviderError> {
+        let expected = crate::output_schema::fingerprint(
+            &self
+                .context
+                .as_ref()
+                .ok_or_else(writer_state_error)?
+                .request
+                .output,
+        )?;
+        if let Err(error) = crate::OutputValidation::require_installed(&inner_stream, expected) {
+            drop(inner_stream);
+            let mut context = self.context.take().ok_or_else(writer_state_error)?;
+            context.push(&Err(error.clone()));
+            let completion = context.enqueue(None, true).ok_or_else(writer_state_error)?;
+            self.finish_tracking();
+            await_write(completion).await?;
+            return Err(error);
+        }
+        let context = self.context.take().ok_or_else(writer_state_error)?;
+        self.tracking = false;
+        let output_contract = inner_stream.output_contract;
+        let mut stream = crate::BoxEventStream::new(RecordingStream {
+            inner: inner_stream,
+            context: Some(context),
+            activity: Arc::clone(&self.activity),
+            completion: None,
+            done: false,
+        });
+        stream.output_contract = output_contract;
+        Ok(stream)
+    }
+
     fn finish_tracking(&mut self) {
         if self.tracking {
             self.tracking = false;

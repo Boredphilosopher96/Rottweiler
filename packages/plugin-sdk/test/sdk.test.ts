@@ -431,7 +431,7 @@ describe("wire protocol", () => {
           "catalog/": () => ({ models: [{
             id: "capable", display_name: "Capable",
             capabilities: {
-              structured_output: false, tool_calling: true, vision: true, thinking: true, cache_breakpoints: "explicit",
+              structured_output: "unsupported", tool_calling: true, vision: true, thinking: true, cache_breakpoints: "explicit",
             },
             max_context_tokens: 200_000, max_output_tokens: 16_000,
             pricing: {

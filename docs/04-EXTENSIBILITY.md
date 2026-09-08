@@ -137,7 +137,8 @@ object. Structured requests require an empty tool list and `tool_choice: {
 or inference. OpenAI Chat uses `response_format.json_schema`; Responses uses
 `text.format`, both with strict schemas. Generic compatible Chat, Anthropic,
 and Copilot adapters reject this contract before effects. A provider plugin
-must explicitly advertise `structured_output` in each model's catalog. The
+must explicitly advertise `structured_output: "json_schema"` in each model's catalog;
+`"unsupported"` rejects structured requests. The
 host accepts structured requests only against already cached model evidence.
 
 The common host validator withholds structured text until normal completion,

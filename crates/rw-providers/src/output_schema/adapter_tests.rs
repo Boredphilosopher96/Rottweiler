@@ -94,7 +94,7 @@ async fn direct_openai_http_projects_and_validates_both_supported_wire_dialects(
                 assert_eq!(format["schema"]["required"],serde_json::json!(["count","labels","optional"]));
                 let text=r#"{"count":1,"labels":[],"optional":null}"#;
                 let frames=match mode {
-                    OpenAiWireMode::ChatCompletions=>vec![serde_json::json!({"model":"fixture","choices":[{"index":0,"delta":{"content":text},"finish_reason":"stop"}]}).to_string(),"[DONE]".into()],
+                    OpenAiWireMode::ChatCompletions=>vec![serde_json::json!({"model":"fixture","choices":[{"index":0,"delta":{"content":text},"finish_reason":"stop"}]}).to_string(),serde_json::json!({"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":4}}).to_string(),"[DONE]".into()],
                     OpenAiWireMode::Responses=>vec![serde_json::json!({"type":"response.output_text.delta","delta":text}).to_string(),serde_json::json!({"type":"response.completed","response":{"usage":{}}}).to_string()],
                 };
                 let body=frames.into_iter().map(|frame|format!("data: {frame}\n\n")).collect::<String>();
@@ -125,6 +125,14 @@ async fn direct_openai_http_projects_and_validates_both_supported_wire_dialects(
             1
         );
         assert!(observed.iter().any(|event|matches!(event,Ok(ProviderEvent::TextDelta{text}) if text.contains("\"count\":1"))));
+        if mode == OpenAiWireMode::ChatCompletions {
+            let usage = observed.iter().position(|event| matches!(event, Ok(ProviderEvent::Usage {usage}) if usage.output_tokens == 4)).expect("usage after choice stop");
+            let finished = observed
+                .iter()
+                .position(|event| matches!(event, Ok(ProviderEvent::Finished { .. })))
+                .expect("terminal");
+            assert!(usage < finished);
+        }
         assert_eq!(auth.0.load(Ordering::SeqCst), 1);
     }
 }
@@ -166,5 +174,47 @@ fn refusals_are_recognized_even_when_refusal_text_itself_is_valid_json() {
         serde_json::json!({"type":"response.content_part.added","part":{"type":"refusal","refusal":"{}"}}),
     ] {
         assert!(wire::is_refusal(&value));
+    }
+}
+
+#[test]
+fn direct_construction_cannot_override_structured_or_tool_contracts() {
+    for (key, value) in [
+        ("response_format", serde_json::json!({"type":"json_object"})),
+        ("text", serde_json::json!({"format":{"type":"json_schema"}})),
+        ("tools", serde_json::json!([])),
+    ] {
+        let mut settings = config(
+            "http://127.0.0.1:9/".parse().expect("URL"),
+            OpenAiWireMode::Responses,
+            Arc::new(CountAuth::default()),
+        );
+        settings.extra_body.insert(key.into(), value);
+        let Err(error) = OpenAiCompatibleProvider::new(settings) else {
+            panic!("controlled field override")
+        };
+        assert_eq!(error.kind, ProviderErrorKind::InvalidRequest);
+    }
+}
+#[test]
+fn actual_normalizers_reject_json_shaped_refusals_in_structured_mode() {
+    for (mode, data) in [
+        (
+            OpenAiWireMode::ChatCompletions,
+            serde_json::json!({"choices":[{"index":0,"delta":{"refusal":"{}"},"finish_reason":"stop"}]}),
+        ),
+        (
+            OpenAiWireMode::Responses,
+            serde_json::json!({"type":"response.refusal.delta","delta":"{}"}),
+        ),
+    ] {
+        let frames = [crate::types::RawSseFrame {
+            event: None,
+            data: data.to_string(),
+        }];
+        let events = crate::openai::replay_sse_frames(mode, &frames, true);
+        assert!(
+            matches!(events.as_slice(),[Err(error)] if error.kind == ProviderErrorKind::Protocol && error.message == "structured output was refused")
+        );
     }
 }

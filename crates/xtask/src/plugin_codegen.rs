@@ -115,8 +115,10 @@ export interface ProviderModelsParams {
 
 export type ProviderCacheBreakpoints = "none" | "explicit" | "automatic"
 
+export type ProviderStructuredOutputSupport = "unsupported" | "json_schema"
+
 export interface ProviderModelCapabilities {
-  readonly structured_output: boolean
+  readonly structured_output: ProviderStructuredOutputSupport
   readonly tool_calling: boolean
   readonly vision: boolean
   readonly thinking: boolean
@@ -315,7 +317,7 @@ const FIXTURE_TEMPLATE: &str = r#"{
         "id": "vision-thinking",
         "display_name": "Vision Thinking",
         "capabilities": {
-          "structured_output": false,
+          "structured_output": "unsupported",
           "tool_calling": true,
           "vision": true,
           "thinking": true,
@@ -468,7 +470,7 @@ const SCHEMA_TEMPLATE: &str = r##"{
       "type": "object",
       "required": ["structured_output", "tool_calling", "vision", "thinking", "cache_breakpoints"],
       "properties": {
-        "structured_output": { "type": "boolean" },
+        "structured_output": { "enum": ["unsupported", "json_schema"] },
         "tool_calling": { "type": "boolean" },
         "vision": { "type": "boolean" },
         "thinking": { "type": "boolean" },

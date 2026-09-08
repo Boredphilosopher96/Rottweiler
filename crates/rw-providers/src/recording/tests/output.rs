@@ -162,15 +162,19 @@ async fn routed_structured_contract_is_validated_before_discovery_and_cannot_be_
         crate::RetryPolicy::default(),
     )
     .expect("router");
-    let events: Vec<_> = router
+    let stream = router
         .stream_alias(
             "structured",
             structured_request(),
             crate::attempt::fixture_gate(),
         )
-        .expect("route")
-        .collect()
-        .await;
+        .expect("route");
+    OutputValidation::require_installed(
+        &stream,
+        crate::output_schema::fingerprint(&structured_request().output).expect("contract"),
+    )
+    .expect("router preserves output custody");
+    let events: Vec<_> = stream.collect().await;
     assert!(events.iter().all(Result::is_ok));
     assert_eq!(
         events

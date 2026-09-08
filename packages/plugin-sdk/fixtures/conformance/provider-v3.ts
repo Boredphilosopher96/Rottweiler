@@ -30,7 +30,7 @@ export const plugin = definePlugin({
           id: "vision-thinking",
           display_name: "Vision Thinking",
           capabilities: {
-            structured_output: false, tool_calling: true,
+            structured_output: "unsupported", tool_calling: true,
             vision: true,
             thinking: true,
             cache_breakpoints: "explicit",

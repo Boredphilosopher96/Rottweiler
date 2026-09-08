@@ -134,6 +134,16 @@ impl OpenAiCompatibleProvider {
     ///
     /// Returns an error when the configured proxy cannot initialize an HTTP client.
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, ProviderError> {
+        if config
+            .extra_body
+            .iter()
+            .any(|(key, value)| rw_types::config::provider_body_field_is_controlled(key, value))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "extra provider body overrides an engine-controlled field",
+            ));
+        }
         let client = build_client_with_proxy_auth(
             config.proxy.as_ref(),
             config.proxy_authentication.as_ref(),

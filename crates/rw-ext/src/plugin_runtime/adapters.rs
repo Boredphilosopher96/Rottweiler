@@ -345,7 +345,9 @@ impl RpcProviderAdapter {
                 },
                 pricing: pricing.clone(),
             };
-            if model.capabilities.structured_output {
+            if model.capabilities.structured_output
+                == rw_plugin_protocol::ProviderStructuredOutputSupport::JsonSchema
+            {
                 structured_models.insert(model.id.clone());
             }
             metadata_by_model.insert(model.id.clone(), model_metadata.clone());

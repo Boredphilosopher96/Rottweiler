@@ -131,7 +131,7 @@ impl OutputValidation {
             if !finished { Err(invalid_response("structured output ended without completion"))?; }
             drop(source);
             let work = rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || work.validate()).await
-                .map_err(worker_error)??;
+                .map_err(|error| worker_error(&error))??;
             let mut offset = 0;
             while offset < work.text.len() {
                 let mut end = work.text.len().min(offset + 16 * 1024);
@@ -173,7 +173,7 @@ fn invalid_response(message: &'static str) -> ProviderError {
     ProviderError::new(ProviderErrorKind::Protocol, message)
 }
 
-fn worker_error(error: rw_resources::WorkError) -> ProviderError {
+fn worker_error(error: &rw_resources::WorkError) -> ProviderError {
     let kind = match error {
         rw_resources::WorkError::Admission(_) => ProviderErrorKind::ResourceExhausted,
         rw_resources::WorkError::Worker(_) => ProviderErrorKind::Protocol,

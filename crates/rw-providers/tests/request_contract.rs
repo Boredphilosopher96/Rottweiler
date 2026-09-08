@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 fn request() -> Value {
     json!({
-        "model": "fixture", "turns": [], "tools": [], "tool_choice": {"mode": "auto"},
+        "model": "fixture", "turns": [], "tools": [], "output": {"mode":"text"}, "tool_choice": {"mode": "auto"},
         "max_output_tokens": 64, "temperature": null, "thinking": "off", "cache_hint": null
     })
 }
@@ -17,6 +17,7 @@ fn provider_request_requires_its_complete_envelope() -> Result<(), Box<dyn std::
         "turns",
         "tools",
         "tool_choice",
+        "output",
         "max_output_tokens",
         "temperature",
         "thinking",

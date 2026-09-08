@@ -23,7 +23,7 @@ impl PluginRpcClient for Client {
     async fn request(&self, method: &str, _: Value) -> Result<Value, PluginRpcError> {
         assert_eq!(method, METHOD_PROVIDER_MODELS);
         Ok(
-            json!({"models":[{"id":"model","capabilities":{"structured_output":true,"tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"}}]}),
+            json!({"models":[{"id":"model","capabilities":{"structured_output":"json_schema","tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"}}]}),
         )
     }
     async fn provider_stream(

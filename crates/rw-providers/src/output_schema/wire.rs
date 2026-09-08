@@ -1,4 +1,4 @@
-//! Official OpenAI strict schema projection. Generic compatible dialects do not opt in.
+//! Official `OpenAI` strict schema projection. Generic compatible dialects do not opt in.
 use super::{OutputContract, OutputSchema};
 use serde_json::{Map, Value, json};
 

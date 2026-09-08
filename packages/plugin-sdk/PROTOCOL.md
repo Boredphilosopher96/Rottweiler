@@ -270,8 +270,8 @@ field set, so schema changes update capture and validation together.
 ## Structured provider responses
 
 `ProviderRequest.output` is required: use `{ "mode": "text" }` for normal
-streaming. A model catalog's required `structured_output` boolean declares
-support for `{ "mode": "json_schema", "name": "result", "schema": ... }`.
+streaming. A model catalog's required `structured_output: "unsupported" | "json_schema"` declares
+its output dialect for `{ "mode": "json_schema", "name": "result", "schema": ... }`.
 The finite schema types are exported as `OutputContract`, `OutputSchema`, and
 `OutputField`. Objects require every declared field and reject extras; use
 `nullable` for a present field that can contain null. References, unknown

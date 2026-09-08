@@ -480,7 +480,7 @@ function validateProviderModelsResponse(response: ProviderModelsResponse): void 
       "structured_output", "tool_calling", "vision", "thinking", "cache_breakpoints",
     ])
     if (
-      typeof model.capabilities.structured_output !== "boolean"
+      !["unsupported", "json_schema"].includes(model.capabilities.structured_output)
       || typeof model.capabilities.tool_calling !== "boolean"
       || typeof model.capabilities.vision !== "boolean"
       || typeof model.capabilities.thinking !== "boolean"

@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt as _;
 
 /// Fully composed provider registry and provider-blind model router.
 pub struct ProviderRuntime {

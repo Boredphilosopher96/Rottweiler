@@ -308,6 +308,8 @@ impl ProviderRouter {
         if candidates.is_empty() {
             return Err(RouterError::AliasNotConfigured(alias.to_owned()));
         }
+        let output_contract = crate::output_schema::fingerprint(&request.output)
+            .map_err(|error| RouterError::OperationAdmission(error.to_string()))?;
         let providers = self.providers.clone();
         let operations = self.operations.clone();
         let retry = self.retry.clone();
@@ -418,7 +420,9 @@ impl ProviderRouter {
                 "all configured model candidates failed before producing output",
             )));
         };
-        Ok(crate::BoxEventStream::new(event_stream))
+        let mut stream = crate::BoxEventStream::new(event_stream);
+        stream.output_contract = output_contract;
+        Ok(stream)
     }
 }
 

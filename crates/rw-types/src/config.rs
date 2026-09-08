@@ -1,5 +1,8 @@
 //! Typed configuration schema shared by the engine and SDK consumers.
 
+mod provider_body;
+pub use provider_body::provider_body_field_is_controlled;
+
 use rw_memory_derive::PrepareAllocation as Allocation;
 use std::collections::BTreeMap;
 
@@ -427,24 +430,8 @@ impl ProviderConfig {
             ));
         }
 
-        for key in self.extra_body.keys() {
-            let lower = key.to_ascii_lowercase();
-            if matches!(
-                lower.as_str(),
-                "model"
-                    | "messages"
-                    | "input"
-                    | "tools"
-                    | "tool_choice"
-                    | "stream"
-                    | "stream_options"
-                    | "max_tokens"
-                    | "max_completion_tokens"
-                    | "max_output_tokens"
-                    | "temperature"
-            ) || lower == "reasoning"
-                || lower.starts_with("reasoning_")
-            {
+        for (key, value) in &self.extra_body {
+            if provider_body_field_is_controlled(key, value) {
                 return Err(format!(
                     "extra_body field {key:?} is engine-controlled and cannot be overridden"
                 ));
