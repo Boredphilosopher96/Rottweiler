@@ -3,190 +3,61 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 import { afterEach, describe, expect, test } from "bun:test"
+import { runOwnedProcess } from "./support/owned-process"
+
+const HARNESS_DEADLINE_MS = 20_000
+// Two serial renderers plus artifact comparison; product latency has separate gates.
+const PROOF_DEADLINE_MS = 60_000
 
 describe("TUI visual evidence", () => {
-  let evidenceDirectory: string | null = null
+  const evidenceDirectories: string[] = []
 
   afterEach(async () => {
-    if (evidenceDirectory !== null) {
-      await rm(evidenceDirectory, { recursive: true, force: true })
-      evidenceDirectory = null
+    for (const directory of evidenceDirectories.splice(0)) {
+      await rm(directory, { recursive: true, force: true })
     }
   })
 
-  test("emits terminal-native ANSI evidence and no character SVG", async () => {
-    evidenceDirectory = await mkdtemp(join(tmpdir(), "rottweiler-svg-test-"))
-    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
-    const process = Bun.spawn(["bun", "run", harness, "conversation", evidenceDirectory], {
-      cwd: resolve(import.meta.dir, ".."),
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const [exitCode, stderr] = await Promise.all([
-      process.exited,
-      new Response(process.stderr).text(),
-    ])
+  async function render(scenario: string): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), `rottweiler-${scenario}-test-`))
+    evidenceDirectories.push(directory)
+    const { code, stderr } = await runOwnedProcess(
+      [process.execPath, "run", resolve(import.meta.dir, "../scripts/tui-visual-harness.ts"), scenario, directory],
+      { cwd: resolve(import.meta.dir, ".."), timeoutMs: HARNESS_DEADLINE_MS },
+    )
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
+    return directory
+  }
 
-    expect(stderr).toBe("")
-    expect(exitCode).toBe(0)
-    const ansiPath = join(evidenceDirectory, "conversation.ansi")
-    const pngPath = join(evidenceDirectory, "conversation.png")
-    const svgPath = join(evidenceDirectory, "conversation.svg")
-    expect(await Bun.file(ansiPath).exists()).toBeTrue()
-    expect(await Bun.file(pngPath).exists()).toBeTrue()
-    expect(await Bun.file(svgPath).exists()).toBeFalse()
-    const ansi = await Bun.file(ansiPath).text()
+  test("emits terminal-native ANSI evidence and no character SVG", async () => {
+    const directory = await render("conversation")
+    expect(await Bun.file(join(directory, "conversation.ansi")).exists()).toBeTrue()
+    expect(await Bun.file(join(directory, "conversation.png")).exists()).toBeTrue()
+    expect(await Bun.file(join(directory, "conversation.svg")).exists()).toBeFalse()
+    const ansi = await Bun.file(join(directory, "conversation.ansi")).text()
     const visible = ansi.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
     expect(visible).toContain("reasoning")
     expect(visible).toContain("edit  core/cursor.rs")
-  })
+  }, PROOF_DEADLINE_MS)
 
-  test("proves the production theme browser deterministically without character SVG", async () => {
-    const firstDirectory = await mkdtemp(join(tmpdir(), "rottweiler-theme-browser-first-"))
-    const secondDirectory = await mkdtemp(join(tmpdir(), "rottweiler-theme-browser-second-"))
-    evidenceDirectory = firstDirectory
-    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
-    const run = (directory: string) => Bun.spawn(
-      ["bun", "run", harness, "theme-browser", directory],
-      { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
-    )
-    const first = run(firstDirectory)
-    const [firstExit, firstStderr] = await Promise.all([
-      first.exited,
-      new Response(first.stderr).text(),
-    ])
-
-    expect(firstStderr).toBe("")
-    expect(firstExit).toBe(0)
-    const second = run(secondDirectory)
-    const [secondExit, secondStderr] = await Promise.all([
-      second.exited,
-      new Response(second.stderr).text(),
-    ])
-    expect(secondStderr).toBe("")
-    expect(secondExit).toBe(0)
-
-    for (const extension of ["txt", "ansi", "png", "json"]) {
-      const firstArtifact = Bun.file(join(firstDirectory, `theme-browser.${extension}`))
-      const secondArtifact = Bun.file(join(secondDirectory, `theme-browser.${extension}`))
-      expect(await firstArtifact.exists()).toBeTrue()
-      expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
-    }
-    expect(await Bun.file(join(firstDirectory, "theme-browser.svg")).exists()).toBeFalse()
-    const proof = await Bun.file(join(firstDirectory, "theme-browser.json")).json()
-    expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
-
-    await rm(secondDirectory, { recursive: true, force: true })
-  })
-
-  test("proves the production settings browser at wide and narrow sizes deterministically", async () => {
-    const firstDirectory = await mkdtemp(join(tmpdir(), "rottweiler-settings-browser-first-"))
-    const secondDirectory = await mkdtemp(join(tmpdir(), "rottweiler-settings-browser-second-"))
-    evidenceDirectory = firstDirectory
-    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
-    const run = (directory: string) => Bun.spawn(
-      ["bun", "run", harness, "settings-browser", directory],
-      { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
-    )
-
-    const first = run(firstDirectory)
-    const [firstExit, firstStderr] = await Promise.all([
-      first.exited,
-      new Response(first.stderr).text(),
-    ])
-    expect(firstStderr).toBe("")
-    expect(firstExit).toBe(0)
-
-    const second = run(secondDirectory)
-    const [secondExit, secondStderr] = await Promise.all([
-      second.exited,
-      new Response(second.stderr).text(),
-    ])
-    expect(secondStderr).toBe("")
-    expect(secondExit).toBe(0)
-
-    for (const artifact of ["settings-browser", "settings-browser-narrow"]) {
-      for (const extension of ["txt", "ansi", "png", "json"]) {
-        const firstArtifact = Bun.file(join(firstDirectory, `${artifact}.${extension}`))
-        const secondArtifact = Bun.file(join(secondDirectory, `${artifact}.${extension}`))
-        expect(await firstArtifact.exists()).toBeTrue()
-        expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
+  for (const scenario of ["theme-browser", "settings-browser", "mcp-browser", "session-review"]) {
+    test(`proves the production ${scenario} deterministically at each supported size`, async () => {
+      const first = await render(scenario)
+      const second = await render(scenario)
+      const artifacts = scenario === "theme-browser" ? [scenario] : [scenario, `${scenario}-narrow`]
+      for (const artifact of artifacts) {
+        for (const extension of ["txt", "ansi", "png", "json"]) {
+          const firstArtifact = Bun.file(join(first, `${artifact}.${extension}`))
+          const secondArtifact = Bun.file(join(second, `${artifact}.${extension}`))
+          expect(await firstArtifact.exists()).toBeTrue()
+          expect(await secondArtifact.exists()).toBeTrue()
+          expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
+        }
+        expect(await Bun.file(join(first, `${artifact}.svg`)).exists()).toBeFalse()
+        const proof = await Bun.file(join(first, `${artifact}.json`)).json()
+        expect(proof.assertions.length).toBeGreaterThan(0)
+        expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
       }
-      expect(await Bun.file(join(firstDirectory, `${artifact}.svg`)).exists()).toBeFalse()
-      const proof = await Bun.file(join(firstDirectory, `${artifact}.json`)).json()
-      expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
-    }
-
-    await rm(secondDirectory, { recursive: true, force: true })
-  })
-
-  test("proves the production MCP browser at wide and narrow sizes deterministically", async () => {
-    const firstDirectory = await mkdtemp(join(tmpdir(), "rottweiler-mcp-browser-first-"))
-    const secondDirectory = await mkdtemp(join(tmpdir(), "rottweiler-mcp-browser-second-"))
-    evidenceDirectory = firstDirectory
-    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
-    const run = (directory: string) => Bun.spawn(
-      ["bun", "run", harness, "mcp-browser", directory],
-      { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
-    )
-
-    for (const directory of [firstDirectory, secondDirectory]) {
-      const process = run(directory)
-      const [exitCode, stderr] = await Promise.all([
-        process.exited,
-        new Response(process.stderr).text(),
-      ])
-      expect(stderr).toBe("")
-      expect(exitCode).toBe(0)
-    }
-
-    for (const artifact of ["mcp-browser", "mcp-browser-narrow"]) {
-      for (const extension of ["txt", "ansi", "png", "json"]) {
-        const firstArtifact = Bun.file(join(firstDirectory, `${artifact}.${extension}`))
-        const secondArtifact = Bun.file(join(secondDirectory, `${artifact}.${extension}`))
-        expect(await firstArtifact.exists()).toBeTrue()
-        expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
-      }
-      expect(await Bun.file(join(firstDirectory, `${artifact}.svg`)).exists()).toBeFalse()
-      const proof = await Bun.file(join(firstDirectory, `${artifact}.json`)).json()
-      expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
-    }
-
-    await rm(secondDirectory, { recursive: true, force: true })
-  })
-
-  test("proves the production session review at wide and narrow sizes deterministically", async () => {
-    const firstDirectory = await mkdtemp(join(tmpdir(), "rottweiler-session-review-first-"))
-    const secondDirectory = await mkdtemp(join(tmpdir(), "rottweiler-session-review-second-"))
-    evidenceDirectory = firstDirectory
-    const harness = resolve(import.meta.dir, "../scripts/tui-visual-harness.ts")
-    const run = (directory: string) => Bun.spawn(
-      ["bun", "run", harness, "session-review", directory],
-      { cwd: resolve(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
-    )
-
-    for (const directory of [firstDirectory, secondDirectory]) {
-      const process = run(directory)
-      const [exitCode, stderr] = await Promise.all([
-        process.exited,
-        new Response(process.stderr).text(),
-      ])
-      expect(stderr).toBe("")
-      expect(exitCode).toBe(0)
-    }
-
-    for (const artifact of ["session-review", "session-review-narrow"]) {
-      for (const extension of ["txt", "ansi", "png", "json"]) {
-        const firstArtifact = Bun.file(join(firstDirectory, `${artifact}.${extension}`))
-        const secondArtifact = Bun.file(join(secondDirectory, `${artifact}.${extension}`))
-        expect(await firstArtifact.exists()).toBeTrue()
-        expect(await firstArtifact.arrayBuffer()).toEqual(await secondArtifact.arrayBuffer())
-      }
-      expect(await Bun.file(join(firstDirectory, `${artifact}.svg`)).exists()).toBeFalse()
-      const proof = await Bun.file(join(firstDirectory, `${artifact}.json`)).json()
-      expect(proof.assertions.every((assertion: { passed: boolean }) => assertion.passed)).toBeTrue()
-    }
-
-    await rm(secondDirectory, { recursive: true, force: true })
-  })
+    }, PROOF_DEADLINE_MS)
+  }
 })

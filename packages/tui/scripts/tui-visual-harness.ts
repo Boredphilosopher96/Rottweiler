@@ -24,15 +24,16 @@ if (!isVisualScenario(scenarioInput)) {
   throw new Error(`Unknown scenario: ${scenarioInput}`)
 }
 const outputDirectory = resolve(process.argv[3] ?? `/tmp/rottweiler-tui-evidence/${scenarioInput}`)
-const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+// The invoking process owner handles termination. Renderer signal handlers must
+// not dispose native buffers while the evidence task can still capture them.
+const setup = await createTestRenderer({ width: 110, height: 32, useThread: false, exitSignals: [] })
 const parserDataPath = await mkdtemp(join(tmpdir(), "rottweiler-visual-"))
 const treeSitter = new TreeSitterClient({
   dataPath: parserDataPath,
   workerPath: resolve(import.meta.dir, "../node_modules/@opentui/core/parser.worker.js"),
 })
-await treeSitter.initialize()
-
 try {
+  await treeSitter.initialize()
   const app = createRottweilerApp(setup.renderer, { sessionReader: sessionReaderFor([conversationItem(1, "user", "Add reconnect-safe streaming. The cursor double-advances after a dropped SSE connection.")]),
     initialState: scenarioState(scenarioInput),
     requestId: () => "visual-proof-request",

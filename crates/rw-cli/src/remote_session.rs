@@ -156,7 +156,7 @@ async fn run_remote_session(
     let config = remote::RemoteConfig {
         ssh_executable: std::env::var_os("ROTTWEILER_SSH_BIN")
             .map_or_else(|| PathBuf::from("/usr/bin/ssh"), PathBuf::from),
-        host: host.to_owned(),
+        host: host.clone(),
         remote_rw_executable: std::env::var_os("ROTTWEILER_REMOTE_RW")
             .map_or_else(|| PathBuf::from("/usr/local/bin/rw"), PathBuf::from),
         remote_socket,
@@ -205,7 +205,7 @@ async fn run_remote_session(
             token_file: local_paths.token.clone(),
             session_id: SessionId(session_id.clone()),
             target: shell_broker::ShellTarget::Remote {
-                host: host.to_owned(),
+                host: host.clone(),
             },
         },
         broker_ready,

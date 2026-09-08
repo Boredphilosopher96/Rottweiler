@@ -53,8 +53,8 @@ incremental = false
 [profile.release]
 strip = true
 # Official release builds route through scripts/cargo-release.sh. Its native
-# macOS profile uses the measured speed winner; Linux retains its independently
-# size-qualified `s` override until the same comparison runs there.
+# macOS profile optimizes execution speed; Linux uses its platform-specific
+# `s` override to fit the native distribution size budget.
 opt-level = 3
 lto = "fat"
 codegen-units = 1
