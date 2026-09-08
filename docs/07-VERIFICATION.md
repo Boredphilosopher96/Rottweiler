@@ -309,8 +309,8 @@ deadlines cover their serial proofs and cleanup; product latency gates are separ
 
 Nested Python verification owners opt into a bounded settlement channel. Each
 child is registered before launch and released after its actual process owner
-reaps it; only then may the wrapper acknowledge closure. Cancellation gives the
-wrapper five seconds to settle its children. Forced wrapper death, missing
+reaps it; only then may the wrapper acknowledge closure. Cancellation uses the
+shared physical-retirement deadline described below. Forced wrapper death, missing
 closure, or an incomplete spawn handoff is `UNSETTLED` and stops subsequent
 gates. Delegated PID records are diagnostic identities, never authority to kill
 a possibly reused process. This contract covers participating process owners;
