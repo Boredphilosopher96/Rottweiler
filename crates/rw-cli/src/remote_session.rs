@@ -204,9 +204,7 @@ async fn run_remote_session(
             socket: local_paths.socket.clone(),
             token_file: local_paths.token.clone(),
             session_id: SessionId(session_id.clone()),
-            target: shell_broker::ShellTarget::Remote {
-                host: host.clone(),
-            },
+            target: shell_broker::ShellTarget::Remote { host: host.clone() },
         },
         broker_ready,
     ));
