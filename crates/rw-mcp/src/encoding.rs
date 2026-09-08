@@ -41,28 +41,39 @@ impl EncodingWork {
     }
 }
 
+struct EncodingSource {
+    encoder: Arc<dyn StructuredResponseEncoder>,
+    value: Value,
+}
+impl EncodingSource {
+    fn run(self) -> Result<EncodedPayload, McpError> {
+        let source = AllocationPlan::new(self.value)
+            .map_err(|_| McpError::Encoding("MCP response allocation is unsupported".into()))?;
+        let working = self.encoder.working_bytes(source.value())?;
+        let bytes = source
+            .bytes()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(working))
+            .ok_or_else(|| {
+                McpError::Encoding("MCP encoding allocation exceeds its contract".into())
+            })?;
+        let retained = Allocation::new(bytes)?;
+        EncodingWork {
+            encoder: self.encoder,
+            source,
+            retained,
+        }
+        .run()
+    }
+}
+
 pub(crate) async fn encode(
     encoder: Arc<dyn StructuredResponseEncoder>,
     value: Value,
 ) -> Result<EncodedPayload, McpError> {
-    let source = AllocationPlan::new(value)
-        .map_err(|_| McpError::Encoding("MCP response allocation is unsupported".into()))?;
-    let bytes = source
-        .bytes()
-        .checked_mul(2)
-        .and_then(|source_bytes| {
-            encoder
-                .working_bytes(source.value())
-                .ok()?
-                .checked_add(source_bytes)
-        })
-        .ok_or_else(|| McpError::Encoding("MCP encoding allocation exceeds its contract".into()))?;
-    let retained = Allocation::new(bytes)?;
-    let owner = EncodingWork {
-        encoder,
-        source,
-        retained,
-    };
+    // Shape/count traversal can scan the whole response. It belongs to the same
+    // admitted CPU worker as preparation and encoding, before any new body allocation.
+    let owner = EncodingSource { encoder, value };
     rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || owner.run())
         .await
         .map_err(|error| McpError::Encoding(error.to_string()))?
