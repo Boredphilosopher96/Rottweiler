@@ -20,7 +20,7 @@ use crate::registry::{
 use crate::symbols::WorkspaceSymbolIndex;
 
 mod io;
-mod operations;
+pub(crate) mod operations;
 mod transaction;
 
 use io::{atomic_write, atomic_write_if_unchanged, read_capped, read_capped_snapshot};

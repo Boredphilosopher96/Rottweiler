@@ -15,7 +15,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 type Proof = Option<Result<(), Arc<str>>>;
 
 #[derive(Clone)]
-pub(super) struct FileOperations(Arc<Operations>);
+pub(crate) struct FileOperations(Arc<Operations>);
 struct Operations {
     admission: Arc<Semaphore>,
     next_id: AtomicU64,
@@ -65,7 +65,7 @@ impl std::fmt::Debug for FileOperations {
     }
 }
 impl FileOperations {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_limits(16, Duration::from_secs(30))
     }
     fn with_limits(maximum: usize, proof_timeout: Duration) -> Self {
@@ -75,6 +75,16 @@ impl FileOperations {
             calls: Mutex::new(HashMap::new()),
             proof_timeout,
         }))
+    }
+
+    /// Execute a readonly filesystem kernel under the same physical settlement owner.
+    pub(crate) async fn read<T: Send + 'static>(
+        &self,
+        context: ToolContext,
+        operation: impl FnOnce(&ToolContext) -> Result<T, ToolError> + Send + 'static,
+    ) -> Result<T, ToolError> {
+        self.run(context, move |context, _transaction| operation(context))
+            .await
     }
 
     pub(super) async fn run<T: Send + 'static>(
@@ -165,7 +175,7 @@ impl FileOperations {
         result?.result
     }
 
-    pub(super) async fn settle(&self) -> Result<(), ToolError> {
+    pub(crate) async fn settle(&self) -> Result<(), ToolError> {
         if self.0.admission.is_closed() {
             return Err(ToolError::EffectsUnsettled(
                 "file operation owner is quarantined".to_owned(),
