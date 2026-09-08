@@ -99,13 +99,22 @@ export async function exerciseHistory(app: RottweilerApp, fixture: MemoryFixture
   await reveal(String(fixture.historyRows - 1), "latest-after-reconnect")
   app.openSessionPicker()
   const deadline = performance.now() + 10_000
-  while (!app.picker.select.options.some(option => option.value === "sessions.new")) {
+  await render()
+  while (!app.picker.visible || !app.picker.input.visible || app.picker.input.width === 0
+    || setup.renderer.currentFocusedRenderable !== app.picker.input
+    || !app.picker.select.options.some(option => option.value === "sessions.new")) {
     if (performance.now() >= deadline) throw new Error("session picker did not become editable")
     await Bun.sleep(1); await render()
   }
+  // A remote option can arrive before the editable modal is presented. Send
+  // terminal bytes only to the focused input after its native layout has run.
+  const inputBefore = { focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, visible: app.picker.visible, query: app.picker.input.value }
   await setup.mockInput.typeText("needle-in-message")
+  const inputAfter = { focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, visible: app.picker.visible, query: app.picker.input.value }
   while (!app.picker.select.options.some(option => option.value === "memory-probe")) {
-    if (performance.now() >= deadline) throw new Error(`indexed search result was filtered out of the picker: ${JSON.stringify({ focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, composer: app.composer.value.slice(0, 100), query: app.picker.input.value, results: app.state.sessionSearch, options: app.picker.select.options.map(option => option.value), errors: app.state.errors.slice(-3) })}`)
+    requireThat(app.picker.input.value === "needle-in-message",
+      `session search lost its terminal query: ${JSON.stringify({ inputBefore, inputAfter, query: app.picker.input.value })}`)
+    if (performance.now() >= deadline) throw new Error(`indexed search result was filtered out of the picker: ${JSON.stringify({ inputBefore, inputAfter, focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, composer: app.composer.value.slice(0, 100), query: app.picker.input.value, results: app.state.sessionSearch, options: app.picker.select.options.map(option => option.value), errors: app.state.errors.slice(-3) })}`)
     await Bun.sleep(1); await render()
   }
   app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "memory-probe"))

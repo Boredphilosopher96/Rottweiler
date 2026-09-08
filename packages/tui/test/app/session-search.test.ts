@@ -11,6 +11,8 @@ async function fixture(match: SessionSearchMatch | null, failure = false) {
   const setup = await createTestRenderer({ width: 100, height: 30, useThread: false })
   const reads: { session: string; read: TranscriptRead }[] = []
   const switches: string[] = []
+  const searchStarted = Promise.withResolvers<void>()
+  const releaseSearch = Promise.withResolvers<void>()
   let app!: RottweilerApp
   app = createRottweilerApp(setup.renderer, {
     sessionId: "origin", treeSitterClient: new MockTreeSitterClient(),
@@ -32,6 +34,7 @@ async function fixture(match: SessionSearchMatch | null, failure = false) {
       await Bun.sleep(0)
       const meta = { ...command.meta, emitted_at: "2026-09-08T00:00:00Z" }
       if (command.type === "list_sessions") app.handleEvent({ type: "sessions_listed", meta, sessions: [] })
+      if (command.type === "search_sessions") { searchStarted.resolve(); await releaseSearch.promise }
       if (command.type === "search_sessions") app.handleEvent({ type: "sessions_search_ready", meta, query: command.query, truncated: false,
         hits: [{ session: { session_id: "matched", title: "Different title", workspace_name: "Workspace", model: "fast", driver_client_id: null, shell_active: false }, match }] })
       return { type: "accepted" }
@@ -44,6 +47,18 @@ async function fixture(match: SessionSearchMatch | null, failure = false) {
   await waitForHistory(setup, () => app.picker.select.options.some(option => option.value === "sessions.new"))
   expect(setup.renderer.currentFocusedRenderable).toBe(app.picker.input)
   await setup.mockInput.typeText("body-only-needle")
+  await searchStarted.promise
+  try {
+    // A state update while the remote search is pending must not reset its
+    // editable query merely because the previous session list was empty.
+    app.setState({ ...app.state })
+    await setup.renderOnce()
+    expect(app.picker.input.value).toBe("body-only-needle")
+    expect(app.picker.input.visible).toBeTrue()
+    expect(setup.renderer.currentFocusedRenderable).toBe(app.picker.input)
+  } catch (error) {
+    app.destroy(); setup.renderer.destroy(); throw error
+  } finally { releaseSearch.resolve() }
   await waitForHistory(setup, () => app.picker.select.options.some(option => option.value === "matched"))
   app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "matched"))
   app.picker.select.selectCurrent(); await setup.flush()

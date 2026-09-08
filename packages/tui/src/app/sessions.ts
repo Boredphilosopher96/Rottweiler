@@ -339,6 +339,7 @@ export class SessionUiController {
 
   openSessionPicker(): void {
     this.#sessionActionId = null
+    this.#host.picker.input.value = ""
     this.#host.pickerController.begin("sessions")
     this.#host.requests.command({ type: "list_sessions" })
     this.#host.pickerController.refresh()
@@ -702,7 +703,8 @@ export class SessionUiController {
         if (
           sessionError === undefined &&
           this.#host.requests.current("sessions") !== null &&
-          this.#host.state.sessions.length === 0
+          this.#host.state.sessions.length === 0 &&
+          this.#host.picker.input.value.length === 0
         ) {
           this.#host.pickerController.showLoading("Sessions", "Loading sessions")
           break
