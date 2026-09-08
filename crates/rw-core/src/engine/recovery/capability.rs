@@ -98,6 +98,14 @@ pub struct HistoryRead<T> {
     value: T,
     owner: Box<dyn Send + Sync>,
 }
+impl<T: std::fmt::Debug> std::fmt::Debug for HistoryRead<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("HistoryRead")
+            .field(&self.value)
+            .finish()
+    }
+}
 impl<T> HistoryRead<T> {
     /// Transfer the materialization and its already-acquired allowance together.
     #[must_use]
