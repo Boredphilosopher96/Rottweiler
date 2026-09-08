@@ -66,6 +66,7 @@ mod supervisor;
 #[allow(dead_code)]
 mod tty;
 mod tui_config;
+mod tui_launch;
 mod upgrade;
 
 fn main() -> Result<()> {

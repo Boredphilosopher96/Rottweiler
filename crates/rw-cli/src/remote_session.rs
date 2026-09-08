@@ -241,16 +241,21 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         }
         return Err(error);
     }
-    let tui = run_remote_tui_process(
-        js_host_executable,
-        &local_paths,
-        &fork_operation_directory,
-        &session_id,
-        tui_keybindings.as_deref(),
-    );
-    tokio::pin!(tui);
+    let cursor = local_paths.directory.join("last-seen");
+    let mut tui = crate::tui_launch::TuiProcess::start(&crate::tui_launch::TuiLaunch {
+        executable: &js_host_executable,
+        socket: &local_paths.socket,
+        token_file: &local_paths.token,
+        session_id: &session_id,
+        last_seen_file: &cursor,
+        fork_operation_directory: &fork_operation_directory,
+        keybindings: tui_keybindings.as_deref(),
+        theme: "",
+        replay: false,
+    });
     let result = tokio::select! {
-        result = &mut tui => result,
+        result = tui.wait() => result.into_diagnostic(),
+        signal = wait_for_remote_shutdown_signal() => signal.into_diagnostic(),
         result = &mut broker => match result {
             Ok(Ok(())) => Err(miette!("foreground-shell broker stopped unexpectedly")),
             Ok(Err(error)) => Err(miette!(error.to_string())),
@@ -262,6 +267,8 @@ pub(super) async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
             Err(error) => Err(miette!(error.to_string())),
         },
     };
+    let tui_cleanup = tui.shutdown().await.into_diagnostic();
+    let result = result.and(tui_cleanup);
     broker.abort();
     let remote_shutdown = finish_remote_watchdog(
         &watchdog_control,
@@ -582,60 +589,6 @@ pub(super) async fn wait_for_socket_or_child(
     }
 }
 
-pub(super) async fn run_remote_tui_process(
-    tui: PathBuf,
-    paths: &server::ServerRuntimePaths,
-    fork_operation_directory: &Path,
-    session_id: &str,
-    keybindings: Option<&str>,
-) -> Result<()> {
-    use std::process::Stdio;
-
-    let cursor = paths.directory.join("last-seen");
-    for attempt in 0..=5_u8 {
-        let mut command = tokio::process::Command::new(&tui);
-        command
-            .arg(rw_types::release_contract::JS_HOST_TUI_ROLE)
-            .env_remove("ROTTWEILER_TUI_KEYBINDINGS")
-            .env("ROTTWEILER_ENGINE_SOCKET", &paths.socket)
-            .env("ROTTWEILER_ENGINE_TOKEN_FILE", &paths.token)
-            .env("ROTTWEILER_SESSION_ID", session_id)
-            .env("ROTTWEILER_LAST_SEEN_FILE", &cursor)
-            .env(
-                "ROTTWEILER_FORK_OPERATION_DIRECTORY",
-                fork_operation_directory,
-            )
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        if let Some(keybindings) = keybindings {
-            command.env("ROTTWEILER_TUI_KEYBINDINGS", keybindings);
-        }
-        let mut child = command.spawn().into_diagnostic()?;
-        let status = tokio::select! {
-            status = child.wait() => status.into_diagnostic()?,
-            interrupted = wait_for_remote_shutdown_signal() => {
-                interrupted.into_diagnostic()?;
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Ok(());
-            }
-        };
-        if status.success() {
-            return Ok(());
-        }
-        if attempt == 5 {
-            return Err(miette!("remote TUI restart budget exhausted"));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(
-            50_u64.saturating_mul(1_u64 << attempt),
-        ))
-        .await;
-    }
-    Err(miette!("remote TUI stopped unexpectedly"))
-}
-
 #[cfg(unix)]
 pub(super) async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -651,39 +604,4 @@ pub(super) async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
 #[cfg(not(unix))]
 pub(super) async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn remote_client_selects_the_tui_role_on_every_process_start() {
-        let root = tempfile::tempdir().expect("runtime");
-        let executable = root.path().join("host");
-        fs::write(
-            &executable,
-            "#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = tui ] || exit 64\n\
-             marker=\"$ROTTWEILER_FORK_OPERATION_DIRECTORY/started\"\n\
-             if [ ! -f \"$marker\" ]; then printf first > \"$marker\"; exit 75; fi\n\
-             printf restarted > \"$marker\"\n",
-        )
-        .expect("host fixture");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).expect("executable");
-        let paths = server::ServerRuntimePaths {
-            directory: root.path().to_owned(),
-            socket: root.path().join("engine.sock"),
-            token: root.path().join("token"),
-            descriptor: root.path().join("descriptor"),
-        };
-        run_remote_tui_process(executable, &paths, root.path(), "remote-session", None)
-            .await
-            .expect("remote client restart");
-        assert_eq!(
-            fs::read_to_string(root.path().join("started")).expect("start receipt"),
-            "restarted"
-        );
-    }
 }

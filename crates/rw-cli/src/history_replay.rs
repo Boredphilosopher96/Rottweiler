@@ -310,28 +310,28 @@ pub(super) async fn run_history_replay_with_tui(
     let state = server::ServerState::new(engine, &runtime);
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     let server_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
-    let mut command = tokio::process::Command::new(tui);
-    command.arg(rw_types::release_contract::JS_HOST_TUI_ROLE);
-    command
-        .env_remove("ROTTWEILER_TUI_KEYBINDINGS")
-        .env("ROTTWEILER_ENGINE_SOCKET", &runtime.paths.socket)
-        .env("ROTTWEILER_ENGINE_TOKEN_FILE", &runtime.paths.token)
-        .env("ROTTWEILER_SESSION_ID", session)
-        .env("ROTTWEILER_REPLAY_MODE", "1")
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
-    if let Some(keybindings) = keybindings {
-        command.env("ROTTWEILER_TUI_KEYBINDINGS", keybindings);
-    }
-    let status = command.status().await;
+    let cursor = runtime.paths.directory.join("last-seen");
+    let fork_operation_directory = storage_root.join("control/pending-forks");
+    let mut client = crate::tui_launch::TuiProcess::start(&crate::tui_launch::TuiLaunch {
+        executable: &tui,
+        socket: &runtime.paths.socket,
+        token_file: &runtime.paths.token,
+        session_id: session,
+        last_seen_file: &cursor,
+        fork_operation_directory: &fork_operation_directory,
+        keybindings: keybindings.as_deref(),
+        theme: "",
+        replay: true,
+    });
+    let result = tokio::select! {
+        result = client.wait() => result.into_diagnostic(),
+        signal = crate::remote_session::wait_for_remote_shutdown_signal() => signal.into_diagnostic(),
+    };
+    let cleanup = client.shutdown().await.into_diagnostic();
     let _ = shutdown.send(true);
     server_task.await.into_diagnostic()??;
     drop(runtime);
-    let status = status.into_diagnostic()?;
-    if !status.success() {
-        return Err(miette!("historical replay TUI exited with status {status}"));
-    }
+    result.and(cleanup)?;
     Ok(())
 }
 

@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     io,
-    os::unix::process::{CommandExt as _, ExitStatusExt as _},
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -30,7 +30,9 @@ const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
 const TUI_THEME_ENV: &str = "ROTTWEILER_TUI_THEME";
 const SUPERVISOR_PID_ENV: &str = crate::parent_death::SUPERVISOR_PID_ENV;
 const ENGINE_STDERR_TAIL_BYTES: usize = 16 * 1024;
-const TUI_RECYCLE_EXIT_CODE: i32 = 75;
+#[cfg(test)]
+use crate::tui_launch::TUI_RECYCLE_EXIT_CODE;
+use crate::tui_launch::{tui_exit_is_recycle, tui_exit_is_user_close};
 
 type ShellBrokerResult = Result<(), crate::shell_broker::ShellBrokerError>;
 type ShellBrokerTask = tokio::task::JoinHandle<ShellBrokerResult>;
@@ -720,16 +722,6 @@ impl<B: ProcessBackend> Supervisor<B> {
     }
 }
 
-fn tui_exit_is_user_close(status: ExitStatus) -> bool {
-    status.success()
-        || status.code() == Some(130)
-        || status.signal() == Some(rustix::process::Signal::INT.as_raw())
-}
-
-fn tui_exit_is_recycle(status: ExitStatus) -> bool {
-    status.code() == Some(TUI_RECYCLE_EXIT_CODE)
-}
-
 #[derive(Clone, Copy)]
 enum RuntimeFileKind {
     Socket,
@@ -832,27 +824,18 @@ fn sanitize_engine_stderr(value: &str, token_file: &Path) -> String {
 }
 
 fn tui_spec(config: &SupervisorConfig, last_seen: Option<SequenceId>) -> ChildSpec {
-    let mut env = connection_env(config, last_seen);
-    if let Some(keybindings) = &config.tui_keybindings {
-        env.insert(
-            OsString::from(TUI_KEYBINDINGS_ENV),
-            OsString::from(keybindings),
-        );
+    crate::tui_launch::TuiLaunch {
+        executable: &config.js_host_executable,
+        socket: &config.socket,
+        token_file: &config.token_file,
+        session_id: &config.session_id,
+        last_seen_file: &config.last_seen_file,
+        fork_operation_directory: &config.fork_operation_directory,
+        keybindings: config.tui_keybindings.as_deref(),
+        theme: &config.tui_theme,
+        replay: false,
     }
-    env.insert(
-        OsString::from(TUI_THEME_ENV),
-        OsString::from(&config.tui_theme),
-    );
-    ChildSpec {
-        program: config.js_host_executable.clone(),
-        args: vec![rw_types::release_contract::JS_HOST_TUI_ROLE.into()],
-        env,
-        stdio: StdioMode::Inherit,
-        // The TUI must remain in `rw`'s foreground process group so it can
-        // actually own the controlling terminal. Foreground shell handover
-        // creates its own child group at the broker boundary.
-        new_process_group: false,
-    }
+    .spec(last_seen)
 }
 
 fn connection_env(
