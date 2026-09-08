@@ -399,9 +399,13 @@ an input with no durable acceptance may be submitted at most three times, while
 an accepted turn or compaction is never replayed and must finish within its
 deadline. Any failure writes a structured `soak-result.json` before the process
 exits so the failing run retains its exact diagnostic instead of deleting the
-only evidence. The harness also kills the TUI once and requires the
-supervisor to attach a new TUI to the same engine PID with the persisted
-transcript intact. It samples combined RSS for the complete supervisor process
+only evidence. Failed runs retain their private scratch directory. Shutdown
+requires the supervisor's successful managed-child cleanup result, final reaping
+of the owned supervisor, and disappearance of observed processes and groups.
+Forced shutdown or missing physical proof reports `UNSETTLED`; observed historical
+PIDs never authorize cleanup signals. The harness stops the unreaped supervisor
+while selecting and killing its current direct TUI child, then resumes it and
+requires a new TUI on the same engine PID with the persisted transcript intact. It samples combined RSS for the complete supervisor process
 tree throughout and fails immediately above 600 MiB. A memory failure retains
 the per-process RSS snapshot and workload counters without persisting command
 arguments or credentials. Nightly and tag-release

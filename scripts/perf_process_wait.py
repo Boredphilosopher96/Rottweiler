@@ -27,14 +27,12 @@ if sys.platform == "darwin" and not hasattr(os, "waitid"):
     _waitid.restype = ctypes.c_int
 
 
-def observe_exit(pid: int) -> int | None:
-    """Return the exit code, leaving this exact child waitable until final reap."""
-    options = os.WEXITED | os.WNOHANG | os.WNOWAIT
+def _observe(pid: int, events: int) -> tuple[int, int] | None:
+    """Return code/status without consuming this owner's child identity."""
+    options = events | os.WNOHANG | os.WNOWAIT
     if hasattr(os, "waitid"):
         result = os.waitid(os.P_PID, pid, options)
-        if result is None:
-            return None
-        return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
+        return None if result is None else (result.si_code, result.si_status)
     if sys.platform != "darwin":
         raise RuntimeError("sample settlement requires waitid with WNOWAIT")
     result = DarwinSignalInfo()
@@ -42,9 +40,22 @@ def observe_exit(pid: int) -> int | None:
         error = ctypes.get_errno()
         if error != errno.EINTR:
             raise OSError(error, os.strerror(error))
-    if result.pid == 0:
+    return None if result.pid == 0 else (result.code, result.status)
+
+
+def observe_exit(pid: int) -> int | None:
+    """Return the exit code, leaving this exact child waitable until final reap."""
+    result = _observe(pid, os.WEXITED)
+    if result is None:
         return None
-    return result.status if result.code == os.CLD_EXITED else -result.status
+    code, status = result
+    return status if code == os.CLD_EXITED else -status
+
+
+def observe_stopped(pid: int) -> bool:
+    """Prove an owned child stopped, retaining both stop and exit wait state."""
+    result = _observe(pid, os.WSTOPPED | os.WEXITED)
+    return result is not None and result[0] == os.CLD_STOPPED
 
 
 def signal_owned_group(pid: int, number: int) -> None:

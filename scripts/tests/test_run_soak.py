@@ -333,7 +333,8 @@ class SoakHarnessTests(unittest.TestCase):
                     with self.assertRaises(SOAK.SoakFailure):
                         SOAK.run_soak(rw, None, 4, 0.1, 600 * 1024 * 1024, progress_path=output)
                 result = json.loads(output.read_text())
-                self.assertEqual(result["status"], "fail")
+                self.assertEqual(result["status"], "UNSETTLED")
+                self.addCleanup(__import__("shutil").rmtree, result["retained_scratch"])
                 self.assertEqual(result["turns_submitted"], int(ready))
                 self.assertEqual(result["turns_accepted"], 0)
                 self.assertEqual(result["turns_completed"], 0)

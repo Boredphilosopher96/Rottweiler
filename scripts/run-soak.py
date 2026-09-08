@@ -23,6 +23,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from journal_observer import journal_files, session_journals
 from release_contract import load_contract
+from perf_process import run_sample, delegated_success_scope, check_sample_cancellation
+from perf_process_scope import UnsettledScope
+from perf_process_wait import observe_exit
+from perf_scratch import retained_scratch
+from soak_process import terminate_supervisor, kill_direct_child
 
 TUI_ROLE = load_contract(Path(__file__).resolve().parents[1] / "contracts/release-contract.json").js_host_roles["tui"]
 
@@ -139,12 +144,13 @@ def parse_process_table(output: str) -> dict[int, ProcessRow]:
 
 
 def process_table() -> dict[int, ProcessRow]:
-    output = subprocess.run(
+    result = run_sample(
         ["ps", "-axo", "pid=,ppid=,rss=,command="],
-        check=True,
-        stdout=subprocess.PIPE,
-        text=True,
-    ).stdout
+        cwd=Path.cwd(), env=dict(os.environ), timeout=2, output_limit=1024 * 1024,
+    )
+    if result.returncode:
+        raise RuntimeError("could not observe soak process tree")
+    output = result.stdout.decode("utf-8", errors="replace")
     return parse_process_table(output)
 
 
@@ -189,89 +195,6 @@ def validate_executable(path: Path, label: str) -> Path:
     if not os.access(path, os.X_OK):
         raise ValueError(f"{label} is not executable")
     return path
-
-
-def terminate_group(process: subprocess.Popen[bytes]) -> None:
-    terminate_tree(process, {})
-
-
-def pid_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-def terminate_tree(
-    process: subprocess.Popen[bytes], owned_processes: dict[int, str]
-) -> None:
-    """Gracefully stop the supervisor, then kill every retained owned group."""
-    if process.poll() is None:
-        try:
-            rows = process_table()
-            selected = descendants(rows, process.pid)
-            owned_processes.clear()
-            owned_processes.update({pid: rows[pid].command for pid in selected})
-        except (OSError, subprocess.SubprocessError):
-            pass
-        try:
-            # Signal only the supervisor first so its managed-child cleanup can
-            # terminate and wait for the TUI and independently grouped engine.
-            os.kill(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
-        except ProcessLookupError:
-            pass
-        except subprocess.TimeoutExpired:
-            pass
-
-    try:
-        current_rows = process_table()
-    except (OSError, subprocess.SubprocessError):
-        current_rows = {}
-    # Retaining historical PIDs across an eight-hour run risks PID reuse. The
-    # latest snapshot replaces older ones, and fallback signals only a PID
-    # whose current command still exactly matches the owned process.
-    live = {
-        pid
-        for pid, command in owned_processes.items()
-        if pid in current_rows and current_rows[pid].command == command
-    }
-    groups: set[int] = set()
-    for pid in live:
-        try:
-            group = os.getpgid(pid)
-            if group != os.getpgrp():
-                groups.add(group)
-        except ProcessLookupError:
-            pass
-    for group in groups:
-        try:
-            os.killpg(group, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline and any(pid_exists(pid) for pid in live):
-        time.sleep(0.02)
-    for group in groups:
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    for pid in live:
-        if pid_exists(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-    if process.poll() is None:
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
 
 
 def text_events(marker: str, index: int) -> list[dict[str, object]]:
@@ -502,6 +425,8 @@ def run_soak(
         if isinstance(error, SoakFailure):
             details.update(error.details)
         details["error_type"] = type(error).__name__
+        if isinstance(error, UnsettledScope):
+            details["physical_settlement"] = "UNSETTLED"
         failure = SoakFailure(redact_diagnostic(str(error)), details)
         if progress_path is not None:
             try:
@@ -559,8 +484,10 @@ def _run_soak(
     # Unix-domain sockets have a small platform path limit (104 bytes on
     # macOS). Keep the private harness root short before the supervisor adds
     # its randomized runtime directory.
-    with tempfile.TemporaryDirectory(prefix="rws-", dir="/tmp") as temporary:
-        root = Path(temporary)
+    with delegated_success_scope(), retained_scratch(
+        "rws-", parent=Path("/tmp"),
+        evidence=lambda path: progress.snapshot(retained_scratch=str(path)),
+    ) as root:
         home = root / "h"
         workspace = root / "w"
         state = root / "s"
@@ -595,32 +522,7 @@ def _run_soak(
         }
         if tui is not None:
             environment["ROTTWEILER_JS_HOST_BIN"] = str(js_host_executable)
-        master, slave = pty.openpty()
-        os.set_blocking(master, False)
-        try:
-            process = subprocess.Popen(
-                [
-                str(rw),
-                "--permission-mode",
-                "auto-safe",
-                "--in-memory-replay-script",
-                str(replay_script),
-                "--record-script-delay-ms",
-                str(script_delay_ms),
-                ],
-                cwd=workspace,
-                env=environment,
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                start_new_session=True,
-            )
-        except BaseException:
-            os.close(master)
-            os.close(slave)
-            raise
-        os.close(slave)
-        owned_processes: dict[int, str] = {}
+        owned_processes: set[int] = set()
         # The isolated workspace has no executable project configuration. Deny
         # the one-time trust prompt explicitly so the production supervisor starts.
         probe = EventLogProbe(state / "sessions")
@@ -691,13 +593,40 @@ def _run_soak(
                 forced_restart_completed=forced_restart_completed,
             )
 
+        master, slave = pty.openpty()
+        os.set_blocking(master, False)
+        try:
+            process = subprocess.Popen(
+                [
+                str(rw),
+                "--permission-mode",
+                "auto-safe",
+                "--in-memory-replay-script",
+                str(replay_script),
+                "--record-script-delay-ms",
+                str(script_delay_ms),
+                ],
+                cwd=workspace,
+                env=environment,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+            )
+        except BaseException:
+            os.close(master)
+            os.close(slave)
+            raise
+        os.close(slave)
         try:
             os.write(master, b"n\r")
             while time.monotonic() - started < duration:
-                if process.poll() is not None:
+                check_sample_cancellation()
+                status = observe_exit(process.pid)
+                if status is not None:
                     raise RuntimeError(
                         "supervised Rottweiler exited early with "
-                        f"{process.returncode}: "
+                        f"{status}: "
                         f"submitted={submitted} completed={completed} "
                         f"waiting={waiting}; terminal tail: "
                         f"engine={engine_diagnostic}; "
@@ -745,7 +674,7 @@ def _run_soak(
                     except BlockingIOError:
                         pass
                     except OSError:
-                        if process.poll() is None:
+                        if observe_exit(process.pid) is None:
                             raise
 
                 if waiting is not None and probe.poll(waiting.marker):
@@ -823,9 +752,12 @@ def _run_soak(
                 ):
                     rows = process_table()
                     engine_pid = find_descendant(rows, process.pid, rw, " serve ")
-                    tui_pid = find_descendant(rows, process.pid, js_host_executable, role=TUI_ROLE)
+                    def current_direct_tui() -> int | None:
+                        current_rows = process_table()
+                        pid = find_descendant(current_rows, process.pid, js_host_executable, role=TUI_ROLE)
+                        return pid if pid is not None and current_rows[pid].parent == process.pid else None
+                    tui_pid = kill_direct_child(process, current_direct_tui) if engine_pid is not None else None
                     if engine_pid is not None and tui_pid is not None:
-                        os.kill(tui_pid, signal.SIGKILL)
                         restart_old_tui = tui_pid
                         restart_engine = engine_pid
                         restart_ready_before = driver_ready_count
@@ -889,7 +821,7 @@ def _run_soak(
                 if now >= next_sample:
                     rows = process_table()
                     selected = descendants(rows, process.pid)
-                    owned_processes = {pid: rows[pid].command for pid in selected}
+                    owned_processes = selected
                     for generations, current in (
                         (engine_generations, find_descendant(rows, process.pid, rw, " serve ")),
                         (tui_generations, find_descendant(rows, process.pid, js_host_executable, role=TUI_ROLE)),
@@ -954,9 +886,17 @@ def _run_soak(
             if durable_bytes <= 0 or last_completed_marker is None:
                 raise RuntimeError("soak did not persist a durable transcript")
         finally:
+            primary = sys.exception()
             capture_progress()
+            if primary is not None:
+                progress.snapshot(primary_error=redact_diagnostic(str(primary)),
+                                  primary_error_type=type(primary).__name__)
             try:
-                terminate_tree(process, owned_processes)
+                terminate_supervisor(
+                    process, master, owned_processes,
+                    lambda: descendants(process_table(), process.pid),
+                )
+                progress.snapshot(physical_settlement="proved")
             finally:
                 os.close(master)
 
@@ -989,7 +929,7 @@ def failure_result(error: Exception) -> dict[str, object]:
     }
     if isinstance(error, SoakFailure):
         result.update(error.details)
-    result["status"] = "fail"
+    result["status"] = "UNSETTLED" if result.get("physical_settlement") == "UNSETTLED" else "fail"
     result["schema_version"] = 1
     return result
 
@@ -1030,10 +970,6 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
-    def interrupted(signum: int, _frame: object) -> None:
-        raise InterruptedError(f"soak interrupted by signal {signum}")
-
-    previous_termination = signal.signal(signal.SIGTERM, interrupted)
     try:
         result = run_soak(
             args.rw,
@@ -1056,8 +992,6 @@ def main() -> None:
             result["evidence_write_error"] = type(write_error).__name__
         print(json.dumps(result, sort_keys=True), file=sys.stderr)
         raise SystemExit(1) from None
-    finally:
-        signal.signal(signal.SIGTERM, previous_termination)
     print(json.dumps(result, sort_keys=True))
 
 
