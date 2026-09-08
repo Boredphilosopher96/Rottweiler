@@ -47,7 +47,8 @@ impl TerminalSpawner for TokioTerminalSpawner {
         .await
         .map_err(|error| match error {
             rw_resources::WorkError::Admission(error) => io::Error::other(error),
-            rw_resources::WorkError::Worker(error) => {
+            error @ (rw_resources::WorkError::Worker(_)
+            | rw_resources::WorkError::ResultUnavailable) => {
                 ownership::unsettled(format!("PTY creation worker lost proof: {error}"))
             }
         })? {

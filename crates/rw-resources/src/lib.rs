@@ -5,6 +5,7 @@
 //! does not claim to count arbitrary descendants created inside that group.
 //! Resource acquisition never authorizes an effect or replaces a caller's deadline.
 
+mod blocking;
 #[cfg(unix)]
 pub mod process;
 
@@ -176,6 +177,8 @@ pub enum WorkError {
     Admission(#[from] AdmissionError),
     #[error("physical worker failed: {0}")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("completed physical worker did not release its typed result")]
+    ResultUnavailable,
 }
 
 /// Run a finite blocking operation with process-wide execution admission.
@@ -188,13 +191,7 @@ pub async fn run_blocking<T: Send + 'static>(
     class: ResourceClass,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, WorkError> {
-    let lease = acquire(class, std::future::pending()).await?;
-    let span = tracing::Span::current();
-    Ok(tokio::task::spawn_blocking(move || {
-        let _lease = lease;
-        span.in_scope(work)
-    })
-    .await?)
+    blocking::run(pool(class), class, work).await
 }
 
 #[cfg(test)]

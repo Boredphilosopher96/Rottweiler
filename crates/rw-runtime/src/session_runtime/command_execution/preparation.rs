@@ -41,7 +41,10 @@ impl Preparation {
             Err(rw_resources::WorkError::Admission(error)) => {
                 Err(Failure::Rejected(error.to_string()))
             }
-            Err(rw_resources::WorkError::Worker(error)) => Err(Failure::Unsettled(format!(
+            Err(
+                error @ (rw_resources::WorkError::Worker(_)
+                | rw_resources::WorkError::ResultUnavailable),
+            ) => Err(Failure::Unsettled(format!(
                 "command preparation lost physical proof: {error}"
             ))),
         }
