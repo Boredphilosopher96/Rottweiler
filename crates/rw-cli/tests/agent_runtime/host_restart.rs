@@ -300,12 +300,10 @@ fn bootstrap_session() -> rw_types::SessionId {
 }
 
 impl NativeHost {
-    fn attach_driver(&self, request: &str) -> TestResult {
-        let reply = self.dispatch(&ClientCommand::AttachSession {
+    fn take_driver(&self, request: &str) -> TestResult {
+        let reply = self.dispatch(&ClientCommand::TakeDriver {
             meta: self.meta(request),
             session_id: bootstrap_session(),
-            last_seen_sequence: None,
-            role: rw_types::ClientRole::Driver,
         })?;
         assert_eq!(reply.outcome(), &CommandOutcome::Accepted {});
         Ok(())
@@ -417,7 +415,7 @@ fn socket_interrupt_and_process_recovery_preserve_exact_turn_receipts() -> TestR
     );
     let mut first = NativeHost::start(&root, &workspace, &home, "first", 30_000)?;
     first.bootstrap_catalog()?;
-    first.attach_driver("initial-driver")?;
+    first.take_driver("initial-driver")?;
     first.message("cancel-over-socket")?;
     let cancelled =
         first.wait_journal(&home, |events| started_for(events, "cancel-over-socket"))?;
@@ -445,7 +443,7 @@ fn socket_interrupt_and_process_recovery_preserve_exact_turn_receipts() -> TestR
     );
     let mut restarted = NativeHost::start(&root, &workspace, &home, "restarted", 0)?;
     restarted.bootstrap_catalog()?;
-    restarted.attach_driver("recovered-driver")?;
+    restarted.take_driver("recovered-driver")?;
     assert_eq!(
         restarted.wait_journal(&home, |events| terminal_status(events, &unfinished))?,
         TurnStatus::Interrupted
