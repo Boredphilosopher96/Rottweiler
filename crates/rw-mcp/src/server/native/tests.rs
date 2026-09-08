@@ -23,6 +23,9 @@ async fn blocked_pipe_read_and_write_wake_restore_flags_and_join_before_refund()
         }
     }
     fcntl_setfl(&output, flags).expect("restore fixture flags");
+    // Darwin records a sticky kernel flag after the first write. Snapshot the
+    // state handed to the native owner, after the fixture has filled the pipe.
+    let flags = fcntl_getfl(&output).expect("flags before native ownership");
     let (pool, permit) = permit();
     let (stream, owner) = open(input, output, permit).expect("open");
     let (mut read, mut write) = tokio::io::split(stream);

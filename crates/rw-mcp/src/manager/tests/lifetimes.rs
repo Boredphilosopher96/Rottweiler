@@ -184,7 +184,7 @@ pub(super) async fn fixture(
     (manager, connector, id)
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn abandoned_invocations_keep_effects_owned_and_refuse_new_work_until_retirement() {
     for kind in ["tool", "resource", "prompt"] {
         let (manager, connector, id) = fixture(false).await;
@@ -223,6 +223,7 @@ async fn abandoned_invocations_keep_effects_owned_and_refuse_new_work_until_reti
         );
         assert!(manager.call_tool(&id, "work", json!({})).await.is_err());
         connector.client.invocation.release.add_permits(1);
+        await_retirement(&manager, &id).await;
         manager
             .settle_effects()
             .await
@@ -239,13 +240,16 @@ async fn abandoned_invocations_keep_effects_owned_and_refuse_new_work_until_reti
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn invocation_deadline_reports_unsettled_without_dropping_actual_work() {
     let (manager, connector, id) = fixture(false).await;
     let worker = manager.clone();
     let server = id.clone();
     let caller = tokio::spawn(async move { worker.call_tool(&server, "work", json!({})).await });
     connector.client.invocation.started.notified().await;
+    // Only the gated deadline observation uses virtual time. Physical CPU work
+    // in connection setup and retirement must not race automatic clock advance.
+    tokio::time::pause();
     assert!(matches!(
         caller.await.expect("caller returns"),
         Err(McpError::EffectsUnsettled { .. })
@@ -254,14 +258,16 @@ async fn invocation_deadline_reports_unsettled_without_dropping_actual_work() {
         connector.client.invocation.abandoned.load(Ordering::SeqCst),
         0
     );
+    tokio::time::resume();
     connector.client.invocation.release.add_permits(1);
+    await_retirement(&manager, &id).await;
     manager
         .settle_effects()
         .await
         .expect("deadline work eventually retires");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn cancelled_connection_waiter_cannot_drop_or_duplicate_the_connector() {
     let (manager, connector, id) = fixture(true).await;
     let worker = manager.clone();
@@ -287,7 +293,7 @@ async fn cancelled_connection_waiter_cannot_drop_or_duplicate_the_connector() {
     assert_eq!(connector.client.catalogs.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn concurrent_enable_waiters_share_one_connection_attempt() {
     let (manager, connector, id) = fixture(true).await;
     let worker = manager.clone();
@@ -309,7 +315,7 @@ async fn concurrent_enable_waiters_share_one_connection_attempt() {
     assert_eq!(manager.statuses().await[0].state, ServerState::Ready);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn shutdown_survives_a_dropped_waiter_and_closes_admission_permanently() {
     let (manager, connector, id) = fixture(false).await;
     connector.client.block_close.store(true, Ordering::SeqCst);
@@ -338,7 +344,7 @@ async fn shutdown_survives_a_dropped_waiter_and_closes_admission_permanently() {
     assert!(manager.set_enabled(&id, true).await.is_err());
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn disabling_waits_for_actual_invocations_even_after_client_close_returns() {
     let (manager, connector, id) = fixture(false).await;
     let worker = manager.clone();
@@ -356,6 +362,7 @@ async fn disabling_waits_for_actual_invocations_even_after_client_close_returns(
     );
     assert!(manager.set_enabled(&id, true).await.is_err());
     connector.client.invocation.release.add_permits(1);
+    await_retirement(&manager, &id).await;
     manager
         .settle_effects()
         .await
@@ -364,7 +371,7 @@ async fn disabling_waits_for_actual_invocations_even_after_client_close_returns(
     assert_eq!(manager.statuses().await[0].state, ServerState::Disabled);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn aggregate_invocation_admission_is_bounded_before_remote_work_starts() {
     let (manager, connector, id) = fixture(false).await;
     let mut callers = Vec::new();
@@ -386,6 +393,7 @@ async fn aggregate_invocation_admission_is_bounded_before_remote_work_starts() {
         assert!(caller.await.expect_err("caller cancelled").is_cancelled());
     }
     connector.client.invocation.release.add_permits(count);
+    await_retirement(&manager, &id).await;
     manager
         .settle_effects()
         .await
@@ -398,4 +406,16 @@ async fn aggregate_invocation_admission_is_bounded_before_remote_work_starts() {
         connector.client.invocation.abandoned.load(Ordering::SeqCst),
         0
     );
+}
+
+/// Await actual admitted CPU/result work after releasing a fixture gate. Then
+/// the public bounded settlement call must observe its proven retirement.
+async fn await_retirement(manager: &McpManager, server: &McpServerId) {
+    tokio::time::timeout(
+        manager.inner.limits.request_timeout,
+        manager.inner.operations.drain_server(server),
+    )
+    .await
+    .expect("physical fixture retirement deadline")
+    .expect("physical fixture retirement");
 }
