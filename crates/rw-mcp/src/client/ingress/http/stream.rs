@@ -118,6 +118,15 @@ impl Shared {
                 if let Some(event) = event {
                     cursor.update(Arc::clone(&event.metadata))?;
                     if let Some(frame) = event.data {
+                        // SSE priming events carry resume/retry metadata without
+                        // a JSON-RPC message. Keep that cursor and continue.
+                        if std::str::from_utf8(&frame.bytes)
+                            .map_err(|_| invalid())?
+                            .trim()
+                            .is_empty()
+                        {
+                            continue;
+                        }
                         let terminal = match self.deliver(frame, false).await {
                             Ok(terminal) => terminal,
                             Err(_) if self.closing.is_cancelled() => {

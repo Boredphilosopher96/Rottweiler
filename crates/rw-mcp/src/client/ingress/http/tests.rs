@@ -16,6 +16,7 @@ enum Case {
     AcceptedGet,
     EmptyNotification,
     ErrorBody,
+    Priming,
 }
 struct Seen {
     method: McpHttpMethod,
@@ -62,13 +63,23 @@ impl Fixture {
                 "error":{"code":-32601,"message":"initialize required"}}),
             ),
             "initialize" => {
-                let mut response = json_response(
-                    200,
-                    &json!({"jsonrpc":"2.0", "id":id, "result":{
-                        "protocolVersion":ProtocolVersion::STANDARD_HEADERS,
-                        "capabilities":{"tools":{}}, "serverInfo":{"name":"raw-fixture","version":"1"}
-                    }}),
-                );
+                let result = json!({"jsonrpc":"2.0", "id":id, "result":{
+                    "protocolVersion":ProtocolVersion::STANDARD_HEADERS,
+                    "capabilities":{"tools":{}}, "serverInfo":{"name":"raw-fixture","version":"1"}
+                }});
+                let mut response = if matches!(self.case, Case::Priming) {
+                    let wire = format!("id: 0\nretry: 1\ndata:\n\ndata: \t \n\ndata: {result}\n\n");
+                    McpHttpResponse {
+                        status: 200,
+                        headers: vec![("content-type".into(), "text/event-stream".into())],
+                        body: stream::iter(
+                            wire.into_bytes().into_iter().map(|byte| Ok(vec![byte])),
+                        )
+                        .boxed(),
+                    }
+                } else {
+                    json_response(200, &result)
+                };
                 response
                     .headers
                     .push(("mcp-session-id".into(), "fixture-session".into()));
@@ -268,4 +279,34 @@ async fn non_success_json_rpc_error_settles_only_its_request() {
         .expect("connection remains usable");
     assert_eq!(result["content"][0]["text"], "exact reply");
     close(&*client).await;
+}
+
+#[tokio::test]
+async fn empty_and_whitespace_priming_events_preserve_initialization_and_reuse() {
+    let fixture = Fixture::new(Case::Priming);
+    let client = fixture.connect().await;
+    assert_eq!(
+        client
+            .list_tools(slot(&*client))
+            .await
+            .expect("tools after priming")
+            .len(),
+        1
+    );
+    let result = client
+        .call_tool("echo", json!({}), slot(&*client))
+        .await
+        .expect("call after priming");
+    assert_eq!(result["content"][0]["text"], "exact reply");
+    close(&*client).await;
+    assert_eq!(
+        fixture
+            .seen
+            .lock()
+            .expect("history")
+            .iter()
+            .filter(|request| request.method == McpHttpMethod::Delete)
+            .count(),
+        1
+    );
 }
