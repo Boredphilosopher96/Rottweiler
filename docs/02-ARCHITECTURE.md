@@ -840,6 +840,10 @@ Built on OpenTUI (per ADR-001), which supplies the retained component tree and t
   explicit interaction ports. Each controller owns its pending requests and
   timers; a reply may update only the session scope that issued it. Handwritten
   files are capped at 1,500 lines, and TUI typechecking rejects unused declarations.
+  Visible modal ownership determines both key routing and native focus after
+  event-driven interaction updates. Session/reconnect invalidation rejects retired
+  correlated projections until a new request establishes that projection authority;
+  connection notifications retain their separate session/client validation.
 - `ClientCommand`, `EngineEvent`, and the shared IR are owned by the Rust types in
   `crates/rw-types`. `cargo xtask codegen` generates `protocol/types.ts`, the JSON
   schemas, and the cross-language fixtures from those types. The TUI imports the

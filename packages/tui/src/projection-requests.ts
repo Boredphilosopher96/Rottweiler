@@ -71,6 +71,8 @@ export type ProjectionCommand =
   | { readonly type: "list_commands" | "list_sessions" }
 
 type RequestMeta = ClientCommand["meta"]
+// null accepts the initial bootstrap projection; undefined invalidates the retired scope.
+type LatestRequest = string | null | undefined
 
 interface ProjectionRequestBrokerOptions {
   readonly allocations: ClientAllocationOwner
@@ -99,8 +101,8 @@ const MAX_PENDING_SETTING_REQUESTS = 128
 
 export class ProjectionRequestBroker {
   readonly #options: ProjectionRequestBrokerOptions
-  readonly #settingPredecessors = new Map<string, string | null>()
-  readonly #latestRequests: Record<ProjectionRequestKind, string | null> = {
+  readonly #settingPredecessors = new Map<string, LatestRequest>()
+  readonly #latestRequests: Record<ProjectionRequestKind, LatestRequest> = {
     commands: null,
     modes: null,
     models: null,
@@ -165,7 +167,7 @@ export class ProjectionRequestBroker {
 
   accepts(kind: ProjectionRequestKind, requestId: string | null): boolean {
     const latest = this.#latestRequests[kind]
-    return latest === null || requestId === latest
+    return latest === null || (latest !== undefined && requestId === latest)
   }
 
   matches(kind: ProjectionRequestKind, requestId: string | null): boolean {
@@ -192,6 +194,9 @@ export class ProjectionRequestBroker {
   clearForSessionChange(): void {
     for (const kind of [
       "workspace_status",
+      "workspace_diff",
+      "files",
+      "provider_activation_models",
       "review",
       "mcp_review",
       "commands",
@@ -205,6 +210,7 @@ export class ProjectionRequestBroker {
       "runtime_services",
       "subagents",
     ] as const) this.#forget(kind)
+    this.#filePreview = null
     this.#modelSwitchRequests.clear()
   }
 
@@ -241,11 +247,11 @@ export class ProjectionRequestBroker {
   markProviderActivationModels(): void {
     const requestId = this.#latestRequests.models
     this.#latestRequests.provider_activation_models = requestId
-    this.#pendingRequests.provider_activation_models = requestId
+    this.#pendingRequests.provider_activation_models = requestId ?? null
   }
 
   consumeProviderActivationModels(requestId: string | null): boolean {
-    if (this.#latestRequests.provider_activation_models !== requestId) return false
+    if (requestId === null || this.#latestRequests.provider_activation_models !== requestId) return false
     this.#forget("provider_activation_models")
     return true
   }
@@ -477,7 +483,7 @@ export class ProjectionRequestBroker {
 
   #forget(kind: ProjectionRequestKind): void {
     if (kind === "settings") this.#settingPredecessors.clear()
-    this.#latestRequests[kind] = null
+    this.#latestRequests[kind] = undefined
     this.clear(kind)
   }
 
@@ -532,7 +538,7 @@ export class ProjectionRequestBroker {
       }
       if (type === "set_setting") {
         if (this.#latestRequests.settings === requestId) {
-          this.#latestRequests.settings = this.#settingPredecessors.get(requestId) ?? null
+          this.#latestRequests.settings = this.#settingPredecessors.get(requestId)
         }
         this.#settingPredecessors.delete(requestId)
       }

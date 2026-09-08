@@ -852,7 +852,7 @@ export class RottweilerApp extends BoxRenderable {
       isRecord(eventRecord.question) &&
       eventRecord.question.response_kind === "text"
     ) {
-      this.composer.focus()
+      this.#input.focusForInputMode()
     }
     if (event.type === "session_forked") {
       void this.#transitionToFork(event.child.session_id)
@@ -1020,7 +1020,9 @@ export class RottweilerApp extends BoxRenderable {
       this.interactionPanel.usesComposer && composerVisible ? this.composer.dockHeight : 0,
     )
     const focusOwner = this.#input.visibleFocusOwner()
-    if (
+    if (this.#input.modalPickerVisible()) {
+      this.#input.focusForInputMode()
+    } else if (
       (previousFocusOwner === "interaction" ||
         previousFocusOwner === "output" ||
         previousFocusOwner === "review") &&

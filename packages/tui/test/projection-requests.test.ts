@@ -6,7 +6,7 @@ import { ProjectionRequestBroker } from "../src/projection-requests"
 import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome } from "../src/protocol"
 
 
-function modelCatalog(requestId: string): EngineEvent {
+function modelCatalog(requestId: string): Extract<EngineEvent, { type: "models_listed" }> {
   return { aliases: [], providers: [], cached: false, truncated: false,
     type: "models_listed",
     meta: {
@@ -95,6 +95,47 @@ describe("projection request correlation", () => {
     expect(broker.completeEvent(newerReply)).toBe("models")
     expect(broker.current("models")).toBeNull()
     expect(broker.acceptsEvent(modelCatalog(older))).toBeFalse()
+  })
+
+  test("scope invalidation rejects old reads while fresh requests and connection notifications remain admissible", async () => {
+    let sequence = 0
+    const broker = new ProjectionRequestBroker({
+      allocations: new ClientAllocationOwner(), clientId: () => "projection-test", sessionId: () => "session-test",
+      requestId: () => `request-${++sequence}`, replayActive: () => false,
+      emit: command => command.type === "set_setting" ? { type: "rejected", error: {
+        category: "protocol", code: "refused", message: "Refused", retryable: false,
+      } } : { type: "accepted" }, onProjectionFailure: () => {}, onCommandFailure: () => {},
+    })
+    expect(broker.acceptsEvent(modelCatalog("bootstrap"))).toBeTrue()
+    const old = broker.issue("models").request_id
+    for (const kind of ["workspace_diff", "files", "provider_activation_models"] as const) broker.issue(kind)
+    for (const invalidate of [() => broker.clearForSessionChange(), () => broker.clearForReconnect()]) {
+      invalidate()
+      expect(broker.acceptsEvent(modelCatalog(old))).toBeFalse()
+      expect(broker.accepts("models", null)).toBeFalse()
+      for (const kind of ["workspace_diff", "files", "provider_activation_models"] as const) {
+        expect(broker.current(kind)).toBeNull()
+        expect(broker.accepts(kind, null)).toBeFalse()
+      }
+      const fresh = broker.issue("models").request_id
+      expect(broker.acceptsEvent(modelCatalog(fresh))).toBeTrue()
+      broker.completeEvent(modelCatalog(fresh))
+      expect(broker.acceptsEvent(modelCatalog(old))).toBeFalse()
+      // Unsolicited session navigation has its own connection and session authority in App.
+      expect(broker.acceptsEvent({ type: "session_navigation_requested", session_id: "session-test",
+        meta: { ...modelCatalog("notice").meta, client_id: "projection-test", request_id: "notice" },
+        target: { kind: "session", session_id: "next" },
+      })).toBeTrue()
+    }
+    broker.clearForReconnect()
+    broker.command({ type: "set_setting", key: "compaction.auto", value: "false" })
+    await Bun.sleep(0)
+    expect(broker.acceptsEvent(settingsCatalog("old-setting"))).toBeFalse()
+    expect(broker.accepts("settings", null)).toBeFalse()
+    const settings = broker.command({ type: "list_settings" })!
+    expect(broker.acceptsEvent(settingsCatalog(settings))).toBeTrue()
+    const permissions = broker.command({ type: "add_session_permission_rule", pattern: "read", action: "allow" })!
+    expect(broker.accepts("permissions", permissions)).toBeTrue()
   })
 
   test("reports the latest list-settings failure through its pending slot", async () => {

@@ -453,24 +453,7 @@ export class InputUiController {
     this.#host.statusLine.update(this.#host.children.presentedState())
   }
 
-  focusForInputMode(): void {
-    if (this.#host.outputViewer.visible) {
-      this.#host.outputViewer.focusPresentation()
-      return
-    }
-    if (this.#host.reviewPanel.visible) {
-      this.#host.reviewPanel.focusPresentation()
-      return
-    }
-    if (this.#host.interactionPanel.capturesInput) {
-      this.#host.interactionPanel.select.focus()
-      return
-    }
-    if (this.#host.children.isActiveSubagentRunning()) {
-      this.#host.composer.editor.showCursor = false
-      this.#host.transcript.scroller.focus()
-      return
-    }
+  #focusModalPicker(): void {
     if (this.#host.mcpBrowser.visible) {
       this.#host.mcpBrowser.input.focus()
       return
@@ -488,11 +471,33 @@ export class InputUiController {
       return
     }
     if (this.#host.picker.visible && !this.#host.pickerController.anchored) {
-      if (this.#inputMode === "insert") {
+      if (this.#inputMode !== "normal") {
         this.#host.picker.input.focus()
       } else {
         this.#host.picker.select.focus()
       }
+      return
+    }
+  }
+
+  focusForInputMode(): void {
+    const owner = this.visibleFocusOwner()
+    if (owner === "picker") { this.#focusModalPicker(); return }
+    if (owner === "output") {
+      this.#host.outputViewer.focusPresentation()
+      return
+    }
+    if (owner === "review") {
+      this.#host.reviewPanel.focusPresentation()
+      return
+    }
+    if (owner === "interaction") {
+      this.#host.interactionPanel.select.focus()
+      return
+    }
+    if (this.#host.children.isActiveSubagentRunning()) {
+      this.#host.composer.editor.showCursor = false
+      this.#host.transcript.scroller.focus()
       return
     }
     if (this.#inputMode === "standard") {
