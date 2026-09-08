@@ -44,6 +44,32 @@ class TerminalTests(unittest.TestCase):
             terminal.close()
         self.assertEqual(terminal.owner.process.returncode, 0)
 
+    def test_raw_terminal_descriptor_accepts_literal_eof_control_byte(self):
+        terminal = self.spawn("import os,termios,tty; assert os.isatty(0); original=termios.tcgetattr(0); tty.setraw(0); print('READY',flush=True); value=os.read(0,1); termios.tcsetattr(0,termios.TCSANOW,original); assert value==bytes([4]); print('EOF',flush=True)")
+        ready = bytearray(); deadline = time.monotonic() + 3
+        while b'READY' not in ready:
+            self.assertLess(time.monotonic(), deadline)
+            output, errors = terminal.read(); ready.extend(output)
+            self.assertFalse(errors)
+        terminal.write(bytes([4]), deadline=deadline)
+        output, errors = self.wait(terminal)
+        self.assertIn(b'EOF', output); self.assertFalse(errors)
+        self.assertEqual(terminal.observe_exit(), 0)
+        terminal.close()
+
+    def test_output_eof_does_not_retire_a_live_physical_process(self):
+        terminal = self.spawn("import os,time; os.close(0); os.close(1); os.close(2); time.sleep(30)")
+        deadline = time.monotonic() + 3
+        while terminal._readers:
+            self.assertLess(time.monotonic(), deadline)
+            terminal.read()
+        self.assertIsNone(terminal.observe_exit())
+        with patch('m8_process.select.select', side_effect=AssertionError('closed descriptor polled')):
+            self.assertEqual(terminal.read(.001), (b'', b''))
+        terminal.close()
+        with self.assertRaises(ProcessLookupError):
+            os.kill(terminal.pid, 0)
+
     def test_cancellation_closes_physical_owner_before_scratch_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
             evidence = []

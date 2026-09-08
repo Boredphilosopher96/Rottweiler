@@ -12,7 +12,6 @@ import math
 import os
 import pathlib
 import re
-import select
 import shutil
 import statistics
 import stat
@@ -435,9 +434,6 @@ def one_sample(
     terminal = Terminal(command, cwd=workspace, env=env)
     started = terminal.spawn_started_ns
     process = terminal.owner.process
-    terminal_master = terminal.master
-    assert process.stderr is not None
-    stderr_descriptor = process.stderr.fileno()
     captured_stderr = bytearray()
     terminal_output = bytearray()
     prompt_ready_ms: float | None = None
@@ -448,22 +444,9 @@ def one_sample(
     try:
         while time.monotonic() < deadline:
             check_sample_cancellation()
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            if not ready:
-                if observe_exit(process.pid) is not None:
-                    break
-                continue
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
             if (
                 PROMPT_READY_MARKER in captured_stderr
                 and b"rw> " in terminal_output
@@ -486,18 +469,9 @@ def one_sample(
         status_ready = False
         while time.monotonic() < status_deadline:
             check_sample_cancellation()
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
             with contextlib.suppress(RuntimeError):
                 parse_status(
                     bytes(terminal_output),
@@ -535,18 +509,9 @@ def one_sample(
             activated = False
             while time.monotonic() < activation_deadline:
                 check_sample_cancellation()
-                ready, _, _ = select.select(
-                    [stderr_descriptor, terminal_master], [], [], 0.01
-                )
-                for descriptor in ready:
-                    try:
-                        chunk = os.read(descriptor, 65536)
-                    except OSError:
-                        chunk = b""
-                    if descriptor == stderr_descriptor:
-                        append_bounded(captured_stderr, chunk)
-                    else:
-                        append_bounded(terminal_output, chunk)
+                stdout, stderr = terminal.read()
+                append_bounded(terminal_output, stdout)
+                append_bounded(captured_stderr, stderr)
                 with contextlib.suppress(RuntimeError):
                     parse_status(
                         bytes(terminal_output),
@@ -573,18 +538,9 @@ def one_sample(
             terminal_output.count(b"rw> ") < expected_prompts
             and time.monotonic() < exit_deadline
         ):
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
         if terminal_output.count(b"rw> ") < expected_prompts:
             raise RuntimeError(
                 f"sample {sample} line client did not return after MCP activation: "
@@ -596,18 +552,9 @@ def one_sample(
         shutdown_deadline = time.monotonic() + 10
         while time.monotonic() < shutdown_deadline:
             check_sample_cancellation()
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
             if observe_exit(process.pid) is not None:
                 break
         if observe_exit(process.pid) is None:

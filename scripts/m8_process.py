@@ -29,6 +29,7 @@ class Terminal:
         finally:
             os.close(slave)
         self.stderr = self.owner.process.stderr
+        self._readers = {self.master: 0, self.stderr.fileno(): 1}
 
     @property
     def pid(self) -> int:
@@ -40,7 +41,11 @@ class Terminal:
 
     def read(self, timeout: float = .01) -> tuple[bytes, bytes]:
         check_sample_cancellation()
-        ready, _, _ = select.select([self.master, self.stderr.fileno()], [], [], timeout)
+        if not self._readers:
+            time.sleep(timeout)
+            check_sample_cancellation()
+            return b"", b""
+        ready, _, _ = select.select(list(self._readers), [], [], timeout)
         result = [b"", b""]
         for descriptor in ready:
             try:
@@ -51,7 +56,9 @@ class Terminal:
                 if descriptor != self.master or error.errno != errno.EIO:
                     raise
                 chunk = b""
-            result[0 if descriptor == self.master else 1] = chunk
+            result[self._readers[descriptor]] = chunk
+            if not chunk:
+                del self._readers[descriptor]
         return result[0], result[1]
 
     def write(self, body: bytes, *, deadline: float) -> None:
