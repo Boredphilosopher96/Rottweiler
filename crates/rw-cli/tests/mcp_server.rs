@@ -79,15 +79,14 @@ impl ExternalClient {
         let protocol = self.service.close().await;
         let exited =
             tokio::time::timeout(std::time::Duration::from_secs(3), self.child.wait()).await;
-        let status = match exited {
-            Ok(status) => status.expect("reap MCP server"),
-            Err(_) => {
-                self.child
-                    .kill()
-                    .await
-                    .expect("kill and reap stalled MCP server");
-                panic!("MCP server did not exit after closing stdin");
-            }
+        let status = if let Ok(status) = exited {
+            status.expect("reap MCP server")
+        } else {
+            self.child
+                .kill()
+                .await
+                .expect("kill and reap stalled MCP server");
+            panic!("MCP server did not exit after closing stdin");
         };
         protocol.expect("close external MCP client");
         assert!(status.success(), "MCP server exited with {status}");
