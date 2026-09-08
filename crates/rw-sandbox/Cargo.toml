@@ -33,6 +33,7 @@ blake3.workspace = true
 sha2.workspace = true
 rw-types.workspace = true
 rustix.workspace = true
+nix = { workspace = true, features = ["socket"] }
 rustls = { version = "0.23.41", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true

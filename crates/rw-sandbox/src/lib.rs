@@ -1,8 +1,8 @@
 //! OS-native sandbox policy, capability probing, and launch-plan construction.
 //!
-//! The crate deliberately does not execute commands.  It turns a reviewed
-//! policy into an argv-only launch plan consumed by `rw-tools`, and exposes the
-//! Linux helper entry point used immediately before `exec(2)`.
+//! Reviewed policies produce argv-only launch plans. Trusted helper entries
+//! install native sandbox restrictions and supervise single-process plugins
+//! through physical child retirement.
 
 mod executable;
 pub use executable::{
@@ -14,6 +14,11 @@ pub use helper::SandboxHelper;
 
 #[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(unix)]
+mod parent_lifeline;
+#[cfg(unix)]
+pub use parent_lifeline::PluginRendezvous;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -331,6 +336,7 @@ pub struct LaunchPlan {
     /// warning; unsupported configurations return an error instead.
     pub warnings: Vec<String>,
     _helper: SandboxHelper,
+    single_process: bool,
     /// Open descriptor pinning the approved immutable Linux helper executable
     /// until the namespace launcher crosses `exec(2)`.
     #[cfg(target_os = "linux")]
@@ -747,6 +753,7 @@ pub fn shell_launch_plan(
                 args: unshare_args,
                 warnings: Vec::new(),
                 _helper: helper_owner.clone(),
+                single_process: !policy.allow_process_creation,
                 helper_pin: Some(helper_pin),
             });
         }
@@ -761,6 +768,7 @@ pub fn shell_launch_plan(
             args: unshare_args,
             warnings: Vec::new(),
             _helper: helper_owner.clone(),
+            single_process: !policy.allow_process_creation,
             helper_pin: Some(helper_pin),
         })
     }
@@ -834,6 +842,12 @@ where
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     let entry = args.get(1).and_then(|value| value.to_str());
+    #[cfg(unix)]
+    if entry == Some(parent_lifeline::ENTRY) {
+        return parent_lifeline::run(&args)
+            .map(|never| match never {})
+            .map_err(|error| SandboxError::Unavailable(error.to_string()));
+    }
     #[cfg(target_os = "macos")]
     if entry == Some(macos::WORKER_ARG) {
         let program = args

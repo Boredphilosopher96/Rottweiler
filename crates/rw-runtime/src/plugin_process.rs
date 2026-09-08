@@ -3,7 +3,9 @@
 mod launch_bytes;
 mod proxy_settlement;
 use launch_bytes::LaunchBytes;
+mod lifeline;
 mod retirement;
+use lifeline::ProcessControl;
 
 use std::{
     path::{Path, PathBuf},
@@ -26,6 +28,11 @@ use tokio::{
     io::{AsyncReadExt as _, BufReader},
     process::Child,
 };
+
+#[cfg(target_os = "linux")]
+const PLUGIN_PROCESS_UNITS: u32 = 3;
+#[cfg(not(target_os = "linux"))]
+const PLUGIN_PROCESS_UNITS: u32 = 2;
 
 const MAX_PLUGIN_STDERR_BYTES: u64 = 256 * 1024;
 const PLUGIN_HANDOFF_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,10 +86,13 @@ impl PluginLauncher for SandboxedPluginLauncher {
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
         let waiting = std::time::Instant::now();
         tracing::debug!(target: "rw_performance", stage = "plugin.process_admission", phase = "queued");
-        let admission =
-            rw_resources::acquire(rw_resources::ResourceClass::Process, std::future::pending())
-                .await
-                .map_err(|failure| PluginLaunchError::Rejected(error(&failure.to_string())))?;
+        let admission = rw_resources::acquire_units(
+            rw_resources::ResourceClass::Process,
+            PLUGIN_PROCESS_UNITS,
+            std::future::pending(),
+        )
+        .await
+        .map_err(|failure| PluginLaunchError::Rejected(error(&failure.to_string())))?;
         tracing::debug!(target: "rw_performance", stage = "plugin.process_admission", phase = "admitted",
             admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
         let owned_config = config.clone();
@@ -113,10 +123,10 @@ async fn handoff_in_worker(
         tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn", phase = "admitted",
             admission_ms = waiting.elapsed().as_secs_f64() * 1000.0);
         let started = std::time::Instant::now();
-        let SpawnedPlugin { child, proxy, bytes } = spawn()?;
+        let SpawnedPlugin { child, proxy, bytes, control } = spawn()?;
         // Establish the complete physical owner synchronously before any
         // callback, tracing subscriber or async handoff can fail or be dropped.
-        let handoff = attach_supervisor(child, proxy, &config, helper, admission, bytes);
+        let handoff = attach_supervisor(child, proxy, &config, helper, admission, bytes, control);
         tracing::debug!(target: "rw_performance", stage = "plugin.verify_and_spawn",
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
         let started = std::time::Instant::now();
@@ -200,7 +210,7 @@ fn spawn_pinned_plugin(
     let started = std::time::Instant::now();
     bytes.validate_write_roots(roots)?;
     let (policy, proxy) = plugin_sandbox_policy(config, profile, scratch, roots, &bytes)?;
-    #[allow(unused_mut)]
+    let rendezvous = rw_tools::PluginRendezvous::bind().map_err(|cause| process_error(&cause))?;
     let mut plan = shell_launch_plan(&policy, helper, bytes.program(config), bytes.args(config))
         .map_err(|sandbox| error(&sandbox.to_string()))?;
     if !plan.warnings.is_empty() {
@@ -208,6 +218,9 @@ fn spawn_pinned_plugin(
     }
     tracing::debug!(target: "rw_performance", stage = "plugin.sandbox_plan",
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = true);
+    rendezvous
+        .wrap(&mut plan)
+        .map_err(|cause| error(&cause.to_string()))?;
     let mut command = tokio::process::Command::new(&plan.program);
     command
         .args(&plan.args)
@@ -218,7 +231,7 @@ fn spawn_pinned_plugin(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(false);
     for name in config.environment_allowlist() {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
@@ -235,13 +248,32 @@ fn spawn_pinned_plugin(
     tracing::debug!(target: "rw_performance", stage = "plugin.native_spawn", phase = "begin");
     // The aggregate verify_and_spawn completion is emitted only after the
     // physical supervisor owns the child, so tracing cannot strand raw effects.
-    let child = command.spawn().map_err(|error| process_error(&error))?;
+    let mut child = command.spawn().map_err(|error| process_error(&error))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| error("missing plugin supervisor pid"))?;
+    let control = match rendezvous.accept(pid) {
+        Ok(stream) => ProcessControl::Lifeline(stream),
+        Err(cause) => {
+            // accept never grants launch. This helper cannot own an effect.
+            let _ = child.start_kill();
+            let runtime = tokio::runtime::Handle::current();
+            loop {
+                if runtime.block_on(child.wait()).is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return Err(process_error(&cause));
+        }
+    };
     #[cfg(target_os = "linux")]
     drop(plan.take_helper_pin());
     Ok(SpawnedPlugin {
         child,
         proxy,
         bytes,
+        control,
     })
 }
 
@@ -293,6 +325,7 @@ fn attach_supervisor(
     helper: rw_tools::SandboxHelper,
     admission: rw_resources::ResourceLease,
     bytes: Arc<LaunchBytes>,
+    control: ProcessControl,
 ) -> impl std::future::Future<Output = Result<LaunchedPluginProcess, PluginLaunchError>> {
     let process_group = child.id();
     let stdin = child.stdin.take();
@@ -302,6 +335,7 @@ fn attach_supervisor(
     let process = Arc::new(PluginChild {
         bytes,
         helper,
+        control: Mutex::new(Some(control)),
         admission: Mutex::new(Some(admission)),
         settlement: tokio::sync::Mutex::new(()),
         child: Mutex::new(Some(child)),
@@ -340,6 +374,29 @@ fn attach_supervisor(
                 }
             }
         };
+        let granted = process
+            .control
+            .lock()
+            .map_err(|_| PluginLaunchError::EffectsUnsettled {
+                message: "plugin control lock poisoned".into(),
+            })?
+            .as_ref()
+            .ok_or_else(|| PluginLaunchError::EffectsUnsettled {
+                message: "plugin control missing".into(),
+            })?
+            .grant();
+        if let Err(cause) = granted {
+            let _ = process.kill_tree();
+            return match process.settle_effects().await {
+                Ok(()) => {
+                    handoff.settled = true;
+                    Err(PluginLaunchError::Rejected(cause))
+                }
+                Err(failure) => Err(PluginLaunchError::EffectsUnsettled {
+                    message: failure.to_string(),
+                }),
+            };
+        }
         if let Some(denials) = denials {
             let weak = Arc::downgrade(&process);
             tokio::spawn(async move {
@@ -392,12 +449,14 @@ impl Drop for PendingPluginHandoff {
 }
 
 struct SpawnedPlugin {
+    control: ProcessControl,
     child: Child,
     proxy: Option<SupervisedEgressProxy>,
     bytes: Arc<LaunchBytes>,
 }
 
 struct PluginChild {
+    control: Mutex<Option<ProcessControl>>,
     bytes: Arc<LaunchBytes>,
     settlement: tokio::sync::Mutex<()>,
     admission: Mutex<Option<rw_resources::ResourceLease>>,
@@ -433,9 +492,7 @@ impl SupervisedPluginProcess for PluginChild {
                     .process_group
                     .lock()
                     .map_err(|_| error("plugin group owner poisoned"))?;
-                rw_tools::terminate_and_wait_process_group(group)
-                    .await
-                    .map_err(|failure| error(&failure.to_string()))?;
+                lifeline::group_absent(group).await?;
                 self.process_group
                     .lock()
                     .map_err(|_| error("plugin group owner poisoned"))?
@@ -446,6 +503,10 @@ impl SupervisedPluginProcess for PluginChild {
         );
         process?;
         proxy?;
+        self.control
+            .lock()
+            .map_err(|_| error("plugin control lock poisoned"))?
+            .take();
         self.admission
             .lock()
             .map_err(|_| error("plugin process admission owner poisoned"))?
@@ -465,6 +526,17 @@ impl SupervisedPluginProcess for PluginChild {
             .lock()
             .map_err(|_| error("plugin process admission owner poisoned"))?;
         if admission.is_none() {
+            return Ok(());
+        }
+        let control = self
+            .control
+            .lock()
+            .map_err(|_| error("plugin control lock poisoned"))?;
+        let Some(control) = control.as_ref() else {
+            return Ok(());
+        };
+        control.stop()?;
+        if !control.direct() {
             return Ok(());
         }
         let group = self.kill_original_group();
@@ -521,14 +593,46 @@ impl PluginChild {
 
     async fn wait_for_exit(&self) -> Result<Option<i32>, PluginProcessError> {
         loop {
-            let status = self
-                .child
-                .lock()
-                .map_err(|_| error("plugin child lock was poisoned"))?
-                .as_mut()
-                .ok_or_else(|| error("plugin child owner is unavailable"))?
-                .try_wait()
-                .map_err(|error| process_error(&error))?;
+            let status = {
+                let mut child = self
+                    .child
+                    .lock()
+                    .map_err(|_| error("plugin child lock was poisoned"))?;
+                let child = child
+                    .as_mut()
+                    .ok_or_else(|| error("plugin child owner is unavailable"))?;
+                if let Some(pid) = child
+                    .id()
+                    .and_then(|value| i32::try_from(value).ok())
+                    .and_then(rustix::process::Pid::from_raw)
+                {
+                    use rustix::process::{WaitId, WaitIdOptions};
+                    let exited = rustix::process::waitid(
+                        WaitId::Pid(pid),
+                        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                    )
+                    .map_err(|cause| error(&cause.to_string()))?
+                    .is_some();
+                    if exited {
+                        // The unreaped helper anchors the group even if it
+                        // crashed. Never signal a stored PGID after reap.
+                        rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+                            .or_else(|cause| {
+                                if cause == rustix::io::Errno::SRCH {
+                                    Ok(())
+                                } else {
+                                    Err(cause)
+                                }
+                            })
+                            .map_err(|cause| error(&cause.to_string()))?;
+                        child.try_wait().map_err(|cause| process_error(&cause))?
+                    } else {
+                        None
+                    }
+                } else {
+                    child.try_wait().map_err(|cause| process_error(&cause))?
+                }
+            };
             if let Some(status) = status {
                 return Ok(status.code());
             }
@@ -969,6 +1073,7 @@ mod tests {
                 .expect("helper"),
                 process_fixture_lease(),
                 fixture_launch_bytes(),
+                ProcessControl::TestGroup,
             ),
         )
         .await

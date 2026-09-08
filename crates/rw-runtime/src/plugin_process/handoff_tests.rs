@@ -30,6 +30,7 @@ async fn incomplete_stdio_is_rejected_only_after_actual_child_cleanup() {
             running_helper(),
             process_fixture_lease(),
             fixture_launch_bytes(),
+            ProcessControl::TestGroup,
         ),
     )
     .await
@@ -61,6 +62,7 @@ async fn lost_wait_result_is_typed_as_unsettled_launch() {
             running_helper(),
             process_fixture_lease(),
             fixture_launch_bytes(),
+            ProcessControl::TestGroup,
         ),
     )
     .await
@@ -93,6 +95,7 @@ async fn successful_process_settlement_stops_proxy_while_process_owner_stays_ali
         running_helper(),
         process_fixture_lease(),
         fixture_launch_bytes(),
+        ProcessControl::TestGroup,
     )
     .await
     .expect("handoff");
@@ -141,6 +144,7 @@ async fn dropping_bare_launched_process_settles_actual_child_and_proxy() {
         running_helper(),
         process_fixture_lease(),
         fixture_launch_bytes(),
+        ProcessControl::TestGroup,
     )
     .await
     .expect("handoff");
@@ -186,6 +190,7 @@ async fn dropped_launch_waiter_retires_the_child_returned_by_its_blocking_worker
             child,
             proxy: None,
             bytes: fixture_launch_bytes(),
+            control: ProcessControl::TestGroup,
         })
     }));
     entered.await.expect("worker owns launch");

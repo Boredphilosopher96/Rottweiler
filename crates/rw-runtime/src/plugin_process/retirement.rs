@@ -18,6 +18,13 @@ pub(super) fn retire_dropped(process: &mut PluginChild) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     let owner = PluginChild {
+        control: Mutex::new(
+            process
+                .control
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        ),
         bytes: Arc::clone(&process.bytes),
         settlement: tokio::sync::Mutex::new(()),
         admission: Mutex::new(Some(admission)),

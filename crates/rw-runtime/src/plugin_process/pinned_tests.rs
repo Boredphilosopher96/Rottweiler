@@ -100,6 +100,7 @@ async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execu
     let scratch = tempfile::tempdir().expect("scratch");
     let helper = helper_executable().expect("explicit immutable helper prerequisite");
     let SpawnedPlugin {
+        control,
         child,
         proxy,
         bytes,
@@ -119,6 +120,7 @@ async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execu
         helper,
         process_fixture_lease(),
         bytes,
+        control,
     )
     .await
     .expect("owned handoff");
@@ -170,6 +172,7 @@ async fn dropped_handoff_keeps_code_until_physical_retirement() {
     let scratch = tempfile::tempdir().expect("scratch");
     let helper = helper_executable().expect("explicit immutable helper prerequisite");
     let SpawnedPlugin {
+        control,
         child,
         proxy,
         bytes,
@@ -189,6 +192,7 @@ async fn dropped_handoff_keeps_code_until_physical_retirement() {
         helper,
         process_fixture_lease(),
         bytes,
+        control,
     )
     .await
     .expect("handoff");
@@ -229,6 +233,7 @@ async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
     let scratch = tempfile::tempdir().expect("scratch");
     let helper = helper_executable().expect("explicit immutable helper prerequisite");
     let SpawnedPlugin {
+        control,
         child,
         proxy,
         bytes,
@@ -241,8 +246,6 @@ async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
         &[scratch.path().to_path_buf()],
     )
     .expect("spawn");
-    let mut child = child;
-    assert_ready(child.stdout.as_mut().expect("child stdout")).await;
     let pending = attach_supervisor(
         child,
         proxy,
@@ -250,6 +253,7 @@ async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
         helper,
         process_fixture_lease(),
         bytes,
+        control,
     );
     assert!(
         pinned_root.exists(),
@@ -291,4 +295,71 @@ fn preparation_read_view_is_distinct_from_immutable_executable_authority() {
             .validate_write_roots(&[bytes.program(&config).to_path_buf()])
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn closing_parent_lifeline_retires_a_plugin_that_ignores_stdin() {
+    assert_lifeline_retirement(false).await;
+}
+
+#[tokio::test]
+async fn killed_supervisor_keeps_group_anchored_until_effects_are_killed() {
+    assert_lifeline_retirement(true).await;
+}
+
+async fn assert_lifeline_retirement(kill_supervisor: bool) {
+    let images = rw_tools::ApprovedExecutableImages::default();
+    let _admission = crate::native_fixture::admit().await;
+    let (_directory, config) = native_fixture("hold\n");
+    let profile = profile();
+    let bytes = Arc::new(LaunchBytes::capture(&config, &profile, &images).expect("capture"));
+    let scratch = tempfile::tempdir().expect("scratch");
+    let helper = helper_executable().expect("explicit helper");
+    let SpawnedPlugin {
+        control,
+        child,
+        proxy,
+        bytes,
+    } = spawn_pinned_plugin(
+        &config,
+        &profile,
+        scratch.path(),
+        &helper,
+        bytes,
+        &[scratch.path().to_path_buf()],
+    )
+    .expect("supervised spawn");
+    let pid = child.id().expect("supervisor pid");
+    let mut launched = attach_supervisor(
+        child,
+        proxy,
+        &config,
+        helper,
+        process_fixture_lease(),
+        bytes,
+        control,
+    )
+    .await
+    .expect("granted launch");
+    assert_ready(&mut launched.stdout).await;
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).expect("pid range")).expect("pid");
+    if kill_supervisor {
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL)
+            .expect("kill only supervisor");
+    } else {
+        launched.process.kill_tree().expect("close parent lifeline");
+    }
+    tokio::time::timeout(Duration::from_secs(5), launched.process.settle_effects())
+        .await
+        .expect("bounded physical settlement")
+        .expect("settled");
+    assert_eq!(
+        rustix::process::test_kill_process_group(pid),
+        Err(rustix::io::Errno::SRCH)
+    );
+    launched
+        .process
+        .settle_effects()
+        .await
+        .expect("settlement stays idempotent");
 }
