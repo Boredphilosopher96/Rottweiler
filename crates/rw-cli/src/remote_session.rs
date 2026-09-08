@@ -18,11 +18,13 @@ use crate::cli_args::Cli;
 #[cfg(unix)]
 use crate::runtime_paths::{
     RuntimeDirectoryGuard, allocate_runtime_paths, locate_js_host_executable,
-    read_private_bootstrap_token, remove_stale_forward_socket, runtime_artifacts_ready,
-    runtime_is_live, valid_bootstrap_token, write_private_file_atomic,
+    read_private_bootstrap_token, remove_stale_forward_socket, valid_bootstrap_token,
+    write_private_file_atomic,
 };
 use crate::trust_cli::configuration_root;
 use crate::{remote, server, shell_broker, tui_config};
+
+mod detached;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_detached_server(
@@ -38,22 +40,6 @@ pub(super) async fn spawn_detached_server(
 ) -> Result<()> {
     use std::process::Stdio;
 
-    if runtime_is_live(paths).await {
-        let token = read_private_bootstrap_token(&paths.token)?
-            .ok_or_else(|| miette!("live engine bootstrap token failed validation"))?;
-        println!(
-            "{}",
-            serde_json::to_string(&DetachedServerReady {
-                version: 1,
-                socket: paths.socket.clone(),
-                token,
-                session_id: session_id.to_owned(),
-                started: false,
-            })
-            .into_diagnostic()?
-        );
-        return Ok(());
-    }
     let mut command = tokio::process::Command::new(std::env::current_exe().into_diagnostic()?);
     command
         .arg("serve")
@@ -88,38 +74,21 @@ pub(super) async fn spawn_detached_server(
         use std::os::unix::process::CommandExt as _;
         command.as_std_mut().process_group(0);
     }
-    let mut child = command.spawn().into_diagnostic()?;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if runtime_artifacts_ready(paths) {
-            let token = read_private_bootstrap_token(&paths.token)?
-                .ok_or_else(|| miette!("new engine bootstrap token failed validation"))?;
-            println!(
-                "{}",
-                serde_json::to_string(&DetachedServerReady {
-                    version: 1,
-                    socket: paths.socket.clone(),
-                    token,
-                    session_id: session_id.to_owned(),
-                    started: true,
-                })
-                .into_diagnostic()?
-            );
-            return Ok(());
-        }
-        if let Some(status) = child.try_wait().into_diagnostic()? {
-            return Err(miette!(
-                "detached engine exited before becoming ready with status {status}"
-            ));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let _ = child.kill().await;
-            return Err(miette!(
-                "detached engine did not become ready within 5 seconds"
-            ));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    }
+    // This engine becomes independent after readiness transfer, even when the
+    // invoking process itself was launched by an interactive supervisor.
+    command.env_remove(crate::parent_death::SUPERVISOR_PID_ENV);
+    let paths = paths.clone();
+    let session_id = session_id.to_owned();
+    crate::tui_session::run(move |stop| {
+        Box::pin(detached::start(
+            command,
+            paths,
+            session_id,
+            stop,
+            detached::announce,
+        ))
+    })
+    .await
 }
 
 pub(super) fn append_execution_lease_restart_flag(

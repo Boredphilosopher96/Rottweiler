@@ -12,6 +12,8 @@ use rw_types::ToolCapability;
 use std::collections::VecDeque;
 
 mod aggregate;
+mod announcement;
+pub(crate) use announcement::announce;
 mod input;
 mod print;
 mod public_event;

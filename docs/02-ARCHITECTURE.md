@@ -246,6 +246,12 @@ reconnecting cannot bypass those bounds. Losing the server caller requests this
 same cleanup from its owning task. Idle event forwarding stops when its receiver
 closes.
 
+A detached engine remains owned through private-token and authenticated-health
+validation and the complete readiness output write. Startup cancellation, output
+failure, or invalid readiness kills and reaps that new process before returning.
+Only acknowledged readiness transfers its lifetime to the detached engine;
+reporting an already-live engine does not acquire ownership of that process.
+
 Host event fanout shares encoded JSON bytes through every intermediate queue and
 the final SSE frame. A 96 MiB host-wide owner covers prepared copies, encoding
 scratch, and retained output; four encoders and 64 subscriptions (four per client)

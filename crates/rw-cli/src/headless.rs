@@ -1,5 +1,6 @@
 //! Local CLI client: terminal I/O consumes the runtime command/event surface.
 mod output;
+pub(super) use output::announce;
 
 use crate::cli_args::OutputFormat;
 use miette::{Result, miette};
