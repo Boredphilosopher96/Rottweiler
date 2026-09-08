@@ -74,20 +74,32 @@ interface ClientRestoreHost {
   setPrimaryView(view: PrimaryView): void
   updateToolsWorkspace(state: RottweilerState, restoreHidden: boolean): void
 }
+type MountedClientState = Pick<AppClientState, "transcript" | "tools" | "toolsScrollTop" | "picker">
+
 export class ClientRestoreController {
   #pendingClientState: AppClientState | null = null
   #pendingAllocation: ClientAllocationLease | null = null
+  #mountedState: MountedClientState | null = null
+  #mountedAllocation: ClientAllocationLease | null = null
   #pendingMounted = false
   #transcriptRestored = false
   #toolsRestored = false
   #pickerRestored = false
+  #transcriptAttempt: string | null = null
+  #toolsAttempt: string | null = null
+  #pickerAttempt: string | null = null
+  #toolsState: WeakRef<RottweilerState> | null = null
+  #pickerOptions: WeakRef<object> | null = null
   #interactionAllocation: ClientAllocationLease | null = null
   #answerGuard: { readonly session: string; readonly control: string; readonly text: string; readonly child: string } | null = null
   #interaction: InteractionSelection | null = null
   constructor(readonly host: ClientRestoreHost) {}
   #discardMountedState(): void {
-    this.#pendingClientState = null
+    this.#pendingClientState = null; this.#mountedState = null
+    this.#mountedAllocation?.release(); this.#mountedAllocation = null
     this.#transcriptRestored = false; this.#toolsRestored = false; this.#pickerRestored = false
+    this.#transcriptAttempt = null; this.#toolsAttempt = null; this.#pickerAttempt = null
+    this.#toolsState = null; this.#pickerOptions = null
     this.#pendingAllocation?.release(); this.#pendingAllocation = null
   }
   discard(): void {
@@ -232,6 +244,12 @@ export class ClientRestoreController {
     }
     if (state.child === null) void this.host.history.restoreViewport(directSessionRead(this.host.sessionId), state.history)
     this.#pendingAllocation = owner
+    const mounted: MountedClientState = { transcript: state.transcript, tools: state.tools,
+      toolsScrollTop: state.toolsScrollTop, picker: state.picker }
+    // Reserve every later restoration owner before the private handoff can be
+    // consumed. Frame-time adoption must not need new allocation admission.
+    this.#mountedAllocation = this.host.history.cache.allocations.reserve("drafts", retainedJsonBytes(mounted, 64 * 1024 * 1024))
+    this.#mountedState = mounted
     if (state.interaction !== null) {
       this.#interactionAllocation = this.host.history.cache.allocations.reserve("drafts", retainedJsonBytes(state.interaction, 4096))
       this.#interaction = state.interaction
@@ -246,35 +264,59 @@ export class ClientRestoreController {
 
   /** Apply viewport/selection only after replay and OpenTUI layout have supplied their rows. */
   applyPendingRecycleScroll(): void {
-    const state = this.#pendingClientState
-    if (state === null) { this.#restoreInteraction(); return }
-    if (!this.#pendingMounted) {
-      if (state.child === null || !this.host.children.restoreRecycleTarget(state.child)) return
-      this.#pendingMounted = true
-      this.restoreComposerState(state.composer); this.host.submission.restoreInput(state.composer.content)
-      void this.host.history.restoreViewport(this.host.children.readTarget, state.history)
+    const pending = this.#pendingClientState
+    if (pending !== null) {
+      if (!this.#pendingMounted) {
+        if (pending.child === null || !this.host.children.restoreRecycleTarget(pending.child)) return
+        this.#pendingMounted = true
+        this.restoreComposerState(pending.composer); this.host.submission.restoreInput(pending.composer.content)
+        void this.host.history.restoreViewport(this.host.children.readTarget, pending.history)
+      }
+      // Only separately admitted view hints await later mounts. Composer and
+      // attachment owners have adopted their state and no longer need this envelope.
+      this.#pendingClientState = null
+      this.#pendingAllocation?.release(); this.#pendingAllocation = null
     }
+    const state = this.#mountedState
+    if (state === null) { this.#restoreInteraction(); return }
     this.#restoreInteraction()
     const transcriptReady = !this.host.history.snapshot.loading
       && this.host.history.snapshot.page !== null
     if (!this.#toolsRestored && (state.tools.expanded.length > 0 || state.tools.selectedId !== null || state.toolsScrollTop > 0)) {
-      this.host.updateToolsWorkspace(this.host.children.presentedState(), true)
+      const presented = this.host.children.presentedState()
+      if (this.#toolsState?.deref() !== presented) {
+        this.host.updateToolsWorkspace(presented, true)
+        this.#toolsState = new WeakRef(presented)
+      }
     }
     const toolsReady = state.toolsScrollTop === 0 || this.host.ui.toolsWorkspace.mountedRowCount > 0
-    if (!this.#transcriptRestored && transcriptReady) this.#transcriptRestored = this.host.ui.transcript.restoreClientState(state.transcript)
-    if (!this.#toolsRestored && toolsReady) {
-      this.#toolsRestored = this.host.ui.toolsWorkspace.restoreClientState(state.tools)
-      this.host.ui.toolsWorkspace.activityScroller.scrollTo(state.toolsScrollTop)
+    const transcript = this.host.ui.transcript, tools = this.host.ui.toolsWorkspace
+    const transcriptRevision = `${transcript.clientStateRevision}:${transcript.width}:${transcript.height}`
+    if (!this.#transcriptRestored && transcriptReady && this.#transcriptAttempt !== transcriptRevision) {
+      this.#transcriptAttempt = transcriptRevision
+      this.#transcriptRestored = transcript.restoreClientState(state.transcript)
+    }
+    const toolsRevision = `${tools.clientStateRevision}:${tools.width}:${tools.height}`
+    if (!this.#toolsRestored && toolsReady && this.#toolsAttempt !== toolsRevision) {
+      this.#toolsAttempt = toolsRevision
+      this.#toolsRestored = tools.restoreClientState(state.tools)
+      tools.activityScroller.scrollTo(state.toolsScrollTop)
     }
     let pickerReady = true
     if (!this.#pickerRestored && state.picker !== null && this.host.pickerController.kind === state.picker.kind) {
       const surface = this.clientPickerSurface()
       if (surface !== null) {
+        const revision = `${surface.clientStateRevision}:${surface.width}:${surface.height}`
+        if (this.#pickerAttempt === revision) return
+        this.#pickerAttempt = revision
         if (state.picker.selectedId !== null) surface.selectById(state.picker.selectedId)
         pickerReady = state.picker.selectedId === null || surface.selectedId === state.picker.selectedId
         surface.restoreViewport(state.picker.scrollOffset)
       } else {
-        const index = this.host.ui.picker.select.options.findIndex((item) => item.value === state.picker?.selectedId)
+        const options = this.host.ui.picker.select.options
+        if (this.#pickerOptions?.deref() === options) return
+        this.#pickerOptions = new WeakRef(options)
+        const index = options.findIndex((item) => item.value === state.picker?.selectedId)
         if (index >= 0) this.host.ui.picker.select.setSelectedIndex(index)
         pickerReady = state.picker.selectedId === null || index >= 0
       }

@@ -234,6 +234,9 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.resizeForTerminal(ctx.width, ctx.height)
   }
 
+  #clientStateRevision = 0
+  get clientStateRevision(): number { return this.#clientStateRevision }
+
   get selectedId(): string | null {
     return this.#selectedId
   }
@@ -283,6 +286,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.heading.content = presentation.title
     if (this.input.value !== presentation.query) this.input.value = presentation.query
     this.#rows = presentation.rows
+    this.#clientStateRevision++
     this.#emptyCopy = presentation.emptyCopy
     if (!this.#rows.some((row) => row.kind === "item" && row.id === this.#pressedRowId)) {
       this.#pressedRowId = null
@@ -312,6 +316,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.input.blur()
     this.input.value = ""
     this.#rows = []
+    this.#clientStateRevision++
     this.#selectedId = null
     this.#scrollOffset = 0
     this.#pressedRowId = null

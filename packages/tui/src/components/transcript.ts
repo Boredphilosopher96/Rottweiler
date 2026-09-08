@@ -87,6 +87,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #onInteraction: (() => void) | undefined
   readonly #onOpenToolOutput: ((invocationId: string) => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
+  #clientStateRevision = 0
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
   readonly #tailToolPool: ToolBlockRenderable[] = []
   readonly #reasoningExpansion = new Map<string, boolean>()
@@ -364,6 +365,10 @@ export class TranscriptRenderable extends BoxRenderable {
     return anchor === null && this.#history.total > 0n ? null : { following: false, anchor }
   }
 
+  get clientStateRevision(): string {
+    return `${this.#clientStateRevision}:${this.#tailReasoning.blockId}:${this.#tailReasoning.visible}:${this.#compactionReasoning.blockId}:${this.#compactionReasoning.visible}`
+  }
+
   captureClientState(): TranscriptClientState {
     return {
       blocks: {
@@ -540,6 +545,7 @@ export class TranscriptRenderable extends BoxRenderable {
       if (desired.has(key)) continue
       this.scroller.remove(card)
       this.mountedCards.delete(key)
+      this.#clientStateRevision++
       card.destroyRecursively()
       this.#recycledSinceCollection++
     }
@@ -560,7 +566,9 @@ export class TranscriptRenderable extends BoxRenderable {
             ?? (item.agent_turn === this.#tailReasoningTurnId ? this.#tailReasoning.expanded : true),
         }, this.#toolExpansion.get(item.content.type === "tool" ? item.content.invocation_id : `history:${item.id}`))
         this.mountedCards.set(item.id, card)
+        this.#clientStateRevision++
       }
+      if (card.item.revision !== item.revision) this.#clientStateRevision++
       card.update(item, Math.max(20, this.width || this.ctx.width))
       this.scroller.insertBefore(card, reference)
       reference = card
@@ -745,6 +753,7 @@ export class TranscriptRenderable extends BoxRenderable {
       if (retained.has(invocationId)) continue
       this.#tailTools.remove(card)
       this.#tailToolCards.delete(invocationId)
+      this.#clientStateRevision++
       this.#tailToolPool.push(card)
     }
     for (const tool of tools) {
@@ -778,6 +787,7 @@ export class TranscriptRenderable extends BoxRenderable {
         }
         card.update(tool, Math.max(20, this.width || this.ctx.width), this.#state?.workspaceRoots?.generation ?? "")
         this.#tailToolCards.set(tool.invocationId, card)
+        this.#clientStateRevision++
         this.#tailTools.add(card)
       } else {
         card.update(tool, Math.max(20, this.width || this.ctx.width), this.#state?.workspaceRoots?.generation ?? "")

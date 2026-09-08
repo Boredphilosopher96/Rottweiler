@@ -386,6 +386,9 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
     return this.#selectedRowKey
   }
 
+  #clientStateRevision = 0
+  get clientStateRevision(): number { return this.#clientStateRevision }
+
   captureClientState(): ClientBlockState {
     return {
       selectedId: this.#selectedRowKey,
@@ -412,6 +415,7 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
       if (desiredKeys.has(key)) continue
       this.activityScroller.remove(row)
       this.#rows.delete(key)
+      this.#clientStateRevision++
       row.destroyRecursively()
     }
     for (const rowModel of model.rows) {
@@ -424,6 +428,7 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
           this.#options.onOpenToolOutput,
         )
         this.#rows.set(rowModel.key, row)
+        this.#clientStateRevision++
         this.activityScroller.add(row)
       }
     }
