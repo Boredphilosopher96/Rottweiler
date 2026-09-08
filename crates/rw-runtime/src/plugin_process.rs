@@ -609,7 +609,14 @@ impl PluginChild {
                         // crashed. Never signal a stored PGID after reap.
                         rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
                             .or_else(|cause| {
-                                if cause == rustix::io::Errno::SRCH {
+                                // Darwin can deny signals to a zombie-only
+                                // group. WNOWAIT already established exit;
+                                // this permits reaping, not settlement. The
+                                // receipt and group-absence proofs still apply.
+                                if cause == rustix::io::Errno::SRCH
+                                    || (cfg!(target_os = "macos")
+                                        && cause == rustix::io::Errno::PERM)
+                                {
                                     Ok(())
                                 } else {
                                     Err(cause)
