@@ -281,6 +281,10 @@ impl RuntimeWork {
                 return true;
             }
             tokio::select! {
+                // An exchange publishes its transport error before its task
+                // completes. Observe completed work before admitting a retry,
+                // so that retry cannot enter an epoch whose resolver is draining.
+                biased;
                 () = self.stopped.cancelled() => break,
                 result = tasks.join_next(), if !tasks.is_empty() => {
                     match result {
