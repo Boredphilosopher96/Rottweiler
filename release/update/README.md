@@ -50,21 +50,24 @@ and Harbor's containers use fixed disposable GitHub-hosted images. These are
 prerequisites to signing for the applicable release tier: the workflow does not
 offer a skip flag for missing evidence or infrastructure.
 
-Before creating a tag, run the **Release preflight** workflow manually. It
-validates the measured baseline provenance, committed public signing inputs,
-protected variables/secrets, and dogfood ledger, then invokes the same
-calibrated protected-performance workflow used by release qualification. Its
-final artifact binds the readiness and both platform performance evidence sets
-to the exact source SHA, version, run, and run attempt. The tag publisher
-requires and verifies that artifact; it does not repeat the noisy measurements.
-The preflight cannot sign metadata, publish a GitHub release, update Homebrew, or
-substitute for the exact-tag WSL2 gate. For v1 and later it also cannot
-substitute for the exact-tag protected soaks, Terminal-Bench, or live replay
-gates. Pre-v1 readiness records those as not claimed rather than measured.
-Before sealing the candidate, preflight also downloads the public stable and
-beta envelopes and requires the checked-in channel specs to advance their
-shared metadata version by exactly one. Cryptographic authentication and the
-complete transition policy remain enforced again by the signer.
+Releases start from a pushed version tag, not from a merge to `main`. Prepare
+matching workspace, SDK and host package versions, and advance both channel
+specs from the deployed metadata version to exactly `N+1`. Verify the transition
+with `scripts/check-release-channel-advance.py` using the public stable and beta
+envelopes. After the release preparation passes CI and merges, push `vVERSION`
+at that exact commit. The Signed release workflow builds, qualifies, signs and
+publishes the platform archives, Homebrew packages and signed update repository.
+
+For v1 and later, run **Release preflight** manually at the release commit
+before creating the tag. It validates protected inputs and invokes the protected
+performance workflow. Its artifact binds readiness and platform evidence to the
+exact source SHA, version, run and run attempt; the tag publisher verifies it.
+Pre-v1 tags use their exact-tag readiness and acceptance gates without requiring
+calibrated performance baselines or that protected-performance preflight. Their
+qualification evidence explicitly records calibrated performance as unclaimed.
+Each tier enforces its required gates.
+The preflight cannot sign or publish artifacts, or substitute for exact-tag WSL2
+acceptance, protected soaks or paid live gates required by the release tier.
 
 The tag workflow materializes those seeds as mode-0600 temporary files, signs
 the two channel documents, deletes the temporary directory, attests the archive

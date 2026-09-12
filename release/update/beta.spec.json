@@ -1,18 +1,18 @@
 {
   "schema_version": 1,
   "role": "release",
-  "version": 2,
+  "version": 3,
   "expires_unix": 1817078400,
   "channel": "beta",
-  "release_notes": "Rottweiler 0.1.4",
+  "release_notes": "Rottweiler 0.1.5",
   "targets": {
     "darwin-arm64": {
-      "version": "0.1.4",
-      "url": "https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-darwin-arm64.tar.gz"
+      "version": "0.1.5",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.5-darwin-arm64.tar.gz"
     },
     "linux-x86_64": {
-      "version": "0.1.4",
-      "url": "https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-linux-x86_64.tar.gz"
+      "version": "0.1.5",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.5-linux-x86_64.tar.gz"
     }
   }
 }

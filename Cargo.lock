@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "rw-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2675,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "rw-context"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "proptest",
@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "rw-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "rw-ext"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2763,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "rw-intel"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "rw-macos-bootstrap"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "mach2",
@@ -2791,7 +2791,7 @@ dependencies = [
 
 [[package]]
 name = "rw-mcp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2816,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "rw-memory-derive"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2825,7 +2825,7 @@ dependencies = [
 
 [[package]]
 name = "rw-operation-contract"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "schemars",
  "serde",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "rw-plugin-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "rw-operation-contract",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "rw-providers"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "rw-resources"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "rustix",
  "thiserror 2.0.20",
@@ -2887,7 +2887,7 @@ dependencies = [
 
 [[package]]
 name = "rw-runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2926,7 +2926,7 @@ dependencies = [
 
 [[package]]
 name = "rw-sandbox"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "rw-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "globset",
@@ -2973,7 +2973,7 @@ dependencies = [
 
 [[package]]
 name = "rw-tools"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3004,7 +3004,7 @@ dependencies = [
 
 [[package]]
 name = "rw-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "rw-memory-derive",
  "rw-operation-contract",
@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "rw-wasm-host"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "rw-ext",
  "rw-plugin-protocol",
@@ -4765,7 +4765,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",

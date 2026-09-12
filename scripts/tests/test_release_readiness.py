@@ -128,24 +128,37 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("darwin-arm64/core baseline is not measured", result.stdout)
 
-    def test_pre_v1_requires_core_but_records_soak_as_not_claimed(self) -> None:
+    def test_pre_v1_records_uncalibrated_core_and_soak_as_not_claimed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.fixture(root, release_version="0.1.0")
             path = root / "benchmarks" / "performance-baseline.json"
             baseline = json.loads(path.read_text(encoding="utf-8"))
             for platform in PLATFORMS:
-                baseline["platforms"][platform]["suites"]["soak"][
-                    "baseline_kind"
-                ] = "bootstrap"
+                for suite in ("core", "soak"):
+                    baseline["platforms"][platform]["suites"][suite][
+                        "baseline_kind"
+                    ] = "bootstrap"
             path.write_text(json.dumps(baseline), encoding="utf-8")
             result = self.run_check(root, release_version="0.1.0")
             document = json.loads(result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(document["qualification"], "pre-v1")
         self.assertEqual(
+            document["evidence"]["core_baselines"], "not_claimed_for_pre_v1"
+        )
+        self.assertEqual(
             document["evidence"]["protected_soak"], "not_claimed_for_pre_v1"
         )
+
+    def test_pre_v1_still_rejects_missing_signing_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, release_version="0.1.5")
+            (root / "release/update/root-chain.json").unlink()
+            result = self.run_check(root, release_version="0.1.5")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing required release input", result.stdout)
 
     def test_v1_requires_measured_soak_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

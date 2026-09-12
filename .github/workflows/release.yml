@@ -753,6 +753,7 @@ jobs:
               test "$QUALIFICATION" = pre-v1
               test "$RELEASE_SOAK_RESULT" = skipped
               test "$RELEASE_SOAK_QUEUE_RESULT" = skipped
+              calibrated_performance=not_claimed_for_pre_v1
               protected_soak=not_claimed_for_pre_v1
               terminal_bench=not_claimed_for_pre_v1
               dogfood=not_claimed_for_pre_v1
@@ -763,6 +764,7 @@ jobs:
               test "$QUALIFICATION" = v1
               test "$RELEASE_SOAK_RESULT" = success
               test "$RELEASE_SOAK_QUEUE_RESULT" = success
+              calibrated_performance=passed
               protected_soak=passed
               terminal_bench=passed
               dogfood=passed
@@ -782,6 +784,7 @@ jobs:
               "preflight_run_id": int(os.environ["PREFLIGHT_RUN_ID"]),
               "evidence": {
                   "global_gate": "passed",
+                  "calibrated_performance": "$calibrated_performance",
                   "terminal_bench": "$terminal_bench",
                   "protected_soak": "$protected_soak",
                   "wsl2": "passed",
