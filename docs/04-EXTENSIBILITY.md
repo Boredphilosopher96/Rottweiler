@@ -289,7 +289,7 @@ must fit the frame limit; oversized replies fail without truncation.
 
 ### SDKs
 
-Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second. The dependency-leaf `rw-plugin-protocol` crate owns the public wire version, methods, limits, envelopes, manifest grammar, and DTOs. Its checked-in TypeScript, schema, and fixture projections are generated and CI-checked. The release workflow publishes the version-matched TypeScript package through npm trusted publishing, then proves an unmodified clean scaffold can install it from the public registry. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source.
+Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second. The dependency-leaf `rw-plugin-protocol` crate owns the public wire version, methods, limits, envelopes, manifest grammar, and DTOs. Its checked-in TypeScript, schema, and fixture projections are generated and CI-checked. After the matching GitHub release is published, a separate manually dispatched workflow checks out that exact tag, requires the workspace and SDK versions to match it, and publishes the TypeScript package through npm trusted publishing. It then proves an unmodified clean scaffold can install the same bytes from the public registry. Registry publication does not gate the binary release, Homebrew publication, or signed update metadata. Pull-request CI consumes the packed package artifact rather than rewriting the dependency to workspace source.
 
 ### Plugin configuration and approval
 

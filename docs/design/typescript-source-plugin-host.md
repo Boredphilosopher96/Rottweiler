@@ -229,12 +229,15 @@ before the last-good snapshot remains active.
 
 ## Distribution and SDK publication
 
-The official SDK is published from the exact tag workflow using npm trusted
-publishing. The package version must equal the release version. CI packs the
-candidate package and consumes its tarball instead of rewriting the scaffold to a
-workspace source path. After qualification, the release publishes and then creates
-a clean scaffold that installs the unmodified version from the public registry,
-typechecks, tests, and builds.
+The official SDK is published with npm trusted publishing by a separate manual
+workflow after the matching GitHub release exists. The workflow checks out the
+exact tag, rejects a branch with the same input name, and requires both the
+workspace and package versions to equal the tag. It compares an existing registry
+package byte-for-byte with the tag-built tarball or publishes the missing version,
+then creates a clean scaffold that installs that version from the public registry,
+typechecks, tests, and builds. Binary, Homebrew, and signed-update publication do
+not depend on the npm registry. CI packs the candidate package and consumes its
+tarball instead of rewriting the scaffold to a workspace source path.
 
 The source host is included in release archives, installers, Homebrew private
 trees, size gates, and archive provenance. The release build executes the
