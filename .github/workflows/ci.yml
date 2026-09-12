@@ -247,6 +247,11 @@ jobs:
     timeout-minutes: 45
     outputs:
       candidate_artifact: linux-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
+      ROTTWEILER_UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
+      ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
+      ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
     steps:
       - name: Configure native cache
         run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
@@ -302,6 +307,11 @@ jobs:
     timeout-minutes: 45
     outputs:
       candidate_artifact: macos-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
+      ROTTWEILER_UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
+      ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
+      ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
     steps:
       - name: Configure native cache
         run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"

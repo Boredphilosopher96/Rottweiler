@@ -101,7 +101,8 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.assertIn("needs: runner-contract", build)
                 self.assertIn(runner, build)
-                self.assertIn("Build deterministic size-gated archive", build)
+                self.assertIn("scripts/promote-release-candidate.py", build)
+                self.assertNotIn("scripts/build-native-candidate.py", build)
                 self.assertIn("Attest archive provenance", build)
                 self.assertIn("Upload unsigned archive for release signing", build)
                 self.assertIn("overwrite: true", build)

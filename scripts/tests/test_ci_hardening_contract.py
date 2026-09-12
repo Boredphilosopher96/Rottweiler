@@ -353,7 +353,7 @@ class CiHardeningContractTests(unittest.TestCase):
             contract = workflow_job(workflow, contract_name)
             with self.subTest(contract=contract_name):
                 self.assertIn("runs-on: ubuntu-latest", contract)
-                self.assertIn("timeout-minutes: 5", contract)
+                self.assertIn("timeout-minutes: 65", contract)
                 self.assertIn("vars.ROTTWEILER_SELF_HOSTED_RUNNERS", contract)
                 self.assertIn("exit 1", contract)
             for consumer_name in consumer_names:
@@ -486,6 +486,36 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertEqual(sign_and_publish.count("name: release-linux-x86_64"), 1)
         self.assertNotIn("pattern: release-*", sign_and_publish)
         self.assertNotIn("merge-multiple:", sign_and_publish)
+
+    def test_release_promotes_exact_ci_candidates_without_duplicate_builds(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        qualification = workflow_job(workflow, "runner-contract")
+        self.assertIn("scripts/release_ci.py", qualification)
+        self.assertIn('--source-sha "$GITHUB_SHA"', qualification)
+        for release_job, ci_job in (
+            ("build-linux", "linux-candidate-build"),
+            ("build-macos", "macos-candidate-build"),
+        ):
+            promotion = workflow_job(workflow, release_job)
+            self.assertIn("scripts/promote-release-candidate.py", promotion)
+            self.assertIn("needs.runner-contract.outputs.ci_run_id", promotion)
+            self.assertIn("needs.runner-contract.outputs.ci_run_attempt", promotion)
+            self.assertNotIn("build-native-candidate.py", promotion)
+            self.assertNotIn("rustup", promotion)
+            for key in (
+                "ROTTWEILER_UPDATE_ROOT_VERSION", "ROTTWEILER_UPDATE_ROOT_THRESHOLD",
+                "ROTTWEILER_UPDATE_ROOT_KEYS_JSON", "ROTTWEILER_UPDATE_BASE_URL",
+            ):
+                self.assertIn(key, workflow_job(ci, ci_job))
+                self.assertIn(key, promotion)
+        self.assertNotIn("  release-linux-security:", workflow)
+        self.assertNotIn("cargo clippy", workflow)
+        self.assertNotIn("cargo audit", workflow)
+        self.assertNotIn("JavaScript package gates", workflow)
+        for job in ("release-gate", "release-terminal-bench"):
+            self.assertIn("if: ${{ !startsWith(github.ref_name, 'v0.') }}",
+                          workflow_job(workflow, job).split("    steps:", 1)[0])
 
     def test_release_provider_and_eval_secrets_are_step_scoped(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

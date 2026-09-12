@@ -228,7 +228,7 @@ class OwnershipCheckerTests(unittest.TestCase):
         )
         self.assertEqual(failures, [])
 
-    def test_ci_and_release_run_the_ownership_check_with_architecture_gates(self) -> None:
+    def test_ci_owns_architecture_gates_and_release_requires_qualified_ci(self) -> None:
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         release = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         gates = [
@@ -237,10 +237,12 @@ class OwnershipCheckerTests(unittest.TestCase):
             "python3 scripts/check-toolchain-ownership.py",
             "python3 scripts/check-network-boundaries.py",
         ]
-        for workflow in (ci, release):
-            positions = [workflow.find(gate) for gate in gates]
-            self.assertTrue(all(position >= 0 for position in positions))
-            self.assertEqual(positions, sorted(positions))
+        positions = [ci.find(gate) for gate in gates]
+        self.assertTrue(all(position >= 0 for position in positions))
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("scripts/release_ci.py", release)
+        self.assertIn('--source-sha "$GITHUB_SHA"', release)
+        self.assertTrue(all(gate not in release for gate in gates))
 
 
 if __name__ == "__main__":

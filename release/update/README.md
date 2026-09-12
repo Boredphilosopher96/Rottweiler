@@ -134,3 +134,5 @@ version exactly once; a client may then accept that same authenticated version
 when switching channels. Expiry times must advance deliberately; the signer and
 client reject rollback, wrong-channel, wrong-platform, expired, and unsigned
 inputs.
+
+Release archives are promoted from the successful `main` push CI run for the exact tagged commit. The native CI jobs embed the repository's public updater configuration; promotion rejects artifacts built with different trust inputs, source, profile, or component bytes. CI owns the shared test and security suite. The release workflow owns archive promotion, WSL acceptance, release-tier evidence, signing, and publication. Expired or missing CI artifacts require a new successful CI run for the same source before release.
