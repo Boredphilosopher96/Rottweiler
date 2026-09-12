@@ -12,6 +12,30 @@ WRAPPER = REPO / "crates/rw-cli/tests/m8_release_gate_linux.sh"
 
 
 class M8LinuxWrapperTests(unittest.TestCase):
+    def test_native_measurement_consumes_explicit_receipts_without_compilation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate, receipt = root / "candidate", root / "fixture.json"
+            candidate.mkdir(); receipt.write_text("prepared receipt")
+            log = root / "arguments"
+            driver = root / "python3"
+            driver.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$M8_LOG"\n')
+            driver.chmod(0o700)
+            for name in ("cargo", "rustc"):
+                compiler = root / name
+                compiler.write_text('#!/bin/sh\nexit 97\n'); compiler.chmod(0o700)
+            env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "M8_LOG": str(log),
+                   "ROTTWEILER_M8_PERF_SAMPLES": "100", "ROTTWEILER_M8_FUNCTIONAL_ONLY": "0"}
+            env.pop("ROTTWEILER_PERF_OUTPUT", None)
+            wrapper = REPO / "crates/rw-cli/tests/m8_release_gate.sh"
+            subprocess.run([str(wrapper), str(candidate), str(receipt)], env=env, check=True)
+            self.assertEqual(log.read_text().splitlines()[1:],
+                             ["--candidate", str(candidate), "--fixture-receipt", str(receipt), "--samples", "100"])
+            self.assertTrue(candidate.exists()); self.assertTrue(receipt.exists())
+            missing = subprocess.run([str(wrapper), str(candidate)], env=env, capture_output=True)
+            self.assertEqual(missing.returncode, 2)
+            self.assertIn(b"MCP_FIXTURE_RECEIPT", missing.stderr)
+
     def test_forwards_metrics_and_uses_ephemeral_tmpfs_builds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -20,6 +44,10 @@ class M8LinuxWrapperTests(unittest.TestCase):
             docker.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"\n"
+                "case \"$1\" in\n"
+                " create) printf '%064d\\n' 1 ;;\n"
+                " inspect) echo 'exited 0' ;;\n"
+                "esac\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -33,11 +61,13 @@ class M8LinuxWrapperTests(unittest.TestCase):
             }
             env.pop("ROTTWEILER_UPDATE_ROOT_THRESHOLD", None)
 
-            subprocess.run([str(WRAPPER)], cwd=REPO, env=env, check=True)
+            candidate = root / "candidate"; candidate.mkdir()
+            receipt = root / "fixture.json"; receipt.write_text("fixture")
+            subprocess.run([str(WRAPPER), str(candidate), str(receipt)], cwd=REPO, env=env, check=True)
 
             log_text = log.read_text(encoding="utf-8")
             calls = log_text.splitlines()
-            run = next(call for call in calls if call.startswith("run "))
+            run = next(call for call in calls if call.startswith("create "))
             self.assertIn("--privileged", run)
             self.assertIn(f"type=bind,source={REPO},target={REPO}", run)
             self.assertIn("--tmpfs /m8-work:rw,exec,size=3g", run)
@@ -53,6 +83,10 @@ class M8LinuxWrapperTests(unittest.TestCase):
             self.assertIn("link-arg=-fuse-ld=gold", log_text)
             self.assertIn('rm -rf "$CARGO_TARGET_DIR"', log_text)
             self.assertIn("m8_release_gate.py", log_text)
+            strict = log_text.split("  else\n", 1)[1]
+            self.assertNotIn("cargo-release.sh build", strict)
+            self.assertIn("ROTTWEILER_M8_CANDIDATE", log_text)
+            self.assertIn("ROTTWEILER_M8_FIXTURE_RECEIPT", log_text)
             self.assertFalse(
                 any("rottweiler-m8-target-" in call for call in calls),
                 "build output must never use a leakable named volume",

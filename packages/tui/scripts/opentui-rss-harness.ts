@@ -1,3 +1,4 @@
+import { observedResidentBytes } from "../src/process-memory"
 import { BoxRenderable, TextRenderable } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 
@@ -35,7 +36,7 @@ try {
       samples.push({
         cycle,
         rssBytes: process.memoryUsage.rss(),
-        maxRssBytes: process.resourceUsage().maxRSS * 1024,
+        maxRssBytes: observedResidentBytes(),
       })
     }
   }

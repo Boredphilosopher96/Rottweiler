@@ -7,10 +7,13 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+redb.workspace = true
 blake3.workspace = true
 globset.workspace = true
+memchr.workspace = true
 rusqlite.workspace = true
 rw-types.workspace = true
+rw-resources.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
@@ -22,6 +25,9 @@ url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

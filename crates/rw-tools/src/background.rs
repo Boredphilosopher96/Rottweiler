@@ -1,3 +1,6 @@
+mod presentation;
+use presentation::{KILL_PRESENTATION, OUTPUT_PRESENTATION, STATUS_PRESENTATION};
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -748,6 +751,10 @@ impl BackgroundStatusTool {
 
 #[async_trait]
 impl Tool for BackgroundStatusTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "background_status".to_owned(),
@@ -777,7 +784,8 @@ impl Tool for BackgroundStatusTool {
             serde_json::to_string_pretty(&processes)
                 .map_err(|error| ToolError::Output(error.to_string()))?,
             json!({ "processes": processes }),
-        ))
+        )
+        .with_presentation(STATUS_PRESENTATION.plan()?))
     }
 }
 
@@ -795,6 +803,10 @@ impl BackgroundOutputTool {
 
 #[async_trait]
 impl Tool for BackgroundOutputTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "background_output".to_owned(),
@@ -832,10 +844,10 @@ impl Tool for BackgroundOutputTool {
             write!(rendered, "[{stream}] {}", chunk.content)
                 .map_err(|error| ToolError::Output(error.to_string()))?;
         }
-        Ok(ToolResult::new(
-            rendered,
-            json!({ "process": process, "chunks": chunks }),
-        ))
+        Ok(
+            ToolResult::new(rendered, json!({ "process": process, "chunks": chunks }))
+                .with_presentation(OUTPUT_PRESENTATION.plan()?),
+        )
     }
 }
 
@@ -853,6 +865,10 @@ impl BackgroundKillTool {
 
 #[async_trait]
 impl Tool for BackgroundKillTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "background_kill".to_owned(),
@@ -878,7 +894,8 @@ impl Tool for BackgroundKillTool {
         Ok(ToolResult::new(
             format!("{}: {:?}", process.process_id, process.status),
             json!({ "process": process }),
-        ))
+        )
+        .with_presentation(KILL_PRESENTATION.plan()?))
     }
 }
 
@@ -909,6 +926,9 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for BlockingFixture {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
         fn supports_background(&self) -> bool {
             true
         }
@@ -949,6 +969,9 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for SplitSecretFixture {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
         fn supports_background(&self) -> bool {
             true
         }
@@ -1208,6 +1231,9 @@ mod tests {
 
     #[async_trait]
     impl CommandExecutor for CompletingFixture {
+        async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+            Ok(())
+        }
         fn supports_background(&self) -> bool {
             true
         }
@@ -1325,7 +1351,11 @@ mod tests {
                 // support. This fixture exercises process-group ownership only,
                 // so the request deliberately bypasses sandbox-helper composition;
                 // native sandbox enforcement has separate acceptance coverage.
-                Arc::new(TokioCommandExecutor::default().sandboxed(policy)),
+                Arc::new(TokioCommandExecutor::default().sandboxed(
+                    policy,
+                    crate::test_support::sandbox_helper(),
+                    crate::CommandScratch::create("fixture").expect("scratch owner"),
+                )),
                 &session,
                 CommandRequest {
                     sandbox: BashSandboxMode::Unsandboxed,
@@ -1380,7 +1410,11 @@ mod tests {
                 .expect("sandbox policy"),
         );
         let executor: Arc<dyn CommandExecutor> =
-            Arc::new(TokioCommandExecutor::default().sandboxed(policy));
+            Arc::new(TokioCommandExecutor::default().sandboxed(
+                policy,
+                crate::test_support::sandbox_helper(),
+                crate::CommandScratch::create("fixture").expect("scratch owner"),
+            ));
         let manager = Arc::new(BackgroundProcessManager::new(
             Arc::new(IdentityCommandFixtureRedactor),
             BackgroundProcessLimits::default(),

@@ -1,0 +1,513 @@
+//! Correlated request lifetime and replaceable progress state.
+use super::{PluginRpcError, rpc_error};
+use rw_plugin_protocol::{OperationLifetime, ToolProgress, ToolProgressParams};
+use rw_tools::{CancellationToken, ToolProgressSink};
+use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
+
+pub(super) enum RequestPolicy {
+    Command {
+        lifetime: OperationLifetime,
+    },
+    Ordinary {
+        allow_closed: bool,
+    },
+    Tool {
+        lifetime: OperationLifetime,
+        progress: Arc<dyn ToolProgressSink>,
+        effects: Option<Arc<crate::PluginToolEffects>>,
+    },
+}
+
+impl RequestPolicy {
+    pub(super) fn allows_closed(&self) -> bool {
+        matches!(self, Self::Ordinary { allow_closed: true })
+    }
+
+    pub(super) fn begin(
+        self,
+        response: oneshot::Sender<Result<Value, PluginRpcError>>,
+        timeout: Duration,
+    ) -> (PendingRequest, RequestObserver) {
+        match self {
+            Self::Command { lifetime } => {
+                // Commands have no idle-renewal channel. Both clocks are fixed
+                // at admission, including time spent in the bounded writer.
+                let deadline =
+                    Instant::now() + Duration::from_millis(u64::from(lifetime.idle_ms()));
+                (
+                    PendingRequest::Command {
+                        response,
+                        origin: None,
+                        deadline,
+                    },
+                    RequestObserver::Deadline(deadline),
+                )
+            }
+            Self::Ordinary { .. } => (
+                PendingRequest::Ordinary {
+                    response,
+                    origin: None,
+                    provider_alias: None,
+                    deadline: Instant::now() + timeout,
+                },
+                RequestObserver::Ordinary(timeout),
+            ),
+            Self::Tool {
+                lifetime,
+                progress,
+                effects,
+            } => {
+                let now = Instant::now();
+                let total = now + Duration::from_millis(u64::from(lifetime.total_ms()));
+                let idle = now + Duration::from_millis(u64::from(lifetime.idle_ms()));
+                let (updates, receiver) = watch::channel(None);
+                (
+                    PendingRequest::Tool {
+                        response,
+                        effects,
+                        operation: ToolOperation {
+                            total,
+                            idle,
+                            idle_duration: Duration::from_millis(u64::from(lifetime.idle_ms())),
+                            last_sequence: 0,
+                            rate: ProgressRate::new(now),
+                            updates,
+                        },
+                    },
+                    RequestObserver::Tool {
+                        total,
+                        idle,
+                        progress,
+                        updates: receiver,
+                    },
+                )
+            }
+        }
+    }
+}
+
+pub(super) enum PendingRequest {
+    Command {
+        response: oneshot::Sender<Result<Value, PluginRpcError>>,
+        origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
+        deadline: Instant,
+    },
+    Ordinary {
+        response: oneshot::Sender<Result<Value, PluginRpcError>>,
+        origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
+        provider_alias: Option<String>,
+        deadline: Instant,
+    },
+    Tool {
+        response: oneshot::Sender<Result<Value, PluginRpcError>>,
+        operation: ToolOperation,
+        effects: Option<Arc<crate::PluginToolEffects>>,
+    },
+}
+
+impl PendingRequest {
+    pub(super) fn effects(&self) -> Option<Arc<crate::PluginToolEffects>> {
+        match self {
+            Self::Tool {
+                operation, effects, ..
+            } if Instant::now() < operation.total && Instant::now() < operation.idle => {
+                effects.clone()
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn bind_authority(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<(), PluginRpcError> {
+        if method == rw_plugin_protocol::METHOD_PROVIDER_MODELS {
+            let catalog: rw_plugin_protocol::ProviderModelsParams =
+                serde_json::from_value(params.clone()).map_err(|_| {
+                    rpc_error("invalid_params", "invalid provider catalog invocation")
+                })?;
+            let Self::Ordinary { provider_alias, .. } = self else {
+                return Err(rpc_error(
+                    "invalid_method",
+                    "catalog requires ordinary request admission",
+                ));
+            };
+            *provider_alias = Some(catalog.alias_prefix);
+            return Ok(());
+        }
+        if method != rw_plugin_protocol::METHOD_COMMAND_EXECUTE {
+            return Ok(());
+        }
+        let command: rw_plugin_protocol::CommandExecuteParams =
+            serde_json::from_value(params.clone())
+                .map_err(|_| rpc_error("invalid_params", "invalid command invocation"))?;
+        let (Self::Ordinary { origin, .. } | Self::Command { origin, .. }) = self else {
+            return Err(rpc_error(
+                "invalid_method",
+                "command requires ordinary request admission",
+            ));
+        };
+        *origin = command.invocation_id;
+        Ok(())
+    }
+
+    pub(super) fn owns_provider_http(&self, alias: &str) -> bool {
+        matches!(self, Self::Ordinary { provider_alias: Some(owned), deadline, .. }
+            if owned == alias && Instant::now() < *deadline)
+    }
+
+    pub(super) fn owns_origin(
+        &self,
+        expected: &rw_types::extension_invocation::ExtensionInvocationId,
+    ) -> bool {
+        matches!(self, Self::Ordinary { origin: Some(origin), .. } | Self::Command {origin:Some(origin),..} if origin == expected)
+    }
+
+    pub(super) fn respond(self, result: Result<Value, PluginRpcError>) {
+        match self {
+            Self::Command {
+                response, deadline, ..
+            } => {
+                let result = if Instant::now() >= deadline {
+                    Err(rpc_error(
+                        "timeout",
+                        "plugin command exceeded its immutable deadline",
+                    ))
+                } else {
+                    result
+                };
+                let _ = response.send(result);
+            }
+            Self::Ordinary { response, .. } => {
+                let _ = response.send(result);
+            }
+            Self::Tool {
+                response,
+                operation,
+                ..
+            } => {
+                let now = Instant::now();
+                let result = if now >= operation.total {
+                    Err(rpc_error(
+                        "timeout",
+                        "plugin tool exceeded its total deadline",
+                    ))
+                } else if now >= operation.idle {
+                    Err(rpc_error(
+                        "timeout",
+                        "plugin tool exceeded its idle deadline",
+                    ))
+                } else {
+                    result
+                };
+                let _ = response.send(result);
+                drop(operation);
+            }
+        }
+    }
+
+    pub(super) fn progress(&mut self, params: ToolProgressParams) -> bool {
+        let Self::Tool { operation, .. } = self else {
+            return false;
+        };
+        let now = Instant::now();
+        if now >= operation.total
+            || now >= operation.idle
+            || params.sequence <= operation.last_sequence
+            || !operation.rate.take(now)
+        {
+            return false;
+        }
+        operation.last_sequence = params.sequence;
+        operation.idle = now + operation.idle_duration;
+        operation
+            .updates
+            .send(Some(Observation {
+                progress: params.progress,
+                idle: operation.idle,
+            }))
+            .is_ok()
+    }
+}
+
+pub(super) struct ToolOperation {
+    total: Instant,
+    idle: Instant,
+    idle_duration: Duration,
+    last_sequence: u32,
+    rate: ProgressRate,
+    updates: watch::Sender<Option<Observation>>,
+}
+
+#[derive(Clone)]
+pub(super) struct Observation {
+    progress: ToolProgress,
+    idle: Instant,
+}
+
+struct ProgressRate {
+    tokens: u32,
+    replenished: Instant,
+}
+impl ProgressRate {
+    fn new(now: Instant) -> Self {
+        Self {
+            tokens: rw_operation_contract::PROGRESS_BURST,
+            replenished: now,
+        }
+    }
+    fn take(&mut self, now: Instant) -> bool {
+        let interval = u128::from(rw_operation_contract::PROGRESS_INTERVAL_MS);
+        let elapsed = now.duration_since(self.replenished).as_millis() / interval;
+        if elapsed > 0 {
+            let replenished = u32::try_from(elapsed).unwrap_or(u32::MAX);
+            self.tokens = self
+                .tokens
+                .saturating_add(replenished)
+                .min(rw_operation_contract::PROGRESS_BURST);
+            self.replenished += Duration::from_millis(
+                u64::from(replenished) * u64::from(rw_operation_contract::PROGRESS_INTERVAL_MS),
+            );
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
+}
+
+pub(super) enum RequestObserver {
+    Deadline(Instant),
+    Ordinary(Duration),
+    Tool {
+        total: Instant,
+        idle: Instant,
+        progress: Arc<dyn ToolProgressSink>,
+        updates: watch::Receiver<Option<Observation>>,
+    },
+}
+
+impl RequestObserver {
+    pub(super) async fn wait(
+        self,
+        mut response: oneshot::Receiver<Result<Value, PluginRpcError>>,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, PluginRpcError> {
+        match self {
+            Self::Deadline(deadline) => tokio::select! {
+                biased;
+                ()=cancellation.cancelled()=>Err(rpc_error("cancelled","plugin command was cancelled")),
+                ()=tokio::time::sleep_until(deadline)=>Err(rpc_error("timeout","plugin command exceeded its immutable deadline")),
+                result=&mut response=>result.map_err(|_|rpc_error("connection_closed","plugin RPC connection closed"))?,
+            },
+            Self::Ordinary(timeout) => tokio::select! {
+                biased;
+                () = cancellation.cancelled() => Err(rpc_error("cancelled", "plugin RPC request was cancelled")),
+                result = tokio::time::timeout(timeout, response) => result
+                    .map_err(|_| rpc_error("timeout", "plugin RPC request timed out"))?
+                    .map_err(|_| rpc_error("connection_closed", "plugin RPC connection closed"))?,
+            },
+            Self::Tool {
+                total,
+                mut idle,
+                progress,
+                mut updates,
+            } => loop {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(rpc_error("cancelled", "plugin tool was cancelled")),
+                    () = tokio::time::sleep_until(total) => return Err(rpc_error("timeout", "plugin tool exceeded its total deadline")),
+                    result = &mut response => return result.map_err(|_| rpc_error("connection_closed", "plugin RPC connection closed"))?,
+                    changed = updates.changed() => {
+                        if changed.is_err() { return Err(rpc_error("connection_closed", "plugin tool progress closed before its outcome")); }
+                        if let Some(observation) = updates.borrow_and_update().clone() {
+                            idle = observation.idle;
+                            progress.report(observation.progress).map_err(|_| rpc_error("cancelled", "plugin tool progress admission closed"))?;
+                        }
+                    }
+                    () = tokio::time::sleep_until(idle) => return Err(rpc_error("timeout", "plugin tool exceeded its idle deadline")),
+                }
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use rw_tools::ToolError;
+    use std::sync::Mutex;
+
+    #[tokio::test(start_paused = true)]
+    async fn command_deadline_starts_at_admission_and_rejects_progress_renewal() {
+        let (send, receive) = oneshot::channel();
+        let (mut pending, observer) = RequestPolicy::Command {
+            lifetime: OperationLifetime::new(100, 100).unwrap(),
+        }
+        .begin(send, Duration::from_millis(5));
+        assert!(
+            !pending.progress(update(1)),
+            "tool progress cannot renew a command"
+        );
+        tokio::time::advance(Duration::from_millis(101)).await;
+        let result = observer.wait(receive, &CancellationToken::default()).await;
+        assert_eq!(
+            result.unwrap_err().code,
+            "timeout",
+            "writer delay cannot restart the deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn command_response_after_deadline_is_never_success() {
+        let (send, receive) = oneshot::channel();
+        let (pending, _observer) = RequestPolicy::Command {
+            lifetime: OperationLifetime::new(100, 100).unwrap(),
+        }
+        .begin(send, Duration::from_millis(5));
+        tokio::time::advance(Duration::from_millis(101)).await;
+        pending.respond(Ok(Value::Null));
+        assert_eq!(receive.await.unwrap().unwrap_err().code, "timeout");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn catalog_http_authority_is_exact_and_expires_at_admission_deadline() {
+        let (send, _receive) = oneshot::channel();
+        let (mut pending, _) = RequestPolicy::Ordinary {
+            allow_closed: false,
+        }
+        .begin(send, Duration::from_secs(5));
+        assert!(!pending.owns_provider_http("fixture/"));
+        pending
+            .bind_authority(
+                rw_plugin_protocol::METHOD_PROVIDER_MODELS,
+                &serde_json::json!({"alias_prefix":"fixture/"}),
+            )
+            .unwrap();
+        assert!(pending.owns_provider_http("fixture/"));
+        assert!(!pending.owns_provider_http("fixture/model"));
+        assert!(!pending.owns_provider_http("other/"));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(!pending.owns_provider_http("fixture/"));
+    }
+
+    #[derive(Default)]
+    struct Updates(Mutex<Vec<String>>);
+    impl ToolProgressSink for Updates {
+        fn report(&self, update: ToolProgress) -> Result<(), ToolError> {
+            self.0.lock().unwrap().push(update.message().to_owned());
+            Ok(())
+        }
+    }
+
+    fn update(sequence: u32) -> ToolProgressParams {
+        ToolProgressParams {
+            request_id: rw_plugin_protocol::RpcId::Number(1),
+            sequence,
+            progress: ToolProgress::new(format!("work {sequence}"), None).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_renews_idle_but_never_the_total_deadline() {
+        let (send, receive) = oneshot::channel();
+        let sink = Arc::new(Updates::default());
+        let (mut pending, observer) = RequestPolicy::Tool {
+            lifetime: OperationLifetime::new(120, 75).unwrap(),
+            progress: sink.clone(),
+            effects: None,
+        }
+        .begin(send, Duration::from_millis(1));
+        let waiting =
+            tokio::spawn(
+                async move { observer.wait(receive, &CancellationToken::default()).await },
+            );
+        for sequence in 1..=2 {
+            tokio::time::sleep(Duration::from_millis(45)).await;
+            assert!(pending.progress(update(sequence)));
+        }
+        let result = tokio::time::timeout(Duration::from_millis(90), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.unwrap_err().message,
+            "plugin tool exceeded its total deadline"
+        );
+        assert_eq!(sink.0.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn outcome_is_published_before_progress_channel_closes() {
+        for _ in 0..100 {
+            let (send, receive) = oneshot::channel();
+            let (pending, observer) = RequestPolicy::Tool {
+                lifetime: OperationLifetime::default(),
+                progress: Arc::new(Updates::default()),
+                effects: None,
+            }
+            .begin(send, Duration::from_millis(1));
+            let waiting =
+                tokio::spawn(
+                    async move { observer.wait(receive, &CancellationToken::default()).await },
+                );
+            pending.respond(Ok(Value::Null));
+            assert_eq!(waiting.await.unwrap(), Ok(Value::Null));
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_idle_rejects_a_late_success_before_observer_polling() {
+        let (send, receive) = oneshot::channel();
+        let (mut pending, observer) = RequestPolicy::Tool {
+            lifetime: OperationLifetime::default(),
+            progress: Arc::new(Updates::default()),
+            effects: None,
+        }
+        .begin(send, Duration::from_secs(5));
+        if let PendingRequest::Tool { operation, .. } = &mut pending {
+            operation.idle = Instant::now();
+        }
+        pending.respond(Ok(Value::Null));
+        let result = observer.wait(receive, &CancellationToken::default()).await;
+        assert_eq!(
+            result.unwrap_err().message,
+            "plugin tool exceeded its idle deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_rate_and_sequence_cannot_bypass_admission() {
+        let (send, _receive) = oneshot::channel();
+        let (mut pending, _observer) = RequestPolicy::Tool {
+            lifetime: OperationLifetime::default(),
+            progress: Arc::new(Updates::default()),
+            effects: None,
+        }
+        .begin(send, Duration::from_secs(5));
+        assert!(!pending.progress(update(0)));
+        assert!(pending.progress(update(1)));
+        assert!(!pending.progress(update(1)));
+        for sequence in 2..=4 {
+            assert!(pending.progress(update(sequence)));
+        }
+        assert!(!pending.progress(update(5)));
+        let (ordinary, _receive) = oneshot::channel();
+        assert!(
+            !PendingRequest::Ordinary {
+                response: ordinary,
+                origin: None,
+                provider_alias: None,
+                deadline: Instant::now() + Duration::from_secs(5),
+            }
+            .progress(update(1))
+        );
+    }
+}

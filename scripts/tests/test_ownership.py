@@ -42,7 +42,7 @@ def valid_manifest(extra: str = "") -> str:
         outputs = ["generated/protocol.ts"]
 
         [[shadow]]
-        id = "legacy-session-validator"
+        id = "duplicate-session-validator"
         owner = "session-protocol"
         path = "client/session.ts"
         pattern = "function\\\\s+validateSessionId\\\\s*\\\\("
@@ -69,6 +69,24 @@ class OwnershipCheckerTests(unittest.TestCase):
         manifest = root / "architecture" / "ownership.toml"
         write(root, "architecture/ownership.toml", valid_manifest())
         return manifest
+
+    def test_projection_inventory_rejects_undeclared_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.make_valid_repository(root)
+            manifest.write_text(manifest.read_text() + '\n[[inventory]]\nid = "wire"\ngenerator = "session-protocol-typescript"\npatterns = ["generated/*.ts"]\n')
+            self.assertEqual(self.checker.validate_repository(root, manifest), [])
+            write(root, "generated/extra.ts", "unexpected projection")
+            self.assertTrue(any("undeclared generated projection" in error for error in self.checker.validate_repository(root, manifest)))
+
+    def test_projection_inventory_requires_an_owned_safe_pattern(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.make_valid_repository(root)
+            manifest.write_text(manifest.read_text() + '\n[[inventory]]\nid = "wire"\ngenerator = "session-protocol-typescript"\npatterns = ["../*.ts", "unowned/*.ts"]\n')
+            failures = self.checker.validate_repository(root, manifest)
+            self.assertTrue(any("unsafe file pattern" in error for error in failures))
+            self.assertTrue(any("no declared output" in error for error in failures))
 
     def test_valid_manifest_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -162,7 +180,18 @@ class OwnershipCheckerTests(unittest.TestCase):
 
             failures = self.checker.validate_repository(root, manifest)
 
-            self.assertTrue(any("legacy-session-validator" in failure for failure in failures))
+            self.assertTrue(any("duplicate-session-validator" in failure for failure in failures))
+
+    def test_rust_child_module_retains_shadow_checks(self) -> None:
+        for entrypoint in ["client/session.rs", "client/session/mod.rs"]:
+            with self.subTest(entrypoint=entrypoint), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = self.make_valid_repository(root)
+                manifest.write_text(valid_manifest().replace("client/session.ts", entrypoint))
+                write(root, entrypoint, "mod nested;\n")
+                write(root, "client/session/nested.rs", "function validateSessionId() {}\n")
+                failures = self.checker.validate_repository(root, manifest)
+                self.assertTrue(any("client/session/nested.rs" in failure for failure in failures))
 
     def test_owner_and_output_paths_must_be_safe_and_unique(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

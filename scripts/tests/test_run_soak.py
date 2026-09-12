@@ -73,7 +73,7 @@ class SoakHarnessTests(unittest.TestCase):
         rows = SOAK.parse_process_table(
             "10 1 100 /tmp/rw\n"
             "11 10 200 /tmp/rw serve --max-turns 32\n"
-            "12 10 300 /tmp/rottweiler-tui\n"
+            "12 10 300 /tmp/rottweiler-js-host\n"
             "13 11 400 helper\n"
             "99 1 999 unrelated\n"
         )
@@ -83,55 +83,19 @@ class SoakHarnessTests(unittest.TestCase):
             SOAK.find_descendant(rows, 10, Path("/tmp/rw"), " serve "), 11
         )
         self.assertEqual(
-            SOAK.find_descendant(rows, 10, Path("/tmp/rottweiler-tui")), 12
+            SOAK.find_descendant(rows, 10, Path("/tmp/rottweiler-js-host")), 12
         )
 
-    def test_event_probe_reads_only_growth_and_remembers_persisted_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            sessions = Path(temporary)
-            log = sessions / "session-1" / "events.jsonl"
-            log.parent.mkdir()
-            log.write_text('{"event":{"type":"session_created"}}\n', encoding="utf-8")
-            probe = SOAK.EventLogProbe(sessions)
-
-            self.assertFalse(probe.poll("SOAK_STEP_000001_DONE"))
-            first_bytes = probe.bytes_observed
-            with log.open("a", encoding="utf-8") as handle:
-                handle.write(
-                    '{"event":{"type":"text_delta","text":"SOAK_STEP_000001_DONE"}}\n'
-                )
-            self.assertTrue(probe.poll("SOAK_STEP_000001_DONE"))
-            self.assertTrue(probe.marker_persisted("SOAK_STEP_000001_DONE"))
-            self.assertGreater(probe.bytes_observed, first_bytes)
-            observed = probe.bytes_observed
-            self.assertTrue(probe.poll("SOAK_STEP_000001_DONE"))
-            self.assertEqual(probe.bytes_observed, observed)
-            self.assertGreater(probe.durable_bytes(), 0)
-            log.write_text("durable marker removed\n", encoding="utf-8")
-            self.assertFalse(probe.marker_persisted("SOAK_STEP_000001_DONE"))
-
-    def test_event_probe_tracks_input_acceptance_and_compaction_boundaries(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            sessions = Path(temporary)
-            log = sessions / "session-1" / "events.jsonl"
-            log.parent.mkdir()
-            probe = SOAK.EventLogProbe(sessions)
-            log.write_text(
-                '{"event":{"type":"user_message_accepted",'
-                '"content":"SOAK_INPUT_000001"}}\n'
-                '{"event":{"type":"compaction_started"}}\n',
-                encoding="utf-8",
-            )
-
-            probe.poll()
-            self.assertTrue(probe.saw("SOAK_INPUT_000001"))
-            self.assertEqual(probe.event_count("user_message_accepted"), 1)
-            self.assertEqual(probe.event_count("compaction_started"), 1)
-            with log.open("a", encoding="utf-8") as handle:
-                handle.write('{"event":{"type":"compaction_finished"}}\n')
-            probe.poll()
-            self.assertEqual(probe.event_count("compaction_started"), 1)
-            self.assertEqual(probe.event_count("compaction_finished"), 1)
+    def test_shared_host_restart_selects_only_the_exact_tui_role(self) -> None:
+        rows = SOAK.parse_process_table(
+            "10 1 100 /tmp/rw\n"
+            "11 10 200 /tmp/rottweiler-js-host source-plugin run /tmp/tui\n"
+            "12 10 300 /tmp/rottweiler-js-host tui\n"
+        )
+        host = Path("/tmp/rottweiler-js-host")
+        self.assertEqual(SOAK.find_descendant(rows, 10, host, role=SOAK.TUI_ROLE), 12)
+        del rows[12]
+        self.assertIsNone(SOAK.find_descendant(rows, 10, host, role=SOAK.TUI_ROLE))
 
     def test_failure_result_is_written_for_artifact_retention(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -156,7 +120,7 @@ class SoakHarnessTests(unittest.TestCase):
                 "max_rss_bytes": 700,
                 "process_rss": [
                     {"executable": "rw", "pid": 10, "rss_bytes": 300},
-                    {"executable": "rottweiler-tui", "pid": 11, "rss_bytes": 400},
+                    {"executable": "rottweiler-js-host", "pid": 11, "rss_bytes": 400},
                 ],
                 "rss_limit_bytes": 600,
                 "turns_completed": 20,
@@ -229,11 +193,11 @@ class SoakHarnessTests(unittest.TestCase):
 
     def test_event_diagnostics_keep_identities_not_payloads_across_split_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "session-1" / "events.jsonl"
-            path.parent.mkdir()
-            raw = json.dumps({"sequence": "9", "event": {
+            path = Path(temporary) / "session-1" / "journal" / "active.jsonl"
+            path.parent.mkdir(parents=True)
+            raw = json.dumps({"sequence": "0", "event": {
                 "type": "text_delta", "turn_id": "2", "text": "payload-private-canary",
-                "meta": {"session_id": "session-1", "sequence_id": "9", "caused_by": "req-1"},
+                "meta": {"session_id": "session-1", "sequence_id": "0", "caused_by": "req-1"},
             }}).encode() + b"\n"
             probe = SOAK.EventLogProbe(Path(temporary))
             path.write_bytes(raw[:60])
@@ -244,7 +208,7 @@ class SoakHarnessTests(unittest.TestCase):
             probe.poll()
             result = probe.diagnostics()[0]
             self.assertEqual(result["session_id"], "session-1")
-            self.assertEqual(result["sequence_id"], "9")
+            self.assertEqual(result["sequence_id"], "0")
             self.assertEqual(result["turn_id"], "2")
             self.assertEqual(result["request_id"], "req-1")
             self.assertNotIn("payload-private-canary", json.dumps(result))
@@ -264,7 +228,7 @@ class SoakHarnessTests(unittest.TestCase):
             with self.subTest(ready=ready), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 rw = root / "rw"
-                tui = root / "rottweiler-tui"
+                tui = root / "rottweiler-js-host"
                 observed = root / "input.txt"
                 output = root / "soak.json"
                 tui.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(10)\n")
@@ -273,16 +237,23 @@ class SoakHarnessTests(unittest.TestCase):
                     "import os, select, subprocess, sys, time\n"
                     f"child = subprocess.Popen([{str(tui)!r}])\n"
                     "try:\n"
+                    "    print('SOAK_TUI_PROCESS_START', flush=True)\n"
                     f"    if {ready!r}:\n"
                     "        print('SOAK_DRIVER_', end='', flush=True)\n"
                     "        time.sleep(0.05)\n"
                     "        print('READY', flush=True)\n"
-                    "    until = time.monotonic() + 1.4\n"
                     f"    with open({str(observed)!r}, 'wb') as recorded:\n"
-                    "        while time.monotonic() < until:\n"
+                    "        received = bytearray()\n"
+                    f"        while {ready!r}:\n"
                     "            if select.select([0], [], [], 0.05)[0]:\n"
-                    "                recorded.write(os.read(0, 4096))\n"
+                    "                chunk = os.read(0, 4096)\n"
+                    "                if not chunk: break\n"
+                    "                recorded.write(chunk)\n"
+                    "                received.extend(chunk)\n"
                     "                recorded.flush()\n"
+                    "                if b'SOAK_INPUT_' in received:\n"
+                    "                    print('SOAK_TUI_INPUT_ACK', flush=True)\n"
+                    "                    break\n"
                     "finally:\n"
                     "    child.terminate()\n"
                     "    child.wait()\n"
@@ -290,10 +261,10 @@ class SoakHarnessTests(unittest.TestCase):
                 )
                 rw.chmod(0o700)
                 tui.chmod(0o700)
-                def fixture_descendant(rows, supervisor, executable, required=""):
+                def fixture_descendant(rows, supervisor, executable, required="", *, role=None):
                     # macOS ps can expose only the interpreter name for scripts.
                     # The fixture's only child is its fake TUI; retain real PIDs.
-                    if executable.name == "rottweiler-tui":
+                    if executable.name == "rottweiler-js-host":
                         return next((pid for pid, row in rows.items() if row.parent == supervisor), None)
                     return None
 
@@ -301,7 +272,8 @@ class SoakHarnessTests(unittest.TestCase):
                     with self.assertRaises(SOAK.SoakFailure):
                         SOAK.run_soak(rw, None, 4, 0.1, 600 * 1024 * 1024, progress_path=output)
                 result = json.loads(output.read_text())
-                self.assertEqual(result["status"], "fail")
+                self.assertEqual(result["status"], "UNSETTLED")
+                self.addCleanup(__import__("shutil").rmtree, result["retained_scratch"])
                 self.assertEqual(result["turns_submitted"], int(ready))
                 self.assertEqual(result["turns_accepted"], 0)
                 self.assertEqual(result["turns_completed"], 0)

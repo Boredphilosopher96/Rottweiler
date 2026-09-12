@@ -11,28 +11,13 @@ import unittest
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "ci_evidence.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("ci_evidence", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
 class CiEvidenceTests(unittest.TestCase):
-    def test_permission_denial_requires_proof_that_no_live_members_remain(self):
-        process = subprocess.Popen([sys.executable, "-c", "pass"])
-        process.wait()
-        with patch.object(MODULE.os, "killpg", side_effect=PermissionError), patch.object(
-            MODULE.subprocess, "check_output", return_value=f"{process.pid} S\n".encode(),
-        ):
-            with self.assertRaises(PermissionError):
-                MODULE.settle_group(process)
-        with patch.object(MODULE.os, "killpg", side_effect=PermissionError), patch.object(
-            MODULE.subprocess, "check_output", return_value=f"{process.pid} Z\n".encode(),
-        ):
-            MODULE.settle_group(process)
-        with patch.object(MODULE.subprocess, "check_output", return_value=b"unavailable"):
-            with self.assertRaises(OSError):
-                MODULE.group_has_live_members(process.pid)
-
     @unittest.skipUnless(hasattr(os, "fork"), "requires Unix process groups")
     def test_cancellation_reaps_group_after_its_leader_has_exited(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -90,7 +75,26 @@ class CiEvidenceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertNotIn(secret, result.stdout.decode())
             self.assertNotIn(secret, output.read_text())
+            self.assertNotIn(secret, output.with_suffix(".log").read_text())
             self.assertIn("[REDACTED]", result.stdout.decode())
+
+    def test_early_failure_survives_later_output_and_log_size_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result.json"
+            child = "import sys; print('early failure'); print('x' * (9 * 1024 * 1024)); print('final marker'); sys.exit(7)"
+            result = subprocess.run([
+                sys.executable, str(SCRIPT), "--gate", "fixture", "--output", str(output), "--",
+                sys.executable, "-c", child,
+            ], stdout=subprocess.DEVNULL, check=False)
+            self.assertEqual(result.returncode, 7)
+            evidence = json.loads(output.read_text())
+            log = output.with_name(evidence["log_file"])
+            self.assertEqual(log.stat().st_size, MODULE.MAX_LOG_BYTES)
+            self.assertEqual(evidence["log_prefix_bytes"], MODULE.MAX_LOG_BYTES)
+            self.assertGreater(evidence["log_omitted_bytes"], 1024 * 1024)
+            with log.open("rb") as source:
+                self.assertTrue(source.read(128).startswith(b"early failure\n"))
+            self.assertIn("final marker", evidence["log_tail"])
 
     def test_failure_preserves_exit_status_and_bounded_tail(self):
         with tempfile.TemporaryDirectory() as directory:

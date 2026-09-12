@@ -1,9 +1,11 @@
+import { MAX_PENDING_TOOL_INVOCATIONS, TRANSCRIPT_TAIL_TEXT_BYTES } from "../../../../protocol/types"
 import type { ToolOutputStream } from "../protocol"
 
-// Leave room for the engine's terminal truncation marker after its 1 MiB / 1024 chunk limit.
-export const MAX_TOOL_DISPLAY_BYTES = 1024 * 1024 + 1024
+// The admitted live invocation set shares a fixed preview payload allowance.
+export const MAX_ACTIVE_TOOL_DISPLAY_BYTES = 8 * 1024 * 1024
+export const MAX_TOOL_DISPLAY_BYTES = Math.floor(MAX_ACTIVE_TOOL_DISPLAY_BYTES / MAX_PENDING_TOOL_INVOCATIONS)
 export const MAX_TOOL_DISPLAY_CHUNKS = 1025
-export const MAX_TAIL_TEXT_BYTES = 1024 * 1024
+export const MAX_TAIL_TEXT_BYTES = TRANSCRIPT_TAIL_TEXT_BYTES
 export const LIVE_OUTPUT_TRUNCATION_MARKER = "[live tool output truncated; command output continues to drain]"
 const MAX_WINDOW_LINES = 32
 export const MAX_PREVIEW_LINE_CODE_UNITS = 4096
@@ -29,10 +31,16 @@ export interface ToolOutputChunk {
   readonly stream: ToolOutputStream
   readonly chunk: string
 }
-interface ChunkNode {
-  readonly previous: ChunkNode | null
-  readonly value: ToolOutputChunk
+export class ToolOutputNode {
+  readonly allocationBytes: number
+  readonly depth: number
+  constructor(readonly previous: ToolOutputNode | null, readonly value: ToolOutputChunk) {
+    this.depth = (previous?.depth ?? 0) + 1
+    this.allocationBytes = (previous?.allocationBytes ?? 0) + 176 + value.chunk.length * 2
+  }
 }
+export class ToolOutputCacheIdentity {}
+export const TOOL_OUTPUT_CACHE_ALLOCATION_BYTES = MAX_TOOL_DISPLAY_BYTES * 10 + MAX_TOOL_DISPLAY_CHUNKS * 64 + MAX_WINDOW_LINES * 256
 export interface OutputLineWindow {
   readonly lines: readonly string[]
   readonly lineCount: number
@@ -42,17 +50,16 @@ interface LineWindow extends OutputLineWindow {
   readonly visibleLineCount: number
   readonly endedWithCR: boolean
 }
-export interface ToolOutputView {
-  readonly plain: string
+export interface ToolOutputPreview {
+  readonly hasOutput: boolean
   readonly plainWindow: OutputLineWindow
   readonly labeledWindow: OutputLineWindow
-  readonly labeled: string
   readonly tailLines: readonly string[]
   readonly lineCount: number
   readonly sourceTruncated: boolean
 }
-interface Materialization extends ToolOutputView {
-  readonly node: ChunkNode | null
+interface Materialization extends ToolOutputPreview {
+  readonly node: WeakRef<ToolOutputNode> | null
   readonly count: number
   readonly window: LineWindow
   readonly markerTail: string
@@ -63,9 +70,10 @@ interface StreamCache {
   windowInputCodeUnits: number
 }
 const materializations = new WeakMap<object, StreamCache>()
+const truncatedMaterializations = new WeakMap<Materialization, ToolOutputPreview>()
 const EMPTY_WINDOW: LineWindow = { lines: [""], visibleLines: [], lineCount: 1, visibleLineCount: 0, endedWithCR: false }
 const EMPTY_MATERIALIZATION: Materialization = {
-  node: null, count: 0, plain: "", labeled: "", tailLines: [], lineCount: 0, sourceTruncated: false,
+  node: null, count: 0, hasOutput: false, tailLines: [], lineCount: 0, sourceTruncated: false,
   markerTail: "", window: EMPTY_WINDOW, plainWindow: EMPTY_WINDOW, labeledWindow: EMPTY_WINDOW,
 }
 
@@ -123,11 +131,17 @@ export class ToolOutputBuffer {
     readonly retainedBytes = 0,
     readonly omittedBytes = 0,
     readonly truncated = false,
-    private readonly root: object = {},
-    private readonly node: ChunkNode | null = null,
+    private readonly root = new ToolOutputCacheIdentity(),
+    private readonly node: ToolOutputNode | null = null,
   ) {}
 
   static empty(): ToolOutputBuffer { return new ToolOutputBuffer() }
+
+  /** A source preview cannot accept later bytes across an omitted region. */
+  static fromPreview(text: string, truncated: boolean): ToolOutputBuffer {
+    const initial = ToolOutputBuffer.empty().append({ stream: "stdout", chunk: text })
+    return new ToolOutputBuffer(initial.count, initial.retainedBytes, initial.omittedBytes, initial.truncated || truncated, initial.root, initial.node)
+  }
 
   append(value: ToolOutputChunk): ToolOutputBuffer {
     const bytes = Buffer.byteLength(value.chunk)
@@ -136,35 +150,37 @@ export class ToolOutputBuffer {
     const chunk = allowed ? utf8Prefix(value.chunk, remaining) : ""
     const retained = Buffer.byteLength(chunk)
     const truncated = this.truncated || !allowed || retained < bytes
-    const root = this.count === 0 && !this.truncated ? {} : this.root
+    const root = this.count === 0 && !this.truncated ? new ToolOutputCacheIdentity() : this.root
     return new ToolOutputBuffer(
       this.count + (allowed ? 1 : 0),
       this.retainedBytes + retained,
       Math.min(Number.MAX_SAFE_INTEGER, this.omittedBytes + bytes - retained),
       truncated,
       root,
-      allowed ? { previous: this.node, value: { stream: value.stream, chunk } } : this.node,
+      allowed ? new ToolOutputNode(this.node, { stream: value.stream, chunk }) : this.node,
     )
   }
 
-  read(): ToolOutputView {
+  preview(): ToolOutputPreview {
     let cache = materializations.get(this.root)
     if (cache === undefined) {
       cache = { current: EMPTY_MATERIALIZATION, visitedNodes: 0, windowInputCodeUnits: 0 }
       materializations.set(this.root, cache)
     }
     let result = cache.current
-    if (result.node !== this.node) {
+    if (result.node !== null && result.node.deref() === undefined) result = EMPTY_MATERIALIZATION
+    const resultNode = result.node?.deref() ?? null
+    if (resultNode !== this.node) {
       const pending: ToolOutputChunk[] = []
       let cursor = this.node
-      while (cursor !== null && cursor !== result.node) {
+      while (cursor !== null && cursor !== resultNode) {
         pending.push(cursor.value)
         cache.visitedNodes += 1
         cursor = cursor.previous
       }
-      if (cursor !== result.node) result = EMPTY_MATERIALIZATION
-      let plain = result.plain
-      let labeled = result.labeled
+      if (cursor !== resultNode) result = EMPTY_MATERIALIZATION
+      let hasOutput = result.hasOutput
+      let count = result.count
       let plainWindow = result.plainWindow
       let labeledWindow = result.labeledWindow
       let window = result.window
@@ -177,26 +193,43 @@ export class ToolOutputBuffer {
         const markerCandidate = markerTail + value.chunk
         sourceTruncated ||= markerCandidate.includes(LIVE_OUTPUT_TRUNCATION_MARKER)
         markerTail = markerCandidate.slice(-(LIVE_OUTPUT_TRUNCATION_MARKER.length - 1))
-        const labeledChunk = `${labeled === "" ? "" : "\n"}${value.stream === "stderr" ? "Error output" : "Output"}\n${value.chunk.trimEnd()}`
+        const labeledChunk = `${count === 0 ? "" : "\n"}${value.stream === "stderr" ? "Error output" : "Output"}\n${value.chunk.trimEnd()}`
         plainWindow = appendRawWindow(plainWindow, value.chunk)
         labeledWindow = appendRawWindow(labeledWindow, labeledChunk)
         cache.windowInputCodeUnits += value.chunk.length * 2 + labeledChunk.length
-        plain += value.chunk
-        labeled += labeledChunk
+        hasOutput ||= value.chunk !== ""
+        count++
       }
-      result = { node: this.node, count: this.count, plain, labeled, plainWindow, labeledWindow, window, markerTail,
+      result = { node: this.node === null ? null : new WeakRef(this.node), count: this.count, hasOutput, plainWindow, labeledWindow, window, markerTail,
         tailLines: window.visibleLines, lineCount: window.visibleLineCount, sourceTruncated }
       // An old immutable snapshot must not roll the forward materialization cursor back.
       if (this.count >= cache.current.count) cache.current = result
     }
     if (!this.truncated) return result
-    return {
-      ...result, sourceTruncated: true,
+    const existing = truncatedMaterializations.get(result)
+    if (existing !== undefined) return existing
+    const view: ToolOutputPreview = {
+      ...result, hasOutput: true, sourceTruncated: true,
       plainWindow: appendRawWindow(result.plainWindow, `\n${DISPLAY_TRUNCATION_MARKER}`),
       labeledWindow: appendRawWindow(result.labeledWindow, `\n${DISPLAY_TRUNCATION_MARKER}`),
-      plain: `${result.plain}\n${DISPLAY_TRUNCATION_MARKER}`,
-      labeled: `${result.labeled}\n${DISPLAY_TRUNCATION_MARKER}`,
     }
+    truncatedMaterializations.set(result, view)
+    return view
+  }
+
+  get allocationNode(): ToolOutputNode | null { return this.node }
+  get allocationCache(): ToolOutputCacheIdentity | null { return this.count === 0 ? null : this.root }
+
+  sameStream(other: ToolOutputBuffer): boolean { return this.root === other.root }
+
+  /** The explicit full-output reader walks only newly appended chunks; branches request a fresh prefix. */
+  appendedAfter(previous: ToolOutputBuffer | null): readonly ToolOutputChunk[] | null {
+    if (previous !== null && (previous.root !== this.root || previous.count > this.count)) return null
+    const pending: ToolOutputChunk[] = []
+    let cursor = this.node
+    const stop = previous?.node ?? null
+    while (cursor !== null && cursor !== stop) { pending.push(cursor.value); cursor = cursor.previous }
+    return cursor === stop ? pending.reverse() : null
   }
 
   get materializationWork(): { readonly visitedNodes: number; readonly retainedVersions: number; readonly windowInputCodeUnits: number } {
@@ -214,4 +247,10 @@ export const EMPTY_TOOL_OUTPUT = ToolOutputBuffer.empty()
 
 export function toolOutputBuffer(chunks: readonly ToolOutputChunk[]): ToolOutputBuffer {
   return chunks.reduce((buffer, chunk) => buffer.append(chunk), EMPTY_TOOL_OUTPUT)
+}
+
+export function boundedUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value
+  if (maxBytes < 3) return ".".repeat(Math.max(0, maxBytes))
+  return `${utf8Prefix(value, maxBytes - 3)}…`
 }

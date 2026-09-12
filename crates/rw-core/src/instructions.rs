@@ -1,4 +1,4 @@
-//! Root project-instruction discovery for the M2 context prefix.
+//! Root project-instruction discovery for the stable context prefix.
 
 use std::{
     collections::BTreeSet,
@@ -17,8 +17,7 @@ pub const MAX_INSTRUCTION_FILES: usize = 64;
 /// Maximum aggregate instruction bytes admitted into the stable prefix.
 pub const MAX_INSTRUCTION_CONTEXT_BYTES: u64 = 512 * 1024;
 
-/// Stable M2 coding-agent system turn used until the M3 context assembler owns
-/// the complete cache-aware prefix.
+/// Coding-agent system contract included in the cache-aware context prefix.
 #[must_use]
 pub fn base_agent_system_turn() -> Turn {
     Turn {
@@ -38,7 +37,7 @@ pub fn base_agent_system_turn() -> Turn {
     }
 }
 
-/// Builds the stable M2 prefix: the base agent contract followed by optional
+/// Builds the stable prefix: the base agent contract followed by optional
 /// root repository instructions.
 ///
 /// # Errors

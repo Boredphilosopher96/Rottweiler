@@ -6,28 +6,35 @@
 //! the deterministic replay format.
 
 mod anthropic;
+mod attempt;
 mod auth;
+mod continuation;
+mod event_stream;
 mod github_copilot;
 mod http;
 mod models_dev;
 mod openai;
 mod openai_subscription;
+mod output_schema;
 mod pricing;
 mod proxy;
 mod recording;
 mod retry;
 mod router;
+mod settlement;
 mod sse;
 mod token_response;
 mod types;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy};
+pub use attempt::{ProviderAttempt, ProviderAttemptGate, ProviderAttemptOutcome};
 pub use auth::{
     AuthMaterial, AuthProvider, DEFAULT_OAUTH_CALLBACK_TIMEOUT, KnownSecretRegistrar,
     OAuthAuthorizationCode, OAuthAuthorizationCodeConfig, OAuthEntropy, OAuthLoginSession,
     OAuthRefreshConfig, OAuthTokenSet, ProxyAuthentication, RefreshTokenSink, RefreshingOAuth,
     Secret, StaticAuth, SystemOAuthEntropy,
 };
+pub use continuation::ContinuationProvenance;
 pub use github_copilot::{
     DeviceFlowCancellation, GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT, GITHUB_COPILOT_API_VERSION,
     GITHUB_COPILOT_BASE_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_DEVICE_CODE_ENDPOINT,
@@ -58,9 +65,10 @@ pub use openai_subscription::{
     OpenAiSubscriptionTokenSink, extract_openai_subscription_account_id,
     openai_subscription_oauth_flow, openai_subscription_oauth_flow_with_endpoints,
 };
+pub use output_schema::{OutputContract, OutputField, OutputSchema, OutputValidation};
 pub use pricing::{CostBreakdown, ModelPricing, PricingTable};
 pub use proxy::{ProxyEnvironment, ProxyResolution, ProxySettings, ProxySource};
-pub use recording::{FixtureRedactor, Recorder, ReplayProvider};
+pub use recording::{FixtureRedactor, MAX_RECORDING_FIXTURE_BYTES, Recorder, ReplayProvider};
 pub use retry::{
     Clock, Delay, JitterSource, ProductionJitter, RetryPolicy, SeededJitter, TokioClock, TokioDelay,
 };

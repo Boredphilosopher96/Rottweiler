@@ -1,3 +1,5 @@
+import { MAX_COMPOSER_TEXT_BYTES } from "../../src/composer-drafts"
+import { emptySessionReader, sessionReaderFor, conversationItem } from "../fixtures/history"
 import { createStreamingTail } from "../../src/state/model"
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
@@ -53,6 +55,7 @@ afterAll(() => {
     platform: process.platform,
     arch: process.arch,
     samples: rawSamples,
+    input_gate: { clock: "wall", statistic: inputLatencyStatistic(), exclusive_limit_ms: 16 },
   })
   writeReport(output, { schema_version: 1, metrics: emittedMetrics })
   expect(Object.keys(emittedMetrics).sort()).toEqual(expected)
@@ -90,29 +93,22 @@ describe("M4 executable TUI performance budgets", () => {
     mockTreeSitter.setMockResult({ highlights: [] })
     treeSitter = mockTreeSitter
     const payload = "x".repeat(1_018)
-    const transcript = Array.from({ length: 10_240 }, (_, index) => ({
-      sequenceId: String(index + 1),
-      agentTurn: String(index + 1),
-      turn: {
-        role: "assistant" as const,
-        blocks: [{ type: "text" as const, text: `${String(index).padStart(5, "0")} ${payload}` }],
-        meta: { synthetic: false, summary: false },
-      },
-    }))
-    expect(transcript.reduce((bytes, entry) => bytes + entry.turn.blocks.reduce((sum, block) => sum + Buffer.byteLength(block.text), 0), 0)).toBe(10 * 1_024 * 1_024)
+    const history = Array.from({ length: 10_240 }, (_, index) =>
+      conversationItem(index + 1, "assistant", `${String(index).padStart(5, "0")} ${payload}`))
+    expect(history.reduce((bytes, item) => bytes + (item.content.type === "conversation"
+      ? item.content.blocks.reduce((sum, block) => sum + (block.type === "text" ? Buffer.byteLength(block.body.text) : 0), 0) : 0), 0)).toBe(10 * 1_024 * 1_024)
     const base: RottweilerState = {
       ...createInitialState(),
-      transcript,
       streamingTail: createStreamingTail({
         turnId: "10241",
         text: "",
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer, {
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(history),
       initialState: base,
       treeSitterClient: mockTreeSitter,
     })
@@ -160,7 +156,7 @@ describe("M4 executable TUI performance budgets", () => {
     expect(native.nativeLastFrameTime).toBeLessThan(frameP999BudgetMs * 1_000)
   }, 20_000)
 
-  test("focused composer input echo stays below 16ms p99", async () => {
+  test("focused composer input echo obeys the declared 16ms statistic", async () => {
     Bun.gc(true)
     const setup = await createTestRenderer({
       width: 80,
@@ -169,7 +165,7 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer)
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     await setup.renderOnce()
     app.composer.focus()
@@ -189,8 +185,9 @@ describe("M4 executable TUI performance budgets", () => {
       await setup.renderOnce()
       Bun.gc(true)
       const samples = samplesFor("composer_input", inputLatencyClock(), 5)
+      const cpuSamples = samplesFor("composer_input_process_cpu", "process_cpu", 5)
       for (const key of input) {
-        const elapsed = startInputLatencySample()
+        const elapsed = startInputLatencySample(cpuSamples)
         setup.mockInput.pressKey(key)
         await setup.renderOnce()
         setup.captureCharFrame()
@@ -206,10 +203,7 @@ describe("M4 executable TUI performance budgets", () => {
     console.info(
       `Focused composer input echo (${inputLatencyClock()}): trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
     )
-    // Every trial retains the 16ms hard ceiling. Protected runs use wall time;
-    // shared-runner smoke uses process CPU time so descheduling is not charged
-    // as input/render compute. A compute regression still moves every trial.
-    for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
+    assertInputLatency("composer_input")
   })
 
   test("mounted tool-output bursts stay inside the frame budget with live Tree-sitter", async () => {
@@ -227,19 +221,9 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const transcript = Array.from({ length: 40 }, (_, index) => ({
-      sequenceId: String(index + 1),
-      agentTurn: String(index + 1),
-      turn: {
-        role: "assistant" as const,
-        blocks: [{
-          type: "text" as const,
-          text: `Result ${index}\n\n\`\`\`typescript\nconst value${index} = ${index}\n\`\`\``,
-        }],
-        meta: { synthetic: false, summary: false },
-      },
-    }))
-    let state: RottweilerState = { ...createInitialState(), transcript }
+    const history = Array.from({ length: 40 }, (_, index) => conversationItem(index + 1, "assistant",
+      `Result ${index}\n\n\`\`\`typescript\nconst value${index} = ${index}\n\`\`\``))
+    let state: RottweilerState = createInitialState()
     const meta = (sequence: number) => ({
       protocol_version: PROTOCOL_VERSION,
       session_id: "tool-output-performance",
@@ -257,12 +241,13 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(index + 1),
         turn_id: "tool-output-turn",
         tool_call_id: `mounted-tool-${index}`,
+        invocation_id: `mounted-tool-${index}`,
         name: "bash",
         args: { command: `fixture-${index}` },
         call_index: index,
       }))
     }
-    const app = createRottweilerApp(renderer, { initialState: state, treeSitterClient: treeSitter })
+    const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(history), initialState: state, treeSitterClient: treeSitter })
     renderer.root.add(app)
     await setup.flush()
     expect(app.transcript.mountedEntryCount).toBe(16)
@@ -278,6 +263,7 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(100 + index),
         turn_id: "tool-output-turn",
         tool_call_id: "mounted-tool-15",
+        invocation_id: "mounted-tool-15",
         stream: "stdout",
         chunk,
       }))
@@ -318,12 +304,13 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(index + 1),
         turn_id: "tools-performance-turn",
         tool_call_id: `tools-performance-${index}`,
+        invocation_id: `tools-performance-${index}`,
         name: "bash",
         args: { command: `fixture-${index}` },
         call_index: index,
       }))
     }
-    const app = createRottweilerApp(renderer, { initialState: state })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: state })
     renderer.root.add(app)
     app.showToolsView()
     await setup.renderOnce()
@@ -342,6 +329,7 @@ describe("M4 executable TUI performance budgets", () => {
         meta: meta(100 + index),
         turn_id: "tools-performance-turn",
         tool_call_id: `tools-performance-${index % 16}`,
+        invocation_id: `tools-performance-${index % 16}`,
         stream: "stdout",
         chunk,
       }))
@@ -373,7 +361,7 @@ describe("M4 executable TUI performance budgets", () => {
     expect(app.toolsElapsedTimerActive).toBeFalse()
   }, 20_000)
 
-  test("Vim mode dispatch and insert echo stay below 16ms p99", async () => {
+  test("Vim mode dispatch and insert echo obey the declared 16ms statistic", async () => {
     Bun.gc(true)
     const setup = await createTestRenderer({
       width: 80,
@@ -382,7 +370,7 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    const app = createRottweilerApp(renderer, { keybindings: { preset: "vim" } })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, keybindings: { preset: "vim" } })
     renderer.root.add(app)
     await setup.renderOnce()
     setup.mockInput.pressKey("i")
@@ -402,8 +390,9 @@ describe("M4 executable TUI performance budgets", () => {
       await setup.renderOnce()
       Bun.gc(true)
       const samples = samplesFor("vim_input", inputLatencyClock(), 5)
+      const cpuSamples = samplesFor("vim_input_process_cpu", "process_cpu", 5)
       for (const key of input) {
-        const elapsed = startInputLatencySample()
+        const elapsed = startInputLatencySample(cpuSamples)
         setup.mockInput.pressKey(key)
         await setup.renderOnce()
         setup.captureCharFrame()
@@ -419,8 +408,35 @@ describe("M4 executable TUI performance budgets", () => {
     console.info(
       `Vim composer input echo (${inputLatencyClock()}): trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
     )
-    for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
+    assertInputLatency("vim_input")
   })
+  test("near-limit UTF-8 composer input and render obey the declared 16ms statistic", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 28, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
+    renderer.root.add(app)
+    const trialP99s: number[] = []
+    for (let trial = 0; trial < 3; trial++) {
+      const original = "é".repeat((MAX_COMPOSER_TEXT_BYTES - 256) / 2)
+      app.composer.value = original
+      app.composer.editor.cursorOffset = original.length
+      await setup.renderOnce(); Bun.gc(true)
+      const samples = samplesFor("bounded_composer_input", inputLatencyClock(), 5)
+      const cpuSamples = samplesFor("bounded_composer_input_process_cpu", "process_cpu", 5)
+      for (let key = 0; key < 128; key++) {
+        const elapsed = startInputLatencySample(cpuSamples)
+        app.composer.editor.insertChar("x")
+        await setup.renderOnce()
+        setup.captureCharFrame()
+        samples.push(elapsed())
+      }
+      expect(app.composer.value).toBe(original + "x".repeat(128))
+      trialP99s.push(percentile(samples.slice(5), 0.99))
+    }
+    console.info(`Bounded composer input/render (${inputLatencyClock()}): p99s=${trialP99s.map(value => value.toFixed(3)).join(",")}ms`)
+    assertInputLatency("bounded_composer_input")
+  })
+
 })
 
 function percentile(values: readonly number[], quantile: number): number {
@@ -429,18 +445,29 @@ function percentile(values: readonly number[], quantile: number): number {
   return sorted[Math.max(0, index)] ?? Number.POSITIVE_INFINITY
 }
 
-function inputLatencyClock(): "process CPU" | "wall" {
-  return process.env.ROTTWEILER_PERF_SMOKE === "1" ? "process CPU" : "wall"
+function inputLatencyClock(): "wall" {
+  return "wall"
 }
 
-function startInputLatencySample(): () => number {
-  if (process.env.ROTTWEILER_PERF_SMOKE === "1") {
-    const started = process.cpuUsage()
-    return () => {
-      const used = process.cpuUsage(started)
-      return (used.user + used.system) / 1_000
-    }
+function inputLatencyStatistic(): "median" | "p99" {
+  return process.env.ROTTWEILER_PERF_SMOKE === "1" ? "median" : "p99"
+}
+
+function assertInputLatency(name: string): void {
+  const record = rawSamples[name]!
+  const quantile = inputLatencyStatistic() === "median" ? 0.5 : 0.99
+  for (const trial of record.trialsMs) {
+    expect(percentile(trial.slice(record.warmup), quantile)).toBeLessThan(16)
   }
+}
+
+function startInputLatencySample(cpuSamples: number[]): () => number {
+  const cpu = process.cpuUsage()
   const started = Bun.nanoseconds()
-  return () => (Bun.nanoseconds() - started) / 1_000_000
+  return () => {
+    const wall = (Bun.nanoseconds() - started) / 1_000_000
+    const used = process.cpuUsage(cpu)
+    cpuSamples.push((used.user + used.system) / 1_000)
+    return wall
+  }
 }

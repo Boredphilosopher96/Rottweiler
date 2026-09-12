@@ -104,10 +104,18 @@ impl DevelopmentClient {
     }
 
     async fn dispatch(&self, command: ClientCommand) -> Result<()> {
-        let body = serde_json::to_vec(&command).into_diagnostic()?;
+        let body = crate::command_encoding::encode(&command).into_diagnostic()?;
         let request = Request::builder()
             .method(Method::POST)
             .uri("/v1/command")
+            .header(
+                crate::server::COMMAND_LANE_HEADER,
+                if command.is_urgent() {
+                    "urgent"
+                } else {
+                    "normal"
+                },
+            )
             .header(HOST, "localhost")
             .header(AUTHORIZATION, format!("Bearer {}", self.credentials.token))
             .header(CLIENT_HEADER, &self.credentials.client_id.0)
@@ -120,8 +128,11 @@ impl DevelopmentClient {
                 "the local engine rejected the plugin development command"
             ));
         }
-        match collect_json(response.into_body()).await? {
-            CommandOutcome::Accepted => Ok(()),
+        match collect_json::<rw_core::CommandReply>(response.into_body())
+            .await?
+            .outcome()
+        {
+            CommandOutcome::Accepted {} => Ok(()),
             CommandOutcome::Rejected { error } => Err(miette!(
                 "plugin development was rejected ({}): {}",
                 error.code,

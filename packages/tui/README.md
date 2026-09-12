@@ -6,11 +6,17 @@ must not be handwritten in this package.
 
 ```sh
 bun install
+export ROTTWEILER_OPENTUI_LIBRARY="$(python3 ../../scripts/build-opentui-native.py)"
 bun run dev
 bun run test       # deterministic functional suite
 bun run test:perf  # isolated latency and frame-compute gates
 bun run typecheck
 ```
+
+Source commands require that explicit, receipt-verified native artifact. The Bun
+preload selects it before OpenTUI loads; stale or missing receipts fail before
+application initialization. Tests and diagnostics never build native code. Re-run
+the preparation command after native source, patch, or toolchain changes.
 
 The renderer acceptance suite uses OpenTUI's public `@opentui/core/testing`
 surface and captures the native renderer's in-memory character and styled-cell

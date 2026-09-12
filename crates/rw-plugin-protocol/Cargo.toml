@@ -1,12 +1,14 @@
 [package]
 name = "rw-plugin-protocol"
-description = "Dependency-leaf public plugin wire contract for Rottweiler"
+description = "Public plugin wire contract for Rottweiler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rw-operation-contract.workspace = true
+rw-types.workspace = true
 blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true

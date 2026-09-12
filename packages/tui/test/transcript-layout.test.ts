@@ -1,3 +1,4 @@
+import { emptySessionReader, conversationItem, sessionReaderFor } from "./fixtures/history"
 import { createStreamingTail } from "../src/state/model"
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
@@ -66,14 +67,7 @@ describe("retained transcript layout", () => {
     await treeSitter.initialize()
     renderer = await createTestRenderer({ width: 88, height: 22, useThread: false })
 
-    const transcript = Array.from({ length: 24 }, (_, index) => ({
-      sequenceId: String(index + 1),
-      agentTurn: String(index + 1),
-      turn: {
-        role: "assistant" as const,
-        blocks: [{
-          type: "text" as const,
-          text: [
+    const items = Array.from({ length: 24 }, (_, index) => conversationItem(index + 1, "assistant", [
             `## CARD_${index}_BEGIN`,
             "",
             `CARD_${index} has a **formatted** response with a table and code sample.`,
@@ -87,18 +81,15 @@ describe("retained transcript layout", () => {
             "```",
             "",
             `CARD_${index}_END`,
-          ].join("\n"),
-        }],
-        meta: { synthetic: false, summary: false },
-      },
-    }))
-    const app = createRottweilerApp(renderer.renderer, {
+          ].join("\n")))
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: sessionReaderFor(items),
       treeSitterClient: treeSitter,
-      initialState: { ...createInitialState(), transcript },
+
     })
     renderer.renderer.root.add(app)
+    await renderer.flush()
     expect(app.transcript.mountedEntryCount).toBe(16)
-    expect(app.transcript.mountedKeys.at(0)).toBe("9:9:assistant")
+    expect(app.transcript.mountedKeys.at(0)).toBe("9")
     await settleMarkdownHighlights(
       [...app.transcript.mountedCards.values()].map((card) => card.markdown),
       renderer,
@@ -115,7 +106,7 @@ describe("retained transcript layout", () => {
     expect(getBaseAttributes(heading?.attributes ?? 0) & TextAttributes.BOLD).not.toBe(0)
 
     let priorTop = app.transcript.scroller.scrollTop
-    for (let attempt = 0; attempt < 500 && priorTop > 0; attempt += 1) {
+    for (let attempt = 0; attempt < 500 && (priorTop > 0 || !renderer.captureCharFrame().includes("CARD_0_BEGIN")); attempt += 1) {
       await renderer.mockMouse.scroll(
         app.transcript.scroller.x + 2,
         app.transcript.scroller.y + 2,
@@ -131,14 +122,14 @@ describe("retained transcript layout", () => {
       priorTop = nextTop
     }
     expect(app.transcript.scroller.scrollTop).toBe(0)
-    expect(renderer.captureCharFrame()).toContain("CARD_8")
+    expect(renderer.captureCharFrame()).toContain("CARD_0")
 
     let priorBottomTop = app.transcript.scroller.scrollTop
     const bottom = () => Math.max(
       0,
       app.transcript.scroller.scrollHeight - app.transcript.scroller.viewport.height,
     )
-    for (let attempt = 0; attempt < 500 && priorBottomTop < bottom(); attempt += 1) {
+    for (let attempt = 0; attempt < 500 && (priorBottomTop < bottom() || !renderer.captureCharFrame().includes("CARD_23")); attempt += 1) {
       await renderer.mockMouse.scroll(
         app.transcript.scroller.x + 2,
         app.transcript.scroller.y + 2,
@@ -181,7 +172,7 @@ describe("retained transcript layout", () => {
       "",
       "STREAMING_TAIL_SENTINEL",
     ].join("\n")
-    const app = createRottweilerApp(renderer.renderer, {
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader,
       treeSitterClient: treeSitter,
       initialState: {
         ...createInitialState(),
@@ -190,7 +181,7 @@ describe("retained transcript layout", () => {
           text,
           thinking: "",
           citations: [],
-          toolCallIds: [],
+          toolInvocationIds: [],
           finished: null,
         }),
       },
@@ -227,11 +218,11 @@ describe("retained transcript layout", () => {
         text: "",
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer.renderer, {
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader,
       treeSitterClient: treeSitter,
       initialState: initial,
     })
@@ -290,7 +281,7 @@ describe("retained transcript layout", () => {
   test("retains one Markdown renderer while compaction text and thoughts stream", async () => {
     renderer = await createTestRenderer({ width: 80, height: 24, useThread: false })
     const initial = createInitialState()
-    const app = createRottweilerApp(renderer.renderer, { initialState: initial })
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.renderer.root.add(app)
     const markdown = app.transcript.compactionMarkdown
     const chunks = ["# Context summary", "\n\nThe **workspace**", " remains ready."]
@@ -331,20 +322,8 @@ describe("retained transcript layout", () => {
     })
     await treeSitter.initialize()
     renderer = await createTestRenderer({ width: 82, height: 40, useThread: false })
-    const app = createRottweilerApp(renderer.renderer, {
-      theme: nordTheme,
-      treeSitterClient: treeSitter,
-      initialState: {
-        ...createInitialState(),
-        transcript: [
-          {
-            sequenceId: "1",
-            agentTurn: "1",
-            turn: {
-              role: "assistant",
-              blocks: [{
-                type: "text",
-                text: [
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: sessionReaderFor([
+conversationItem(1, "assistant", [
                   "## Previous answer",
                   "",
                   "Main prose stays readable.",
@@ -355,22 +334,12 @@ describe("retained transcript layout", () => {
                   "```",
                   "",
                   "PREVIOUS_ANSWER_END",
-                ].join("\n"),
-              }],
-              meta: { synthetic: false, summary: false },
-            },
-          },
-          {
-            sequenceId: "2",
-            agentTurn: "2",
-            turn: {
-              role: "user",
-              blocks: [{ type: "text", text: "FOLLOW_UP_QUESTION_START\nCan you continue?" }],
-              meta: { synthetic: false, summary: false },
-            },
-          },
-        ],
-      },
+                ].join("\n")),
+conversationItem(2, "user", "FOLLOW_UP_QUESTION_START\nCan you continue?")
+]),
+      theme: nordTheme,
+      treeSitterClient: treeSitter,
+
     })
     renderer.renderer.root.add(app)
     for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -404,11 +373,11 @@ describe("retained transcript layout", () => {
         text: lines.join("\n"),
         thinking: "",
         citations: [],
-        toolCallIds: [],
+        toolInvocationIds: [],
         finished: null,
       }),
     }
-    const app = createRottweilerApp(renderer.renderer, { initialState: initial })
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader, initialState: initial })
     renderer.renderer.root.add(app)
     await renderer.flush()
 

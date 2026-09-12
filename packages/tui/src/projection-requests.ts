@@ -1,11 +1,15 @@
+import { commandReplyDomain, type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
+import type { ReplyAllocation } from "./transport/reply-allocation"
+import type { EngineEvent } from "./protocol"
 import {
   PROTOCOL_VERSION,
+  CLIENT_COMMAND_EXECUTION,
   type ClientCommand,
   type CommandOutcome,
   type PermissionDecision,
   type PermissionApprovalScope,
 } from "./protocol"
-import { isRecord, type WireEngineEvent } from "./transport"
+import { isRecord } from "./transport"
 
 export type ProjectionKind =
   | "commands"
@@ -67,13 +71,16 @@ export type ProjectionCommand =
   | { readonly type: "list_commands" | "list_sessions" }
 
 type RequestMeta = ClientCommand["meta"]
+// null accepts the initial bootstrap projection; undefined invalidates the retired scope.
+type LatestRequest = string | null | undefined
 
 interface ProjectionRequestBrokerOptions {
+  readonly allocations: ClientAllocationOwner
   readonly clientId: () => string
   readonly sessionId: () => string
   readonly requestId: () => string
   readonly replayActive: () => boolean
-  readonly emit: (command: ClientCommand) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
+  readonly emit: (command: ClientCommand, allocation: ReplyAllocation) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
   readonly onProjectionFailure: (
     kind: ProjectionKind,
     type: ClientCommand["type"],
@@ -94,8 +101,8 @@ const MAX_PENDING_SETTING_REQUESTS = 128
 
 export class ProjectionRequestBroker {
   readonly #options: ProjectionRequestBrokerOptions
-  readonly #settingPredecessors = new Map<string, string | null>()
-  readonly #latestRequests: Record<ProjectionRequestKind, string | null> = {
+  readonly #settingPredecessors = new Map<string, LatestRequest>()
+  readonly #latestRequests: Record<ProjectionRequestKind, LatestRequest> = {
     commands: null,
     modes: null,
     models: null,
@@ -160,7 +167,7 @@ export class ProjectionRequestBroker {
 
   accepts(kind: ProjectionRequestKind, requestId: string | null): boolean {
     const latest = this.#latestRequests[kind]
-    return latest === null || requestId === latest
+    return latest === null || (latest !== undefined && requestId === latest)
   }
 
   matches(kind: ProjectionRequestKind, requestId: string | null): boolean {
@@ -187,6 +194,9 @@ export class ProjectionRequestBroker {
   clearForSessionChange(): void {
     for (const kind of [
       "workspace_status",
+      "workspace_diff",
+      "files",
+      "provider_activation_models",
       "review",
       "mcp_review",
       "commands",
@@ -200,6 +210,7 @@ export class ProjectionRequestBroker {
       "runtime_services",
       "subagents",
     ] as const) this.#forget(kind)
+    this.#filePreview = null
     this.#modelSwitchRequests.clear()
   }
 
@@ -236,11 +247,11 @@ export class ProjectionRequestBroker {
   markProviderActivationModels(): void {
     const requestId = this.#latestRequests.models
     this.#latestRequests.provider_activation_models = requestId
-    this.#pendingRequests.provider_activation_models = requestId
+    this.#pendingRequests.provider_activation_models = requestId ?? null
   }
 
   consumeProviderActivationModels(requestId: string | null): boolean {
-    if (this.#latestRequests.provider_activation_models !== requestId) return false
+    if (requestId === null || this.#latestRequests.provider_activation_models !== requestId) return false
     this.#forget("provider_activation_models")
     return true
   }
@@ -265,10 +276,12 @@ export class ProjectionRequestBroker {
     return this.#modelSwitchRequests.delete(requestId)
   }
 
-  acceptsEvent(event: WireEngineEvent): boolean {
+  acceptsEvent(event: EngineEvent): boolean {
     const record = event as unknown as Record<string, unknown>
     const requestId = requestIdFrom(record)
     switch (event.type) {
+      case "todos_read":
+        return false // Direct task reads settle through their session capability.
       case "workspace_status_ready":
         return this.accepts("workspace_status", requestId)
       case "runtime_services_listed":
@@ -315,7 +328,7 @@ export class ProjectionRequestBroker {
     }
   }
 
-  completeEvent(event: WireEngineEvent): ProjectionKind | null {
+  completeEvent(event: EngineEvent): ProjectionKind | null {
     switch (event.type) {
       case "command_descriptors_listed":
         this.clear("commands")
@@ -359,8 +372,7 @@ export class ProjectionRequestBroker {
   command(command: ProjectionCommand): string | null {
     if (
       this.#options.replayActive() &&
-      command.type !== "list_sessions" &&
-      command.type !== "search_sessions"
+      CLIENT_COMMAND_EXECUTION[command.type] !== "read"
     ) return null
 
     const meta = this.meta()
@@ -370,8 +382,21 @@ export class ProjectionRequestBroker {
     return meta.request_id
   }
 
-  async emit(command: ClientCommand): Promise<void | CommandOutcome | null> {
-    return this.#options.emit(command)
+  allocate(): ClientAllocationLease { return this.#options.allocations.reserve("decoding", 0) }
+
+  async emit(command: ClientCommand, allocation: ClientAllocationLease): Promise<void | CommandOutcome | null> {
+    allocation.moveTo(commandReplyDomain(command.type))
+    return this.#options.emit(command, allocation)
+  }
+
+  /** Input handlers that ignore results still own decoding through rejection projection. */
+  dispatch(command: ClientCommand): void {
+    void this.#emitProjectionCommand(command.type, command, command.meta.request_id)
+  }
+
+  async consume(command: ClientCommand, consume: (outcome: void | CommandOutcome | null) => void | Promise<void>): Promise<void> {
+    using allocation = this.allocate()
+    await consume(await this.emit(command, allocation))
   }
 
   #trackCommand(command: ProjectionCommand, requestId: string): void {
@@ -458,7 +483,7 @@ export class ProjectionRequestBroker {
 
   #forget(kind: ProjectionRequestKind): void {
     if (kind === "settings") this.#settingPredecessors.clear()
-    this.#latestRequests[kind] = null
+    this.#latestRequests[kind] = undefined
     this.clear(kind)
   }
 
@@ -467,8 +492,9 @@ export class ProjectionRequestBroker {
     command: ClientCommand,
     requestId: string,
   ): Promise<void> {
+    using allocation = this.allocate()
     try {
-      const outcome = await this.emit(command)
+      const outcome = await this.emit(command, allocation)
       if (outcome?.type === "rejected") {
         this.#handleFailure(type, requestId, outcome, outcome.error.message, "rejected")
       } else if (outcome === null) {
@@ -512,7 +538,7 @@ export class ProjectionRequestBroker {
       }
       if (type === "set_setting") {
         if (this.#latestRequests.settings === requestId) {
-          this.#latestRequests.settings = this.#settingPredecessors.get(requestId) ?? null
+          this.#latestRequests.settings = this.#settingPredecessors.get(requestId)
         }
         this.#settingPredecessors.delete(requestId)
       }

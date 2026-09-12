@@ -31,11 +31,10 @@ jobs:
       - run: python3 scripts/ci_evidence.py --gate python-contracts --output ci-results/python.json -- python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   package-inventory:
@@ -59,11 +58,10 @@ jobs:
           echo "packages=$(python3 scripts/ci_inventory.py matrix)" >> "$GITHUB_OUTPUT"
       - name: Retain inventory evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-inventory-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   packages:
@@ -86,14 +84,22 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
-      - run: python3 scripts/ci_evidence.py --gate package --output ci-results/package.json -- python3 scripts/ci_inventory.py package "${{ matrix.package }}"
+      - name: Prepare TUI source native prerequisite
+        if: matrix.package == 'tui'
+        run: |
+          python3 scripts/ci_inventory.py install tui --build-dependencies
+          library=$(python3 scripts/build-opentui-native.py)
+          echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
+      - run: |
+          ownership=
+          if [ "${{ matrix.package }}" = tui ]; then ownership=--delegated; fi
+          python3 scripts/ci_evidence.py $ownership --gate package --output ci-results/package.json -- python3 scripts/ci_inventory.py package "${{ matrix.package }}"
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-${{ matrix.os }}-${{ matrix.package }}-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   fuzz-compile:
@@ -112,11 +118,10 @@ jobs:
       - run: python3 scripts/ci_evidence.py --gate fuzz-compile --output ci-results/fuzz.json -- cargo check --locked --manifest-path fuzz/Cargo.toml --bins
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   test:
@@ -125,12 +130,15 @@ jobs:
     timeout-minutes: 45
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_TEST_ACTIVATION_TRACE: "1"
     strategy:
       fail-fast: false
       matrix:
         os: [macos-15, ubuntu-latest]
 
     steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -140,6 +148,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ". -> target"
+          key: engine-rust-artifacts
+      - name: Prepare Linux sandbox namespace prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends iproute2 util-linux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          timeout 10s unshare --user --map-root-user --mount --net --pid --fork /bin/true
+          echo "ROTTWEILER_REQUIRE_LINUX_SANDBOX=1" >> "$GITHUB_ENV"
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
@@ -148,16 +165,28 @@ jobs:
           bun-version: 1.3.14
 
       - name: Frozen integration dependencies
-        run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install plugin-sdk tui
+        run: python3 scripts/ci_evidence.py --gate frozen-install --output ci-results/install.json -- python3 scripts/ci_inventory.py install js-host --build-dependencies
+      - name: Prepare verified source renderer
+        run: |
+          library=$(python3 scripts/build-opentui-native.py)
+          echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
       - run: python3 scripts/ci_evidence.py --gate fmt --output ci-results/fmt.json -- cargo fmt --all -- --check
+      - name: Check isolated test dependency graphs
+        run: |
+          python3 scripts/ci_evidence.py --gate core-test-graph --output ci-results/core-test-graph.json -- cargo check --locked -p rw-core --tests --all-features
+          python3 scripts/ci_evidence.py --gate mcp-test-graph --output ci-results/mcp-test-graph.json -- cargo check --locked -p rw-mcp --tests --all-features
+      - name: Check the production dependency graph
+        run: python3 scripts/ci_evidence.py --gate production-graph --output ci-results/production-graph.json -- cargo check --locked -p rw-cli --bin rw
       - run: python3 scripts/ci_evidence.py --gate clippy --output ci-results/clippy.json -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - run: python3 scripts/ci_evidence.py --gate rust-tests --output ci-results/rust-tests.json -- cargo test --locked --workspace --all-features
+      - name: Build native sandbox test prerequisite
+        run: python3 scripts/ci_evidence.py --gate test-helper-build --output ci-results/test-helper-build.json -- python3 scripts/build-test-helper.py --github-env "$GITHUB_ENV"
+      - run: python3 scripts/ci_evidence.py --gate rust-tests --output ci-results/rust-tests.json -- cargo test --locked --workspace --all-features --no-fail-fast
       - run: cargo run --locked --quiet -p xtask -- codegen --check
-      - run: cargo run --locked --quiet -p rw-plugin-protocol --bin rw-plugin-protocol-codegen -- --check
       - run: python3 scripts/release_contract.py generate-rust --check
       - run: python3 scripts/release_contract.py generate-typescript --check
       - run: python3 scripts/check-dependency-direction.py
       - run: python3 scripts/check-ownership.py
+      - run: python3 scripts/ci_evidence.py --gate source-size --output ci-results/source-size.json -- python3 scripts/check-source-size.py
       - run: python3 scripts/check-toolchain-ownership.py
       - run: python3 scripts/check-network-boundaries.py
       - run: python3 scripts/check-documentation.py
@@ -184,11 +213,10 @@ jobs:
           bun run --cwd "$root/plugin" build
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-${{ matrix.os }}-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   security-tests:
@@ -201,22 +229,124 @@ jobs:
           persist-credentials: false
       - run: python3 scripts/ci_evidence.py --gate sandbox --output ci-results/sandbox.json -- crates/rw-sandbox/tests/linux_security_gate.sh
       - name: M8 production-composition functional acceptance
-        run: python3 scripts/ci_evidence.py --gate m8-functional --output ci-results/m8.json -- crates/rw-cli/tests/m8_release_gate_linux.sh
+        run: python3 scripts/ci_evidence.py --delegated --gate m8-functional --output ci-results/m8.json -- crates/rw-cli/tests/m8_release_gate_linux.sh
         env:
           ROTTWEILER_M8_FUNCTIONAL_ONLY: 1
           ROTTWEILER_M8_PERF_SAMPLES: 1
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
+
+  linux-candidate-build:
+    name: Build native Linux candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      candidate_artifact: linux-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target/native-candidate"
+          key: native-rust-artifacts
+          cache-on-failure: true
+      - name: Build and enforce native component sizes
+        id: candidate
+        run: >-
+          python3 scripts/ci_evidence.py --gate build-and-size --output ci-results/build.json --
+          python3 scripts/build-native-candidate.py
+          --output "$RUNNER_TEMP/native-candidates.noindex"
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
+          --github-output "$GITHUB_OUTPUT"
+      - name: Preserve failed Linux engine and diagnostic link map
+        if: failure() && steps.candidate.outcome == 'failure'
+        continue-on-error: true
+        run: >-
+          python3 scripts/diagnose-native-size.py
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
+          --failed-gate ci-results/build.json
+          --output ci-results/native-size
+      - name: Upload verified native candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.candidate.outputs.candidate }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain build and size evidence
+        if: always()
+        uses: ./.github/actions/retain-evidence
+        with:
+          name: native-build-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 30
+
+
+  macos-candidate-build:
+    name: Build native macOS candidate
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      candidate_artifact: macos-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target/native-candidate"
+          key: native-rust-artifacts
+          cache-on-failure: true
+      - name: Build and enforce native component sizes
+        id: candidate
+        run: >-
+          python3 scripts/ci_evidence.py --gate build-and-size --output ci-results/build.json --
+          python3 scripts/build-native-candidate.py
+          --output "$RUNNER_TEMP/native-candidates.noindex"
+          --target-dir "$GITHUB_WORKSPACE/target/native-candidate"
+          --github-output "$GITHUB_OUTPUT"
+      - name: Upload verified native candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-native-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.candidate.outputs.candidate }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain build and size evidence
+        if: always()
+        uses: ./.github/actions/retain-evidence
+        with:
+          name: native-build-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 30
+
 
   performance-smoke:
     name: Per-PR performance smoke
-    runs-on: ubuntu-latest
+    needs: linux-candidate-build
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
@@ -224,30 +354,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - run: rustup override set 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Download verified native candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          workspaces: ". -> target"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.14
-      - run: bun install --frozen-lockfile
-        working-directory: packages/tui
+          name: ${{ needs.linux-candidate-build.outputs.candidate_artifact }}
+          path: ${{ runner.temp }}/native-candidate.noindex
+      - name: Verify and prepare native candidate
+        run: python3 scripts/native_candidate.py prepare "$RUNNER_TEMP/native-candidate.noindex"
       - name: Enforce headless absolute budgets with a bounded smoke sample
-        run: python3 scripts/ci_evidence.py --gate headless-smoke --output ci-results/headless.json -- crates/rw-cli/tests/perf_gate.sh
+        run: python3 scripts/ci_evidence.py --delegated --gate headless-smoke --output ci-results/headless.json -- crates/rw-cli/tests/perf_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
         env:
           ROTTWEILER_PERF_SMOKE: 1
           ROTTWEILER_PERF_SAMPLES: 100
           ROTTWEILER_PERF_OUTPUT: ci-results/headless-metrics.json
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   tui-performance-smoke:
@@ -262,6 +387,8 @@ jobs:
       matrix:
         os: [macos-15, ubuntu-latest]
     steps:
+      - name: Configure native cache
+        run: echo "ROTTWEILER_NATIVE_CACHE_DIR=$RUNNER_TEMP/rottweiler-native-cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -270,22 +397,26 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
+      - name: Prepare verified source renderer
+        run: |
+          library=$(python3 scripts/build-opentui-native.py)
+          echo "ROTTWEILER_OPENTUI_LIBRARY=$library" >> "$GITHUB_ENV"
       - name: Enforce TUI transport and render-loop budgets
         env:
           ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/ci-results/tui-metrics.json
-        run: python3 scripts/ci_evidence.py --gate tui-smoke --output ci-results/tui.json -- bun run --cwd packages/tui test:perf
+        run: python3 scripts/ci_evidence.py --delegated --gate tui-smoke --output ci-results/tui.json -- python3 scripts/tui_tests.py test:perf
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-${{ matrix.os }}-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   m4-ssh-loopback:
     name: M4 SSH loopback contract
-    runs-on: ubuntu-latest
+    needs: linux-candidate-build
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
@@ -298,14 +429,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - run: rustup override set 1.97.1
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Download verified native candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          bun-version: 1.3.14
-      - run: bun install --frozen-lockfile
-        working-directory: packages/tui
+          name: ${{ needs.linux-candidate-build.outputs.candidate_artifact }}
+          path: ${{ runner.temp }}/native-candidate.noindex
+      - name: Verify and prepare native candidate
+        run: python3 scripts/native_candidate.py prepare "$RUNNER_TEMP/native-candidate.noindex"
       - name: Configure required SSH loopback
         run: |
           sudo apt-get update
@@ -327,14 +457,13 @@ jobs:
           sudo install -d -m 755 /run/sshd
           sudo service ssh restart
           ssh rottweiler-ci true
-      - run: python3 scripts/ci_evidence.py --gate ssh-acceptance --output ci-results/ssh.json -- crates/rw-cli/tests/m4_release_gate.sh
+      - run: python3 scripts/ci_evidence.py --delegated --gate ssh-acceptance --output ci-results/ssh.json -- crates/rw-cli/tests/m4_release_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
   supply-chain:
@@ -366,18 +495,17 @@ jobs:
       - run: python3 scripts/ci_evidence.py --gate audit --output ci-results/audit.json -- cargo audit
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30
 
 
   required:
     name: CI required
     if: always()
-    needs: [contracts, package-inventory, packages, fuzz-compile, test, security-tests, performance-smoke, tui-performance-smoke, m4-ssh-loopback, supply-chain]
+    needs: [linux-candidate-build, macos-candidate-build, contracts, package-inventory, packages, fuzz-compile, test, security-tests, performance-smoke, tui-performance-smoke, m4-ssh-loopback, supply-chain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -395,9 +523,8 @@ jobs:
         run: python3 scripts/ci_evidence.py --gate required --output ci-results/required.json -- python3 scripts/ci_inventory.py required
       - name: Retain gate evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: ./.github/actions/retain-evidence
         with:
           name: ci-${{ github.job }}-linux-core-${{ github.run_attempt }}
           path: ci-results/
-          if-no-files-found: warn
           retention-days: 30

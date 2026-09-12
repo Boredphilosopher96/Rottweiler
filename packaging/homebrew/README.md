@@ -15,3 +15,10 @@ notarization are available.
 
 The `Formula/rottweiler.rb` source-build formula remains available for
 development, but the Cask is the supported installation path.
+
+HEAD builds resolve Rust, Bun and Zig from repository-owned exact toolchain
+contracts. Homebrew verifies the Bun and Zig official release archives; the native
+builder verifies the Zig archive again before compiling the patched OpenTUI
+source and bundled dependency sources. Its source, patch, flags and compiler
+identity are retained in the candidate receipt. Build caches stay beneath the
+isolated Cargo target and follow the repository cleanup owner.

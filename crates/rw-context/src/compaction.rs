@@ -187,7 +187,9 @@ pub fn summary_turn(summary: impl Into<String>) -> Turn {
     }
 }
 
-fn auto_continue_turn() -> Turn {
+/// Synthetic continuation appended once after a complete automatic summary.
+#[must_use]
+pub fn auto_continue_turn() -> Turn {
     Turn {
         role: Role::User,
         blocks: vec![Block::Text {

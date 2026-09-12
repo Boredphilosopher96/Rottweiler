@@ -6,7 +6,34 @@ release preflight, paid live canaries, and protected release gates. A gate only
 counts when the named run completed for the exact source or archive; queued,
 unconfigured, and intentionally unrun tiers are not green evidence.
 
+## Protected branch policy
+
+The default branch requires a pull request, resolved review threads, a linear
+history, and the complete `CI required` aggregate alongside its mandatory status
+contexts. The aggregate rejects failed, cancelled, missing, or unexpectedly
+skipped jobs, including both TUI performance smoke jobs. Repository roles have
+no standing bypass. A failing build is repaired through a pull request; reruns
+must retain the first failure and explain what changed.
+
+An emergency ruleset change requires the repository owner's explicit incident
+approval, a recorded reason and scope, and restoration of protection immediately
+after the incident action. It does not qualify the resulting source: the exact
+merged source must still complete every mandatory check. Do not use protection
+changes to deliver unfinished feature work.
+
+CI checks the production `rw-cli --bin rw` dependency graph separately from the
+isolated crate test graphs and the workspace all-features graph. Test-only
+dependency features must not supply APIs required by the shipped engine.
+
 ## 1. Deterministic replay (the foundation)
+
+Provider and configured-search recording files share a 64 MiB encoded ceiling.
+Configured-search reads pin a private regular-file descriptor with nonblocking,
+no-follow open, allocate only its admitted length, and reject observed length or
+modification-time changes. JSON structure and a 256 MiB conservative decoded-work
+ceiling are checked before constructing the required occurrence arrays. These
+per-file bounds do not describe an aggregate resident-memory pool. Recording
+publication uses the same file and structure limits.
 
 The record/replay middleware is the spine of all agent-level testing:
 
@@ -74,11 +101,11 @@ prove whole-record precedence — explicit user config, then provider-discovered
 metadata, then models.dev — while subscription and credit-accounted providers
 reject dollar-pricing overrides and retain their non-dollar accounting.
 
-The plugin SDK and Rust host conformance surface covers protocol 2 only.
+The plugin SDK and Rust host conformance surface covers protocol 3 only.
 The `rw-plugin-protocol` codegen check owns and verifies the
-TypeScript, `protocol-2.json`, and schema projections; the protocol also
+TypeScript, `protocol-3.json`, and schema projections; the protocol also
 negotiates model-catalog capability and validates bounded catalog entries.
-Cross-host `provider-v2.ts` and `provider-auth-v2.ts` fixtures exercise
+Cross-host `provider-v3.ts` and `provider-auth-v3.ts` fixtures exercise
 catalog metadata plus host-mediated authentication, including declared
 credential references, response redaction across chunk boundaries,
 cancellation, and terminal refusal of an undeclared reference before HTTP.
@@ -169,7 +196,21 @@ Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard 
 
 ### OpenTUI test surface
 
-OpenTUI 0.4.5 exposes a public `@opentui/core/testing` entry point. Its
+OpenTUI exposes a public `@opentui/core/testing` entry point.
+Source TUI suites require an explicit `ROTTWEILER_OPENTUI_LIBRARY` from
+`python3 scripts/build-opentui-native.py` before the test or measurement starts.
+The package preload verifies its source, artifact, license, and lifetime-proof
+receipt before OpenTUI imports the library. Missing or stale preparation fails;
+source tests do not fall back to the npm native binary or compile inside gates.
+
+Native renderer builds use the worktree's `target/opentui-native` cache by default.
+`ROTTWEILER_NATIVE_CACHE_DIR` selects an explicit absolute cache directory for
+CI jobs whose Cargo cache pruning does not preserve renderer receipts/licenses.
+Cache location does not change the native source/toolchain identity. Under its
+build lock, the explicit builder discards an incomplete or invalid cache key and
+rebuilds it with the required lifetime probe. Acceptance verification remains
+read-only and rejects every incomplete, stale, or modified artifact.
+
 `createTestRenderer` uses the native renderer with in-memory output and provides
 deterministic render flushing, mock keyboard/mouse input, resize control,
 character-frame capture, and styled cell/span capture. The contract test in
@@ -183,10 +224,21 @@ Property tests worth calling out:
 - **Retained mutation previews**: every tool preview emits a redacted durable `ToolDiffReady` independently of whether permission asked. Rust actor tests cover an auto-approved write with no approval event, protocol fixtures round-trip the event, and the TUI reducer/render tests retain the Tree-sitter-highlighted inline diff through tool completion.
 - **Truthful active-service projection**: host tests expose only initialized LSP clients and currently executing formatter/linter guards, never configured-idle commands, arguments, paths, output, endpoints, or credentials. TUI tests poll only while tool work is active and omit empty service/MCP sections.
 - **Terminal rendering contracts**: the embedded Tree-sitter smoke parses TypeScript, Bash, and Rust without network/runtime asset lookup; canonical extension fixtures cover the remaining bundled grammars. TUI fixtures retain visible Bash command cards, compact the command palette, and keep unsupported fenced languages as bounded code blocks without claiming a terminal-native diagram renderer.
+- **Joined focus transitions**: real App scenarios open a modal picker, receive an approval or question, switch sessions, deliver the retired search reply, and press Escape. Every transition checks the sole native focused node and retained draft, with no accidental approval, answer, or submission.
+- **Rich extension surfaces**: an authenticated HTTP fixture supplies source-qualified rich tool output, a panel, exact-owner actions, and paged canonical artifact content. A held content response overlaps native rendering at the maximum field/table-row cardinalities and usable input/panel commands. Generation replacement, disconnect destruction, and actual malformed-descriptor rejection retire action authority. The source test and compiled diagnostic enter the same source-owned probe through the explicit TUI host role. This functional oracle uses the closed native field renderers; frame-time qualification remains the separate compiled performance gate.
+- **Native third-party rich workflow**: `scripts/prepare-rich-fixture.py --candidate DIR --bun PINNED_BUN --output PREPARED` explicitly compiles the SDK fixture and binds its manifest, executable bytes, Bun and source to the native candidate. `scripts/native-rich-extension.py --candidate DIR --fixture-receipt PREPARED/rich-fixture.json --output SHORT_PRIVATE_PATH` performs no compilation. The actual approval CLI authorizes that private fixture, then the production engine, compiled App and SDK process create a canonical paged tool result and execute two source-qualified actions. Canonical journal evidence must independently contain the matching successful invocation and state changes 0, 1 and 2. A bounded private Unix relay forwards engine bytes unchanged: this fixture's real HTTP client requests `Connection: close`, and its separate control socket can withhold one artifact response or disconnect all connections. Dismissal must retire held bytes while composer/panel input remains usable; reconnect-independent artifact paging uses the canonical engine source. Native process owners and relay tasks must settle before the run can pass. Fixture source checks and relay unit tests do not substitute for executing this joined native oracle, and this functional run does not establish frame-time budgets.
+- **Joined interactive pressure**: the optimized `session_host::tests::interactive::joined_streaming_native_client` host forwards commands and SSE from actual `EngineHost` through a bounded test HTTP adapter. It seeds 10,240,000 canonical transcript bytes before timing and retains a durable provider-context reset so old transcript text does not exhaust the provider context window. The compiled client records all 1,200 requested 60 Hz frames, 256 acknowledged keys, exact history search/resize anchors, actual approval, child inspection/interruption and 2,000 paced stream lines. Twelve admitted journal batches hold four real commit workers with eight queued; the original finite store barrier and actual queue-age/durable-ack observations remain authoritative. Renderer compute, input latency, requested cadence misses and actual stream delivery duration are separate raw observations. The draining native terminal cannot prove physical monitor refresh; production HTTP and whole-product RSS use M4 and soak evidence separately.
 - **Crash safety**: kill the process at random points during a replayed session → `--resume` always loads a consistent state.
-- **Event schema evolution**: old fixture logs (N-1 version) always load.
+- **Event schema validation**: fixtures conform to the declared event contract. Unsupported schemas and incomplete envelopes are rejected before replay or storage mutation.
 - **Doctor diagnostics**: injected fixtures independently seed a provider 401/403, a bounded connection failure, unavailable sandbox support, and `TERM=dumb`; each must produce its distinct stable code and a non-zero result. Loopback HTTP fixtures cover rejected API credentials and authenticated explicit-proxy routing. Credential-inventory tests assert two logical references cause exactly one shared vault read and that canary values never occur in text or JSON.
 - **Fail-soft extension discovery**: `rw-ext` regressions isolate malformed, oversized, non-UTF-8, unreadable, and symlinked artifacts while retaining valid siblings and deterministic path diagnostics. `rw-store` turns an incomplete project inventory into an empty, fingerprint-free `Untrustable` assessment and refuses grants; `rw-runtime` proves malformed user artifacts and uninventoriable untrusted roots still yield a usable startup catalog while runtime trust-grant mutation refuses them; `rw-cli` independently tests the same grant refusal. Missing workspace roots and trust-store assessment failures remain error paths rather than being mislabeled as fail-soft artifact diagnostics.
+
+The hosted Linux integration job configures its ephemeral runner to permit
+unprivileged user namespaces, then probes user, mount, network and PID namespace
+creation before running Rust tests. It requires sandbox enforcement in those
+tests. Namespace admission failure is a failed environment prerequisite; the
+job does not turn native sandbox tests into successful skips. The separate
+privileged Linux security gate exercises the syscall policy and mount topology.
 
 ## 3. Performance budgets (CI-enforced, p99 unless noted)
 
@@ -216,13 +268,106 @@ which detects sustained regressions without treating host-wide scheduler stalls
 as product latency. Every measured sample is reported; neither tier retries,
 trims, nor substitutes a relative baseline.
 
-The required pull-request and `main` TUI smoke applies the same distinction to
-input echo: it measures input dispatch plus render compute with process CPU time
-on shared hosted runners, excluding time while the process is descheduled, and
-still requires every trial's p99 to remain below 16ms. Protected performance,
-nightly, and release TUI gates retain wall-clock input-to-echo measurement on
-their fixed native images; those gates remain the user-visible latency
-authority.
+`ROTTWEILER_CLIENT_TIMINGS=1` enables bounded, payload-free client diagnostics.
+The TUI emits startup stage durations when the composer accepts its first input,
+including native module loading, renderer setup, first frame, application imports,
+configuration, parser asset materialization, mounting, paint, and input delivery.
+These observations attribute latency; acceptance still measures the complete
+process-to-interactive interval with diagnostics disabled.
+
+Context assembly has separate timing and allocation test executables. Prebuild
+the release `rw-core` library tests with `cargo test --release -p rw-core --lib
+--no-run --message-format=json`; retain the emitted executable path and hash.
+Prebuild another executable with `--features allocation-measurement`. Only the
+second test executable installs an instrumented system allocator; it emits no
+latency samples. Production libraries and executables do not install it.
+
+On a quiet host, run the first executable with the exact ignored test
+`engine::tests::context_cache::measure_incremental_context_against_full_assembly`,
+and the instrumented executable with
+`engine::tests::context_cache::measure_context_allocation_volume`. Use
+`--exact --ignored --nocapture --test-threads=1`. Select row sizes with
+`ROTTWEILER_CONTEXT_MEASURE_VALUE_BYTES=128`, `512`, and `2048`; each workload has
+128 tool turns and 16 structured rows per turn. The records include actual
+serialized source bytes, request bytes and hash, profile, instrumentation, five
+warmups and 500 samples per implementation. `ROTTWEILER_CONTEXT_MEASURE_MODE`
+selects `paired`, `cached`, or `full`; paired order alternates, with byte-identical
+request validation outside measurement. Cached/full runs use separate processes
+for peak RSS, and full runs never retain an unused normalization cache.
+
+Retain raw samples and executable/source/toolchain identity. Report nearest-rank
+p99 separately from allocation calls and requested bytes. Allocation bytes include
+reallocation growth; they are neither copied bytes nor resident memory. Observe
+peak RSS separately with platform-correct units. The context kernel excludes
+provider I/O, storage and process startup; it does not qualify turn latency alone.
+
+Each headless sample owns a separate process group, a five-second deadline, and
+64 KiB per output stream. A timeout or output flood kills that group and reaps
+the leader before the gate returns. Evidence records the active phase and each
+completed sample as it runs, including failures during warmup or sampling.
+Malformed, duplicate, negative, and out-of-interval timing markers fail the gate.
+
+TUI visual and memory tests launch their executables through the shared Python
+process owner, with one active child and a bounded combined output log per test
+directory. An owned worker thread isolates supervisor startup from Bun's test
+timeout process killer. Test cleanup awaits both the supervisor's group-closure
+acknowledgement and worker exit before deleting scratch. Missing closure retains
+the directory and prevents another launch through that owner. Functional test
+deadlines cover their serial proofs and cleanup; product latency gates are separate.
+
+Nested Python verification owners opt into a bounded settlement channel. Each
+child is registered before launch and released after its actual process owner
+reaps it; only then may the wrapper acknowledge closure. Cancellation uses the
+shared physical-retirement deadline described below. Forced wrapper death, missing
+closure, or an incomplete spawn handoff is `UNSETTLED` and stops subsequent
+gates. Delegated PID records are diagnostic identities, never authority to kill
+a possibly reused process. This contract covers participating process owners;
+importing the helper does not cover unrelated raw subprocesses or detached
+processes. The measured native child does not inherit the settlement channel.
+Standalone and delegated Python gates use the same cooperative cancellation
+owner. A signal is observed after process creation transfers ownership; cleanup
+keeps scratch until the native child is reaped. The final real group signal
+precedes leader reaping, and bounded signal-zero checks then require group
+disappearance. Persistent zombies or reused group numbers fail as `UNSETTLED`;
+they never authorize another real signal.
+
+Headless, M4, and compiled client probes share one scratch lifetime owner.
+Successful scopes remove their private files after process and oracle checks;
+failed or unproven scopes retain them and report the exact path. Headless and
+compiled client probes revalidate candidate bytes after execution, including
+failure paths. Retained scratch requires identity-qualified cleanup after the
+physical owners are investigated.
+
+M4 observes PTY exits without reaping and retains each leader through its final
+group signal. A successful gate acknowledges closure only after local group and
+remote-runtime lifecycle checks finish. Failed or cancelled gates retain their
+scratch and unclosed obligation. Descendant PID snapshots and detached runtime
+descriptors are diagnostic evidence, not cleanup signal authority. Engine stderr
+is drained through a 2 MiB retained log; its worker must reach EOF and join before
+the engine owner settles.
+
+The required pull-request and `main` TUI smoke measures input dispatch through
+native frame capture with wall time, requiring every trial's median below 16ms.
+Input reports retain every wall/CPU sample and the selected statistic.
+The same-process UDS transport harness uses wall-clock median below 2ms for
+shared-runner smoke and wall-clock p99 below 2ms for controlled qualification.
+Transport reports retain every wall/CPU sample and the selected statistic;
+process-wide CPU time includes background threads and is not event latency.
+Protected performance, nightly and release gates retain the strict wall-clock
+input-to-echo and socket p99 budgets on their fixed native images. These gates
+are the user-visible latency authority; smoke results do not qualify p99.
+
+`python3 packages/tui/scripts/client-input-probe.py --candidate PATH --output PATH`
+verifies and launches the compiled shared JavaScript host with the explicit TUI
+role. Its 110×36 native-renderer kernel admits a near-limit 128 KiB UTF-8 composer,
+then measures App keyboard dispatch through native frame capture using wall time.
+Draft setup, history/parser preparation, cursor placement, initial paint and GC
+occur outside the samples. Each of three trials retains all 128 raw samples and
+excludes its first five warmup keys; every nearest-rank p99 must stay below 16 ms.
+Exact final text, painted input, draining terminal output and complete allocation
+retirement are correctness conditions. The runner consumes an exact-source
+verified candidate and never compiles. This kernel qualifies compiled editing;
+process startup, full-application RSS and soak behavior have separate gates.
 
 Full p99 consumers run on fixed native GitHub-hosted images and record the exact
 image version with every raw sample set. Linux measures an independently built,
@@ -249,30 +394,39 @@ maintainer applies the `perf-waiver` label **and** the PR body contains a
 describing the evidence and tradeoff. Nightly and release jobs never accept
 waivers.
 
-The initial checked-in values are explicitly `bootstrap`: core ceilings are
-derived from the fixed v1 absolute budgets and the RSS value preserves the
-pre-baseline guard. They are not empirical measurements and do not satisfy the
-v1 regression gate. Pull-request jobs may use them only as an
-absolute-equivalent smoke comparison. Nightly and exact-tag core and soak jobs
-pass `--require-measured`, retain their real per-platform JSON observations,
-and fail closed until maintainers review that evidence and replace each suite
-with `baseline_kind: measured` plus its runner/run provenance. The 10% ceiling
-and fixed absolute budgets remain unchanged after calibration.
+Bootstrap suites identify which values are observations and which are derived
+from absolute ceilings. Ceiling-derived values are not empirical measurements
+and do not satisfy measured qualification. Pull-request jobs may use bootstrap
+suites for smoke comparison. Nightly and exact-tag core and soak jobs pass
+`--require-measured`, retain their real per-platform JSON observations, and
+require reviewed runner, artifact, profile and workload provenance. A
+`measured` label alone does not establish comparability between different
+workloads or unidentified source trees. The 10% ceiling and fixed absolute
+budgets remain unchanged after calibration.
 
 The memory budget is executable, not an idle sleep. `scripts/run-soak.py`
 launches the production supervisor, Rust engine, and compiled OpenTUI together
 under a PTY. It submits real accumulating turns through the OpenTUI composer to
 a network-free deterministic provider, streams multiple deltas per response,
 periodically calls the safe `read` tool, and runs `/compact` against the growing
-durable transcript. Each step must appear in the session event log before the
-next is submitted. The harness distinguishes PTY delivery from engine progress:
+durable transcript. The bounded journal observer consumes complete top-level
+records with contiguous source identities. A normal step requires its accepted
+input, started turn, streamed text, committed assistant marker, and matching
+successful `TurnFinished`. A tool step additionally requires the exact successful
+read completion and its canonical result reference. Manual compaction requires
+its committed summary and matching `CompactionFinished`. Markers inside partial
+records, nested payloads, or early text deltas cannot complete a step. The harness distinguishes PTY delivery from engine progress:
 an input with no durable acceptance may be submitted at most three times, while
 an accepted turn or compaction is never replayed and must finish within its
 deadline. Any failure writes a structured `soak-result.json` before the process
 exits so the failing run retains its exact diagnostic instead of deleting the
-only evidence. The harness also kills the TUI once and requires the
-supervisor to attach a new TUI to the same engine PID with the persisted
-transcript intact. It samples combined RSS for the complete supervisor process
+only evidence. Failed runs retain their private scratch directory. Shutdown
+requires the supervisor's successful managed-child cleanup result, final reaping
+of the owned supervisor, and disappearance of observed processes and groups.
+Forced shutdown or missing physical proof reports `UNSETTLED`; observed historical
+PIDs never authorize cleanup signals. The harness stops the unreaped supervisor
+while selecting and killing its current direct TUI child, then resumes it and
+requires a new TUI on the same engine PID with the persisted transcript intact. It samples combined RSS for the complete supervisor process
 tree throughout and fails immediately above 600 MiB. A memory failure retains
 the per-process RSS snapshot and workload counters without persisting command
 arguments or credentials. Nightly and tag-release
@@ -281,10 +435,13 @@ workflows run it for 28,800 seconds on dedicated self-hosted runners labeled
 checked against the platform's measured `soak` suite in
 `benchmarks/performance-baseline.json`; bootstrap provenance deliberately
 blocks nightly and release completion. Tag-release soaks install and run
-the exact already-built archive that publication will sign. Nightly soaks use
-the current default-branch Rust binaries built in isolated hosted build jobs,
-verify their checksums on the protected runners, and build the current OpenTUI
-client locally. Dedicated
+the exact already-built archive that publication will sign. `run-soak.py`
+requires either `--candidate` with a verified native receipt, or
+`--release-archive` and `--release-version` with exact installed-member comparison.
+Both modes verify before launching and again after physical shutdown, including
+the renderer, helper identity, and licenses; changed inputs cannot produce a
+passing result. Nightly soaks consume the complete native candidate built in
+isolated build jobs. No compilation occurs inside the soak. Dedicated
 runners are required because hosted Actions jobs cannot sustain one continuous
 eight-hour process.
 
@@ -292,7 +449,7 @@ eight-hour process.
 measures the named production path. Empty or stub benchmarks cannot satisfy a
 budget, and an activated budget remains part of the global gate.
 
-The production-composition prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh`. It runs the
+The production-composition prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh CANDIDATE_DIRECTORY MCP_FIXTURE_RECEIPT`. It consumes a verified native candidate and an immutable fixture receipt, and performs no compilation. Prepare the fixture before conditioning or measurement with `python3 scripts/prepare-m8-fixture.py --candidate CANDIDATE_DIRECTORY --output FIXTURE_BUNDLE_DIRECTORY --target-dir CARGO_TARGET_DIRECTORY`; pass the emitted receipt to the gate. The preparer selects the executable from its exact Cargo invocation and binds its source, compiler, native profile, and hash to the candidate. Its test-support features remain outside the production engine. The gate runs the
 release `rw` binary with an exact persisted project extension inventory trust record and MCP
 approval ledger, discovers three project-configured stdio servers, starts each
 through the production sandbox launcher, loads their real catalogs, composes
@@ -350,12 +507,99 @@ package dependencies are prepared in dependency order, and every excluded fuzz
 binary compiles in PR CI. Scheduled fuzzing derives targets from Cargo and its
 compiler from `fuzz/rust-toolchain.toml`.
 
+Rust tests that launch native plugins require an explicit sandbox worker binary.
+Run `ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT="$(python3 scripts/build-test-helper.py)" && export ROTTWEILER_TEST_SANDBOX_HELPER_RECEIPT`
+with the worktree's Cargo target before those tests. The script builds
+`rw-sandbox-helper` and the non-shipped `rw-sandbox-ownership-fixture` in one
+invocation and selects both executables from Cargo artifact messages. It publishes
+independent executable copies and their flat device/inode/size/SHA-256 receipts
+by one atomic directory rename, after syncing every member. The generation name
+is `<helper SHA-256>-<fixture SHA-256>`; the required sibling receipt is
+`rw-sandbox-ownership-fixture.identity.json`. The environment variable still
+names the ordinary flat `rw-sandbox-helper.identity.json` receipt. Equal complete
+bundles are reused; incomplete or corrupt bundles are rejected without repair.
+Subsequent Cargo feature builds cannot replace the published bytes.
+
+Pinned process-ownership tests verify-copy the declared fixture and its bounded
+attested data (`approved\n` exits after writing `approved`; `hold\n` writes
+`ready` and waits for termination). They prove source replacement, denied unlisted
+files, and physical retirement under the existing deadlines. They neither search
+for target binaries nor compile during execution. Production Bun/TypeScript
+sandbox conformance and SDK workflows still run independently. The fixture host
+validates the helper receipt and owns a private executable snapshot; Linux seals
+its bytes against mutation. CI and coverage build these prerequisites before the
+test command. The product executable retains its own worker entrypoint; neither
+fixture nor a fixture role is added to the shipped product bundle.
+
+`scripts/ci_evidence.py` and measured samples share the same physical process
+owner. CI observes leader exit without reaping, signals only while that leader
+still anchors its group, then requires group disappearance. Participating nested
+Python gates use `--delegated`: their explicit settlement acknowledgement is
+required even on nonzero exit. Cancellation gives their actual owners time to
+settle independently grouped children; missing acknowledgement is `UNSETTLED`
+failure evidence. A raw command receives no nested settlement capability. Each
+physical owner has one fifteen-second retirement deadline: at most ten seconds
+for cooperative child closure, with the remaining five seconds reserved for
+forced termination, reaping and group absence. These phases consume the same
+deadline. A late acknowledgement cannot qualify a forced wrapper exit. Workload
+and measured performance deadlines remain separate.
+
+M8 qualification consumes a verified native candidate and the immutable MCP
+fixture receipt produced by `scripts/prepare-m8-fixture.py` before measurement.
+The preparer selects the executable from that Cargo invocation and binds its
+source, compiler, native profile and hash to the candidate. Gate entry and exit
+verify both inputs; missing or changed identities reject qualification. The
+Linux performance container runs those prepared bytes without compilation.
+Its separate functional-only CI lane explicitly builds nonqualifying fixtures.
+The shell entrypoints use `exec`; the Python gate owns private copies until
+normal EOF shutdown, exact child-group absence and input revalidation complete.
+Only unreaped direct owners authorize signals. Observed MCP process groups are
+absence checks, never cleanup targets. Failed or unproven runs retain scratch
+and stop subsequent qualification. Terminal output has a 4 MiB admission bound;
+raw prompt-ready samples and before/after identity remain in the evidence sidecar.
+
+The supervised application soak records bounded per-generation process-start,
+driver-ready and visible-input markers on its monotonic receive clock. Restoration
+is new-process marker to driver-ready; the forced fault additionally records its
+actual signal interval and fault-to-visible-input blackout. For natural restarts,
+the old-process exit timestamp is not observed: reports retain blackout bounds
+from the last confirmed ready generation through the new-process marker and
+visible acknowledgement, rather than inventing an exact retirement time. Progress
+keeps the latest sixteen records; final or failed evidence keeps every admitted
+generation, up to 4,096. Missing post-restart input acknowledgement fails the soak.
+The 600 MiB combined RSS and 384 MiB product recycling policy are unchanged.
+
+The privileged M8 gate also owns its daemon container, independently of the
+Docker CLI process. Creation returns the full immutable container ID before
+workload start. Cancellation requires removal by that ID and a successful
+absence query before acknowledgement. An ambiguous creation reply or failed
+removal retains an explicit unsettled obligation; killing the Docker CLI cannot
+satisfy it. Normal creation has no added duration cap. Cancellation allows four
+seconds for its creation reply; removal and absence controls each have two-second
+bounds. The entire cancellation chain, including every physical Docker CLI
+retirement, shares one eight-second deadline beginning with the first cancellation
+signal. Normal removal uses the same total bound. This fits within the outer
+cooperative window; a stuck or ambiguous daemon operation remains unsettled.
+
 `scripts/ci_evidence.py` preserves command exit status and writes bounded partial
-and final diagnostics with source/run/lock identity. CI uploads those results
-on failure. Long soaks periodically replace an atomic progress checkpoint and
+and final diagnostics with source/run/lock identity. Each gate retains an 8 MiB
+redacted log prefix and a 128 KiB rolling tail, with explicit omitted-byte counts,
+so later successful test binaries do not erase an earlier failure. Console forwarding
+is a nonblocking projection with no pending byte queue; stalled or closed sinks
+increment a separate console-omission count while retained evidence and physical
+cancellation continue. Native fixture
+activation records stage timing without arguments or credential values. CI uploads
+these results on failure. Long soaks periodically replace an atomic progress checkpoint and
 retain counters and process generations on setup, workload or interruption
 errors. Runner loss can still prevent upload; a local checkpoint alone is not
 remote durable evidence.
+
+CI diagnostic publication has one bounded retry after a five-second backoff.
+Only the upload repeats; failed product gates retain their original status.
+The retry uses a distinct artifact name so an uncertain first publication is
+preserved. Both failures remain in the job log, and missing files or two failed
+uploads fail the job. Cancellation prevents new publication attempts. Native
+candidate artifacts retain their explicit producer/consumer identities.
 
 Private soak admission checks actual runner registration, required labels,
 online status and idle capacity. It reports absent/offline/busy separately. A
@@ -367,7 +611,7 @@ Candidate artifacts remain available fourteen days. Missing private runners
 leave soak qualification incomplete.
 
 
-Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · client and plugin protocol codegen checks (`rw-types` and `rw-plugin-protocol` → committed projections) · semantic ownership, toolchain ownership, dependency-direction, and guarded-network-boundary checks · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · docs build.
+Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · client and plugin protocol codegen checks (`cargo xtask codegen --check` validates committed projections from `rw-types`, `rw-providers`, and `rw-plugin-protocol`) · semantic ownership, toolchain ownership, dependency-direction, and guarded-network-boundary checks · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · docs build.
 Weekly/manual risk evidence: `cargo llvm-cov` records workspace line coverage
 without imposing an unreviewed percentage, while bounded `cargo-mutants`
 campaigns must catch mutations in permission, trust, signed-update, and plugin
@@ -375,7 +619,15 @@ capability boundaries. Evidence is retained per exact run. Establish a required
 coverage threshold only after reviewing the first protected measurements;
 lowering a later threshold requires the same review as a performance waiver.
 Manual protected performance: isolated Linux build artifacts plus macOS binaries built directly on the measurement host to avoid download provenance distortion · 500-sample full p99 gates on fixed native hosted Linux X64 and macOS ARM64 images · M4/M8/TUI performance and release-size evidence.
-Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · the non-optional Terminal-Bench subset on v1+ development lines · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025. Pre-v1 nightlies explicitly record that the v1 capability claim is deferred instead of calling a retired or unconfigured provider.
+M8 identifies activated MCP fixtures through their kernel executable images
+(`/proc/<pid>/exe` on Linux and `proc_pidpath` on macOS), comparing bounded
+streamed SHA-256 and byte counts with the approved fixture artifact. Executable
+metadata must stay stable across capture. Original argv paths are not identity:
+approved programs execute from private snapshots or sealed descriptors. The gate
+still requires exactly three descendant fixture processes in three distinct
+process groups, no startup activation, and complete child-group retirement after
+shutdown. Image hashing occurs outside the prompt-ready timing interval.
+Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · the non-optional Terminal-Bench subset on v1+ development lines · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025. Pre-v1 nightlies omit Terminal-Bench capability qualification.
 Pre-release: the manually dispatched non-publishing preflight validates
 repository-owned public signing inputs, measured baselines, protected
 configuration, and the current 14-day dogfood ledger before invoking the exact
@@ -385,12 +637,34 @@ manifest that hashes the readiness and both platform performance artifacts and
 binds them to the exact source SHA, version, workflow run, and run attempt.
 Release: pre-v1 signing and publication depend on release-readiness validation and the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. Pre-v1 tags do not wait on the separately dispatched protected performance preflight. V1 and later tags additionally require that exact-SHA preflight manifest and its retained evidence; tag builds do not rerun those authoritative performance samples. Major-zero tags record the protected eight-hour soak, Terminal-Bench, 14-day dogfood ledger, and paid two-family replay as `not_claimed_for_pre_v1`; they do not allocate the self-hosted soak runners. V1 and later tags require measured macOS/Linux soak baselines, both exact-archive eight-hour soaks, the pinned 20-task Terminal-Bench baseline with a paid dated OpenAI or Anthropic model, the dogfood ledger, and paid two-family `--record` plus offline replay canary. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs required by the tag's release tier leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
-The TUI keeps the complete durable transcript projection available to replay and
-export, but mounts only the newest 128 transcript cards in OpenTUI and recycles
-plain cards in fixed-size batches. A bounded Bun collection checkpoint releases
-the retired incremental Markdown parse trees after each batch. Viewport culling
-alone does not release renderable objects, so this lifecycle is part of the
-eight-hour RSS contract rather than a paint-only optimization.
+The TUI keeps the complete durable transcript available through bounded semantic
+pages and mounts at most 16 historical rows. Row retirement retains the bounded
+Bun collection checkpoint that releases incremental Markdown parse trees.
+Viewport culling alone does not release renderable objects. The compiled memory
+probe uses this production collection policy by default, without harness-injected
+collection. `client-memory-probe.py --collect-garbage` is a separate allocator
+diagnostic and cannot replace production-policy RSS or eight-hour soak evidence.
+The compiled probe also exercises earliest/middle/latest navigation across 10,000
+mixed rows, resize and append-away anchors, refetch after cache eviction, a
+source-qualified jump through the session search picker, and an
+actual process handoff with a pending child question and a parent text attachment
+larger than 4 MiB. Its bounded fixture runs in the measured client process;
+complete engine-plus-TUI RSS qualification remains a separate gate.
+
+The explicit compiled TUI review diagnostic and its source-entry tests use real
+App/HTTP reads and the verified native renderer
+in separate processes. They force capture while the third session-review file or
+a workspace diff is scrolled away from its beginning, then require the same
+source fingerprint and viewport, preserved draft and attachment, and no decision
+before the fresh response. Changed and removed sources must refuse restoration
+visibly. A pending decision continues to prevent recycling after closing review.
+The private version-5 handoff stores bounded path, view mode, source and workspace
+fingerprints, and viewport offsets; it contains no review body. Its restoration
+lease retires separately from the adopted composer envelope. These functional
+oracles do not replace combined RSS, recycle outage or long-soak measurements.
+Memory observations retry only an interrupted OS `memoryUsage` syscall, with
+three fresh attempts; exhaustion or any other failure aborts the gate. No old or
+zero observation substitutes for a failed read.
 
 The self-hosted `soak` labels are operational security boundaries, not
 general-purpose shared runners. They are restricted to schedule, manual, and
@@ -423,8 +697,15 @@ names, duplicates, links, unsupported/missing platforms, length changes, and
 digest changes. Until notarization is configured, the generated pre-v1 Cask
 must disclose and encode its post-verification quarantine-removal postflight;
 a clean Cask install must launch `rw --version` before publication is called
-usable. The unadvertised development Formula still builds both locked
-Rust and Bun components with the same private-helper/public-symlink layout. Stable release
+usable. The development Formula invokes the native candidate builder with an isolated
+target directory. It verifies the resulting candidate and installs its complete
+private binary directory, including identity files; only `rw` enters `PATH`.
+Its Rustup dependency installs the source-selected compiler into an isolated
+build directory without self-updating or touching user toolchains. Bun comes
+from a Homebrew resource bound to the exact official release URL and SHA-256 in
+`contracts/toolchain-artifacts.json`; `scripts/homebrew_toolchains.py --refresh`
+refreshes those identities from the official checksum list when the source pin
+changes. The builder verifies the installed toolchains and product limits. Stable release
 CI syntax-checks all generated files, attests and publishes them with the
 archives, and verifies the Homebrew tap's resulting `main` commit. Release and
 soak acceptance must invoke only the installed public `rw` with no TUI path
@@ -444,3 +725,75 @@ signer remains authoritative for signatures and the full channel transition.
 3. Docs updated in the same PR (01-FEATURES if user-visible, 03-DECISIONS if a choice was contested, plugin protocol doc if the API changed).
 4. If it fixed a bug: a fixture reproduces the bug and now passes.
 5. No `unwrap()`/`expect()` outside tests and provably-infallible spots (clippy lint enforced).
+
+MCP inbound acceptance exercises the real protocol handshake, unadvertised catalog
+methods, unsolicited host requests, catalog invalidation, schema approval after
+reconnection, and disconnection. Repeated change notifications retain constant
+state rather than a notification backlog. The runtime embedding acceptance uses
+an isolated process with stdin closed: it captures events, chooses a question
+answer, resumes durable state, interrupts a pending question, and verifies empty
+stdout and stderr after owned shutdown.
+
+Raw MCP transport tests additionally cover predecode structural pressure,
+unknown/duplicate/numeric-string IDs, response ownership after another receive,
+request retirement after service close, and SSE behavior across every chunk
+boundary. HTTP fixtures exercise accepted replies delivered on GET, empty
+notification success, non-success JSON-RPC errors, exact standard/auth/session
+headers, and one graceful DELETE. A blocked resolver must retain request bytes and
+runtime credit after cancellation until the actual resolver exits and native
+thread joins. Panicked exchanges must fail their callers; cancellation of the
+outer join observer must retain unproven runtime credit.
+
+Durable MCP payload acceptance covers authenticated chunk windows, dense newline
+queries, clipped large lines, UTF-8 cursors, quota refusal, cancellation rollback,
+and independent fork copies. The adapter must prove that an aborted caller keeps
+its physical worker and allocation alive until settlement, and that an inline
+prompt refusal publishes no payload object. Runtime tests resolve a vault
+credential before an echoed oversized result, inspect both the authenticated
+window and raw stored bytes for secret leakage, and reopen a fork after deleting
+its parent. Creating an unused payload capability must perform no namespace I/O.
+These contracts run in `rw-store` payload tests, the `rw-mcp` library suite, and
+runtime `payloads`/`payload_tests` fixtures; they do not compile native artifacts
+inside a measurement window.
+
+
+### Native hook readiness
+
+Native hook readiness is exercised with a paused clock through the real dormant
+generation and RPC initialization owner: a six-second delayed launch precedes the
+unchanged five-second callback allowance. Dispatcher oracles separately cover
+transformed tool selection, multiple cold generations sharing one absolute
+readiness deadline, aggregate callback exhaustion, ready handlers after readiness
+expiry, and caller-drop custody until effect retirement. These deterministic
+oracles do not claim a measured cold operating-system startup percentile. The
+native headless Ask workflow retains its actual executable and approval path.
+
+### Native Linux code generation
+
+`scripts/native_profile.py` owns native release optimization and Rust flags;
+`cargo-release.sh`, candidate identity verification, and the failure-only link-map
+diagnostic consume that same owner. GNU Linux release artifacts use packed
+relative relocations (`DT_RELR`) and discard static native unwind tables at final link. Packed
+relocations require glibc 2.36 or newer; the current official GNU build image
+already emits a newer glibc ABI requirement. The installer does not provide an
+older-loader compatibility layer. The existing musl path does not enable RELR
+without a separately qualified loader floor.
+
+GNU product builds pin Cargo release panic behavior to abort for dependencies
+and the final executable, rejecting explicit compiler overrides to unwind. The
+supplemental GNU linker script removes
+`.eh_frame` inputs and disables their lookup header without changing the default
+section layout. Its exact bytes are part of the portable candidate profile; the
+compiler-only flag cannot remove tables from precompiled dependencies.
+Removing static native unwind tables
+reduces distribution bytes but limits native stack walking and panic backtraces;
+it does not disable structured operation tracing or change guest WASM unwind
+metadata. Debug builds retain their default stack-walking settings. Optimized
+libtest and instrumentation harnesses use `verification_environment`: the same
+platform optimization level with unwind tables retained, because Cargo libtests
+use panic unwinding independently of the product's abort policy. Their separate
+profile is recorded with harness provenance; artifact behavior is exercised by
+launching the exact receipt-bound product helper. Use unwind-capable builds for
+native stack profiling. Release size, startup,
+and behavioral gates still use the exact verified product artifact, with the
+owned flags in its receipt; product features and size budgets are unchanged.

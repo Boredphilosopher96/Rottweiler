@@ -11,6 +11,7 @@ pub struct CommandDescriptor {
     description: String,
     argument_hint: Option<String>,
     source: CommandSource,
+    host_tools: Arc<[String]>,
 }
 
 impl CommandDescriptor {
@@ -22,7 +23,15 @@ impl CommandDescriptor {
             description: description.into(),
             argument_hint: None,
             source: CommandSource::Builtin,
+            host_tools: Arc::from([]),
         }
+    }
+
+    /// Exact host tools this command may request through its invocation capability.
+    #[must_use]
+    pub fn with_host_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.host_tools = names.into_iter().collect();
+        self
     }
 
     /// Adds the concise argument hint shown alongside the command.
@@ -65,11 +74,17 @@ impl CommandDescriptor {
 /// A parsed command invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandInvocation {
+    origin: Option<rw_types::extension_invocation::ExtensionInvocationId>,
     name: String,
     arguments: String,
 }
 
 impl CommandInvocation {
+    #[must_use]
+    pub fn origin(&self) -> Option<&rw_types::extension_invocation::ExtensionInvocationId> {
+        self.origin.as_ref()
+    }
+
     /// Canonical command name, without the leading slash.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -128,6 +143,9 @@ impl CommandExecutionError {
 /// Command registration or invocation failure.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum CommandRegistryError {
+    /// A dynamic command source could not admit its metadata construction.
+    #[error("command metadata admission exceeded")]
+    Admission,
     /// A command name was empty or contained unsupported characters.
     #[error("invalid command name `{name}`; use lowercase ASCII letters, digits, '-', '_' or '.'")]
     InvalidName { name: String },
@@ -149,10 +167,39 @@ pub enum CommandRegistryError {
     },
 }
 
-#[derive(Clone)]
 struct RegisteredCommand<Context, Output> {
     descriptor: CommandDescriptor,
     handler: Arc<dyn CommandHandler<Context, Output>>,
+}
+
+/// Descriptor-only view of one immutable registry generation.
+///
+/// The shared registry retains each descriptor and its handler's source owner;
+/// this view exposes no parsing or execution capability and copies no metadata.
+pub struct CommandCatalog<Context, Output> {
+    registry: Arc<CommandRegistry<Context, Output>>,
+}
+impl<Context, Output> Clone for CommandCatalog<Context, Output> {
+    fn clone(&self) -> Self {
+        Self {
+            registry: Arc::clone(&self.registry),
+        }
+    }
+}
+impl<Context, Output> CommandCatalog<Context, Output> {
+    /// Iterates borrowed descriptors in canonical order.
+    #[must_use]
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &CommandDescriptor> {
+        self.registry.descriptors()
+    }
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.registry.commands.len()
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.registry.commands.is_empty()
+    }
 }
 
 /// Deterministic slash-command registry shared by built-ins and extensions.
@@ -162,7 +209,7 @@ struct RegisteredCommand<Context, Output> {
 /// overriding an existing command.
 #[derive(Clone)]
 pub struct CommandRegistry<Context, Output> {
-    commands: BTreeMap<String, RegisteredCommand<Context, Output>>,
+    commands: BTreeMap<Arc<str>, Arc<RegisteredCommand<Context, Output>>>,
 }
 
 impl<Context, Output> Default for CommandRegistry<Context, Output> {
@@ -178,6 +225,14 @@ impl<Context, Output> CommandRegistry<Context, Output> {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Captures this immutable generation without copying its metadata.
+    #[must_use]
+    pub fn catalog(self: &Arc<Self>) -> CommandCatalog<Context, Output> {
+        CommandCatalog {
+            registry: Arc::clone(self),
+        }
     }
 
     /// Registers a command through the common built-in/extension API.
@@ -208,18 +263,20 @@ impl<Context, Output> CommandRegistry<Context, Output> {
         descriptor: CommandDescriptor,
         handler: Arc<dyn CommandHandler<Context, Output>>,
     ) -> Result<(), CommandRegistryError> {
-        validate_name(descriptor.name())?;
-        let name = descriptor.name.clone();
-        if self.commands.contains_key(&name) {
-            return Err(CommandRegistryError::Duplicate { name });
+        // Descriptor bytes retire before the handler that owns their admission.
+        // Registry clones share this entire registration and its key backing.
+        let registration = Arc::new(RegisteredCommand {
+            descriptor,
+            handler,
+        });
+        validate_name(registration.descriptor.name())?;
+        let name = registration.descriptor.name();
+        if self.commands.contains_key(name) {
+            return Err(CommandRegistryError::Duplicate {
+                name: name.to_owned(),
+            });
         }
-        self.commands.insert(
-            name,
-            RegisteredCommand {
-                descriptor,
-                handler,
-            },
-        );
+        self.commands.insert(Arc::from(name), registration);
         Ok(())
     }
 
@@ -255,14 +312,81 @@ impl<Context, Output> CommandRegistry<Context, Output> {
         context: &mut Context,
         line: &str,
     ) -> Result<Output, CommandRegistryError> {
+        self.bind_line(line)?.execute(context).await
+    }
+
+    /// Binds a parsed slash command before asynchronous execution.
+    /// # Errors
+    /// Rejects invalid syntax or an absent exact registration.
+    pub fn bind_line(
+        &self,
+        line: &str,
+    ) -> Result<BoundCommand<Context, Output>, CommandRegistryError> {
         let invocation = parse_invocation(line)?;
-        let Some(registered) = self.commands.get(invocation.name()) else {
-            return Err(CommandRegistryError::Unknown {
-                name: invocation.name,
-            });
-        };
-        let name = invocation.name.clone();
-        match AssertUnwindSafe(registered.handler.execute(context, invocation))
+        self.bind(&invocation.name, invocation.arguments)
+    }
+
+    /// Captures the exact registered handler and inert arguments at admission.
+    /// Subsequent registry replacement cannot retarget the invocation.
+    ///
+    /// # Errors
+    /// Rejects noncanonical or absent command names.
+    pub fn bind(
+        &self,
+        name: &str,
+        arguments: String,
+    ) -> Result<BoundCommand<Context, Output>, CommandRegistryError> {
+        validate_name(name)?;
+        let registered = self
+            .commands
+            .get(name)
+            .ok_or_else(|| CommandRegistryError::Unknown {
+                name: name.to_owned(),
+            })?;
+        Ok(BoundCommand {
+            host_tools: Arc::clone(&registered.descriptor.host_tools),
+            handler: Arc::clone(&registered.handler),
+            invocation: CommandInvocation {
+                origin: None,
+                name: name.to_owned(),
+                arguments,
+            },
+        })
+    }
+}
+
+/// One admitted command bound to its actual implementation, never a later name lookup.
+pub struct BoundCommand<Context, Output> {
+    host_tools: Arc<[String]>,
+    handler: Arc<dyn CommandHandler<Context, Output>>,
+    invocation: CommandInvocation,
+}
+impl<Context, Output> BoundCommand<Context, Output> {
+    #[must_use]
+    pub fn host_tools(&self) -> Arc<[String]> {
+        Arc::clone(&self.host_tools)
+    }
+    #[must_use]
+    pub fn with_origin(
+        mut self,
+        origin: rw_types::extension_invocation::ExtensionInvocationId,
+    ) -> Self {
+        self.invocation.origin = Some(origin);
+        self
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.invocation.name()
+    }
+
+    /// Executes the captured implementation through the shared panic boundary.
+    ///
+    /// # Errors
+    /// Reports implementation rejection or panic.
+    pub async fn execute(&self, context: &mut Context) -> Result<Output, CommandRegistryError> {
+        let name = self.invocation.name.clone();
+        match AssertUnwindSafe(self.handler.execute(context, self.invocation.clone()))
             .catch_unwind()
             .await
         {
@@ -305,6 +429,7 @@ fn parse_invocation(line: &str) -> Result<CommandInvocation, CommandRegistryErro
     let name = &without_slash[..split_at];
     validate_name(name)?;
     Ok(CommandInvocation {
+        origin: None,
         name: name.to_owned(),
         arguments: without_slash[split_at..].trim_start().to_owned(),
     })
@@ -317,6 +442,78 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[test]
+    fn registry_clone_shares_descriptor_and_registration_custody() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(
+                CommandDescriptor::new("large", "x".repeat(128 * 1024)),
+                Append("ok"),
+            )
+            .expect("register");
+        let cloned = registry.clone();
+        assert!(std::ptr::eq(
+            registry.resolve("large").expect("original"),
+            cloned.resolve("large").expect("clone")
+        ));
+        let owner = Arc::downgrade(registry.commands.get("large").expect("owner"));
+        assert!(registry.unregister("large"));
+        assert!(owner.upgrade().is_some());
+        assert_eq!(
+            cloned
+                .resolve("large")
+                .expect("retained")
+                .description()
+                .len(),
+            128 * 1024
+        );
+        drop(cloned);
+        assert!(owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn descriptor_snapshot_retains_exact_registration_after_generation_replacement() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(
+                CommandDescriptor::new("large", "x".repeat(128 * 1024)),
+                Append("old"),
+            )
+            .expect("register");
+        let registry = Arc::new(registry);
+        let source = Arc::downgrade(registry.commands.get("large").expect("source"));
+        let snapshot = registry.catalog();
+        let clone = snapshot.clone();
+        assert!(std::ptr::eq(
+            snapshot.iter().next().expect("descriptor"),
+            registry.resolve("large").expect("registered")
+        ));
+        let mut replacement = (*registry).clone();
+        assert!(replacement.unregister("large"));
+        assert!(Arc::new(replacement).catalog().is_empty());
+        drop(registry);
+        drop(snapshot);
+        assert!(
+            source.upgrade().is_some(),
+            "old catalog retains its metadata source"
+        );
+        assert_eq!(clone.len(), 1);
+        assert_eq!(
+            clone
+                .iter()
+                .next()
+                .expect("old descriptor")
+                .description()
+                .len(),
+            128 * 1024
+        );
+        drop(clone);
+        assert!(
+            source.upgrade().is_none(),
+            "final catalog retires its source"
+        );
+    }
 
     struct Append(&'static str);
 
@@ -371,6 +568,32 @@ mod tests {
             Ok("review".to_owned())
         );
         assert_eq!(context, ["built-in:2 ", "extension:src/"]);
+    }
+
+    #[tokio::test]
+    async fn captured_command_cannot_retarget_a_replaced_registration() {
+        let mut registry = CommandRegistry::new();
+        registry
+            .register(CommandDescriptor::new("open", "Open"), Append("first"))
+            .expect("first registration");
+        let admitted = registry
+            .bind("open", "{\"path\":\"a b\"}".into())
+            .expect("bound action");
+        assert!(registry.unregister("open"));
+        registry
+            .register(CommandDescriptor::new("open", "Open"), Append("second"))
+            .expect("replacement registration");
+        let mut context = Vec::new();
+        admitted
+            .execute(&mut context)
+            .await
+            .expect("admitted implementation");
+        assert_eq!(context, ["first:{\"path\":\"a b\"}"]);
+        registry
+            .dispatch_line(&mut context, "/open later")
+            .await
+            .expect("new implementation");
+        assert_eq!(context[1], "second:later");
     }
 
     #[test]

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { materializeTreeSitterRuntime } from "../src/tree-sitter-runtime"
+import { embeddedParserConfigurations, materializeTreeSitterRuntime } from "../src/tree-sitter-runtime"
 
 describe("Tree-sitter runtime cache", () => {
   let root: string | undefined
@@ -26,7 +26,6 @@ describe("Tree-sitter runtime cache", () => {
     expect(second.root).toBe(first.root)
     expect((await lstat(first.root)).mode & 0o777).toBe(0o700)
     expect((await lstat(join(first.root, ".complete"))).mode & 0o777).toBe(0o600)
-    await first.cleanup()
     expect((await lstat(first.workerPath)).isFile()).toBeTrue()
   })
 
@@ -38,5 +37,20 @@ describe("Tree-sitter runtime cache", () => {
     await chmod(cache, 0o755)
 
     await expect(materializeTreeSitterRuntime()).rejects.toThrow("is not private")
+  })
+
+  test("concurrent launches publish a complete parser catalog without temporary writers", async () => {
+    root = await mkdtemp(join(tmpdir(), "rottweiler-tree-sitter-cache-test-"))
+    process.env.ROTTWEILER_HOME = root
+    const runtimes = await Promise.all(Array.from({ length: 3 }, () => materializeTreeSitterRuntime()))
+    const runtime = runtimes[0]!
+    expect(runtimes.every(({ root }) => root === runtime.root)).toBeTrue()
+    expect(await readdir(join(root, "cache", "tree-sitter"))).toEqual([runtime.root.split("/").at(-1)!])
+    for (const parser of embeddedParserConfigurations(runtime.assetsPath)) {
+      const bytes = await readFile(parser.wasm)
+      expect(Array.from(bytes.subarray(0, 4))).toEqual([0, 97, 115, 109])
+      expect((await lstat(parser.wasm)).mode & 0o777).toBe(0o600)
+      for (const query of parser.queries.highlights) expect((await readFile(query)).length).toBeGreaterThan(0)
+    }
   })
 })

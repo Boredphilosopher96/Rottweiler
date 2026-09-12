@@ -6,7 +6,7 @@
 /.github/ @Boredphilosopher96
 /release/ @Boredphilosopher96
 /packaging/ @Boredphilosopher96
-/scripts/build-release.sh @Boredphilosopher96
+/scripts/build-native-candidate.py @Boredphilosopher96
 /scripts/install-release.sh @Boredphilosopher96
 /crates/rw-core/src/permission.rs @Boredphilosopher96
 /crates/rw-core/src/update.rs @Boredphilosopher96

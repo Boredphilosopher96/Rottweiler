@@ -76,11 +76,12 @@ fn main() {
     runtime.block_on(async {
         let root = tempfile::tempdir().expect("temporary directory");
         let workspace = root.path().join("workspace");
-        let hook_scratch = root.path().join("hook-scratch");
+        let hook_owner = rw_tools::CommandScratch::create("hook-fixture").expect("scratch owner");
+        let hook_scratch = hook_owner.path().to_path_buf();
         let private = root.path().join("private");
         let recordings = root.path().join("recordings");
         let hook_recordings = recordings.join("read-only-hooks");
-        for directory in [&workspace, &hook_scratch, &private] {
+        for directory in [&workspace, &private] {
             std::fs::create_dir(directory).expect("test directory");
         }
         let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
@@ -96,11 +97,24 @@ fn main() {
             SandboxPolicy::new([&hook_scratch], NetworkPolicy::Deny).expect("hook policy"),
         );
         let ordinary_live: Arc<dyn CommandExecutor> = Arc::new(
-            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease))
-                .sandboxed(ordinary_policy),
+            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease)).sandboxed(
+                ordinary_policy,
+                rw_sandbox::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("native driver"),
+                )
+                .expect("running helper"),
+                rw_tools::CommandScratch::create("fixture").expect("scratch owner"),
+            ),
         );
         let hook_live: Arc<dyn CommandExecutor> = Arc::new(
-            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease)).sandboxed(hook_policy),
+            TokioCommandExecutor::with_execution_lease(Arc::clone(&lease)).sandboxed(
+                hook_policy,
+                rw_sandbox::SandboxHelper::from_running(
+                    &std::env::current_exe().expect("native driver"),
+                )
+                .expect("running helper"),
+                Arc::clone(&hook_owner),
+            ),
         );
         let ordinary = RecordingCommandExecutor::new(ordinary_live, &recordings, &workspace)
             .expect("ordinary recorder");
@@ -215,6 +229,11 @@ fn main() {
                 .expect_err("each namespaced occurrence is consumed exactly once");
             assert!(error.to_string().contains("exhausted"));
         }
+        drop(hook_owner);
+        assert!(
+            !hook_scratch.exists(),
+            "fixture scratch is removed after replay"
+        );
     });
 }
 

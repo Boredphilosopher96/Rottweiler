@@ -15,7 +15,7 @@ use rw_plugin_protocol::ManifestError;
 #[cfg(feature = "wasm-runtime")]
 use rw_plugin_protocol::PluginManifest;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
 use thiserror::Error;
 #[cfg(feature = "wasm-runtime")]
 use wasmtime::{
@@ -175,7 +175,7 @@ impl WasmHookHost {
             let hook = declaration.name;
             let id = format!("wasm:{}:{}", self.manifest.name, hook.as_str());
             dispatcher.register_shared(
-                crate::plugin_hook_registration(*declaration, id),
+                crate::plugin_hook_registration(*declaration, id, crate::HookEffect::ReadOnly),
                 Arc::clone(&shared),
             )?;
         }
@@ -243,14 +243,16 @@ impl WasmHookHost {
 #[cfg(feature = "wasm-runtime")]
 #[async_trait]
 impl HookHandler for WasmHookHost {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
+        Ok(())
+    }
+
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         if invocation.cancellation().is_cancelled() {
             return Err(HookError::new("cancelled", "WASM hook was cancelled"));
         }
-        let event = rw_plugin_protocol::PluginHook::from(invocation.event())
-            .as_str()
-            .to_owned();
-        let input = encode_input(invocation.payload(), self.limits.max_input_bytes)
+        let event = invocation.event().as_str().to_owned();
+        let input = encode_input(invocation.input(), self.limits.max_input_bytes)
             .map_err(|error| HookError::new("wasm_input", error.to_string()))?;
         tokio::select! {
             result = self.invoke_json(&event, &input) => {
@@ -284,7 +286,10 @@ impl Write for BoundedJsonWriter {
     }
 }
 
-pub(crate) fn encode_input(payload: &Value, limit: usize) -> Result<String, WasmHookHostError> {
+pub(crate) fn encode_input(
+    payload: &impl Serialize,
+    limit: usize,
+) -> Result<String, WasmHookHostError> {
     let mut writer = BoundedJsonWriter {
         bytes: Vec::with_capacity(limit.min(16 * 1024)),
         limit,
@@ -304,16 +309,6 @@ pub(crate) fn encode_input(payload: &Value, limit: usize) -> Result<String, Wasm
 }
 
 #[cfg(feature = "wasm-runtime")]
-#[derive(Deserialize)]
-#[serde(tag = "directive", rename_all = "snake_case", deny_unknown_fields)]
-enum WireDirective {
-    Continue,
-    Replace { payload: Value },
-    Block { message: String },
-    Error { code: String, message: String },
-}
-
-#[cfg(feature = "wasm-runtime")]
 pub(crate) fn parse_directive(
     output: &str,
     max_output_bytes: usize,
@@ -323,26 +318,9 @@ pub(crate) fn parse_directive(
             limit: max_output_bytes,
         });
     }
-    let directive: WireDirective =
-        serde_json::from_str(output).map_err(|error| WasmHookHostError::InvalidDirective {
-            message: error.to_string(),
-        })?;
-    match directive {
-        WireDirective::Continue => Ok(HookDirective::Continue),
-        WireDirective::Replace { payload } => Ok(HookDirective::Replace(payload)),
-        WireDirective::Block { message } => {
-            if message.is_empty() || message.len() > 4_096 || message.chars().any(char::is_control)
-            {
-                return Err(WasmHookHostError::InvalidDirective {
-                    message: "block message is empty, oversized, or contains controls".to_owned(),
-                });
-            }
-            Ok(HookDirective::Block { message })
-        }
-        WireDirective::Error { code, message } => Err(WasmHookHostError::Execution {
-            message: format!("{code}: {message}"),
-        }),
-    }
+    serde_json::from_str(output).map_err(|error| WasmHookHostError::InvalidDirective {
+        message: error.to_string(),
+    })
 }
 
 /// WIT contract authors can use to compile a compatible component.
@@ -369,8 +347,9 @@ mod tests {
             protocol: rw_plugin_protocol::PROTOCOL_VERSION,
             capabilities: rw_plugin_protocol::PluginCapabilities {
                 hooks: vec![rw_plugin_protocol::PluginHookCapability {
-                    name: rw_plugin_protocol::PluginHook::PreTool,
-                    failure_policy: rw_plugin_protocol::PluginHookFailurePolicy::FailOpen,
+                    name: rw_plugin_protocol::HookEvent::PreTool,
+                    class: rw_types::hook_contract::HookClass::Transform,
+                    failure_policy: rw_plugin_protocol::HookFailurePolicy::FailOpen,
                 }],
                 ..rw_plugin_protocol::PluginCapabilities::default()
             },
@@ -380,16 +359,16 @@ mod tests {
     #[test]
     fn wire_directives_are_typed_and_bounded() {
         assert_eq!(
-            parse_directive(r#"{"directive":"continue"}"#, 1_024).expect("continue"),
-            HookDirective::Continue
+            parse_directive(r#"{"decision":"continue"}"#, 1_024).expect("continue"),
+            HookDirective::Continue {}
         );
         assert_eq!(
-            parse_directive(r#"{"directive":"replace","payload":{"ok":true}}"#, 1_024)
+            parse_directive(r#"{"decision":"transform","change":{"hook":"pre_tool","name":"read","arguments":{"ok":true}}}"#, 1_024)
                 .expect("replace"),
-            HookDirective::Replace(serde_json::json!({"ok": true}))
+            HookDirective::Transform { change: crate::HookTransform::PreTool { name: "read".to_owned(), arguments: serde_json::json!({"ok": true}) } }
         );
-        assert!(parse_directive(r#"{"directive":"block","message":""}"#, 1_024).is_err());
-        assert!(parse_directive(r#"{"directive":"continue"}"#, 4).is_err());
+        assert!(parse_directive(r#"{"decision":"continue","message":"foreign"}"#, 1_024).is_err());
+        assert!(parse_directive(r#"{"decision":"continue"}"#, 4).is_err());
     }
 
     #[test]
@@ -401,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_component_invokes_through_the_typed_abi() {
-        let output = r#"{"directive":"replace","payload":{"reviewed":true}}"#;
+        let output = r#"{"decision":"transform","change":{"hook":"pre_tool","name":"read","arguments":{"reviewed":true}}}"#;
         let component = wat::parse_str(format!(
             r#"(component
               (type $hook (func (param "event" string) (param "payload-json" string) (result string)))
@@ -443,7 +422,12 @@ mod tests {
             host.invoke_json("pre_tool", r#"{"tool":"read"}"#)
                 .await
                 .expect("directive"),
-            HookDirective::Replace(serde_json::json!({"reviewed": true}))
+            HookDirective::Transform {
+                change: crate::HookTransform::PreTool {
+                    name: "read".to_owned(),
+                    arguments: serde_json::json!({"reviewed": true})
+                }
+            }
         );
     }
 }

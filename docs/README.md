@@ -6,15 +6,13 @@ the human site, search index, raw Markdown, `llms.txt`, `llms-full.txt`, and
 
 The Markdown beside this file is maintainer documentation:
 
-- `01-FEATURES.md` records product intent. It is not shipped-status evidence.
-- `02-ARCHITECTURE.md` records current and intended system boundaries.
-- `03-DECISIONS.md` is the architecture decision log.
+- `01-FEATURES.md` defines product requirements and behavior.
+- `02-ARCHITECTURE.md` defines system boundaries and ownership.
+- `03-DECISIONS.md` explains design decisions and rationale.
 - `04-EXTENSIBILITY.md` and `05-SECURITY.md` are deep maintainer contracts.
-- `06-ROADMAP.md` preserves the historical implementation sequence.
 - `07-VERIFICATION.md` records evidence tiers and repository gates.
 - `design/` contains focused architecture records.
 - `dogfood/` documents the protected v1 evidence contract.
-- `gaps/` and `reviews/` are dated historical audits, not current product docs.
 - `assets/` contains the source artwork used by the README and docs build.
 
 Vendored specifications under `crates/rw-context/spec/` and Markdown inside

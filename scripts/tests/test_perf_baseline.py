@@ -57,7 +57,14 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(darwin_suites["core"]["baseline_kind"], "measured")
         self.assertIn("30655148886", darwin_suites["core"]["provenance"])
         self.assertEqual(darwin_suites["soak"]["baseline_kind"], "bootstrap")
-        self.assertIn("bootstrap", darwin_suites["soak"]["provenance"])
+        for platform in document["platforms"]:
+            with self.subTest(platform=platform):
+                _, kind, _ = MODULE.baseline_suite(
+                    document, platform, "soak", require_measured=False
+                )
+                self.assertEqual(kind, "bootstrap")
+                with self.assertRaisesRegex(ValueError, "bootstrap-only"):
+                    MODULE.baseline_suite(document, platform, "soak", require_measured=True)
         self.assertEqual(linux_suites["core"]["baseline_kind"], "bootstrap")
         self.assertIn("30655148886", linux_suites["core"]["provenance"])
         self.assertEqual(linux_suites["soak"]["baseline_kind"], "bootstrap")
@@ -68,7 +75,8 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(darwin["installed_first_interactive_max_us"], 1_484_648)
         self.assertEqual(darwin["installed_first_version_max_us"], 650_215)
         self.assertEqual(darwin["turn_overhead_p99_us"], 17_049)
-        self.assertEqual(darwin["tui_bundle_bytes"], 85_314_304)
+        self.assertNotIn("js_bundle_bytes", darwin)
+        self.assertNotIn("tui_bundle_bytes", darwin)
         self.assertEqual(darwin["engine_ready_p99_us"], 19_048)
         self.assertEqual(darwin["mcp_prompt_ready_p99_us"], 59_102)
         self.assertEqual(darwin["tui_process_start_p99_us"], 43_643)
@@ -84,7 +92,8 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(linux["installed_first_interactive_max_us"], 3_000_000)
         self.assertEqual(linux["installed_first_version_max_us"], 1_000_000)
         self.assertEqual(linux["turn_overhead_p99_us"], 49_490)
-        self.assertEqual(linux["tui_bundle_bytes"], 137_155_816)
+        self.assertNotIn("js_bundle_bytes", linux)
+        self.assertNotIn("tui_bundle_bytes", linux)
         self.assertEqual(linux["mcp_prompt_ready_p99_us"], 10_699)
         self.assertEqual(linux["tui_frame_p95_us"], 34_148)
         self.assertEqual(linux["tui_frame_p999_us"], 49_352)

@@ -37,10 +37,21 @@ if printenv ROTTWEILER_PERF_OUTPUT >/dev/null 2>&1; then
   esac
 fi
 
-cleanup() {
-  docker rm -f "$container" >/dev/null 2>&1 || :
-}
-trap cleanup EXIT HUP INT TERM
+if [ "${ROTTWEILER_M8_FUNCTIONAL_ONLY:-0}" = 1 ]; then
+  if [ "$#" -ne 0 ]; then
+    echo "functional M8 takes no qualification artifacts" >&2; exit 2
+  fi
+else
+  if [ "$#" -ne 2 ]; then
+    echo "usage: m8_release_gate_linux.sh VERIFIED_CANDIDATE MCP_FIXTURE_RECEIPT" >&2; exit 2
+  fi
+  candidate=$(CDPATH= cd -- "$1" && pwd -P)
+  fixture_parent=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd -P)
+  fixture_receipt=$fixture_parent/$(basename -- "$2")
+  if [ ! -f "$fixture_receipt" ]; then
+    echo "prepared M8 fixture receipt is missing" >&2; exit 2
+  fi
+fi
 
 docker volume create "$cargo_volume" >/dev/null
 
@@ -56,6 +67,14 @@ set -- docker run --rm --privileged \
   --env ROTTWEILER_CREDENTIAL_BACKEND=file \
   --env "ROTTWEILER_HOST_UID=$(id -u)" \
   --env "ROTTWEILER_HOST_GID=$(id -g)"
+
+if [ "${ROTTWEILER_M8_FUNCTIONAL_ONLY:-0}" != 1 ]; then
+  set -- "$@" \
+    --mount "type=bind,source=$candidate,target=$candidate,readonly" \
+    --mount "type=bind,source=$fixture_parent,target=$fixture_parent,readonly" \
+    --env "ROTTWEILER_M8_CANDIDATE=$candidate" \
+    --env "ROTTWEILER_M8_FIXTURE_RECEIPT=$fixture_receipt"
+fi
 
 # Forward only variables that are actually set.
 for variable in \
@@ -99,7 +118,9 @@ set -- "$@" "$image" sh -eu -c '
         --functional-only || status=$?
     fi
   else
-    crates/rw-cli/tests/m8_release_gate.sh || status=$?
+    # Exact products and their source-bound fixture are prepared before this gate.
+    crates/rw-cli/tests/m8_release_gate.sh "$ROTTWEILER_M8_CANDIDATE" \
+      "$ROTTWEILER_M8_FIXTURE_RECEIPT" || status=$?
   fi
   if [ -n "${ROTTWEILER_PERF_OUTPUT:-}" ] && [ -e "$ROTTWEILER_PERF_OUTPUT" ]; then
     chown "$ROTTWEILER_HOST_UID:$ROTTWEILER_HOST_GID" "$ROTTWEILER_PERF_OUTPUT"
@@ -107,4 +128,4 @@ set -- "$@" "$image" sh -eu -c '
   exit "$status"
 '
 
-"$@"
+exec python3 "$repo/scripts/m8_container.py" "$container" -- "$@"

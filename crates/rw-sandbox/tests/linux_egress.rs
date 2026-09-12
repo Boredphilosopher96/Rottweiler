@@ -18,6 +18,7 @@ use rw_sandbox::{
 use tempfile::tempdir;
 
 const REQUIRE_LINUX_SANDBOX_ENV: &str = "ROTTWEILER_REQUIRE_LINUX_SANDBOX";
+const UNIX_SEQPACKET_TARGET_ENV: &str = "ROTTWEILER_SANDBOX_SEQPACKET_TARGET";
 const UNIX_PAIR_CHILD_ENV: &str = "ROTTWEILER_SANDBOX_UNIX_PAIR_CHILD";
 const UNIX_DGRAM_TARGET_ENV: &str = "ROTTWEILER_SANDBOX_UNIX_DGRAM_TARGET";
 const FILE_READ_FIXTURE_ENV: &str = "ROTTWEILER_SANDBOX_FILE_READ_FIXTURE";
@@ -132,55 +133,7 @@ fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
         return;
     }
 
-    for flags in [
-        nix::sys::socket::SockFlag::empty(),
-        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
-        nix::sys::socket::SockFlag::SOCK_NONBLOCK,
-        nix::sys::socket::SockFlag::SOCK_CLOEXEC | nix::sys::socket::SockFlag::SOCK_NONBLOCK,
-    ] {
-        nix::sys::socket::socketpair(
-            nix::sys::socket::AddressFamily::Unix,
-            nix::sys::socket::SockType::Stream,
-            None,
-            flags,
-        )
-        .expect("valid Unix stream pair flag combination");
-    }
-    for family in [
-        nix::sys::socket::AddressFamily::Inet,
-        nix::sys::socket::AddressFamily::Inet6,
-    ] {
-        assert_socketpair_denied(
-            family,
-            nix::sys::socket::SockType::Stream,
-            None,
-            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
-        );
-    }
-    for (kind, protocol, flags) in [
-        (
-            nix::sys::socket::SockType::Datagram,
-            None,
-            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
-        ),
-        (
-            nix::sys::socket::SockType::SeqPacket,
-            None,
-            nix::sys::socket::SockFlag::SOCK_NONBLOCK,
-        ),
-        (
-            nix::sys::socket::SockType::Stream,
-            Some(nix::sys::socket::SockProtocol::Tcp),
-            nix::sys::socket::SockFlag::empty(),
-        ),
-        (
-            nix::sys::socket::SockType::Stream,
-            None,
-            nix::sys::socket::SockFlag::from_bits_retain(1 << 29),
-        ),
-    ] {
-        assert_socketpair_denied(nix::sys::socket::AddressFamily::Unix, kind, protocol, flags);
-    }
+    verify_connected_pair_contract();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -220,6 +173,82 @@ fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
     });
 }
 
+fn verify_connected_pair_contract() {
+    use std::os::unix::process::CommandExt as _;
+
+    for flags in [
+        nix::sys::socket::SockFlag::empty(),
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC | nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+    ] {
+        for kind in [
+            nix::sys::socket::SockType::Stream,
+            nix::sys::socket::SockType::SeqPacket,
+        ] {
+            nix::sys::socket::socketpair(nix::sys::socket::AddressFamily::Unix, kind, None, flags)
+                .expect("valid connected Unix pair flag combination");
+        }
+    }
+    for family in [
+        nix::sys::socket::AddressFamily::Inet,
+        nix::sys::socket::AddressFamily::Inet6,
+    ] {
+        assert_socketpair_denied(
+            family,
+            nix::sys::socket::SockType::Stream,
+            None,
+            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        );
+    }
+    for (kind, protocol, flags) in [
+        (
+            nix::sys::socket::SockType::Datagram,
+            None,
+            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        ),
+        (
+            nix::sys::socket::SockType::Stream,
+            Some(nix::sys::socket::SockProtocol::Tcp),
+            nix::sys::socket::SockFlag::empty(),
+        ),
+        (
+            nix::sys::socket::SockType::Stream,
+            None,
+            nix::sys::socket::SockFlag::from_bits_retain(1 << 29),
+        ),
+    ] {
+        assert_socketpair_denied(nix::sys::socket::AddressFamily::Unix, kind, protocol, flags);
+    }
+
+    let target = std::env::var_os(UNIX_SEQPACKET_TARGET_ENV).expect("connected IPC target");
+    let address = nix::sys::socket::UnixAddr::new(Path::new(&target)).expect("target address");
+    let (pair, _peer) = nix::sys::socket::socketpair(
+        nix::sys::socket::AddressFamily::Unix,
+        nix::sys::socket::SockType::SeqPacket,
+        None,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+    )
+    .expect("connected sequence-packet pair");
+    assert!(
+        matches!(
+            nix::sys::socket::connect(pair.as_raw_fd(), &address),
+            Err(nix::errno::Errno::EISCONN | nix::errno::Errno::EPERM)
+        ),
+        "a connected IPC pair must not reach a filesystem endpoint"
+    );
+
+    // A same-UID request makes std bypass posix_spawn and exercise its
+    // Linux SOCK_SEQPACKET fork/exec error channel, as Cargo's child setup does.
+    assert!(
+        Command::new("/bin/true")
+            .uid(rustix::process::getuid().as_raw())
+            .status()
+            .expect("nested Rust fork/exec handshake")
+            .success()
+    );
+}
+
 #[test]
 fn deny_and_proxy_modes_allow_only_unix_socketpairs_for_runtime_ipc() {
     if !sandbox_available(&rw_sandbox::probe(), "deny-mode Unix IPC")
@@ -229,6 +258,24 @@ fn deny_and_proxy_modes_allow_only_unix_socketpairs_for_runtime_ipc() {
     }
 
     let workspace = tempdir().expect("workspace");
+    let target_path = workspace.path().join("sequence-target.sock");
+    let target = nix::sys::socket::socket(
+        nix::sys::socket::AddressFamily::Unix,
+        nix::sys::socket::SockType::SeqPacket,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC | nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+        None,
+    )
+    .expect("sequence-packet target");
+    nix::sys::socket::bind(
+        target.as_raw_fd(),
+        &nix::sys::socket::UnixAddr::new(&target_path).expect("target address"),
+    )
+    .expect("bind external target");
+    nix::sys::socket::listen(
+        &target,
+        nix::sys::socket::Backlog::new(1).expect("one connection"),
+    )
+    .expect("listen external target");
     let proxy =
         SupervisedEgressProxy::start(EgressPolicy::new(["example.com"])).expect("policy proxy");
     let relay_path = proxy.relay_path().expect("Linux relay path").to_path_buf();
@@ -257,6 +304,7 @@ fn deny_and_proxy_modes_allow_only_unix_socketpairs_for_runtime_ipc() {
         );
         let status = command
             .env(UNIX_PAIR_CHILD_ENV, "1")
+            .env(UNIX_SEQPACKET_TARGET_ENV, &target_path)
             .status()
             .expect("sandboxed Tokio Unix-pair child");
         assert!(
@@ -264,6 +312,10 @@ fn deny_and_proxy_modes_allow_only_unix_socketpairs_for_runtime_ipc() {
             "sandboxed Unix-pair child exited {status}"
         );
     }
+    assert_eq!(
+        nix::sys::socket::accept(target.as_raw_fd()).expect_err("IPC pairs cannot reach target"),
+        nix::errno::Errno::EAGAIN
+    );
 }
 
 #[test]
@@ -793,9 +845,12 @@ fn test_helper_command(policy: &SandboxPolicy, program: &Path, args: &[OsString]
         "--pid",
         "--fork",
         "--kill-child",
-        "--",
     ]);
+    if matches!(policy.network(), NetworkPolicy::PolicyProxy { .. }) {
+        command.arg("--keep-caps");
+    }
     command
+        .arg("--")
         .arg(env!("CARGO_BIN_EXE_rw-sandbox-helper"))
         .arg(rw_sandbox::HELPER_ARG)
         .arg(serde_json::to_string(policy).expect("serialize policy"))

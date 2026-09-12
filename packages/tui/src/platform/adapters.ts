@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process"
 import { constants as fsConstants } from "node:fs"
-import { chmod, lstat, mkdtemp, open, readFile, rm } from "node:fs/promises"
+import { chmod, lstat, mkdtemp, open, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, extname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-const MAX_EDITOR_BYTES = 2 * 1024 * 1024
+export const MAX_EDITOR_BYTES = 2 * 1024 * 1024
 const MAX_CLIPBOARD_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_PROCESS_DIAGNOSTIC_BYTES = 64 * 1024
 const MAX_PROVIDER_AUTH_URL_BYTES = 4 * 1024
@@ -36,7 +36,7 @@ export interface ClipboardImage {
 
 export interface ImagePasteAdapter {
   readImage(): Promise<ClipboardImage | null>
-  readPath(value: string): Promise<ClipboardImage | null>
+  preparePath(value: string): (() => Promise<ClipboardImage | null>) | null
 }
 
 export interface ExternalUrlAdapter {
@@ -97,7 +97,7 @@ export const noImagePaste: ImagePasteAdapter = {
   async readImage() {
     return null
   },
-  async readPath() {
+  preparePath() {
     return null
   },
 }
@@ -148,6 +148,7 @@ export function createExternalEditorAdapter(
 
   return {
     async compose(initialValue) {
+      if (Buffer.byteLength(initialValue) > MAX_EDITOR_BYTES) return null
       let directory: string | null = null
       let suspended = false
       try {
@@ -180,15 +181,8 @@ export function createExternalEditorAdapter(
         if (result.status !== 0) {
           return null
         }
-        const metadata = await lstat(path)
-        if (
-          !metadata.isFile() ||
-          metadata.isSymbolicLink() ||
-          metadata.size > MAX_EDITOR_BYTES
-        ) {
-          return null
-        }
-        return await readFile(path, "utf8")
+        const bytes = await readBoundedRegularFile(path, MAX_EDITOR_BYTES, 0)
+        return bytes === null ? null : new TextDecoder("utf-8", { fatal: true }).decode(bytes)
       } catch {
         return null
       } finally {
@@ -342,20 +336,20 @@ export function createImagePasteAdapter(
       }
       return null
     },
-    async readPath(value) {
+    preparePath(value) {
       const candidate = pastedFilePath(value, platform)
-      if (candidate === null) return null
-      const { path, explicit } = candidate
+      if (candidate === null || !candidate.explicit) return null
+      const { path } = candidate
       const mediaType = imageMediaTypeForPath(path)
       if (mediaType === null) return null
-      const bytes = await readBoundedRegularFile(path, MAX_CLIPBOARD_IMAGE_BYTES)
-      if (bytes === null || !matchesImageSignature(bytes, mediaType)) {
-        if (!explicit) return null
-        throw new Error(
-          "That image path could not be read safely. Use a regular PNG, JPEG, GIF, or WebP under 5 MiB.",
-        )
+      if (Buffer.byteLength(path) > 4096) throw new Error("That local image path exceeds 4 KiB.")
+      return async () => {
+        const bytes = await readBoundedRegularFile(path, MAX_CLIPBOARD_IMAGE_BYTES)
+        if (bytes === null || !matchesImageSignature(bytes, mediaType)) {
+          throw new Error("That image path could not be read safely. Use a regular PNG, JPEG, GIF, or WebP under 5 MiB.")
+        }
+        return clipboardImage(bytes, mediaType, basename(path))
       }
-      return clipboardImage(bytes, mediaType, basename(path))
     },
   }
 }
@@ -472,6 +466,7 @@ async function readLinuxClipboardImage(
 async function readBoundedRegularFile(
   path: string,
   maximumBytes: number,
+  minimumBytes = 1,
 ): Promise<Uint8Array | null> {
   const before = await lstat(path).catch(() => null)
   if (before === null || !before.isFile() || before.isSymbolicLink()) return null
@@ -482,7 +477,7 @@ async function readBoundedRegularFile(
     const metadata = await file.stat()
     if (
       !metadata.isFile() ||
-      metadata.size === 0 ||
+      metadata.size < minimumBytes ||
       metadata.size > maximumBytes ||
       (before.ino !== 0 && metadata.ino !== before.ino) ||
       (before.dev !== 0 && metadata.dev !== before.dev)
@@ -495,7 +490,8 @@ async function readBoundedRegularFile(
       if (bytesRead === 0) return null
       offset += bytesRead
     }
-    return target
+    const after = await file.stat()
+    return after.size === metadata.size && after.mtimeMs === metadata.mtimeMs ? target : null
   } finally {
     await file.close().catch(() => {})
   }

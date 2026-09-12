@@ -12,9 +12,10 @@ fuzz_target!(|data: &[u8]| {
     let Ok(root) = tempfile::tempdir() else {
         return;
     };
-    let session = root.path().join("sessions/fuzz");
+    let session = root.path().join("sessions/fuzz/journal");
     if std::fs::create_dir_all(&session).is_err()
-        || std::fs::write(session.join("events.jsonl"), data).is_err()
+        || std::fs::write(session.join("active.jsonl"), data).is_err()
+        || std::fs::write(session.join("writer.lock"), []).is_err()
     {
         return;
     }

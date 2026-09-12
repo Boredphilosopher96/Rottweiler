@@ -6,6 +6,7 @@ import { join } from "node:path"
 import {
   createDesktopNotificationAdapter,
   createExternalEditorAdapter,
+  MAX_EDITOR_BYTES,
   createExternalUrlAdapter,
   createImagePasteAdapter,
   createTerminalHandover,
@@ -116,6 +117,37 @@ describe("production TUI platform adapters", () => {
     expect(ordering).toEqual(["suspend", "resume"])
   })
 
+  test("external editor reads admit empty UTF-8 and reject oversized or redirected output", async () => {
+    temporaryDirectory = await mkdtemp(join(tmpdir(), "rw-editor-bounds-"))
+    const root = temporaryDirectory
+    const executor = new RecordingExecutor()
+    const adapter = createExternalEditorAdapter({ suspend() {}, resume() {} }, {
+      environment: { EDITOR: "fixture" }, executor, temporaryRoot: root,
+    })
+    executor.handler = async (_executable, args) => {
+      await writeFile(args.at(-1)!, "")
+      return { status: 0, stdout: new Uint8Array() }
+    }
+    expect(await adapter.compose("clear me")).toBe("")
+    executor.handler = async (_executable, args) => {
+      await writeFile(args.at(-1)!, "x".repeat(MAX_EDITOR_BYTES + 1))
+      return { status: 0, stdout: new Uint8Array() }
+    }
+    expect(await adapter.compose("keep me")).toBeNull()
+    const outside = join(root, "outside.txt")
+    await writeFile(outside, "unrelated content")
+    executor.handler = async (_executable, args) => {
+      const path = args.at(-1)!
+      await rm(path)
+      await symlink(outside, path)
+      return { status: 0, stdout: new Uint8Array() }
+    }
+    expect(await adapter.compose("keep me")).toBeNull()
+    const calls = executor.calls.length
+    expect(await adapter.compose("x".repeat(MAX_EDITOR_BYTES + 1))).toBeNull()
+    expect(executor.calls).toHaveLength(calls)
+  })
+
   test("uses native notification argv with escaped and bounded text", async () => {
     const mac = new RecordingExecutor()
     await createDesktopNotificationAdapter({ platform: "darwin", executor: mac }).notify({
@@ -219,23 +251,35 @@ describe("production TUI platform adapters", () => {
     await writeFile(imagePath, PNG)
     const adapter = createImagePasteAdapter({ platform: "darwin" })
 
-    expect((await adapter.readPath(`'${imagePath}'`))?.name).toBe("screen shot.png")
-    expect((await adapter.readPath(imagePath.replaceAll(" ", "\\ ")))?.mediaType).toBe("image/png")
-    expect((await adapter.readPath(new URL(`file://${imagePath}`).toString()))?.base64)
+    expect((await adapter.preparePath(`'${imagePath}'`)!())?.name).toBe("screen shot.png")
+    expect((await adapter.preparePath(imagePath.replaceAll(" ", "\\ "))!())?.mediaType).toBe("image/png")
+    expect((await adapter.preparePath(new URL(`file://${imagePath}`).toString())!())?.base64)
       .toBe(Buffer.from(PNG).toString("base64"))
-    expect(await adapter.readPath("https://example.test/screen.png")).toBeNull()
-    expect(await adapter.readPath("please review screenshot.png")).toBeNull()
-    expect(await adapter.readPath("please compare src/screenshot.png")).toBeNull()
-    expect(adapter.readPath("file://%ZZ/private.png"))
-      .rejects.toThrow("not a valid local image path")
-    expect(createImagePasteAdapter({ platform: "linux" }).readPath(
+    expect(await adapter.preparePath("https://example.test/screen.png")).toBeNull()
+    expect(await adapter.preparePath("please review screenshot.png")).toBeNull()
+    expect(await adapter.preparePath("please compare src/screenshot.png")).toBeNull()
+    expect(() => adapter.preparePath("file://%ZZ/private.png"))
+      .toThrow("not a valid local image path")
+    expect(createImagePasteAdapter({ platform: "linux" }).preparePath(
       String.raw`C:\Users\Alice\screen shot.png`,
-    )).rejects.toThrow("could not be read safely")
+    )!()).rejects.toThrow("could not be read safely")
     const linkPath = join(temporaryDirectory, "linked image.png")
     await symlink(imagePath, linkPath)
-    expect(adapter.readPath(linkPath)).rejects.toThrow("could not be read safely")
-    expect(adapter.readPath(join(temporaryDirectory, "missing image.png")))
+    expect(adapter.preparePath(linkPath)!()).rejects.toThrow("could not be read safely")
+    expect(adapter.preparePath(join(temporaryDirectory, "missing image.png"))!())
       .rejects.toThrow("could not be read safely")
+  })
+
+  test("local image classification defers file access and leaves plain text synchronous", async () => {
+    temporaryDirectory = await mkdtemp(join(tmpdir(), "rw-image-preparation-"))
+    const adapter = createImagePasteAdapter({ platform: "darwin" })
+    const path = join(temporaryDirectory, "created-after-preparation.png")
+    const read = adapter.preparePath(path)
+    expect(read).not.toBeNull()
+    await writeFile(path, PNG)
+    expect((await read!())?.base64).toBe(Buffer.from(PNG).toString("base64"))
+    expect(adapter.preparePath("screenshot.png")).toBeNull()
+    expect(adapter.preparePath("regular pasted text")).toBeNull()
   })
 
   test("writes and validates the macOS clipboard through a private temporary PNG", async () => {

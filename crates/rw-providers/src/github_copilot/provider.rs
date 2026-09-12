@@ -144,6 +144,7 @@ impl GitHubCopilotRuntime {
     async fn fetch_catalog(&self) -> Result<GitHubCopilotCatalog, ProviderError> {
         require_network(self.network_policy)?;
         let endpoint = self.endpoint("models")?;
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .get(endpoint)
@@ -247,6 +248,7 @@ impl GitHubCopilotProvider {
         request: ProviderRequest,
         wire_sink: Option<Arc<dyn WireFrameSink>>,
     ) -> Result<BoxEventStream, ProviderError> {
+        crate::OutputValidation::preflight(&request, false)?;
         if request.model != self.config.model_id {
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidRequest,
@@ -284,7 +286,7 @@ impl GitHubCopilotProvider {
             None => delegate.stream(request).await?,
         };
         let endpoint = resolved.model.endpoint;
-        Ok(Box::pin(stream.map(move |item| {
+        Ok(crate::BoxEventStream::new(stream.map(move |item| {
             item.and_then(|event| rewrite_event_signature(event, endpoint))
         })))
     }
@@ -292,6 +294,35 @@ impl GitHubCopilotProvider {
 
 #[async_trait]
 impl Provider for GitHubCopilotProvider {
+    async fn settle_effects(&self) -> Result<(), ProviderError> {
+        let Some(resolved) = self.resolved.get() else {
+            return Ok(());
+        };
+        let mut failure = None;
+        for provider in [
+            &resolved.user,
+            &resolved.user_vision,
+            &resolved.agent,
+            &resolved.agent_vision,
+        ] {
+            if let Err(error) = provider.settle_effects().await {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    async fn continuation_provenance(
+        &self,
+    ) -> Result<Option<crate::ContinuationProvenance>, ProviderError> {
+        let resolved = self.resolved().await?;
+        Ok(Some(crate::ContinuationProvenance::bind(&[
+            b"github-copilot",
+            self.config.runtime.base_url.as_str().as_bytes(),
+            format!("{:?}", resolved.model.endpoint).as_bytes(),
+        ])))
+    }
+
     fn name(&self) -> &str {
         &self.config.name
     }
@@ -644,10 +675,10 @@ pub(crate) fn replay_sse_frames(
     let parsed = match endpoint {
         GitHubCopilotEndpoint::Messages => crate::anthropic::replay_sse_frames(frames),
         GitHubCopilotEndpoint::Responses => {
-            crate::openai::replay_sse_frames(OpenAiWireMode::Responses, frames)
+            crate::openai::replay_sse_frames(OpenAiWireMode::Responses, frames, false)
         }
         GitHubCopilotEndpoint::ChatCompletions => {
-            crate::openai::replay_sse_frames(OpenAiWireMode::ChatCompletions, frames)
+            crate::openai::replay_sse_frames(OpenAiWireMode::ChatCompletions, frames, false)
         }
     };
     parsed

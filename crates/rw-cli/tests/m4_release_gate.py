@@ -18,457 +18,71 @@ import shutil
 import signal
 import socket
 import statistics
+import stat
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import termios
 from dataclasses import dataclass
 
 
-FIRST_PAINT_MARKER = b"Rottweiler"
-TUI_PROCESS_START_MARKER = b"ROTTWEILER_TUI_PROCESS_START"
-TUI_TRANSCRIPT_PAINTED_MARKER = b"ROTTWEILER_TUI_TRANSCRIPT_PAINTED"
-TUI_INTERACTIVE_MARKER = b"ROTTWEILER_TUI_INTERACTIVE"
-DRIVER_READY_MARKER = b"ROTTWEILER_TUI_DRIVER_READY"
-PROMPT_MARKER = "M4_REATTACH_PROMPT_7f40"
-RESPONSE_MARKER = "M4_REATTACH_RESPONSE_34d1"
-SHELL_READY_MARKER = "M4_SHELL_CHILD_READY_f003"
-SHELL_STDIN_MARKER = "M4_SHELL_CHILD_STDIN_0a19"
-SHELL_INTERRUPT_MARKER = "M4_SHELL_CHILD_INTERRUPT_82bc"
-SHELL_EXIT_MARKER = "Shell · exited 23"
-BLOCKED_TURN_MARKER = "M4_BLOCKED_AGENT_TURN_6d77"
-SHELL_SECRET_VALUE = "M4_SHELL_SECRET_d10f7e62"
-REPRESENTATIVE_PRICING_MODEL_COUNT = 4_000
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from journal_observer import observed_envelopes, session_journals
+from m4_transcript import fixture_turns
+from m4_output import EngineErrorLog
+from perf_scratch import retained_scratch
+from perf_process_wait import observe_exit
+from perf_process_scope import UnsettledScope
+from perf_process import run_sample, delegated_success_scope, check_sample_cancellation
+from release_contract import load_contract
+
+TUI_ROLE = load_contract(pathlib.Path(__file__).resolve().parents[3] / "contracts/release-contract.json").js_host_roles["tui"]
+from m4_socket_latency import measure_socket_channels
+from m4_gate_support import (
+    BLOCKED_TURN_MARKER,
+    DRIVER_READY_MARKER,
+    FIRST_PAINT_MARKER,
+    FixtureHandler,
+    GateEvidence,
+    PROMPT_MARKER,
+    PtyProcess,
+    REPRESENTATIVE_PRICING_MODEL_COUNT,
+    RESPONSE_MARKER,
+    Runtime,
+    SHELL_EXIT_MARKER,
+    SHELL_INTERRUPT_MARKER,
+    SHELL_READY_MARKER,
+    SHELL_SECRET_VALUE,
+    SHELL_STDIN_MARKER,
+    TERMINAL_SUBMIT,
+    TUI_INTERACTIVE_MARKER,
+    TUI_PROCESS_START_MARKER,
+    TUI_TRANSCRIPT_PAINTED_MARKER,
+    UnixHttpConnection,
+    UnixSseStream,
+    descendant_pids,
+    discovery_request_count,
+    fixture_origin,
+    origin_request_count,
+    process_exists,
+    read_until,
+    read_until_all,
+    spawn_pty,
+    spawn_wrapped_pty,
+    stop_pty,
+    stop_runtime,
+    terminate_process_tree,
+    wait_for_pty_exit,
+    write_config,
+    write_representative_pricing_catalog,
+)
+
+
 # The gate drives an xterm-compatible PTY, so send the same carriage return a
 # physical Return key produces there. Kitty's CSI-u encoding is only emitted by
 # terminals after negotiating that protocol and is not portable PTY input.
-TERMINAL_SUBMIT = b"\r"
-_origin_request_lock = threading.Lock()
-_origin_requests = 0
-_discovery_requests = 0
-
-
-@dataclass
-class Runtime:
-    process: subprocess.Popen[bytes]
-    socket_path: pathlib.Path
-    token_path: pathlib.Path
-    stderr_path: pathlib.Path
-
-
-@dataclass
-class PtyProcess:
-    pid: int
-    fd: int
-
-
-class GateEvidence:
-    """Write observations before assertions; failed gates retain partial samples."""
-
-    def __init__(self, output: pathlib.Path | None) -> None:
-        self.output = output
-        self.started = time.monotonic()
-        self.samples: dict[str, list[dict[str, int]]] = {}
-        self.result: dict[str, object] = {
-            "schema_version": 1,
-            "status": "running",
-            "phase": "setup",
-            "source_sha": os.environ.get("GITHUB_SHA"),
-            "run_id": os.environ.get("GITHUB_RUN_ID"),
-            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
-            "samples": self.samples,
-        }
-
-    def update(self, **fields: object) -> None:
-        self.result.update(fields)
-        self.result["elapsed_seconds"] = round(time.monotonic() - self.started, 3)
-        if self.output is not None:
-            self.output.parent.mkdir(parents=True, exist_ok=True)
-            descriptor, temporary = tempfile.mkstemp(prefix=f".{self.output.name}.", dir=self.output.parent)
-            try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    json.dump(self.result, handle, sort_keys=True)
-                    handle.write("\n")
-                os.replace(temporary, self.output)
-            finally:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temporary)
-
-    def sample(self, group: str, **values: int) -> None:
-        self.samples.setdefault(group, []).append(values)
-        self.update()
-
-    def failure(self, error: BaseException) -> None:
-        self.update(
-            status="fail",
-            error_type=type(error).__name__,
-            error=str(error).replace(SHELL_SECRET_VALUE, "[REDACTED]")[-8_000:],
-            fixture_discoveries=discovery_request_count(),
-            fixture_completions=origin_request_count(),
-        )
-
-
-class UnixHttpConnection:
-    """Small HTTP/1.1 client used to exercise hyper over the real UDS."""
-
-    def __init__(self, socket_path: pathlib.Path, timeout: float = 5.0) -> None:
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.socket.settimeout(timeout)
-        self.socket.connect(str(socket_path))
-        self.buffer = bytearray()
-
-    def close(self) -> None:
-        self.socket.close()
-
-    def send_request(
-        self,
-        method: str,
-        path: str,
-        headers: dict[str, str] | None = None,
-        body: bytes = b"",
-    ) -> None:
-        request_headers = {
-            "Host": "rottweiler.local",
-            "Content-Length": str(len(body)),
-            "Connection": "keep-alive",
-            **(headers or {}),
-        }
-        wire = bytearray(f"{method} {path} HTTP/1.1\r\n".encode("ascii"))
-        for name, value in request_headers.items():
-            wire.extend(f"{name}: {value}\r\n".encode("ascii"))
-        wire.extend(b"\r\n")
-        wire.extend(body)
-        self.socket.sendall(wire)
-
-    def read_response(self) -> tuple[int, dict[str, str], bytes]:
-        header_end = self._receive_until(b"\r\n\r\n")
-        header_block = bytes(self.buffer[:header_end])
-        del self.buffer[: header_end + 4]
-        lines = header_block.split(b"\r\n")
-        try:
-            status = int(lines[0].split(b" ", 2)[1])
-        except (IndexError, ValueError) as error:
-            raise RuntimeError(f"malformed HTTP response status: {lines[0]!r}") from error
-        response_headers: dict[str, str] = {}
-        for line in lines[1:]:
-            name, separator, value = line.partition(b":")
-            if not separator:
-                raise RuntimeError(f"malformed HTTP response header: {line!r}")
-            response_headers[name.decode("ascii").lower()] = value.decode("ascii").strip()
-
-        if "content-length" in response_headers:
-            length = int(response_headers["content-length"])
-            self._receive_bytes(length)
-            body = bytes(self.buffer[:length])
-            del self.buffer[:length]
-        elif response_headers.get("transfer-encoding", "").lower() == "chunked":
-            body = self._read_chunked_body()
-        else:
-            raise RuntimeError("persistent HTTP response omitted a body length")
-        return status, response_headers, body
-
-    def _receive_until(self, marker: bytes) -> int:
-        while True:
-            found = self.buffer.find(marker)
-            if found >= 0:
-                return found
-            self._receive_more()
-
-    def _receive_bytes(self, length: int) -> None:
-        while len(self.buffer) < length:
-            self._receive_more()
-
-    def _receive_more(self) -> None:
-        chunk = self.socket.recv(65536)
-        if not chunk:
-            raise RuntimeError("HTTP connection closed before the response completed")
-        self.buffer.extend(chunk)
-
-    def _read_chunked_body(self) -> bytes:
-        body = bytearray()
-        while True:
-            line_end = self._receive_until(b"\r\n")
-            size_line = bytes(self.buffer[:line_end])
-            del self.buffer[: line_end + 2]
-            try:
-                size = int(size_line.split(b";", 1)[0], 16)
-            except ValueError as error:
-                raise RuntimeError(f"invalid HTTP chunk size: {size_line!r}") from error
-            if size == 0:
-                trailer_end = self._receive_until(b"\r\n")
-                del self.buffer[: trailer_end + 2]
-                return bytes(body)
-            self._receive_bytes(size + 2)
-            body.extend(self.buffer[:size])
-            if self.buffer[size : size + 2] != b"\r\n":
-                raise RuntimeError("HTTP chunk omitted its terminator")
-            del self.buffer[: size + 2]
-
-
-class UnixSseStream:
-    """Incremental SSE reader with HTTP chunk decoding."""
-
-    def __init__(
-        self,
-        socket_path: pathlib.Path,
-        client_id: str,
-        token: str,
-        timeout: float = 5.0,
-    ) -> None:
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.socket.settimeout(timeout)
-        self.socket.connect(str(socket_path))
-        self.raw = bytearray()
-        self.decoded = bytearray()
-        self.chunked = False
-        self.chunk_remaining: int | None = None
-        request = (
-            "GET /v1/events HTTP/1.1\r\n"
-            "Host: rottweiler.local\r\n"
-            f"Authorization: Bearer {token}\r\n"
-            f"x-rottweiler-client: {client_id}\r\n"
-            "Accept: text/event-stream\r\n"
-            "Connection: keep-alive\r\n\r\n"
-        ).encode("ascii")
-        self.socket.sendall(request)
-        header_end = self._raw_until(b"\r\n\r\n")
-        header_block = bytes(self.raw[:header_end])
-        del self.raw[: header_end + 4]
-        lines = header_block.split(b"\r\n")
-        try:
-            status = int(lines[0].split(b" ", 2)[1])
-        except (IndexError, ValueError) as error:
-            raise RuntimeError(f"malformed SSE HTTP status: {lines[0]!r}") from error
-        if status != 200:
-            raise RuntimeError(f"engine SSE subscription returned HTTP {status}")
-        response_headers = {
-            name.decode("ascii").lower(): value.decode("ascii").strip().lower()
-            for line in lines[1:]
-            for name, separator, value in [line.partition(b":")]
-            if separator
-        }
-        content_type = response_headers.get("content-type", "")
-        if not content_type.startswith("text/event-stream"):
-            raise RuntimeError(f"engine SSE returned {content_type!r}, not text/event-stream")
-        self.chunked = response_headers.get("transfer-encoding") == "chunked"
-
-    def close(self) -> None:
-        self.socket.close()
-
-    def next_matching_event(
-        self, request_id: str, expected_type: str, timeout: float = 5.0
-    ) -> dict[str, object]:
-        deadline = time.monotonic() + timeout
-        self.socket.settimeout(timeout)
-        while time.monotonic() < deadline:
-            frame = self._next_frame()
-            data = b"\n".join(
-                line[5:].lstrip()
-                for line in frame.replace(b"\r", b"").split(b"\n")
-                if line.startswith(b"data:")
-            )
-            if not data:
-                continue
-            event = json.loads(data)
-            meta = event.get("meta")
-            if (
-                isinstance(meta, dict)
-                and meta.get("request_id") == request_id
-                and event.get("type") == expected_type
-            ):
-                return event
-        raise RuntimeError(
-            f"SSE stream did not emit {expected_type!r} for request {request_id!r}"
-        )
-
-    def _next_frame(self) -> bytes:
-        while True:
-            frame_end = self.decoded.find(b"\n\n")
-            if frame_end >= 0:
-                frame = bytes(self.decoded[:frame_end])
-                del self.decoded[: frame_end + 2]
-                return frame
-            self._decode_more()
-
-    def _decode_more(self) -> None:
-        if not self.chunked:
-            self.decoded.extend(self._recv())
-            return
-        while True:
-            if self.chunk_remaining is None:
-                line_end = self.raw.find(b"\r\n")
-                if line_end < 0:
-                    self.raw.extend(self._recv())
-                    continue
-                size_line = bytes(self.raw[:line_end])
-                del self.raw[: line_end + 2]
-                self.chunk_remaining = int(size_line.split(b";", 1)[0], 16)
-                if self.chunk_remaining == 0:
-                    raise RuntimeError("engine closed the SSE response")
-            required = self.chunk_remaining + 2
-            if len(self.raw) < required:
-                self.raw.extend(self._recv())
-                continue
-            self.decoded.extend(self.raw[: self.chunk_remaining])
-            if self.raw[self.chunk_remaining : required] != b"\r\n":
-                raise RuntimeError("SSE HTTP chunk omitted its terminator")
-            del self.raw[:required]
-            self.chunk_remaining = None
-            return
-
-    def _raw_until(self, marker: bytes) -> int:
-        while True:
-            found = self.raw.find(marker)
-            if found >= 0:
-                return found
-            self.raw.extend(self._recv())
-
-    def _recv(self) -> bytes:
-        chunk = self.socket.recv(65536)
-        if not chunk:
-            raise RuntimeError("engine closed the SSE stream")
-        return chunk
-
-
-class FixtureHandler(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
-        global _discovery_requests
-        if self.path != "/v1/models":
-            self.send_error(404)
-            return
-        if self.headers.get("Authorization") != f"Bearer {SHELL_SECRET_VALUE}":
-            self.send_error(401)
-            return
-        with _origin_request_lock:
-            _discovery_requests += 1
-        body = json.dumps(
-            {"object": "list", "data": [{"id": "gpt-5-mini", "object": "model"}]},
-            separators=(",", ":"),
-        ).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-        self.wfile.flush()
-
-    def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
-        global _origin_requests
-        length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
-        if self.path != "/v1/chat/completions":
-            self.send_error(404)
-            return
-        with _origin_request_lock:
-            _origin_requests += 1
-        body = (
-            "data: "
-            + json.dumps(
-                {
-                    "id": "m4-release-fixture",
-                    "model": "gpt-5-mini",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": RESPONSE_MARKER},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                },
-                separators=(",", ":"),
-            )
-            + "\n\ndata: [DONE]\n\n"
-        ).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(body)
-        self.wfile.flush()
-
-    def log_message(self, _format: str, *_args: object) -> None:
-        return
-
-
-@contextlib.contextmanager
-def fixture_origin():
-    global _origin_requests, _discovery_requests
-    with _origin_request_lock:
-        _origin_requests = 0
-        _discovery_requests = 0
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-
-
-def origin_request_count() -> int:
-    with _origin_request_lock:
-        return _origin_requests
-
-
-def discovery_request_count() -> int:
-    with _origin_request_lock:
-        return _discovery_requests
-
-
-def write_config(home: pathlib.Path, port: int) -> None:
-    home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    config = f"""
-[models]
-default = "fast"
-aliases.fast = ["fixture/gpt-5-mini"]
-
-[providers.fixture]
-kind = "openai_chat"
-base_url = "http://127.0.0.1:{port}/v1/chat/completions"
-api_key_env = "M4_FIXTURE_API_KEY"
-
-[permissions]
-default = "ask"
-""".lstrip()
-    path = home / "config.toml"
-    path.write_text(config, encoding="utf-8")
-    path.chmod(0o600)
-    write_representative_pricing_catalog(home / "models.toml")
-
-
-def write_representative_pricing_catalog(path: pathlib.Path) -> None:
-    """Seed the gate with the catalog size of a used installation."""
-    entries = [
-        'source_url = "https://models.dev/api.json"',
-        'snapshot_date = "2026-08-22"',
-        'revision = "m4-representative-fixture-v1"',
-    ]
-    for index in range(REPRESENTATIVE_PRICING_MODEL_COUNT):
-        model = "gpt-5-mini" if index == 0 else f"synthetic-{index:04d}"
-        entries.extend(
-            [
-                "",
-                f'[models."fixture/{model}"]',
-                f'display_name = "M4 fixture model {index:04d}"',
-                "max_context_tokens = 128000",
-                "max_output_tokens = 16384",
-                "supports_tools = true",
-                "supports_thinking = true",
-                'reasoning_efforts = ["low", "medium", "high"]',
-                "input_per_million_micros_usd = 250000",
-                "output_per_million_micros_usd = 2000000",
-            ]
-        )
-    path.write_text("\n".join(entries) + "\n", encoding="utf-8")
-    path.chmod(0o600)
 
 
 def isolated_env(home: pathlib.Path, tui: pathlib.Path | None = None) -> dict[str, str]:
@@ -483,7 +97,7 @@ def isolated_env(home: pathlib.Path, tui: pathlib.Path | None = None) -> dict[st
         "NO_COLOR": "1",
     }
     if tui is not None:
-        env["ROTTWEILER_TUI_BIN"] = str(tui)
+        env["ROTTWEILER_JS_HOST_BIN"] = str(tui)
     return env
 
 
@@ -495,7 +109,11 @@ def start_engine(
     session_id: str,
 ) -> tuple[Runtime, float]:
     runtime, started = spawn_engine(rw, sample_root, workspace, port, session_id)
-    wait_for_health(runtime)
+    try:
+        wait_for_health(runtime)
+    except BaseException:
+        stop_runtime(runtime)
+        raise
     ready_ms = (time.perf_counter_ns() - started) / 1_000_000
     return runtime, ready_ms
 
@@ -514,44 +132,52 @@ def spawn_engine(
     socket_path = run / "engine.sock"
     token_path = run / "auth.token"
     stderr_path = sample_root / "engine.stderr"
-    stderr = stderr_path.open("wb")
+    stderr = EngineErrorLog(stderr_path)
     started = time.perf_counter_ns()
-    process = subprocess.Popen(
-        [
-            str(rw),
-            "serve",
-            "--socket",
-            str(socket_path),
-            "--token-file",
-            str(token_path),
-            "--session",
-            session_id,
-            "--workspace",
-            str(workspace),
-            "--permission-mode",
-            "strict",
-            "--model",
-            "fast",
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=stderr,
-        cwd=workspace,
-        env=isolated_env(home),
-        start_new_session=True,
-    )
-    stderr.close()
-    return Runtime(process, socket_path, token_path, stderr_path), started
+    try:
+        process = subprocess.Popen(
+            [
+                str(rw),
+                "serve",
+                "--socket",
+                str(socket_path),
+                "--token-file",
+                str(token_path),
+                "--session",
+                session_id,
+                "--workspace",
+                str(workspace),
+                "--permission-mode",
+                "strict",
+                "--model",
+                "fast",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr.write_fd,
+            cwd=workspace,
+            env=isolated_env(home),
+            start_new_session=True,
+        )
+    except BaseException:
+        stderr.close_input()
+        stderr.finish()
+        raise
+    finally:
+        stderr.close_input()
+    return Runtime(process, socket_path, token_path, stderr), started
 
 
 def wait_for_health(runtime: Runtime, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
-        if runtime.process.poll() is not None:
-            detail = runtime.stderr_path.read_text(encoding="utf-8", errors="replace")
+        check_sample_cancellation()
+        status = observe_exit(runtime.process.pid)
+        if status is not None:
+            detail = runtime.stderr.path.read_text(encoding="utf-8", errors="replace")
             raise RuntimeError(
-                f"release engine exited before readiness ({runtime.process.returncode}): {detail}"
+                f"release engine exited before readiness ({status}): {detail}"
             )
         try:
             token = runtime.token_path.read_text(encoding="ascii").strip()
@@ -575,169 +201,6 @@ def wait_for_health(runtime: Runtime, timeout: float = 5.0) -> None:
             last_error = error
         time.sleep(0.0005)
     raise RuntimeError(f"engine health endpoint was not ready: {last_error}")
-
-
-def spawn_pty(
-    executable: pathlib.Path,
-    env: dict[str, str],
-    cwd: pathlib.Path,
-    arguments: list[str] | None = None,
-) -> PtyProcess:
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.chdir(cwd)
-        os.execve(str(executable), [str(executable), *(arguments or [])], env)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-    return PtyProcess(pid, fd)
-
-
-def spawn_wrapped_pty(
-    executable: pathlib.Path,
-    env: dict[str, str],
-    cwd: pathlib.Path,
-    arguments: list[str] | None = None,
-) -> PtyProcess:
-    """Keep the PTY session leader alive while its supervised child is killed."""
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.chdir(cwd)
-        child = os.fork()
-        if child == 0:
-            os.execve(str(executable), [str(executable), *(arguments or [])], env)
-        os.waitpid(child, 0)
-        while True:
-            signal.pause()
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-    return PtyProcess(pid, fd)
-
-
-def read_until(
-    process: PtyProcess, marker: bytes, timeout: float = 5.0, *, phase: str = "render"
-) -> bytes:
-    return read_until_all(process, (marker,), timeout, phase=phase)
-
-
-def read_until_all(
-    process: PtyProcess, markers: tuple[bytes, ...], timeout: float = 5.0,
-    *, phase: str = "render",
-) -> bytes:
-    if not markers or any(not marker for marker in markers):
-        raise ValueError("PTY markers must be non-empty")
-    deadline = time.monotonic() + timeout
-    captured = bytearray()
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([process.fd], [], [], min(0.05, deadline - time.monotonic()))
-        if not ready:
-            continue
-        try:
-            chunk = os.read(process.fd, 65536)
-        except OSError:
-            break
-        if not chunk:
-            break
-        captured.extend(chunk)
-        if all(marker in captured for marker in markers):
-            return bytes(captured)
-        if len(captured) > 4 * 1024 * 1024:
-            del captured[: len(captured) - 2 * 1024 * 1024]
-    child_status = "still running"
-    with contextlib.suppress(ChildProcessError):
-        found, status = os.waitpid(process.pid, os.WNOHANG)
-        if found == process.pid:
-            child_status = f"exited with wait status {status}"
-    terminal_tail = re.sub(
-        r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))",
-        "",
-        captured.decode("utf-8", errors="replace"),
-    ).replace(SHELL_SECRET_VALUE, "[REDACTED]")[-4000:]
-    raise RuntimeError(
-        f"phase={phase}; PTY process {process.pid} did not render markers {markers!r} "
-        f"({child_status}); fixture_discoveries={discovery_request_count()}; "
-        f"fixture_completions={origin_request_count()}; "
-        f"tail={terminal_tail!r}"
-    )
-
-
-def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
-    """Drain terminal teardown output while waiting for a PTY child to exit."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        found, status = os.waitpid(process.pid, os.WNOHANG)
-        if found == process.pid:
-            return status
-        ready, _, _ = select.select(
-            [process.fd], [], [], min(0.05, deadline - time.monotonic())
-        )
-        if ready:
-            with contextlib.suppress(OSError):
-                os.read(process.fd, 65536)
-    raise TimeoutError(f"PTY process {process.pid} did not exit within {timeout} seconds")
-
-
-def stop_pty(process: PtyProcess) -> None:
-    with contextlib.suppress(ProcessLookupError):
-        # OpenTUI owns raw-mode teardown and does not promise a SIGTERM exit.
-        # The measurement is already complete; SIGKILL avoids adding a fixed
-        # two-second cleanup penalty to every cold-start sample.
-        os.kill(process.pid, signal.SIGKILL)
-    with contextlib.suppress(ChildProcessError):
-        os.waitpid(process.pid, 0)
-    with contextlib.suppress(OSError):
-        os.close(process.fd)
-
-
-def terminate_process_tree(root_pid: int, timeout: float = 3.0) -> None:
-    descendants = descendant_pids(root_pid)
-    for pid in [*reversed(descendants), root_pid]:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        alive = [pid for pid in [root_pid, *descendants] if process_exists(pid)]
-        if not alive:
-            break
-        time.sleep(0.01)
-    for pid in [*reversed(descendants), root_pid]:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-    with contextlib.suppress(ChildProcessError):
-        os.waitpid(root_pid, 0)
-
-
-def descendant_pids(root_pid: int) -> list[int]:
-    output = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
-    by_parent: dict[int, list[int]] = {}
-    for line in output.splitlines():
-        fields = line.split()
-        if len(fields) == 2:
-            by_parent.setdefault(int(fields[1]), []).append(int(fields[0]))
-    descendants: list[int] = []
-    pending = list(by_parent.get(root_pid, []))
-    while pending:
-        pid = pending.pop()
-        descendants.append(pid)
-        pending.extend(by_parent.get(pid, []))
-    return descendants
-
-
-def process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-
-
-def stop_runtime(runtime: Runtime) -> None:
-    if runtime.process.poll() is None:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(runtime.process.pid, signal.SIGTERM)
-        try:
-            runtime.process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(runtime.process.pid, signal.SIGKILL)
-            runtime.process.wait(timeout=2)
 
 
 def one_startup_sample(
@@ -770,7 +233,7 @@ def one_startup_sample(
                 "ROTTWEILER_INTERACTIVE_EPOCH": "1",
             }
         )
-        tui_process = spawn_pty(tui, env, workspace)
+        tui_process = spawn_pty(tui, env, workspace, [TUI_ROLE])
         # Production supervision starts both children before waiting for the
         # engine handoff. Poll readiness while OpenTUI loads so neither cold
         # start is hidden and the total measures their real concurrent path.
@@ -896,13 +359,9 @@ def installed_first_launch_gate(
         shutil.copyfile(source_rw, version_rw)
         version_rw.chmod(0o700)
         started = time.perf_counter_ns()
-        result = subprocess.run(
-            [str(version_rw), "--version"],
-            cwd=workspace,
-            env=isolated_env(root / f"installed-first-version-home-{index}"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
+        result = run_sample(
+            [str(version_rw), "--version"], cwd=workspace,
+            env=isolated_env(root / f"installed-first-version-home-{index}"), timeout=5,
         )
         version.append((time.perf_counter_ns() - started) / 1_000_000)
         if evidence is not None:
@@ -916,7 +375,7 @@ def installed_first_launch_gate(
         artifact_bin = root / f"installed-first-interactive-{index}" / "bin"
         artifact_bin.mkdir(mode=0o700, parents=True)
         rw = artifact_bin / "rw"
-        tui = artifact_bin / "rottweiler-tui"
+        tui = artifact_bin / "rottweiler-js-host"
         native = artifact_bin / source_tui_native.name
         for source, destination in [
             (source_rw, rw),
@@ -1025,115 +484,9 @@ def socket_latency_gate(
             "x-rottweiler-client": client_id,
             "Content-Type": "application/json",
         }
-        query_types = [
-            ("list_commands", "command_descriptors_listed"),
-            ("list_models", "models_listed"),
-        ]
-
-        # Authenticated transport readiness deliberately precedes deferred
-        # session composition. Command discovery became session-scoped once it
-        # included trusted project and extension commands, so wait outside the
-        # measured window until that actor is loaded. Rejections have no result
-        # event; inspect the HTTP outcome before waiting on SSE to avoid turning
-        # a typed startup state into an opaque socket timeout.
-        ready_deadline = time.monotonic() + 5
-        ready_attempt = 0
-        while True:
-            request_id = f"m4-latency-ready-{ready_attempt}"
-            ready_attempt += 1
-            command = json.dumps(
-                {
-                    "type": "list_commands",
-                    "meta": {
-                        "protocol_version": 1,
-                        "client_id": "transport-spoof",
-                        "request_id": request_id,
-                    },
-                    "session_id": session_id,
-                },
-                separators=(",", ":"),
-            ).encode("utf-8")
-            commands.send_request("POST", "/v1/command", headers, command)
-            status, _, response = commands.read_response()
-            if status != 202:
-                raise RuntimeError(
-                    f"session readiness query returned HTTP {status}: {response!r}"
-                )
-            outcome = json.loads(response)
-            if outcome.get("type") == "accepted":
-                events.next_matching_event(request_id, "command_descriptors_listed")
-                break
-            error = outcome.get("error")
-            if (
-                not isinstance(error, dict)
-                or error.get("code") != "session_not_loaded"
-                or time.monotonic() >= ready_deadline
-            ):
-                raise RuntimeError(
-                    f"session did not become query-ready: {outcome!r}"
-                )
-            time.sleep(0.001)
-
-        def run_query(index: int, measured: bool) -> float:
-            command_type, event_type = query_types[index % len(query_types)]
-            request_id = f"m4-latency-{'sample' if measured else 'warmup'}-{index}"
-            command_payload: dict[str, object] = {
-                "type": command_type,
-                "meta": {
-                    "protocol_version": 1,
-                    # The server must overwrite this with the authenticated
-                    # identity before dispatching the typed command.
-                    "client_id": "transport-spoof",
-                    "request_id": request_id,
-                },
-            }
-            # Command discovery is session-scoped because its runtime registry
-            # includes trusted project and extension commands. Keep the release
-            # gate on the generated protocol instead of relying on the older
-            # global-list shape.
-            if command_type == "list_commands":
-                command_payload["session_id"] = session_id
-            command = json.dumps(command_payload, separators=(",", ":")).encode("utf-8")
-            started = time.perf_counter_ns()
-            commands.send_request("POST", "/v1/command", headers, command)
-            event = events.next_matching_event(request_id, event_type)
-            elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
-            if measured and evidence is not None:
-                evidence.sample("uds_query", elapsed_us=math.ceil(elapsed_ms * 1000))
-            meta = event.get("meta")
-            if not isinstance(meta, dict) or meta.get("client_id") != client_id:
-                raise RuntimeError(
-                    "host result did not carry the transport-bound client identity"
-                )
-            status, _, response = commands.read_response()
-            if status != 202:
-                raise RuntimeError(
-                    f"typed host query {command_type!r} returned HTTP {status}: {response!r}"
-                )
-            outcome = json.loads(response)
-            if outcome.get("type") != "accepted":
-                raise RuntimeError(
-                    f"typed host query {command_type!r} was not accepted: {outcome!r}"
-                )
-            return elapsed_ms
-
-        # Warm the persistent UDS connection, host query registry, pricing
-        # metadata, SSE chunk decoder, and Python pages before measuring p99.
-        for index in range(min(50, max(10, samples // 10))):
-            run_query(index, False)
-        latencies = [run_query(index, True) for index in range(samples)]
-        latency_p99 = percentile(latencies, 0.99)
-        print(
-            "M4 production engine-to-TUI UDS event latency: "
-            f"samples={samples}; p50={statistics.median(latencies):.3f}ms "
-            f"p99={latency_p99:.3f}ms max={max(latencies):.3f}ms; "
-            "typed_queries=list_commands,list_models"
+        return measure_socket_channels(
+            commands, events, headers, session_id, client_id, samples, evidence
         )
-        if latency_p99 >= 2:
-            raise RuntimeError(
-                f"production engine-to-TUI socket event p99 {latency_p99:.3f}ms exceeds 2ms"
-            )
-        return {"uds_event_p99_us": math.ceil(latency_p99 * 1000)}
     finally:
         if commands is not None:
             commands.close()
@@ -1143,7 +496,11 @@ def socket_latency_gate(
 
 
 def child_processes(parent: int) -> list[tuple[int, str]]:
-    output = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
+    result = run_sample(["ps", "-axo", "pid=,ppid=,command="], cwd=pathlib.Path.cwd(),
+                        env=dict(os.environ), timeout=2, output_limit=1024 * 1024)
+    if result.returncode:
+        raise RuntimeError("could not observe supervised children")
+    output = result.stdout.decode()
     children: list[tuple[int, str]] = []
     for line in output.splitlines():
         fields = line.strip().split(maxsplit=2)
@@ -1192,10 +549,9 @@ def model_discovery_gate(rw: pathlib.Path, root: pathlib.Path, workspace: pathli
     home = root / "discovery-home"
     write_config(home, port)
     before = discovery_request_count()
-    result = subprocess.run(
+    result = run_sample(
         [str(rw), "models", "list", "--refresh", "--output-format", "json"],
-        cwd=workspace, env=isolated_env(home), capture_output=True, text=True,
-        timeout=8, check=False,
+        cwd=workspace, env=isolated_env(home), timeout=8, output_limit=1024 * 1024,
     )
     if result.returncode != 0:
         raise RuntimeError(f"fixture model discovery exited {result.returncode}: {result.stderr[-2000:]}")
@@ -1296,9 +652,8 @@ def supervisor_reattach_gate(
         )
     finally:
         if not closed_normally:
-            terminate_process_tree(process.pid)
-        with contextlib.suppress(OSError):
-            os.close(process.fd)
+            terminate_process_tree(process)
+        stop_pty(process)
 
 
 def supervisor_parent_death_gate(
@@ -1346,9 +701,8 @@ def supervisor_parent_death_gate(
         process = spawn_pty(rw, env, workspace, ["--dangerously-trust"])
         read_until(process, DRIVER_READY_MARKER, timeout=20)
         owned_children = descendant_pids(process.pid)
-        terminate_process_tree(process.pid)
-        with contextlib.suppress(OSError):
-            os.close(process.fd)
+        terminate_process_tree(process)
+        stop_pty(process)
         process = None
 
         cleanup_deadline = time.monotonic() + 5
@@ -1376,9 +730,8 @@ def supervisor_parent_death_gate(
         )
     finally:
         if process is not None:
-            terminate_process_tree(process.pid)
-            with contextlib.suppress(OSError):
-                os.close(process.fd)
+            terminate_process_tree(process)
+            stop_pty(process)
 
 
 def shell_handover_gate(
@@ -1508,44 +861,41 @@ def shell_handover_gate(
             "the TUI resumed"
         )
     finally:
-        terminate_process_tree(process.pid)
-        with contextlib.suppress(OSError):
-            os.close(process.fd)
+        terminate_process_tree(process)
+        stop_pty(process)
 
 
 def durable_shell_events(home: pathlib.Path) -> list[dict[str, object]]:
-    event_logs = list((home / "sessions").glob("*/events.jsonl"))
+    event_logs = session_journals(home / "sessions")
     if len(event_logs) != 1:
         raise RuntimeError(f"expected one durable session event log, found {event_logs!r}")
     events: list[dict[str, object]] = []
-    for line in event_logs[0].read_text(encoding="utf-8").splitlines():
-        envelope = json.loads(line)
+    for envelope in observed_envelopes(event_logs[0]):
         event = envelope.get("event")
         if isinstance(event, dict) and event.get("type") == "user_shell_state_changed":
             events.append(event)
     return events
 
 
-def wait_pid(pid: int, timeout: float) -> int:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        found, status = os.waitpid(pid, os.WNOHANG)
-        if found == pid:
-            return status
-        time.sleep(0.01)
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGKILL)
-    return os.waitpid(pid, 0)[1]
+def validate_ssh_config(config: pathlib.Path | None) -> None:
+    if config is None:
+        return
+    if not config.is_absolute():
+        raise ValueError("SSH config must be an absolute readable regular file")
+    descriptor = os.open(config, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("SSH config must be an absolute readable regular file")
+    finally:
+        os.close(descriptor)
 
 
-def ssh_preflight(host: str) -> None:
-    completed = subprocess.run(
-        ["/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "--", host, "true"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        timeout=5,
-        check=False,
+def ssh_preflight(host: str, config: pathlib.Path | None) -> None:
+    validate_ssh_config(config)
+    completed = run_sample(
+        ["/usr/bin/ssh", *([] if config is None else ["-F", str(config)]),
+         "-T", "-o", "BatchMode=yes", "--", host, "true"],
+        cwd=pathlib.Path.cwd(), env=dict(os.environ), timeout=5,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -1561,8 +911,9 @@ def ssh_loopback_gate(
     workspace: pathlib.Path,
     port: int,
     host: str,
+    config: pathlib.Path | None,
 ) -> None:
-    ssh_preflight(host)
+    ssh_preflight(host, config)
     home = root / "ssh-home"
     write_config(home, port)
     wrapper = root / "remote-rw"
@@ -1583,6 +934,10 @@ def ssh_loopback_gate(
             "ROTTWEILER_DRIVER_READY_MARKER": DRIVER_READY_MARKER.decode("ascii"),
         }
     )
+    if config is not None:
+        env["ROTTWEILER_SSH_CONFIG"] = str(config)
+    else:
+        env.pop("ROTTWEILER_SSH_CONFIG", None)
     local = spawn_pty(
         rw,
         env,
@@ -1600,9 +955,8 @@ def ssh_loopback_gate(
         require_visible_markers(local_capture)
         local_transcript = wait_for_canonical_durable_transcript(home)
     finally:
-        terminate_process_tree(local.pid)
-        with contextlib.suppress(OSError):
-            os.close(local.fd)
+        terminate_process_tree(local)
+        stop_pty(local)
 
     session_id = "m4-ssh-loopback-gate"
     remote = spawn_pty(
@@ -1641,7 +995,7 @@ def ssh_loopback_gate(
         )
         descriptor, remote_engine_pid = wait_for_detached_remote(session_id)
         os.write(remote.fd, b"\x03")
-        exit_code = os.waitstatus_to_exitcode(wait_pid(remote.pid, 8))
+        exit_code = os.waitstatus_to_exitcode(wait_for_pty_exit(remote, 8))
         if exit_code != 0:
             raise RuntimeError(f"attached remote close exited with {exit_code}")
         deadline = time.monotonic() + 5
@@ -1661,9 +1015,8 @@ def ssh_loopback_gate(
         )
     finally:
         if not remote_closed_normally:
-            terminate_process_tree(remote.pid)
-        with contextlib.suppress(OSError):
-            os.close(remote.fd)
+            terminate_process_tree(remote)
+        stop_pty(remote)
         if not remote_closed_normally:
             cleanup_detached_remote(session_id)
 
@@ -1689,7 +1042,7 @@ def ssh_loopback_gate(
             raise RuntimeError("SIGTERM remote TUI became driver-ready without first paint")
         descriptor, remote_engine_pid = wait_for_detached_remote(term_session_id)
         os.kill(terminated.pid, signal.SIGTERM)
-        exit_code = os.waitstatus_to_exitcode(wait_pid(terminated.pid, 8))
+        exit_code = os.waitstatus_to_exitcode(wait_for_pty_exit(terminated, 8))
         if exit_code != 0:
             raise RuntimeError(f"attached remote SIGTERM exited with {exit_code}")
         deadline = time.monotonic() + 5
@@ -1709,9 +1062,8 @@ def ssh_loopback_gate(
         )
     finally:
         if not term_closed_normally:
-            terminate_process_tree(terminated.pid)
-        with contextlib.suppress(OSError):
-            os.close(terminated.fd)
+            terminate_process_tree(terminated)
+        stop_pty(terminated)
         if not term_closed_normally:
             cleanup_detached_remote(term_session_id)
 
@@ -1727,34 +1079,18 @@ def canonical_durable_transcript(
     home: pathlib.Path, session_id: str | None = None
 ) -> bytes:
     if session_id is None:
-        event_logs = list((home / "sessions").glob("*/events.jsonl"))
+        event_logs = session_journals(home / "sessions")
         if len(event_logs) != 1:
             raise RuntimeError(
                 f"expected one local durable transcript, found {event_logs!r}"
             )
         event_log = event_logs[0]
     else:
-        event_log = home / "sessions" / session_id / "events.jsonl"
-        if not event_log.is_file():
+        event_log = home / "sessions" / session_id / "journal"
+        if not event_log.is_dir():
             raise RuntimeError(f"remote durable transcript is missing: {event_log}")
 
-    turns: list[dict[str, object]] = []
-    for line in event_log.read_text(encoding="utf-8").splitlines():
-        envelope = json.loads(line)
-        event = envelope.get("event")
-        if not isinstance(event, dict) or event.get("type") != "conversation_turn_committed":
-            continue
-        turn = event.get("turn")
-        if not isinstance(turn, dict):
-            raise RuntimeError("durable conversation event omitted its typed turn")
-        role = turn.get("role")
-        blocks = turn.get("blocks")
-        if not isinstance(role, str) or not isinstance(blocks, list):
-            raise RuntimeError("durable conversation turn has an invalid protocol shape")
-        # Session ids, sequence ids, timestamps, and provider bookkeeping are
-        # intentionally excluded; role and provider-neutral blocks are the
-        # canonical transcript bytes both local and remote clients must share.
-        turns.append({"role": role, "blocks": blocks})
+    turns = fixture_turns(observed_envelopes(event_log))
     canonical = json.dumps(
         turns, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -1803,32 +1139,24 @@ def cleanup_detached_remote(session_id: str) -> None:
         descriptor, pid = wait_for_detached_remote(session_id, timeout=0.1)
     except RuntimeError:
         return
-    directory = descriptor.parent
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 2
-    while process_exists(pid) and time.monotonic() < deadline:
-        time.sleep(0.01)
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGKILL)
-    for path in [directory / "engine.sock", directory / "auth.token", descriptor]:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-    with contextlib.suppress(OSError):
-        directory.rmdir()
+    if process_exists(pid):
+        raise UnsettledScope(
+            f"UNSETTLED detached remote runtime: pid={pid} descriptor={descriptor}; "
+            "preserving descriptor for identity-qualified cleanup"
+        )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=pathlib.Path, required=True)
-    parser.add_argument("--rw", type=pathlib.Path, required=True)
-    parser.add_argument("--tui", type=pathlib.Path, required=True)
+    parser.add_argument("--candidate", type=pathlib.Path, required=True)
     parser.add_argument("--samples", type=int, default=100)
     parser.add_argument("--installed-first-samples", type=int, default=3)
     parser.add_argument("--skip-performance", action="store_true")
     parser.add_argument("--skip-supervisor", action="store_true")
     parser.add_argument("--skip-shell", action="store_true")
     parser.add_argument("--ssh-loopback", metavar="HOST")
+    parser.add_argument("--ssh-config", type=pathlib.Path)
     parser.add_argument("--metrics-json", type=pathlib.Path)
     parser.add_argument("--evidence-json", type=pathlib.Path)
     return parser.parse_args()
@@ -1842,7 +1170,15 @@ def opentui_native_library_name() -> str:
     return "libopentui.so"
 
 
+def gate_scratch(evidence: GateEvidence):
+    return retained_scratch("rw4-", parent=pathlib.Path("/tmp"),
+                            evidence=lambda root: evidence.update(retained_scratch=str(root)))
+
+
 def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
+    validate_ssh_config(args.ssh_config)
+    if args.ssh_config is not None and args.ssh_loopback is None:
+        raise ValueError("--ssh-config requires --ssh-loopback")
     if args.samples < 100 and not args.skip_performance:
         raise RuntimeError("p99 release gate requires at least 100 samples")
     if args.installed_first_samples < 3 and not args.skip_performance:
@@ -1850,8 +1186,14 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
     if args.metrics_json is not None and args.skip_performance:
         raise RuntimeError("metric output requires the complete M4 performance gate")
     repo = args.repo.resolve()
-    source_rw = args.rw.resolve()
-    source_tui = args.tui.resolve()
+    from native_candidate import verify as verify_candidate
+    candidate = args.candidate.resolve()
+    receipt = verify_candidate(candidate, repo)
+    evidence.update(candidate={"identity_sha256": receipt["identity_sha256"],
+                               "source": receipt["identity"]["source"],
+                               "components": receipt["components"]})
+    source_rw = candidate / receipt["components"]["engine"]["path"]
+    source_tui = candidate / receipt["components"]["js_host"]["path"]
     source_tui_native = source_tui.with_name(opentui_native_library_name())
     if not source_rw.is_file() or not source_tui.is_file() or not source_tui_native.is_file():
         raise RuntimeError(
@@ -1861,7 +1203,7 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
     # rooted at the short /tmp spelling so the production supervisor's nested
     # private runtime directory is testing startup rather than path overflow.
     metrics: dict[str, int] = {}
-    with tempfile.TemporaryDirectory(prefix="rw4-", dir="/tmp") as temporary:
+    with gate_scratch(evidence) as temporary:
         root = pathlib.Path(temporary)
         root.chmod(0o700)
         # Benchmark installed-artifact copies. Python's copyfile copies the
@@ -1871,7 +1213,7 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
         artifact_bin = root / "bin"
         artifact_bin.mkdir(mode=0o700)
         rw = artifact_bin / "rw"
-        tui = artifact_bin / "rottweiler-tui"
+        tui = artifact_bin / "rottweiler-js-host"
         tui_native = artifact_bin / source_tui_native.name
         shutil.copyfile(source_rw, rw)
         shutil.copyfile(source_tui, tui)
@@ -1911,9 +1253,9 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
                 shell_handover_gate(rw, tui, root, workspace, port)
             if args.ssh_loopback is not None:
                 evidence.update(phase="ssh_loopback")
-                ssh_loopback_gate(rw, tui, root, workspace, port, args.ssh_loopback)
+                ssh_loopback_gate(rw, tui, root, workspace, port, args.ssh_loopback, args.ssh_config)
     if args.metrics_json is not None:
-        metrics["tui_bundle_bytes"] = source_tui.stat().st_size + source_tui_native.stat().st_size
+        metrics["js_bundle_bytes"] = source_tui.stat().st_size + source_tui_native.stat().st_size
         args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
         temporary = args.metrics_json.with_name(f".{args.metrics_json.name}.tmp")
         temporary.write_text(
@@ -1932,8 +1274,9 @@ def main() -> int:
     evidence = GateEvidence(output)
     try:
         evidence.update()
-        result = run_gate(args, evidence)
-        evidence.update(status="pass", phase="complete")
+        with delegated_success_scope():
+            result = run_gate(args, evidence)
+            evidence.update(status="pass", phase="complete", physical_settlement="closed")
         return result
     except BaseException as error:
         try:

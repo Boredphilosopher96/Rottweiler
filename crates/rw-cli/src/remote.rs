@@ -21,6 +21,9 @@ use tokio::net::UnixStream;
 
 use crate::server::{CLIENT_HEADER, ClientCredentials};
 
+mod ssh_options;
+pub(crate) use ssh_options::SshOptions;
+
 const CONTROL_BODY_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,7 +34,7 @@ pub struct SshCommand {
 
 #[derive(Clone, Debug)]
 pub struct RemoteConfig {
-    pub ssh_executable: PathBuf,
+    pub ssh: SshOptions,
     pub host: String,
     pub remote_rw_executable: PathBuf,
     pub remote_socket: PathBuf,
@@ -47,6 +50,7 @@ pub struct RemoteConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteError {
     Host,
+    SshConfig,
     SocketPath,
     RemoteExecutable,
     Session,
@@ -57,6 +61,7 @@ pub enum RemoteError {
 impl std::fmt::Display for RemoteError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::SshConfig => "SSH config must be an absolute readable regular file",
             Self::Host => "remote SSH host is invalid",
             Self::SocketPath => "remote forwarding requires absolute Unix socket paths",
             Self::RemoteExecutable => "remote rw executable must be an absolute path",
@@ -71,6 +76,7 @@ impl std::error::Error for RemoteError {}
 
 impl RemoteConfig {
     pub fn validate(&self) -> Result<(), RemoteError> {
+        self.ssh.validate()?;
         if self.host.is_empty()
             || self.host.starts_with('-')
             || self
@@ -159,16 +165,17 @@ impl RemoteConfig {
             .map(|argument| shell_quote(argument))
             .collect::<Vec<_>>()
             .join(" ");
-        let args = vec![
+        let mut args = self.ssh.arguments();
+        args.extend([
             OsString::from("-T"),
             OsString::from("-o"),
             OsString::from("BatchMode=yes"),
             OsString::from("--"),
             OsString::from(&self.host),
             OsString::from(remote_command),
-        ];
+        ]);
         Ok(SshCommand {
-            program: self.ssh_executable.clone(),
+            program: self.ssh.executable.clone(),
             args,
         })
     }
@@ -182,20 +189,22 @@ impl RemoteConfig {
             self.local_socket.display(),
             self.remote_socket.display()
         );
+        let mut args = self.ssh.arguments();
+        args.extend([
+            OsString::from("-N"),
+            OsString::from("-T"),
+            OsString::from("-o"),
+            OsString::from("ExitOnForwardFailure=yes"),
+            OsString::from("-o"),
+            OsString::from("StreamLocalBindUnlink=yes"),
+            OsString::from("-L"),
+            OsString::from(forwarding),
+            OsString::from("--"),
+            OsString::from(&self.host),
+        ]);
         Ok(SshCommand {
-            program: self.ssh_executable.clone(),
-            args: vec![
-                OsString::from("-N"),
-                OsString::from("-T"),
-                OsString::from("-o"),
-                OsString::from("ExitOnForwardFailure=yes"),
-                OsString::from("-o"),
-                OsString::from("StreamLocalBindUnlink=yes"),
-                OsString::from("-L"),
-                OsString::from(forwarding),
-                OsString::from("--"),
-                OsString::from(&self.host),
-            ],
+            program: self.ssh.executable.clone(),
+            args,
         })
     }
 }
@@ -444,7 +453,7 @@ pub enum WatchdogCommand {
 }
 
 pub async fn run_controlled_watchdog<R: RemoteRecoveryRuntime>(
-    mut runtime: R,
+    runtime: &mut R,
     mut control: tokio::sync::mpsc::Receiver<WatchdogCommand>,
     policy: WatchdogPolicy,
 ) -> Result<(), String> {
@@ -470,7 +479,7 @@ pub async fn run_controlled_watchdog<R: RemoteRecoveryRuntime>(
                 Some(WatchdogCommand::Shutdown) | None => return Ok(()),
             },
             () = tokio::time::sleep(policy.interval) => {
-                match recover_remote(&mut runtime).await {
+                match recover_remote(runtime).await {
                     Ok(_) => failures = 0,
                     Err(error) => {
                         failures = failures.saturating_add(1);
@@ -570,11 +579,19 @@ async fn shutdown_authenticated_host_inner(
             request_id: RequestId("remote-supervisor-shutdown".to_owned()),
         },
     };
-    let body = serde_json::to_vec(&command)
+    let body = crate::command_encoding::encode(&command)
         .map_err(|_| "could not serialize remote shutdown command".to_owned())?;
     let shutdown = Request::builder()
         .method(Method::POST)
         .uri("/v1/command")
+        .header(
+            crate::server::COMMAND_LANE_HEADER,
+            if command.is_urgent() {
+                "urgent"
+            } else {
+                "normal"
+            },
+        )
         .header(HOST, "localhost")
         .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
         .header(CLIENT_HEADER, &credentials.client_id.0)
@@ -586,8 +603,11 @@ async fn shutdown_authenticated_host_inner(
     if response.status() != StatusCode::ACCEPTED {
         return Err("remote engine rejected host shutdown".to_owned());
     }
-    match collect_control_json::<CommandOutcome>(response.into_body()).await? {
-        CommandOutcome::Accepted => Ok(()),
+    match collect_control_json::<rw_core::CommandReply>(response.into_body())
+        .await?
+        .outcome()
+    {
+        CommandOutcome::Accepted {} => Ok(()),
         CommandOutcome::Rejected { error } => Err(format!(
             "remote engine rejected host shutdown: {}",
             error.code
@@ -632,7 +652,10 @@ mod tests {
 
     fn config() -> RemoteConfig {
         RemoteConfig {
-            ssh_executable: PathBuf::from("/usr/bin/ssh"),
+            ssh: SshOptions {
+                executable: PathBuf::from("/usr/bin/ssh"),
+                config_file: None,
+            },
             host: "localhost".to_owned(),
             remote_rw_executable: PathBuf::from("/usr/local/bin/rw"),
             remote_socket: PathBuf::from("/tmp/rottweiler/engine.sock"),
@@ -686,6 +709,37 @@ mod tests {
             .map(OsString::from)
         );
         assert!(!format!("{start:?}{forward:?}").contains("token"));
+    }
+
+    #[test]
+    fn explicit_ssh_profile_is_identical_for_control_forwarding_and_foreground() {
+        let root = tempfile::tempdir().expect("profile root");
+        let path = root.path().join("ssh profile");
+        std::fs::write(&path, "Host localhost\n").expect("profile");
+        let mut selected = config();
+        selected.ssh.config_file = Some(path.clone());
+        for command in [
+            selected.engine_start_command(),
+            selected.engine_recovery_command(),
+            selected.forward_command(),
+        ] {
+            let command = command.expect("SSH command");
+            assert_eq!(
+                &command.args[..2],
+                &[OsString::from("-F"), path.as_os_str().to_owned()]
+            );
+            assert_eq!(command.program, selected.ssh.executable);
+        }
+        let argv = crate::tty::remote_tty_argv(&selected.ssh, "localhost", "pwd")
+            .expect("foreground command");
+        assert_eq!(
+            &argv[..3],
+            &[
+                selected.ssh.executable.into_os_string(),
+                OsString::from("-F"),
+                path.into_os_string()
+            ]
+        );
     }
 
     #[test]
@@ -1078,14 +1132,18 @@ mod tests {
     async fn controlled_watchdog_acknowledges_a_quiescent_pause_before_shutdown() {
         let runtime = MockRecovery::new(MockRecoveryState::default());
         let (control, commands) = tokio::sync::mpsc::channel(2);
-        let watchdog = tokio::spawn(run_controlled_watchdog(
-            runtime.clone(),
-            commands,
-            WatchdogPolicy {
-                interval: Duration::from_millis(50),
-                maximum_consecutive_failures: 2,
-            },
-        ));
+        let mut owned_runtime = runtime.clone();
+        let watchdog = tokio::spawn(async move {
+            run_controlled_watchdog(
+                &mut owned_runtime,
+                commands,
+                WatchdogPolicy {
+                    interval: Duration::from_millis(50),
+                    maximum_consecutive_failures: 2,
+                },
+            )
+            .await
+        });
         let (acknowledged, paused) = tokio::sync::oneshot::channel();
         control
             .send(WatchdogCommand::Pause(acknowledged))

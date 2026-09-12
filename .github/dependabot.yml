@@ -47,6 +47,12 @@ updates:
     multi-ecosystem-group: application-dependencies
     open-pull-requests-limit: 1
 
+  - package-ecosystem: bun
+    directory: /packages/js-host
+    patterns: ["*"]
+    multi-ecosystem-group: application-dependencies
+    open-pull-requests-limit: 1
+
   # END package inventory projection
 
   - package-ecosystem: pip

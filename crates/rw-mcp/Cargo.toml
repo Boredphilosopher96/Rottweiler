@@ -8,24 +8,33 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
+base64.workspace = true
+http.workspace = true
+nix.workspace = true
 blake3.workspace = true
+futures-util = "0.3.31"
 getrandom.workspace = true
 rmcp.workspace = true
+rw-resources.workspace = true
+rw-store.workspace = true
 rw-tools.workspace = true
 rw-types.workspace = true
 rustix.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "sync", "time"] }
 
 [dev-dependencies]
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+rustix = { workspace = true, features = ["pipe"] }
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.23"
 tiktoken-rs = "0.12.0"
 
 [features]
 default = []
-test-support = []
+test-support = ["rmcp/server", "rmcp/transport-io"]
 
 [[bin]]
 name = "rw-mcp-fixture"

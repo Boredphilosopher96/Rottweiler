@@ -1,16 +1,31 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
+use crate::{McpResponse, McpResponseLimits, McpResponseSlot};
 use async_trait::async_trait;
 use rmcp::{
-    ErrorData as McpProtocolError, ServerHandler, ServiceExt as _,
+    ErrorData as McpProtocolError,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, ServerCapabilities, ServerInfo, Tool,
+        ServerCapabilities, ServerInfo, Tool, ToolsCapability,
     },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
+
+mod allocation;
+mod dispatch;
+mod invocation;
+mod lifecycle;
+mod native;
+#[cfg(test)]
+mod ownership_tests;
+#[cfg(test)]
+mod tests;
+mod wire;
+
+/// Bound on session identities owned by one MCP connection.
+pub const MAX_SERVER_SESSIONS: usize = 32;
 
 const MAX_WIRE_TEXT: usize = 16 * 1024;
 const MAX_SERVER_RESULT: usize = 256 * 1024;
@@ -23,15 +38,9 @@ const MAX_SERVER_ARGUMENTS: usize = 64 * 1024;
 /// Returns a sanitized protocol error when initialization fails or the service
 /// task terminates abnormally.
 pub async fn serve_stdio(server: RottweilerMcpServer) -> Result<(), crate::McpError> {
-    let running = server
-        .serve(rmcp::transport::stdio())
+    native::serve(server)
         .await
-        .map_err(|error| crate::McpError::Protocol(error.to_string()))?;
-    running
-        .waiting()
-        .await
-        .map_err(|error| crate::McpError::Protocol(error.to_string()))?;
-    Ok(())
+        .map_err(|error| crate::McpError::Protocol(error.to_string()))
 }
 
 /// Deliberately caller-safe bridge failure; internal errors must be redacted before construction.
@@ -66,24 +75,46 @@ pub struct SessionSummary {
 /// Narrow boundary: the adapter neither owns nor silently takes a driver's lease.
 #[async_trait]
 pub trait EngineMcpBridge: Send + Sync + 'static {
-    async fn tools(&self) -> Result<Vec<EngineTool>, BridgeError>;
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, BridgeError>;
-    async fn create_session(&self, title: Option<String>) -> Result<SessionSummary, BridgeError>;
-    async fn list_sessions(&self) -> Result<Vec<SessionSummary>, BridgeError>;
-    async fn send_message(&self, session_id: &str, message: &str) -> Result<Value, BridgeError>;
+    fn response_limits(&self) -> McpResponseLimits;
+    async fn tools(
+        &self,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<EngineTool>>, BridgeError>;
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, BridgeError>;
+    async fn create_session(
+        &self,
+        title: Option<String>,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<SessionSummary>, BridgeError>;
+    async fn list_sessions(
+        &self,
+        authorized: Vec<String>,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<SessionSummary>>, BridgeError>;
+    async fn send_message(
+        &self,
+        session_id: &str,
+        message: &str,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, BridgeError>;
 }
 
+#[derive(Clone)]
 pub struct RottweilerMcpServer {
     bridge: Arc<dyn EngineMcpBridge>,
     authority: Arc<McpServerAuthority>,
     request_timeout: Duration,
 }
 
-/// Creates a new server and authority for every accepted HTTP connection.
-/// The HTTP host must enforce exact Host/Origin allowlists and a pre-decode body/frame cap.
+/// Creates an independently bounded authority for each owned MCP connection.
 pub struct RottweilerMcpServerFactory {
     bridge: Arc<dyn EngineMcpBridge>,
-    authority: Arc<dyn Fn() -> McpServerAuthority + Send + Sync>,
+    authority: Arc<dyn Fn() -> Result<McpServerAuthority, BridgeError> + Send + Sync>,
     request_timeout: Duration,
 }
 
@@ -91,7 +122,7 @@ impl RottweilerMcpServerFactory {
     #[must_use]
     pub fn new(
         bridge: Arc<dyn EngineMcpBridge>,
-        authority: impl Fn() -> McpServerAuthority + Send + Sync + 'static,
+        authority: impl Fn() -> Result<McpServerAuthority, BridgeError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             bridge,
@@ -106,13 +137,12 @@ impl RottweilerMcpServerFactory {
         self
     }
 
-    #[must_use]
-    pub fn create(&self) -> RottweilerMcpServer {
-        RottweilerMcpServer {
+    pub fn create(&self) -> Result<RottweilerMcpServer, BridgeError> {
+        Ok(RottweilerMcpServer {
             bridge: Arc::clone(&self.bridge),
-            authority: Arc::new((self.authority)()),
+            authority: Arc::new((self.authority)()?),
             request_timeout: self.request_timeout,
-        }
+        })
     }
 }
 
@@ -123,21 +153,44 @@ pub struct McpServerAuthority {
     allow_create: bool,
     allow_list: bool,
     allow_send: bool,
+    _retained: crate::payload_work::Allocation,
 }
 
 impl McpServerAuthority {
-    #[must_use]
     pub fn new(
         allowed_tools: impl IntoIterator<Item = String>,
         explicit_sessions: impl IntoIterator<Item = String>,
-    ) -> Self {
-        Self {
-            allowed_tools: allowed_tools.into_iter().collect(),
-            sessions: RwLock::new(explicit_sessions.into_iter().collect()),
+    ) -> Result<Self, BridgeError> {
+        let retained = crate::payload_work::Allocation::new(64 * 1024)
+            .map_err(|_| BridgeError::safe("MCP authority allocation exhausted"))?;
+        let mut tools = BTreeSet::new();
+        for (index, name) in allowed_tools.into_iter().enumerate() {
+            if index >= 64
+                || name.is_empty()
+                || name.len() > 256
+                || name.chars().any(char::is_control)
+            {
+                return Err(BridgeError::safe("MCP tool authority exceeds its contract"));
+            }
+            tools.insert(name.as_str().to_owned());
+        }
+        let mut sessions = BTreeSet::new();
+        for (index, id) in explicit_sessions.into_iter().enumerate() {
+            if index >= MAX_SERVER_SESSIONS || rw_types::SessionId::validate(&id).is_err() {
+                return Err(BridgeError::safe(
+                    "MCP session authority exceeds its contract",
+                ));
+            }
+            sessions.insert(id.as_str().to_owned());
+        }
+        Ok(Self {
+            allowed_tools: tools,
+            sessions: RwLock::new(sessions),
             allow_create: false,
             allow_list: false,
             allow_send: false,
-        }
+            _retained: retained,
+        })
     }
 
     #[must_use]
@@ -184,7 +237,6 @@ fn tool(name: &'static str, description: &'static str, schema: Value) -> Option<
 #[derive(Deserialize)]
 struct ToolCall {
     name: String,
-    #[serde(default)]
     arguments: Value,
 }
 #[derive(Deserialize)]
@@ -197,23 +249,55 @@ struct SendMessage {
     message: String,
 }
 
-fn arguments(request: &CallToolRequestParams) -> Value {
-    Value::Object(request.arguments.clone().unwrap_or_default())
-}
-
 fn parse<T: serde::de::DeserializeOwned>(
-    request: &CallToolRequestParams,
+    request: &mut CallToolRequestParams,
 ) -> Result<T, McpProtocolError> {
-    serde_json::from_value(arguments(request))
+    serde_json::from_value(Value::Object(request.arguments.take().unwrap_or_default()))
         .map_err(|error| McpProtocolError::invalid_params(error.to_string(), None))
 }
 
-fn result(value: Value) -> CallToolResponse {
-    let bytes = serde_json::to_vec(&value).unwrap_or_default();
-    if bytes.len() > MAX_SERVER_RESULT {
-        return tool_error("Rottweiler MCP server result exceeded its size cap");
+fn result<T: Serialize>(
+    value: McpResponse<T>,
+) -> Result<McpResponse<CallToolResponse>, McpProtocolError> {
+    use rw_types::json_encoding::JsonWriter;
+    let mut count = JsonWriter::count(MAX_SERVER_RESULT);
+    if count.serialize(&value.value).is_err() {
+        return Ok(McpResponse::wire(
+            tool_error("Rottweiler MCP server result exceeded its size cap"),
+            value.retained,
+        ));
     }
-    CallToolResult::structured(value).into()
+    // The source carrier remains held while text and structured representations coexist.
+    let mut retained = crate::payload_work::Allocation::new(MAX_SERVER_RESULT * 2)
+        .map_err(|_| McpProtocolError::internal_error("MCP result allocation exhausted", None))?;
+    let mut bytes = Vec::with_capacity(count.written());
+    JsonWriter::buffer(&mut bytes, MAX_SERVER_RESULT, 0)
+        .and_then(|mut writer| {
+            writer
+                .serialize(&value.value)
+                .map_err(std::io::Error::other)
+        })
+        .map_err(|_| McpProtocolError::internal_error("MCP result encoding failed", None))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| McpProtocolError::internal_error("MCP result encoding failed", None))?;
+    let shape = crate::ingress::profile::inspect(text.as_bytes())
+        .map_err(|_| McpProtocolError::internal_error("MCP result shape exceeded its cap", None))?;
+    let working =
+        crate::ingress::profile::working_bytes(&shape, std::mem::size_of::<Value>().max(128), 4)
+            .map_err(|_| {
+                McpProtocolError::internal_error("MCP result allocation exceeded its cap", None)
+            })?;
+    retained
+        .ensure(working.saturating_add(text.capacity()))
+        .map_err(|_| McpProtocolError::internal_error("MCP result allocation exhausted", None))?;
+    let structured = serde_json::to_value(&value.value)
+        .map_err(|_| McpProtocolError::internal_error("MCP result encoding failed", None))?;
+    let mut response = CallToolResult::success(vec![ContentBlock::text(text)]);
+    response.structured_content = Some(structured);
+    drop(value.value);
+    let mut leases = value.retained;
+    leases.push(Arc::new(retained));
+    Ok(McpResponse::wire(response.into(), leases))
 }
 
 fn tool_error(message: &str) -> CallToolResponse {
@@ -223,110 +307,102 @@ fn tool_error(message: &str) -> CallToolResponse {
     .into()
 }
 
-impl ServerHandler for RottweilerMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+impl RottweilerMcpServer {
+    fn get_info() -> ServerInfo {
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.tools = Some(ToolsCapability::default());
+        ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("rottweiler", env!("CARGO_PKG_VERSION")))
             .with_instructions("Rottweiler coding-agent sessions and approved tools")
     }
 
-    async fn list_tools(
-        &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<ListToolsResult, McpProtocolError> {
-        Ok(ListToolsResult::with_all_items(Self::builtin_tools()))
-    }
-
-    fn get_tool(&self, name: &str) -> Option<Tool> {
-        Self::builtin_tools()
-            .into_iter()
-            .find(|tool| tool.name == name)
-    }
-
     #[allow(clippy::too_many_lines)]
-    async fn call_tool(
+    async fn execute_tool(
         &self,
         request: CallToolRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<CallToolResponse, McpProtocolError> {
-        if serde_json::to_vec(&request.arguments)
-            .is_ok_and(|bytes| bytes.len() > MAX_SERVER_ARGUMENTS)
-        {
-            return Ok(tool_error("MCP request arguments exceed the size cap"));
-        }
-        let output = match request.name.as_ref() {
-            "rottweiler_tools_call" => {
-                let input: ToolCall = parse(&request)?;
+        decoded: Arc<crate::payload_work::Allocation>,
+    ) -> Result<McpResponse<CallToolResponse>, McpProtocolError> {
+        let input = invocation::prepare(request, decoded).await?;
+        let slot = McpResponseSlot::new(self.bridge.response_limits()).map_err(|_| {
+            McpProtocolError::internal_error("MCP response allocation exhausted", None)
+        })?;
+        match input.value {
+            invocation::Invocation::Tool(input) => {
                 if input.name.len() > 256 || !self.authority.allowed_tools.contains(&input.name) {
-                    return Ok(tool_error(
-                        "tool is outside this MCP connection's authority",
+                    return Ok(McpResponse::wire(
+                        tool_error("tool is outside this MCP connection's authority"),
+                        Vec::new(),
                     ));
                 }
-                tokio::time::timeout(
-                    self.request_timeout,
-                    self.bridge.call_tool(&input.name, input.arguments),
+                bridge_result(
+                    self.bridge
+                        .call_tool(&input.name, input.arguments, slot)
+                        .await,
                 )
                 .await
-                .unwrap_or_else(|_| Err(BridgeError::safe("engine tool request timed out")))
             }
-            "rottweiler_sessions_create" => {
+            invocation::Invocation::Create(input) => {
                 if !self.authority.allow_create {
-                    return Ok(tool_error(
-                        "session creation is outside this MCP connection's authority",
+                    return Ok(McpResponse::wire(
+                        tool_error("session creation is outside this MCP connection's authority"),
+                        Vec::new(),
                     ));
                 }
-                let input: CreateSession = parse(&request)?;
                 if input.title.as_ref().is_some_and(|title| title.len() > 512) {
-                    return Ok(tool_error("session title exceeds its size cap"));
+                    return Ok(McpResponse::wire(
+                        tool_error("session title exceeds its size cap"),
+                        Vec::new(),
+                    ));
                 }
-                let created = tokio::time::timeout(
-                    self.request_timeout,
-                    self.bridge.create_session(input.title),
-                )
-                .await
-                .unwrap_or_else(|_| Err(BridgeError::safe("session creation timed out")));
-                match created {
+                let mut sessions = self.authority.sessions.write().await;
+                if sessions.len() >= MAX_SERVER_SESSIONS {
+                    return Ok(McpResponse::wire(
+                        tool_error("MCP session authority is full"),
+                        Vec::new(),
+                    ));
+                }
+                match self.bridge.create_session(input.title, slot).await {
                     Ok(value) => {
-                        self.authority
-                            .sessions
-                            .write()
-                            .await
-                            .insert(value.id.clone());
-                        serde_json::to_value(value)
-                            .map_err(|_| BridgeError::safe("session result encoding failed"))
+                        if rw_types::SessionId::validate(&value.id).is_err() {
+                            return Err(McpProtocolError::internal_error(
+                                "engine returned an invalid session identity",
+                                None,
+                            ));
+                        }
+                        sessions.insert(value.id.clone());
+                        encode_result(value).await
                     }
-                    Err(error) => Err(error),
+                    Err(error) => Ok(McpResponse::wire(
+                        tool_error(&error.safe_message),
+                        Vec::new(),
+                    )),
                 }
             }
-            "rottweiler_sessions_list" => {
+
+            invocation::Invocation::List => {
                 if !self.authority.allow_list {
-                    return Ok(tool_error(
-                        "session listing is outside this MCP connection's authority",
+                    return Ok(McpResponse::wire(
+                        tool_error("session listing is outside this MCP connection's authority"),
+                        Vec::new(),
                     ));
                 }
-                let allowed = self.authority.sessions.read().await.clone();
-                tokio::time::timeout(self.request_timeout, self.bridge.list_sessions())
+                let allowed = self
+                    .authority
+                    .sessions
+                    .read()
                     .await
-                    .unwrap_or_else(|_| Err(BridgeError::safe("session listing timed out")))
-                    .map(|sessions| {
-                        sessions
-                            .into_iter()
-                            .filter(|session| allowed.contains(&session.id))
-                            .collect::<Vec<_>>()
-                    })
-                    .and_then(|value| {
-                        serde_json::to_value(value)
-                            .map_err(|_| BridgeError::safe("session result encoding failed"))
-                    })
+                    .iter()
+                    .cloned()
+                    .collect();
+                bridge_result(self.bridge.list_sessions(allowed, slot).await).await
             }
-            "rottweiler_sessions_send" => {
+            invocation::Invocation::Send(input) => {
                 if !self.authority.allow_send {
-                    return Ok(tool_error(
-                        "session messaging is outside this MCP connection's authority",
+                    return Ok(McpResponse::wire(
+                        tool_error("session messaging is outside this MCP connection's authority"),
+                        Vec::new(),
                     ));
                 }
-                let input: SendMessage = parse(&request)?;
                 if rw_types::SessionId::validate(&input.session_id).is_err()
                     || input.message.len() > MAX_WIRE_TEXT
                     || !self
@@ -336,153 +412,47 @@ impl ServerHandler for RottweilerMcpServer {
                         .await
                         .contains(&input.session_id)
                 {
-                    return Ok(tool_error(
-                        "session is outside this MCP connection's authority or input is oversized",
+                    return Ok(McpResponse::wire(
+                        tool_error(
+                            "session is outside this MCP connection's authority or input is oversized",
+                        ),
+                        Vec::new(),
                     ));
                 }
-                tokio::time::timeout(
-                    self.request_timeout,
-                    self.bridge.send_message(&input.session_id, &input.message),
+                bridge_result(
+                    self.bridge
+                        .send_message(&input.session_id, &input.message, slot)
+                        .await,
                 )
                 .await
-                .unwrap_or_else(|_| Err(BridgeError::safe("session message timed out")))
             }
-            _ => {
-                return Err(McpProtocolError::method_not_found::<
-                    rmcp::model::CallToolRequestMethod,
-                >());
-            }
-        };
-        Ok(output.map_or_else(|error| tool_error(&error.safe_message), result))
+            invocation::Invocation::Oversized => Ok(McpResponse::wire(
+                tool_error("MCP request arguments exceed the size cap"),
+                Vec::new(),
+            )),
+            invocation::Invocation::Unknown => Err(McpProtocolError::method_not_found::<
+                rmcp::model::CallToolRequestMethod,
+            >()),
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used)]
-
-    use super::*;
-    use rmcp::model::CallToolRequestParams;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct Bridge {
-        messages: AtomicUsize,
+async fn bridge_result<T: Serialize + Send + 'static>(
+    value: Result<McpResponse<T>, BridgeError>,
+) -> Result<McpResponse<CallToolResponse>, McpProtocolError> {
+    match value {
+        Ok(value) => encode_result(value).await,
+        Err(error) => Ok(McpResponse::wire(
+            tool_error(&error.safe_message),
+            Vec::new(),
+        )),
     }
+}
 
-    #[async_trait]
-    impl EngineMcpBridge for Bridge {
-        async fn tools(&self) -> Result<Vec<EngineTool>, BridgeError> {
-            Ok(Vec::new())
-        }
-        async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, BridgeError> {
-            Ok(json!({"name":name,"arguments":arguments}))
-        }
-        async fn create_session(
-            &self,
-            _title: Option<String>,
-        ) -> Result<SessionSummary, BridgeError> {
-            Ok(SessionSummary {
-                id: "owned".to_owned(),
-                state: "idle".to_owned(),
-            })
-        }
-        async fn list_sessions(&self) -> Result<Vec<SessionSummary>, BridgeError> {
-            Ok(vec![
-                SessionSummary {
-                    id: "owned".to_owned(),
-                    state: "idle".to_owned(),
-                },
-                SessionSummary {
-                    id: "foreign".to_owned(),
-                    state: "idle".to_owned(),
-                },
-            ])
-        }
-        async fn send_message(
-            &self,
-            session_id: &str,
-            message: &str,
-        ) -> Result<Value, BridgeError> {
-            self.messages.fetch_add(1, Ordering::Relaxed);
-            Ok(json!({"session":session_id,"message":message}))
-        }
-    }
-
-    fn arguments(value: &Value) -> rmcp::model::JsonObject {
-        value.as_object().cloned().expect("object")
-    }
-
-    #[tokio::test]
-    async fn another_agent_drives_server_fixture_with_scoped_authority() {
-        let bridge = Arc::new(Bridge {
-            messages: AtomicUsize::new(0),
-        });
-        let factory = RottweilerMcpServerFactory::new(bridge.clone(), || {
-            McpServerAuthority::new(["read".to_owned()], std::iter::empty())
-                .with_session_access(true, true, true)
-        });
-        let server = factory.create();
-        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        let (server_service, client_service) =
-            tokio::join!(server.serve(server_io), ().serve(client_io));
-        let mut server_service = server_service.expect("server");
-        let mut client_service = client_service.expect("client");
-        assert_eq!(
-            client_service
-                .peer()
-                .list_all_tools()
-                .await
-                .expect("tools")
-                .len(),
-            4
-        );
-
-        let denied = client_service
-            .peer()
-            .call_tool(
-                CallToolRequestParams::new("rottweiler_tools_call")
-                    .with_arguments(arguments(&json!({"name":"bash","arguments":{}}))),
-            )
-            .await
-            .expect("denied");
-        assert_eq!(denied.is_error, Some(true));
-        let created = client_service
-            .peer()
-            .call_tool(
-                CallToolRequestParams::new("rottweiler_sessions_create")
-                    .with_arguments(arguments(&json!({}))),
-            )
-            .await
-            .expect("create");
-        assert_eq!(created.is_error, Some(false));
-        assert_eq!(
-            created
-                .structured_content
-                .as_ref()
-                .expect("structured session result")["id"],
-            "owned"
-        );
-        let sent = client_service
-            .peer()
-            .call_tool(
-                CallToolRequestParams::new("rottweiler_sessions_send")
-                    .with_arguments(arguments(&json!({"session_id":"owned","message":"hello"}))),
-            )
-            .await
-            .expect("send");
-        assert_eq!(sent.is_error, Some(false));
-        let foreign = client_service
-            .peer()
-            .call_tool(
-                CallToolRequestParams::new("rottweiler_sessions_send").with_arguments(arguments(
-                    &json!({"session_id":"foreign","message":"steal"}),
-                )),
-            )
-            .await
-            .expect("foreign");
-        assert_eq!(foreign.is_error, Some(true));
-        assert_eq!(bridge.messages.load(Ordering::Relaxed), 1);
-        client_service.close().await.expect("close client");
-        server_service.close().await.expect("close server");
-    }
+async fn encode_result<T: Serialize + Send + 'static>(
+    value: McpResponse<T>,
+) -> Result<McpResponse<CallToolResponse>, McpProtocolError> {
+    rw_resources::run_blocking(rw_resources::ResourceClass::Cpu, move || result(value))
+        .await
+        .map_err(|_| McpProtocolError::internal_error("MCP result encoder worker failed", None))?
 }

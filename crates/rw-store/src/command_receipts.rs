@@ -1,0 +1,309 @@
+//! Durable at-most-once admission for host mutations, independent of client connections.
+//!
+//! An admitted row is never removed automatically. If effects and completion are
+//! separated by a crash, the row remains indeterminate and cannot authorize rerun.
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rw_types::json_encoding::JsonWriter;
+use rw_types::{
+    RequestId,
+    command_receipt::{CommandReceipt, ReceiptAdmission},
+};
+use std::{fs, path::Path, time::Duration};
+
+const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
+const APPLICATION_ID: u32 = 0x5257_4f50;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReceiptError {
+    #[error("command receipt I/O failed")]
+    Io(#[from] std::io::Error),
+    #[error("command receipt database failed")]
+    Sql(#[from] rusqlite::Error),
+    #[error("command receipt encoding failed")]
+    Json(#[from] serde_json::Error),
+    #[error("command receipt contract is invalid")]
+    Invalid,
+    #[error("operation identity was reused for another command")]
+    Conflict,
+}
+
+struct StoredReceipt {
+    fingerprint: Option<String>,
+    length: Option<i64>,
+    completion: Option<Vec<u8>>,
+}
+pub struct CommandReceipts {
+    connection: Connection,
+}
+impl CommandReceipts {
+    /// Opens private authoritative receipts and rejects foreign database schemas.
+    /// # Errors
+    /// Rejects unsafe storage, invalid schema, and unavailable `SQLite` state.
+    pub fn open(path: &Path) -> Result<Self, ReceiptError> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(path) {
+            Ok(file) => {
+                file.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(ReceiptError::Invalid);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.mode() & 0o077 != 0 || metadata.nlink() != 1 {
+                return Err(ReceiptError::Invalid);
+            }
+        }
+        let database_path = fs::canonicalize(path.parent().ok_or(ReceiptError::Invalid)?)?
+            .join(path.file_name().ok_or(ReceiptError::Invalid)?);
+        let connection = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        connection.pragma_update(None, "cache_size", -2048)?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        let mut store = Self { connection };
+        store.initialize()?;
+        #[cfg(unix)]
+        fs::File::open(path.parent().ok_or(ReceiptError::Invalid)?)?.sync_all()?;
+        Ok(store)
+    }
+
+    fn initialize(&mut self) -> Result<(), ReceiptError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let application_id: u32 =
+            transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
+        let tables: i64 = transaction.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if application_id == 0 && tables == 0 {
+            transaction.execute_batch("CREATE TABLE command_receipts (operation_id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, completion BLOB) STRICT;")?;
+            transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+        } else if application_id != APPLICATION_ID || tables != 1 {
+            return Err(ReceiptError::Invalid);
+        }
+        let definition: String = transaction.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='command_receipts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if definition
+            != "CREATE TABLE command_receipts (operation_id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, completion BLOB) STRICT"
+        {
+            return Err(ReceiptError::Invalid);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Persists admission before any mutation. A duplicate pending row never reruns.
+    /// # Errors
+    /// Rejects identity substitution, malformed inputs, or failed durable admission.
+    pub fn admit(
+        &mut self,
+        operation: &RequestId,
+        fingerprint: &str,
+    ) -> Result<ReceiptAdmission, ReceiptError> {
+        validate(operation, fingerprint)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<StoredReceipt> = transaction.query_row(
+            "SELECT CASE WHEN length(fingerprint)=64 THEN fingerprint ELSE NULL END, length(completion), CASE WHEN length(completion)<=?2 THEN completion ELSE NULL END FROM command_receipts WHERE operation_id=?1",
+            params![operation.0, 16 * 1024 * 1024_i64], |row| Ok(StoredReceipt { fingerprint: row.get(0)?, length: row.get(1)?, completion: row.get(2)? }),
+        ).optional()?;
+        if let Some(StoredReceipt {
+            fingerprint: stored,
+            length,
+            completion,
+        }) = existing
+        {
+            let stored = stored.ok_or(ReceiptError::Invalid)?;
+            validate(operation, &stored)?;
+            if length.is_some_and(|length| !(0..=16 * 1024 * 1024).contains(&length))
+                || length.is_some() != completion.is_some()
+            {
+                return Err(ReceiptError::Invalid);
+            }
+            if stored != fingerprint {
+                return Err(ReceiptError::Conflict);
+            }
+            return match completion {
+                Some(bytes) => {
+                    validate_encoded(&bytes)?;
+                    Ok(ReceiptAdmission::Completed(serde_json::from_slice(&bytes)?))
+                }
+                None => Ok(ReceiptAdmission::Indeterminate),
+            };
+        }
+        transaction.execute(
+            "INSERT INTO command_receipts(operation_id,fingerprint,completion) VALUES (?1,?2,NULL)",
+            params![operation.0, fingerprint],
+        )?;
+        transaction.commit()?;
+        Ok(ReceiptAdmission::Admitted)
+    }
+
+    /// Stores the correlated outcome after effects settle; never changes identity.
+    /// # Errors
+    /// Rejects unknown admissions, conflicting outcomes, or oversized encoding.
+    pub fn complete(
+        &mut self,
+        operation: &RequestId,
+        fingerprint: &str,
+        receipt: &CommandReceipt,
+    ) -> Result<(), ReceiptError> {
+        validate(operation, fingerprint)?;
+        let mut encoded = Vec::new();
+        JsonWriter::buffer(&mut encoded, MAX_RECEIPT_BYTES, 4096)?.serialize(receipt)?;
+        validate_encoded(&encoded)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute("UPDATE command_receipts SET completion=?3 WHERE operation_id=?1 AND fingerprint=?2 AND completion IS NULL", params![operation.0, fingerprint, encoded])?;
+        if changed != 1 {
+            return Err(ReceiptError::Conflict);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+fn validate_encoded(bytes: &[u8]) -> Result<(), ReceiptError> {
+    use rw_types::json_structure::{JsonStructureLimits, preflight_json};
+    let shape = preflight_json(
+        bytes,
+        JsonStructureLimits {
+            max_encoded_bytes: MAX_RECEIPT_BYTES,
+            max_nodes: 65_536,
+            max_string_bytes: MAX_RECEIPT_BYTES,
+            max_depth: 64,
+        },
+    )?;
+    if shape
+        .decode_bytes::<CommandReceipt>()
+        .is_none_or(|bytes| bytes > 64 * 1024 * 1024)
+    {
+        return Err(ReceiptError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate(operation: &RequestId, fingerprint: &str) -> Result<(), ReceiptError> {
+    if !operation.is_valid()
+        || fingerprint.len() != 64
+        || !fingerprint.bytes().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(ReceiptError::Invalid);
+    }
+    Ok(())
+}
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use rw_types::CommandOutcome;
+    fn fingerprint() -> String {
+        "a".repeat(64)
+    }
+    #[test]
+    fn admission_and_completion_survive_connections_and_restart() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("operations.sqlite");
+        let id = RequestId("operation".into());
+        let mut first = CommandReceipts::open(&path).expect("open");
+        let mut second = CommandReceipts::open(&path).expect("second");
+        assert!(matches!(
+            first.admit(&id, &fingerprint()).expect("admit"),
+            ReceiptAdmission::Admitted
+        ));
+        assert!(matches!(
+            second.admit(&id, &fingerprint()).expect("duplicate"),
+            ReceiptAdmission::Indeterminate
+        ));
+        assert!(matches!(
+            second.admit(&id, &"b".repeat(64)),
+            Err(ReceiptError::Conflict)
+        ));
+        drop(first);
+        let mut restarted = CommandReceipts::open(&path).expect("restart");
+        assert!(matches!(
+            restarted.admit(&id, &fingerprint()).expect("pending"),
+            ReceiptAdmission::Indeterminate
+        ));
+        restarted
+            .complete(
+                &id,
+                &fingerprint(),
+                &CommandReceipt {
+                    outcome: CommandOutcome::Accepted {},
+                    events: Vec::new(),
+                },
+            )
+            .expect("complete");
+        assert!(matches!(
+            second.admit(&id, &fingerprint()).expect("receipt"),
+            ReceiptAdmission::Completed(CommandReceipt {
+                outcome: CommandOutcome::Accepted {},
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn oversized_stored_completion_is_invalid_not_pending() {
+        let root = tempfile::tempdir().expect("root");
+        let mut store =
+            CommandReceipts::open(&root.path().join("operations.sqlite")).expect("open");
+        let id = RequestId("operation".into());
+        store.admit(&id, &fingerprint()).expect("admit");
+        store
+            .connection
+            .execute(
+                "UPDATE command_receipts SET completion=zeroblob(?1)",
+                [16 * 1024 * 1024_i64 + 1],
+            )
+            .expect("oversized stored completion");
+        assert!(matches!(
+            store.admit(&id, &fingerprint()),
+            Err(ReceiptError::Invalid)
+        ));
+        store
+            .connection
+            .execute(
+                "UPDATE command_receipts SET completion=NULL, fingerprint=zeroblob(1000000)",
+                [],
+            )
+            .expect_err("STRICT rejects a blob fingerprint");
+    }
+
+    #[test]
+    fn foreign_database_is_rejected_without_rewriting_it() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("operations.sqlite");
+        let store = CommandReceipts::open(&path).expect("open");
+        store
+            .connection
+            .execute_batch("ALTER TABLE command_receipts ADD COLUMN extra TEXT")
+            .expect("foreign schema");
+        drop(store);
+        assert!(matches!(
+            CommandReceipts::open(&path),
+            Err(ReceiptError::Invalid)
+        ));
+    }
+}

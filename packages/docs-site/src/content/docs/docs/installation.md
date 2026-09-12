@@ -57,7 +57,7 @@ git clone https://github.com/Boredphilosopher96/Rottweiler.git
 cd Rottweiler
 rustup toolchain install 1.97.1 --profile minimal
 bun install --cwd packages/tui --frozen-lockfile
-scripts/build-release.sh
+python3 scripts/build-native-candidate.py --print archive
 ```
 
 The command prints the validated archive path. Extract that archive and run its

@@ -138,6 +138,7 @@ pub(crate) async fn enable(store: &Path, name: &str, version: &str, yes: bool) -
             .map_err(|error| miette!(error.to_string()))?;
     let helper = rw_runtime::session::locate_wasm_host_executable()?;
     extensions::WasmProcessHook::new(
+        extensions::WasmWorkerPool::new(),
         helper,
         verified_manifest,
         component,

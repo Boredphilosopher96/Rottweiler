@@ -1,7 +1,6 @@
+import { TextRenderable } from "./text"
 import {
   BoxRenderable,
-  TextRenderable,
-  TextareaRenderable,
   bg,
   fg,
   t,
@@ -16,8 +15,11 @@ import {
   MAX_TOTAL_ATTACHMENT_BYTES,
   type Attachment,
 } from "../protocol"
-import type { ClipboardImage, EditorAdapter, ImagePasteAdapter } from "../platform"
+import { MAX_EDITOR_BYTES, type ClipboardImage, type EditorAdapter, type ImagePasteAdapter } from "../platform"
 import type { RottweilerTheme } from "../theme"
+import { ComposerEditorRenderable } from "./composer-editor"
+import { jsonEncodedBytes } from "../json-size"
+import { ComposerDraftStore, sameAttachment, MAX_COMPOSER_TEXT_BYTES, COMPOSER_TEXT_LIMIT_NOTICE } from "../composer-drafts"
 import { ImageAttachmentRenderable } from "./image"
 
 const COMPOSER_PLACEHOLDER = "Describe a task…"
@@ -35,14 +37,11 @@ export interface ComposerOptions {
   readonly onManageAttachments?: () => void
   readonly onAttachmentError?: (message: string) => void
   readonly submissionScope?: () => string
-  readonly onDetachedSubmissionRejected?: (
-    scope: string,
-    content: string,
-    attachments: readonly Attachment[],
-  ) => void
+  readonly drafts?: ComposerDraftStore
   readonly onInput?: (value: string) => void
   readonly onSubmitted?: () => void
   readonly onSubmissionSettled?: () => void
+  readonly onInputSettled?: () => void
   readonly onHeightChange?: (height: number) => void
 }
 
@@ -53,14 +52,19 @@ export interface ComposerFileMention {
 }
 
 export class ComposerRenderable extends BoxRenderable {
-  readonly editor: TextareaRenderable
+  readonly editor: ComposerEditorRenderable
   readonly attachmentsText: TextRenderable
   readonly queueText: TextRenderable
   readonly hintText: TextRenderable
+  readonly #ownsDrafts: boolean
+  readonly #drafts: ComposerDraftStore
   #attachments: Attachment[] = []
   #imagePreview: ImageAttachmentRenderable | null = null
   #options: ComposerOptions
   #theme: RottweilerTheme
+  #inputGeneration: object = {}
+  #retiring = false
+  #editorRequest: object | null = null
   #submitting = false
   #shellMode = false
   #imagePasteAvailable = false
@@ -92,6 +96,8 @@ export class ComposerRenderable extends BoxRenderable {
       marginLeft: 1,
       marginRight: 1,
     })
+    this.#ownsDrafts = options.drafts === undefined
+    this.#drafts = options.drafts ?? new ComposerDraftStore()
     this.#options = options
     this.#theme = theme
     this.#placeholder = COMPOSER_PLACEHOLDER
@@ -103,7 +109,7 @@ export class ComposerRenderable extends BoxRenderable {
       visible: false,
       onMouseDown: () => this.#options.onManageAttachments?.(),
     })
-    this.editor = new TextareaRenderable(ctx, {
+    this.editor = new ComposerEditorRenderable(ctx, {
       id: "composer-editor",
       width: "100%",
       flexGrow: 1,
@@ -137,7 +143,12 @@ export class ComposerRenderable extends BoxRenderable {
       onSubmit: () => this.submit(),
       onContentChange: () => this.#contentChanged(),
       onPaste: (event) => void this.#paste(event),
-    })
+    }, (codeUnits, utf8Bytes) => {
+      if (utf8Bytes > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return false }
+      if (this.#drafts.canRetainTextBytes(this.#scope(), utf8Bytes) && this.#drafts.canRetainText(this.#scope(), codeUnits, this.#attachments)) return true
+      this.#options.onAttachmentError?.("Draft storage is full. Shorten a draft or remove an attachment before adding more content.")
+      return false
+    }, this.#drafts.allocations)
     this.queueText = new TextRenderable(ctx, {
       id: "composer-queue",
       content: "",
@@ -159,11 +170,26 @@ export class ComposerRenderable extends BoxRenderable {
     this.add(this.queueText)
   }
 
+  override destroyRecursively(): void {
+    this.#retiring = true
+    super.destroyRecursively()
+  }
+
+  override destroy(): void {
+    if (this.isDestroyed) return
+    this.#retiring = true
+    this.#inputGeneration = {}
+    if (this.#ownsDrafts) this.#drafts.clear()
+    super.destroy()
+  }
+
   get value(): string {
     return this.editor.plainText
   }
 
   set value(value: string) {
+    if (!this.#admitDraft(value, this.#attachments)) return
+    this.#inputGeneration = {}
     this.editor.setText(value)
     this.setShellMode(value.startsWith("!"))
     this.#refreshHeight()
@@ -218,8 +244,10 @@ export class ComposerRenderable extends BoxRenderable {
 
   /** Replace the visible draft when switching between parent and child sessions. */
   restoreDraft(content: string, attachments: readonly Attachment[]): void {
+    if (!this.#admitDraft(content, attachments)) return
+    this.#inputGeneration = {}
     this.editor.setText(content)
-    this.#attachments = [...attachments]
+    this.#attachments = [...this.#drafts.get(this.#scope()).attachments]
     this.setShellMode(content.startsWith("!"))
     this.#refreshAttachments()
   }
@@ -277,6 +305,7 @@ export class ComposerRenderable extends BoxRenderable {
     const value = this.editor.plainText
     if (start < 0 || end < start || end > value.length) return false
     const next = value.slice(0, start) + replacement + value.slice(end)
+    if (!this.#admitDraft(next, this.#attachments)) return false
     this.editor.setText(next)
     this.setShellMode(next.startsWith("!"))
     const cursorCharacters = start + replacement.length
@@ -294,82 +323,63 @@ export class ComposerRenderable extends BoxRenderable {
     if ((content.trim().length === 0 && this.#attachments.length === 0) || this.#submitting) {
       return false
     }
-    if (composerWireBytes(content, this.#attachments) > MAX_COMPOSER_WIRE_BYTES) {
+    if (this.#attachments.length > MAX_ATTACHMENTS_PER_MESSAGE
+      || this.#attachments.reduce((sum, item) => sum + (attachmentBytes(item) ?? 0), 0) > MAX_TOTAL_ATTACHMENT_BYTES
+      || composerWireBytes(content, this.#attachments) > MAX_COMPOSER_WIRE_BYTES) {
       this.#options.onAttachmentError?.(
         "This message is too large to send. Remove some text or attachments and try again.",
       )
       return false
     }
-    const submittedAttachments = this.#attachments
-    const submissionScope = this.#options.submissionScope?.() ?? "default"
+    const submissionScope = this.#scope()
+    if (!this.#admitDraft(content, this.#attachments)) return false
+    const reservation = this.#drafts.submit(submissionScope)
+    if (reservation === null) return false
+    const submittedAttachments = reservation.draft.attachments
     this.#submitting = true
+    this.#inputGeneration = {}
     this.editor.clear()
     this.setShellMode(false)
     this.#attachments = []
     this.#refreshAttachments()
     try {
       const accepted = await this.#options.onSubmit(content, submittedAttachments)
-      if (accepted) {
+      if (!this.isDestroyed) this.#synchronizeDraft()
+      const restored = reservation.settle(accepted)
+      if (accepted && !this.isDestroyed) {
         this.#rememberPrompt(content)
         this.#options.onSubmitted?.()
-      } else {
-        this.#restoreRejectedSubmissionForScope(submissionScope, content, submittedAttachments)
+      } else if (!this.isDestroyed && restored !== null && this.#scope() === submissionScope) {
+        this.restoreDraft(restored.content, restored.attachments)
       }
       return accepted
     } catch (error) {
-      this.#restoreRejectedSubmissionForScope(submissionScope, content, submittedAttachments)
+      if (!this.isDestroyed) this.#synchronizeDraft()
+      const restored = reservation.settle(false)
+      if (!this.isDestroyed && restored !== null && this.#scope() === submissionScope) this.restoreDraft(restored.content, restored.attachments)
       throw error
     } finally {
       this.#submitting = false
-      this.#options.onSubmissionSettled?.()
+      if (!this.isDestroyed) this.#options.onSubmissionSettled?.()
     }
   }
 
-  #restoreRejectedSubmissionForScope(
-    scope: string,
-    content: string,
-    attachments: readonly Attachment[],
-  ): void {
-    if ((this.#options.submissionScope?.() ?? "default") === scope) {
-      this.#restoreRejectedSubmission(content, attachments)
-    } else {
-      this.#options.onDetachedSubmissionRejected?.(scope, content, attachments)
-    }
-  }
-
-  #restoreRejectedSubmission(content: string, attachments: readonly Attachment[]): void {
-    const current = this.editor.plainText
-    this.editor.setText(current.length === 0 ? content : `${content}\n${current}`)
-    this.setShellMode(this.editor.plainText.startsWith("!"))
-    const merged: Attachment[] = []
-    const identities = new Set<string>()
-    for (const attachment of this.#attachments) {
-      const identity = attachmentIdentity(attachment)
-      if (identities.has(identity)) continue
-      identities.add(identity)
-      merged.push(attachment)
-    }
-    let overflow = false
-    for (const attachment of attachments) {
-      const identity = attachmentIdentity(attachment)
-      if (identities.has(identity)) continue
-      if (
-        merged.length < MAX_ATTACHMENTS_PER_MESSAGE &&
-        attachmentBudgetError(attachment, merged, this.editor.plainText) === null
-      ) {
-        identities.add(identity)
-        merged.push(attachment)
-      } else {
-        overflow = true
-      }
-    }
-    if (overflow) {
-      this.#options.onAttachmentError?.(
-        "Some attachments from the rejected send could not be restored because the current draft reached its attachment limit.",
-      )
-    }
-    this.#attachments = merged
+  #synchronizeDraft(): void {
+    if (this.#admitDraft(this.editor.plainText, this.#attachments)) return
+    const retained = this.#drafts.get(this.#scope())
+    this.editor.setText(retained.content)
+    this.#attachments = [...retained.attachments]
     this.#refreshAttachments()
+  }
+
+  #scope(): string { return this.#options.submissionScope?.() ?? "default" }
+
+  #admitDraft(content: string, attachments: readonly Attachment[]): boolean {
+    if (Buffer.byteLength(content) > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return false }
+    if (this.#retiring || this.isDestroyed) return false
+    if (this.#drafts.set(this.#scope(), { content, attachments })) return true
+    this.#options.onAttachmentError?.("Draft storage is full. Shorten a draft or remove an attachment before adding more content.")
+    return false
   }
 
   addAttachment(attachment: Attachment): boolean {
@@ -379,21 +389,25 @@ export class ComposerRenderable extends BoxRenderable {
       )
       return false
     }
-    const identity = attachmentIdentity(attachment)
-    if (this.#attachments.some((existing) => attachmentIdentity(existing) === identity)) return true
-    const error = attachmentBudgetError(attachment, this.#attachments, this.editor.plainText)
+    if (this.#attachments.some(existing => sameAttachment(existing, attachment))) return true
+    const admitted = Object.freeze({ ...attachment, data: Object.freeze({ ...attachment.data }) })
+    const error = attachmentBudgetError(admitted, this.#attachments, this.editor.plainText)
     if (error !== null) {
       this.#options.onAttachmentError?.(error)
       return false
     }
-    this.#attachments = [...this.#attachments, attachment]
+    const attachments = [...this.#attachments, admitted]
+    if (!this.#admitDraft(this.editor.plainText, attachments)) return false
+    this.#attachments = [...this.#drafts.get(this.#scope()).attachments]
     this.#refreshAttachments()
     return true
   }
 
   removeAttachment(index: number): boolean {
     if (index < 0 || index >= this.#attachments.length) return false
-    this.#attachments = this.#attachments.filter((_, candidate) => candidate !== index)
+    const attachments = this.#attachments.filter((_, candidate) => candidate !== index)
+    if (!this.#admitDraft(this.editor.plainText, attachments)) return false
+    this.#attachments = [...this.#drafts.get(this.#scope()).attachments]
     this.#refreshAttachments()
     this.editor.focus()
     return true
@@ -412,70 +426,112 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   async pasteImage(): Promise<boolean> {
-    if (!this.#imagePasteAvailable) return false
-    const image = await this.#options.imagePaste.readImage()
-    if (image === null) {
+    return this.#readImage(() => this.#options.imagePaste.readImage())
+  }
+
+  async #readImage(read: () => Promise<ClipboardImage | null>): Promise<boolean> {
+    if (!this.#imagePasteAvailable) {
+      this.#options.onAttachmentError?.("The selected model does not support image input. Choose a vision-capable model first.")
       return false
     }
-    return this.addImage(image)
+    const current = this.#inputOwner()
+    // Base64 storage plus bounded image metadata is reserved before native/file I/O.
+    const reservation = this.#drafts.reserveDraft(this.#scope(), 32_768 + 8 * Math.ceil(MAX_IMAGE_ATTACHMENT_BYTES / 3), 1)
+    if (reservation === null) {
+      this.#options.onAttachmentError?.("Another input is still loading, or the draft has no space for an image.")
+      return false
+    }
+    try {
+      const image = await read()
+      if (!current()) return false
+      if (image === null) {
+        this.#options.onAttachmentError?.("The clipboard or selected path does not contain a supported image.")
+        return false
+      }
+      const attachment: Attachment = { name: image.name, media_type: image.mediaType, data: { type: "inline_base64", data: image.base64 } }
+      const bytes = attachmentBytes(attachment)
+      if (bytes === null || bytes > MAX_IMAGE_ATTACHMENT_BYTES) throw new Error("Image input exceeds its 5 MiB limit.")
+      const restored = reservation.finish({ content: "", attachments: [attachment] }).settle(false)
+      if (restored === null) return false
+      this.#attachments = [...restored.attachments]
+      this.#refreshAttachments()
+      return true
+    } catch (error) {
+      if (current()) this.#options.onAttachmentError?.(error instanceof Error ? error.message : "Image input failed.")
+      return false
+    } finally {
+      reservation.cancel()
+      if (!this.isDestroyed) this.#options.onInputSettled?.()
+    }
   }
 
   async #paste(event: PasteEvent): Promise<void> {
     if (!this.editor.focused) return
-    let text: string
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes)
-    } catch {
-      event.preventDefault()
-      this.#options.onAttachmentError?.("The pasted content is not valid UTF-8 text.")
-      return
-    }
     event.preventDefault()
-    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
-    const trimmed = normalized.trim()
-    if (trimmed.length === 0) {
-      if (!(await this.pasteImage())) {
-        this.#options.onAttachmentError?.("The clipboard does not contain a supported image.")
-      }
-      return
-    }
-    let localImage: ClipboardImage | null
-    try {
-      localImage = await this.#options.imagePaste.readPath(trimmed)
-    } catch (error) {
-      this.#options.onAttachmentError?.(
-        error instanceof Error ? error.message : "That image path could not be attached safely.",
-      )
-      return
-    }
-    if (localImage !== null) {
-      this.addImage(localImage)
-      return
-    }
-    const bytes = Buffer.byteLength(trimmed)
-    const lineCount = (trimmed.match(/\n/g)?.length ?? 0) + 1
-    if ((lineCount >= 3 || trimmed.length > 150) && bytes <= 1024 * 1024) {
-      const ordinal = this.#attachments.filter((item) => item.name.startsWith("Pasted text")).length + 1
-      this.addAttachment({
-        name: `Pasted text ${ordinal}`,
-        media_type: "text/plain",
-        data: { type: "text", content: trimmed },
-      })
-      return
-    }
-    if (bytes > 1024 * 1024) {
+    if (event.bytes.length > MAX_TEXT_ATTACHMENT_BYTES) {
       this.#options.onAttachmentError?.("Pasted text exceeds the 1 MiB message attachment limit.")
       return
     }
-    this.editor.insertText(normalized)
+    let text: string
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes) }
+    catch { this.#options.onAttachmentError?.("The pasted content is not valid UTF-8 text."); return }
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    const trimmed = normalized.trim()
+    if (trimmed.length === 0) { await this.pasteImage(); return }
+    let imageRead: (() => Promise<ClipboardImage | null>) | null
+    try { imageRead = this.#options.imagePaste.preparePath(trimmed) }
+    catch (error) {
+      this.#options.onAttachmentError?.(error instanceof Error ? error.message : "That image path is invalid.")
+      return
+    }
+    if (imageRead !== null) { await this.#readImage(imageRead); return }
+    const firstNewline = trimmed.indexOf("\n")
+    const hasThreeLines = firstNewline >= 0 && trimmed.indexOf("\n", firstNewline + 1) >= 0
+    if (hasThreeLines || trimmed.length > 150) {
+      const ordinal = this.#attachments.filter((item) => item.name.startsWith("Pasted text")).length + 1
+      this.addAttachment({ name: `Pasted text ${ordinal}`, media_type: "text/plain", data: { type: "text", content: trimmed } })
+    } else {
+      // Text paste is one synchronous editor operation at its initiating selection.
+      this.editor.insertText(normalized)
+    }
+  }
+
+  #inputOwner(): () => boolean {
+    const generation = this.#inputGeneration
+    const scope = this.#options.submissionScope?.()
+    return () => !this.#retiring && !this.isDestroyed && generation === this.#inputGeneration
+      && scope === this.#options.submissionScope?.()
   }
 
   async openExternalEditor(): Promise<void> {
-    const result = await this.#options.editor.compose(this.editor.plainText)
-    if (result !== null) {
-      this.editor.replaceText(result)
-      this.setShellMode(result.startsWith("!"))
-      this.editor.focus()
+    if (this.#editorRequest !== null) return
+    const current = this.#inputOwner()
+    if (Buffer.byteLength(this.editor.plainText) > MAX_EDITOR_BYTES) {
+      this.#options.onAttachmentError?.("External editor content exceeds its 2 MiB limit.")
+      return
+    }
+    const reservation = this.#drafts.reserveText(this.#scope(), MAX_COMPOSER_TEXT_BYTES)
+    if (reservation === null) {
+      this.#options.onAttachmentError?.("Another input is still loading, or the draft has no space for the external editor.")
+      return
+    }
+    const request = {}
+    this.#editorRequest = request
+    const content = this.editor.plainText
+    try {
+      const result = await this.#options.editor.compose(content)
+      if (!current() || result === null) return
+      if (Buffer.byteLength(result) > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return }
+      if (this.editor.plainText === content) this.#drafts.set(this.#scope(), { content: "", attachments: this.#attachments })
+      const restored = reservation.finish(result).settle(false)
+      if (restored !== null) {
+        this.restoreDraft(restored.content, restored.attachments)
+      }
+    } catch (error) { if (current()) throw error }
+    finally {
+      reservation.cancel()
+      if (this.#editorRequest === request) this.#editorRequest = null
+      if (!this.isDestroyed) this.#options.onInputSettled?.()
     }
   }
 
@@ -493,7 +549,15 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   #contentChanged(): void {
+    if (this.#retiring || this.isDestroyed) return
     const value = this.editor.plainText
+    if (!this.#admitDraft(value, this.#attachments)) {
+      const retained = this.#drafts.get(this.#scope())
+      this.editor.setText(retained.content)
+      this.#attachments = [...retained.attachments]
+      this.#refreshAttachments()
+      return
+    }
     const restoringHistory =
       this.#restoringHistory || this.#pendingHistoryRestore === value
     if (!restoringHistory) {
@@ -515,7 +579,12 @@ export class ComposerRenderable extends BoxRenderable {
   #rememberPrompt(content: string): void {
     if (content.trim().length === 0) return
     if (this.#history.at(-1) !== content) this.#history.push(content)
-    if (this.#history.length > 256) this.#history.splice(0, this.#history.length - 256)
+    let bytes = this.#history.reduce((sum, prompt) => sum + 32 + prompt.length * 2, 0)
+    while (this.#history.length > 256 || bytes > 1024 * 1024) {
+      const oldest = this.#history.shift()
+      if (oldest === undefined) break
+      bytes -= 32 + oldest.length * 2
+    }
     this.#historyIndex = null
     this.#historyDraft = ""
     this.#pendingHistoryRestore = null
@@ -627,14 +696,6 @@ function characterIndexForByteOffset(value: string, target: number): number {
   return index
 }
 
-function attachmentIdentity(attachment: Attachment): string {
-  if (attachment.source_path !== undefined) return `path:${attachment.source_path}`
-  if (attachment.data.type === "inline_base64") {
-    return `image:${attachment.media_type}:${attachment.data.data}`
-  }
-  return `text:${attachment.media_type}:${attachment.data.content}`
-}
-
 // The host accepts a 16 MiB JSON command. Keep one MiB for the command envelope,
 // session identity, and future additive fields while measuring the exact UTF-8
 // JSON representation of all user-controlled composer payloads.
@@ -667,13 +728,31 @@ function attachmentBudgetError(
     : null
 }
 
+const attachmentWireSizes = new WeakMap<Attachment, number>()
 function composerWireBytes(content: string, attachments: readonly Attachment[]): number {
-  return Buffer.byteLength(JSON.stringify({ content, attachments }))
+  let bytes = jsonEncodedBytes({ content, attachments: [] }, MAX_COMPOSER_WIRE_BYTES)
+  for (const [index, attachment] of attachments.entries()) {
+    if (bytes > MAX_COMPOSER_WIRE_BYTES) return bytes
+    let encoded = attachmentWireSizes.get(attachment)
+    if (encoded === undefined) {
+      encoded = attachment.data.type === "inline_base64" && attachmentBytes(attachment) !== null
+        ? jsonEncodedBytes({ ...attachment, data: { type: "inline_base64", data: "" } }, MAX_COMPOSER_WIRE_BYTES) + attachment.data.data.length
+        : jsonEncodedBytes(attachment, MAX_COMPOSER_WIRE_BYTES)
+      if (Object.isFrozen(attachment) && Object.isFrozen(attachment.data)) attachmentWireSizes.set(attachment, encoded)
+    }
+    bytes += encoded + (index > 0 ? 1 : 0)
+  }
+  return bytes
 }
 
+const attachmentContentSizes = new WeakMap<Attachment, number>()
 function attachmentBytes(attachment: Attachment): number | null {
+  const cached = attachmentContentSizes.get(attachment)
+  if (cached !== undefined) return cached
   if (attachment.data.type === "text") {
-    return Buffer.byteLength(attachment.data.content)
+    const bytes = Buffer.byteLength(attachment.data.content)
+    if (Object.isFrozen(attachment) && Object.isFrozen(attachment.data)) attachmentContentSizes.set(attachment, bytes)
+    return bytes
   }
   const value = attachment.data.data
   if (
@@ -682,5 +761,7 @@ function attachmentBytes(attachment: Attachment): number | null {
     !/^[A-Za-z0-9+/]*={0,2}$/.test(value)
   ) return null
   const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0
-  return (value.length / 4) * 3 - padding
+  const bytes = (value.length / 4) * 3 - padding
+  if (Object.isFrozen(attachment) && Object.isFrozen(attachment.data)) attachmentContentSizes.set(attachment, bytes)
+  return bytes
 }

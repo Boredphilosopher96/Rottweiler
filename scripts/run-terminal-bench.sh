@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tasks="$repo/evals/terminal-bench-20.txt"
-: "${ROTTWEILER_RELEASE_ARCHIVE:?set to a Linux release archive from scripts/build-release.sh}"
+: "${ROTTWEILER_RELEASE_ARCHIVE:?set to a Linux release archive from python3 scripts/build-native-candidate.py --print archive}"
 : "${ROTTWEILER_EVAL_MODEL:?set to a pinned provider/model identifier}"
 : "${ROTTWEILER_EVAL_OUTPUT_DIR:?set to a dedicated Harbor evidence directory}"
 : "${ROTTWEILER_EVAL_API_KEY:?set to the job-scoped model credential}"

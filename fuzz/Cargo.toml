@@ -9,10 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rw-context = { path = "../crates/rw-context" }
-rw-plugin-protocol = { path = "../crates/rw-plugin-protocol" }
-rw-store = { path = "../crates/rw-store" }
-rw-types = { path = "../crates/rw-types" }
+rw-context = { version = "0.1.4", path = "../crates/rw-context" }
+rw-plugin-protocol = { version = "0.1.4", path = "../crates/rw-plugin-protocol" }
+rw-store = { version = "0.1.4", path = "../crates/rw-store" }
+rw-types = { version = "0.1.4", path = "../crates/rw-types" }
 serde_json = "1.0"
 tempfile = "3.27"
 toml = "0.9"

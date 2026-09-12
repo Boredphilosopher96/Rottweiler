@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { contractFixture } from "../../../protocol/fixtures/contract"
 import eventSchema from "../../../protocol/schema/engine-event.schema.json"
 import { PROTOCOL_VERSION } from "../src/protocol"
-import { durableSequenceId, isWireEngineEvent, normalizeWireEngineEvent } from "../src/transport"
+import { isWireEngineEvent, normalizeWireEngineEvent } from "../src/transport"
 
 describe("generated engine event validation", () => {
   test("accepts every Rust-authored fixture without coercion or projection changes", () => {
@@ -13,7 +13,7 @@ describe("generated engine event validation", () => {
     }
   })
 
-  test("rejects the reproduced known discriminator without its required payload", () => {
+  test("rejects a known discriminator without its required payload", () => {
     expect(normalizeWireEngineEvent({ type: "command_acknowledged" })).toBeNull()
     expect(isWireEngineEvent({ type: "command_acknowledged" })).toBeFalse()
   })
@@ -59,27 +59,42 @@ describe("generated engine event validation", () => {
     }
   })
 
-  test("preserves the unknown discriminator policy and additive object fields", () => {
+  test("requires bounded authenticated identities for durable tool payloads", () => {
+    const event = contractFixture.engine_events.find(event => event.type === "tool_call_finished")
+    if (event === undefined) throw new Error("missing tool completion fixture")
+    const reference = { digest: "a".repeat(64), bytes: 64 * 1024 * 1024 }
+    const valid = { ...event, payloads: Array.from({ length: 8 }, () => reference) }
+    expect(normalizeWireEngineEvent(valid)).toBe(valid)
+    for (const payloads of [
+      null,
+      Array.from({ length: 9 }, () => reference),
+      [{ ...reference, digest: "A".repeat(64) }],
+      [{ ...reference, digest: "a".repeat(63) }],
+      [{ ...reference, bytes: reference.bytes + 1 }],
+      [{ ...reference, bytes: "1" }],
+      [{ ...reference, path: "/untrusted" }],
+    ]) expect(normalizeWireEngineEvent({ ...event, payloads })).toBeNull()
+  })
+
+  test("rejects unsupported discriminators and undeclared object fields", () => {
     const unknown = { type: "future_event", meta: { sequence_id: "42" }, payload: [1] }
-    expect(normalizeWireEngineEvent(unknown)).toBe(unknown)
+    expect(normalizeWireEngineEvent(unknown)).toBeNull()
     const event = contractFixture.engine_events[0]
     if (event === undefined) throw new Error("empty event fixture")
     const known = { ...event, additive_field: true }
-    expect(normalizeWireEngineEvent(known)).toBe(known)
+    expect(normalizeWireEngineEvent(known)).toBeNull()
     for (const invalid of [null, [], {}, { type: 1 }]) expect(normalizeWireEngineEvent(invalid)).toBeNull()
   })
 
-  test("additive metadata cannot turn transient or connection events into durable events", () => {
+  test("rejects undeclared metadata on transient and connection events", () => {
     const transient = contractFixture.engine_events.find((event) => event.type === "compaction_attempt_started")
     const connection = contractFixture.engine_events.find((event) => event.type === "command_acknowledged")
     if (transient === undefined || connection === undefined) throw new Error("missing event fixtures")
     for (const meta of [null, { sequence_id: "99" }]) {
       const event = { ...transient, meta }
-      expect(normalizeWireEngineEvent(event)).toBe(event)
-      expect(durableSequenceId(event)).toBeNull()
+      expect(normalizeWireEngineEvent(event)).toBeNull()
     }
     const event = { ...connection, meta: { ...connection.meta, sequence_id: "99" } }
-    expect(normalizeWireEngineEvent(event)).toBe(event)
-    expect(durableSequenceId(event)).toBeNull()
+    expect(normalizeWireEngineEvent(event)).toBeNull()
   })
 })

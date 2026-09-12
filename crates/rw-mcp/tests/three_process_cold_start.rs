@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used)]
 
+mod common;
+
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -8,15 +10,15 @@ use std::{
 
 use async_trait::async_trait;
 use rw_mcp::{
-    CompactJsonEncoder, FilesystemSpool, McpError, McpLimits, McpManager, McpServerConfig,
-    McpTransportConfig, StdioLaunchPolicy, TestOnlyUnsandboxedStdioConnector,
+    CompactJsonEncoder, McpConnectionApprovalPolicy, McpError, McpLimits, McpManager,
+    McpServerConfig, McpTransportConfig, TestOnlyUnsandboxedStdioConnector,
 };
 use rw_types::McpServerId;
 
 struct ApprovedFixture(PathBuf);
 
 #[async_trait]
-impl StdioLaunchPolicy for ApprovedFixture {
+impl McpConnectionApprovalPolicy for ApprovedFixture {
     async fn approve(&self, config: &McpServerConfig) -> Result<(), McpError> {
         match &config.transport {
             McpTransportConfig::Stdio { executable, .. } if executable == &self.0 => Ok(()),
@@ -32,11 +34,7 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
         ApprovedFixture(executable.clone()),
     )));
     let directory = tempfile::tempdir().expect("temp");
-    let spool = Arc::new(
-        FilesystemSpool::new(directory.path().to_path_buf())
-            .await
-            .expect("spool"),
-    );
+    let spool = common::spool(directory.path());
     let manager = McpManager::new(
         connector,
         spool,
@@ -44,7 +42,7 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
         McpLimits::default(),
     );
     for index in 0..3 {
-        let pid_file = directory.path().join(format!("pid-{index}"));
+        let lifetime_file = directory.path().join(format!("lifetime-{index}"));
         manager
             .register(McpServerConfig {
                 id: McpServerId::new(format!("real-{index}")).expect("id"),
@@ -53,8 +51,8 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
                     args: Vec::new(),
                     working_directory: None,
                     environment: vec![(
-                        "RW_MCP_PID_FILE".to_owned(),
-                        pid_file.to_string_lossy().into_owned(),
+                        "RW_MCP_LIFETIME_FILE".to_owned(),
+                        lifetime_file.to_string_lossy().into_owned(),
                     )],
                     sandbox: rw_mcp::McpStdioSandboxPolicy::default(),
                 },
@@ -87,19 +85,23 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
     }
     let tokenizer = tiktoken_rs::cl100k_base().expect("tokenizer");
     assert!(tokenizer.encode_with_special_tokens(&prompt).len() < 2_000);
-    let pids = (0..3)
-        .map(|index| {
-            std::fs::read_to_string(directory.path().join(format!("pid-{index}"))).expect("pid")
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+    let lifetimes = (0..3)
+        .map(|index| directory.path().join(format!("lifetime-{index}")))
+        .collect::<Vec<_>>();
+    assert_live_identities(&lifetimes);
     assert_eq!(
-        pids.len(),
-        3,
-        "each MCP connection must be a distinct real process"
+        manager
+            .tool_search("echo", None)
+            .await
+            .expect("admitted tool search")
+            .len(),
+        3
     );
-    assert_eq!(manager.tool_search("echo", None).await.len(), 3);
-    assert_eq!(manager.resources().await.len(), 3);
-    assert_eq!(manager.prompts().await.len(), 3);
+    assert_eq!(
+        manager.resources().await.expect("admitted metadata").len(),
+        3
+    );
+    assert_eq!(manager.prompts().await.expect("admitted metadata").len(), 3);
     assert!(
         manager
             .shutdown()
@@ -107,4 +109,30 @@ async fn three_real_stdio_processes_reach_prompt_ready_under_release_budget() {
             .into_iter()
             .all(|(_, result)| result.is_ok())
     );
+    for path in &lifetimes {
+        let file = std::fs::File::open(path).expect("retired process lifetime");
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .expect("shutdown settled each process lifetime");
+    }
+}
+
+fn assert_live_identities(lifetimes: &[PathBuf]) {
+    let identities = lifetimes
+        .iter()
+        .map(|path| std::fs::read(path).expect("process identity"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        identities.len(),
+        3,
+        "MCP connections use distinct processes"
+    );
+    assert!(identities.iter().all(|identity| identity.len() == 32));
+    for path in lifetimes {
+        let file = std::fs::File::open(path).expect("process lifetime descriptor");
+        assert_eq!(
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK),
+            "connected server retains its kernel lifetime lock"
+        );
+    }
 }

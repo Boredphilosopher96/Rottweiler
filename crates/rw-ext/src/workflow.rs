@@ -1,8 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
-use futures_util::future::join_all;
-use rw_types::{Cost, DiffArtifactRef, SessionId, SubagentId, Usage};
+pub use rw_types::workflow::WorkflowStepArtifact;
+use rw_types::workflow::{
+    MAX_WORKFLOW_EDGES, MAX_WORKFLOW_STEPS, TaskId, WorkflowChild, WorkflowRunState,
+    WorkflowTaskOutcome, valid_workflow_name as valid_name,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -12,27 +18,23 @@ use crate::discovery::{
 };
 
 const MAX_WORKFLOW_BYTES: u64 = 1024 * 1024;
-const MAX_WORKFLOW_STEPS: usize = 64;
-const MAX_WORKFLOW_EDGES: usize = 256;
-const MAX_STEP_ARTIFACT_BYTES: usize = 256 * 1024;
-const MAX_WORKFLOW_ARTIFACT_BYTES: usize = 1024 * 1024;
 
 /// Executable reference selected by one workflow step.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum WorkflowStepTarget {
     Agent(String),
     Command(String),
 }
 
 /// Failure policy for a workflow step.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum WorkflowOnFail {
     Stop,
     Continue,
 }
 
 /// Minimal deterministic condition evaluated from a completed dependency.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum WorkflowCondition {
     Always,
     Success(String),
@@ -40,7 +42,7 @@ pub enum WorkflowCondition {
 }
 
 /// One validated node in a declarative workflow DAG.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WorkflowStep {
     id: String,
     target: WorkflowStepTarget,
@@ -117,6 +119,16 @@ impl DiscoveredWorkflow {
     #[must_use]
     pub fn steps(&self) -> &[WorkflowStep] {
         &self.steps
+    }
+
+    /// Digest of every scheduler field; a changed definition cannot resume an old run.
+    ///
+    /// # Errors
+    /// Returns an error if the validated definition cannot be serialized.
+    pub fn definition_digest(&self) -> Result<String, WorkflowRunError> {
+        let bytes = serde_json::to_vec(&(&self.name, &self.steps))
+            .map_err(|error| WorkflowRunError::Persistence(error.to_string()))?;
+        Ok(blake3::hash(&bytes).to_hex().to_string())
     }
 
     #[must_use]
@@ -328,13 +340,6 @@ fn deduplicated(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
-        })
-}
-
 fn invalid_workflow<T>(
     path: &std::path::Path,
     message: &str,
@@ -348,25 +353,14 @@ fn invalid_workflow<T>(
 /// Bounded artifacts supplied to one workflow node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowStepRequest {
+    pub task_id: TaskId,
     pub workflow: String,
     /// Stable contiguous position among nodes that actually execute.
     pub step_index: usize,
     pub step_id: String,
     pub target: WorkflowStepTarget,
     pub prompt: String,
-    pub artifacts: BTreeMap<String, WorkflowStepArtifact>,
-}
-
-/// Bounded typed output retained for downstream workflow nodes and reports.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct WorkflowStepArtifact {
-    pub subagent_id: SubagentId,
-    pub child_session_id: SessionId,
-    pub final_text: String,
-    pub touched_files: Vec<String>,
-    pub diff_artifact: Option<DiffArtifactRef>,
-    pub usage: Usage,
-    pub cost: Cost,
+    pub artifacts: BTreeMap<String, Arc<WorkflowStepArtifact>>,
 }
 
 /// Public orchestration boundary used by both interactive and headless runners.
@@ -379,15 +373,25 @@ pub trait WorkflowStepExecutor: Send + Sync {
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("{message}")]
-pub struct WorkflowStepExecutionError {
-    message: String,
+pub enum WorkflowStepExecutionError {
+    #[error("{message}")]
+    Failed { message: String },
+    #[error("{message}")]
+    Unsettled { message: String },
 }
 
 impl WorkflowStepExecutionError {
+    /// Use only when no effect started, or all child effects and cleanup settled.
     #[must_use]
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed {
+            message: message.into(),
+        }
+    }
+    /// Retain the started obligation when execution or cleanup is unproven.
+    #[must_use]
+    pub fn unsettled(message: impl Into<String>) -> Self {
+        Self::Unsettled {
             message: message.into(),
         }
     }
@@ -397,7 +401,7 @@ impl WorkflowStepExecutionError {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WorkflowStepReport {
     pub id: String,
-    pub output: Option<WorkflowStepArtifact>,
+    pub output: Option<Arc<WorkflowStepArtifact>>,
     pub error: Option<String>,
     pub skipped: bool,
 }
@@ -409,191 +413,30 @@ pub struct WorkflowRunReport {
     pub steps: Vec<WorkflowStepReport>,
 }
 
-/// Deterministic, resource-bounded declarative workflow runner.
-pub struct WorkflowRunner<'a, Executor> {
-    executor: &'a Executor,
-}
+mod runner;
+pub use runner::WorkflowRunner;
 
-impl<'a, Executor> WorkflowRunner<'a, Executor>
-where
-    Executor: WorkflowStepExecutor,
-{
-    #[must_use]
-    pub const fn new(executor: &'a Executor) -> Self {
-        Self { executor }
-    }
-
-    /// Runs ready sequential nodes one at a time and ready `parallel = true`
-    /// nodes as a stable concurrent wave.
-    ///
-    /// # Errors
-    ///
-    /// Stops on a failed `on-fail = "stop"` node or when artifact limits are
-    /// exceeded.
-    pub async fn run(
+/// Required durable transitions. Implementations retain write ownership on cancellation.
+#[async_trait]
+pub trait WorkflowJournal: Send + Sync {
+    async fn state(&self) -> Result<WorkflowRunState, WorkflowRunError>;
+    async fn claim(&self, tasks: Vec<TaskId>) -> Result<(), WorkflowRunError>;
+    async fn bind_child(&self, task: TaskId, child: WorkflowChild) -> Result<(), WorkflowRunError>;
+    async fn settle(
         &self,
-        workflow: &DiscoveredWorkflow,
-    ) -> Result<WorkflowRunReport, WorkflowRunError> {
-        let mut complete = BTreeSet::new();
-        let mut artifacts = BTreeMap::<String, WorkflowStepArtifact>::new();
-        let mut reports = BTreeMap::<String, WorkflowStepReport>::new();
-        let mut total_artifact_bytes = 0_usize;
-        let mut next_execution_index = 0_usize;
-        while complete.len() != workflow.steps.len() {
-            let ready = workflow
-                .steps
-                .iter()
-                .filter(|step| {
-                    !complete.contains(&step.id)
-                        && step.needs.iter().all(|need| complete.contains(need))
-                })
-                .collect::<Vec<_>>();
-            let Some(first) = ready.first() else {
-                return Err(WorkflowRunError::InvalidGraph);
-            };
-            let wave = if first.parallel {
-                ready
-                    .into_iter()
-                    .take_while(|step| step.parallel)
-                    .collect::<Vec<_>>()
-            } else {
-                vec![*first]
-            };
-            let (skipped, wave): (Vec<_>, Vec<_>) = wave
-                .into_iter()
-                .partition(|step| !condition_matches(&step.condition, &reports));
-            for step in skipped {
-                reports.insert(
-                    step.id.clone(),
-                    WorkflowStepReport {
-                        id: step.id.clone(),
-                        output: None,
-                        error: None,
-                        skipped: true,
-                    },
-                );
-                complete.insert(step.id.clone());
-            }
-            if wave.is_empty() {
-                continue;
-            }
-            let wave_start = next_execution_index;
-            let requests = wave
-                .iter()
-                .enumerate()
-                .map(|(offset, step)| WorkflowStepRequest {
-                    workflow: workflow.name.clone(),
-                    step_index: wave_start.saturating_add(offset),
-                    step_id: step.id.clone(),
-                    target: step.target.clone(),
-                    prompt: step.prompt.clone(),
-                    artifacts: step
-                        .inputs
-                        .iter()
-                        .filter_map(|id| artifacts.get(id).map(|value| (id.clone(), value.clone())))
-                        .collect(),
-                })
-                .collect::<Vec<_>>();
-            next_execution_index = next_execution_index.saturating_add(requests.len());
-            let results = join_all(
-                requests
-                    .into_iter()
-                    .map(|request| self.executor.execute_step(request)),
-            )
-            .await;
-            for (step, result) in wave.into_iter().zip(results) {
-                record_step_result(
-                    step,
-                    result,
-                    &mut total_artifact_bytes,
-                    &mut artifacts,
-                    &mut reports,
-                )?;
-                complete.insert(step.id.clone());
-            }
-        }
-        Ok(WorkflowRunReport {
-            workflow: workflow.name.clone(),
-            steps: workflow
-                .steps
-                .iter()
-                .filter_map(|step| reports.remove(&step.id))
-                .collect(),
-        })
-    }
-}
-
-fn record_step_result(
-    step: &WorkflowStep,
-    result: Result<WorkflowStepArtifact, WorkflowStepExecutionError>,
-    total_artifact_bytes: &mut usize,
-    artifacts: &mut BTreeMap<String, WorkflowStepArtifact>,
-    reports: &mut BTreeMap<String, WorkflowStepReport>,
-) -> Result<(), WorkflowRunError> {
-    match result {
-        Ok(output) => {
-            let output_bytes = serde_json::to_vec(&output)
-                .map_err(|_| WorkflowRunError::ArtifactLimit {
-                    step: step.id.clone(),
-                })?
-                .len();
-            if output_bytes > MAX_STEP_ARTIFACT_BYTES
-                || total_artifact_bytes.saturating_add(output_bytes) > MAX_WORKFLOW_ARTIFACT_BYTES
-            {
-                return Err(WorkflowRunError::ArtifactLimit {
-                    step: step.id.clone(),
-                });
-            }
-            *total_artifact_bytes = total_artifact_bytes.saturating_add(output_bytes);
-            artifacts.insert(step.id.clone(), output.clone());
-            reports.insert(
-                step.id.clone(),
-                WorkflowStepReport {
-                    id: step.id.clone(),
-                    output: Some(output),
-                    error: None,
-                    skipped: false,
-                },
-            );
-        }
-        Err(error) => {
-            if step.on_fail == WorkflowOnFail::Stop {
-                return Err(WorkflowRunError::StepFailed {
-                    step: step.id.clone(),
-                    message: error.to_string(),
-                });
-            }
-            reports.insert(
-                step.id.clone(),
-                WorkflowStepReport {
-                    id: step.id.clone(),
-                    output: None,
-                    error: Some(error.to_string()),
-                    skipped: false,
-                },
-            );
-        }
-    }
-    Ok(())
-}
-
-fn condition_matches(
-    condition: &WorkflowCondition,
-    reports: &BTreeMap<String, WorkflowStepReport>,
-) -> bool {
-    match condition {
-        WorkflowCondition::Always => true,
-        WorkflowCondition::Success(step) => reports
-            .get(step)
-            .is_some_and(|report| report.output.is_some() && !report.skipped),
-        WorkflowCondition::Failure(step) => reports
-            .get(step)
-            .is_some_and(|report| report.error.is_some() && !report.skipped),
-    }
+        task: TaskId,
+        outcome: WorkflowTaskOutcome,
+    ) -> Result<(), WorkflowRunError>;
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum WorkflowRunError {
+    #[error("workflow persistence failed: {0}")]
+    Persistence(String),
+    #[error("workflow run contains an unsettled task `{step}`; inspect its child before retrying")]
+    UnsettledTask { step: String },
+    #[error("workflow definition differs from the durable run")]
+    DefinitionChanged,
     #[error("workflow graph became unrunnable")]
     InvalidGraph,
     #[error("workflow step `{step}` failed: {message}")]
@@ -640,6 +483,70 @@ mod tests {
             cost: rw_types::Cost::Unavailable {
                 reason: "fixture".to_owned(),
             },
+        }
+    }
+
+    struct MemoryJournal(Mutex<rw_types::workflow::WorkflowRunState>);
+    impl MemoryJournal {
+        fn new(workflow: &super::DiscoveredWorkflow) -> Self {
+            Self(Mutex::new(rw_types::workflow::WorkflowRunState {
+                run_id: rw_types::workflow::WorkflowRunId::parse("0".repeat(32)).expect("run"),
+                parent_session_id: rw_types::SessionId("parent".to_owned()),
+                workflow: workflow.name().to_owned(),
+                definition_digest: workflow.definition_digest().expect("digest"),
+                tasks: workflow
+                    .steps()
+                    .iter()
+                    .map(|step| {
+                        (
+                            step.id().to_owned(),
+                            rw_types::workflow::WorkflowTaskState::Pending,
+                        )
+                    })
+                    .collect(),
+            }))
+        }
+    }
+    #[async_trait]
+    impl super::WorkflowJournal for MemoryJournal {
+        async fn state(
+            &self,
+        ) -> Result<rw_types::workflow::WorkflowRunState, super::WorkflowRunError> {
+            Ok(self.0.lock().expect("state").clone())
+        }
+        async fn claim(
+            &self,
+            tasks: Vec<rw_types::workflow::TaskId>,
+        ) -> Result<(), super::WorkflowRunError> {
+            for task in tasks {
+                self.0.lock().expect("state").tasks.insert(
+                    task.step_id,
+                    rw_types::workflow::WorkflowTaskState::Started { child: None },
+                );
+            }
+            Ok(())
+        }
+        async fn bind_child(
+            &self,
+            task: rw_types::workflow::TaskId,
+            child: rw_types::workflow::WorkflowChild,
+        ) -> Result<(), super::WorkflowRunError> {
+            self.0.lock().expect("state").tasks.insert(
+                task.step_id,
+                rw_types::workflow::WorkflowTaskState::Started { child: Some(child) },
+            );
+            Ok(())
+        }
+        async fn settle(
+            &self,
+            task: rw_types::workflow::TaskId,
+            outcome: rw_types::workflow::WorkflowTaskOutcome,
+        ) -> Result<(), super::WorkflowRunError> {
+            self.0.lock().expect("state").tasks.insert(
+                task.step_id,
+                rw_types::workflow::WorkflowTaskState::Settled { outcome },
+            );
+            Ok(())
         }
     }
 
@@ -715,7 +622,8 @@ needs = ["impl", "tests"]
             events: Arc::clone(&events),
         };
 
-        let report = WorkflowRunner::new(&executor)
+        let journal = MemoryJournal::new(workflow);
+        let report = WorkflowRunner::new(&executor, &journal)
             .run(workflow)
             .await
             .expect("workflow run");
@@ -783,7 +691,9 @@ needs = ["a"]
             &self,
             _request: WorkflowStepRequest,
         ) -> Result<WorkflowStepArtifact, WorkflowStepExecutionError> {
-            Ok(artifact("x".repeat(super::MAX_STEP_ARTIFACT_BYTES + 1)))
+            Ok(artifact(
+                "x".repeat(rw_types::workflow::MAX_STEP_ARTIFACT_BYTES + 1),
+            ))
         }
     }
 
@@ -800,7 +710,8 @@ needs = ["a"]
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
         );
 
-        let error = WorkflowRunner::new(&OversizedExecutor)
+        let journal = MemoryJournal::new(catalog.workflow("delivery").expect("workflow"));
+        let error = WorkflowRunner::new(&OversizedExecutor, &journal)
             .run(catalog.workflow("delivery").expect("workflow"))
             .await
             .expect_err("artifact rejected");
@@ -822,7 +733,9 @@ needs = ["a"]
             request: WorkflowStepRequest,
         ) -> Result<WorkflowStepArtifact, WorkflowStepExecutionError> {
             if request.step_id == "test" {
-                Err(WorkflowStepExecutionError::new("expected replay failure"))
+                Err(WorkflowStepExecutionError::failed(
+                    "expected replay failure",
+                ))
             } else {
                 Ok(artifact(request.step_id))
             }
@@ -859,7 +772,8 @@ if = "success:test"
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
         );
 
-        let report = WorkflowRunner::new(&ConditionalExecutor)
+        let journal = MemoryJournal::new(catalog.workflow("delivery").expect("workflow"));
+        let report = WorkflowRunner::new(&ConditionalExecutor, &journal)
             .run(catalog.workflow("delivery").expect("workflow"))
             .await
             .expect("continued workflow");
@@ -873,5 +787,148 @@ if = "success:test"
             Some("fix")
         );
         assert!(report.steps[2].skipped);
+    }
+    #[tokio::test]
+    async fn resumed_run_reuses_completed_dependencies_and_rejects_ambiguous_work() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        write_workflow(
+            &project,
+            "description = \"resume\"\n[[step]]\nid = \"plan\"\nagent = \"plan\"\n[[step]]\nid = \"build\"\nagent = \"general\"\nneeds = [\"plan\"]\n",
+        );
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(project, fixture.path().join("home"))
+                .with_project_trusted(true),
+        );
+        let workflow = catalog.workflow("delivery").expect("workflow");
+        let journal = MemoryJournal::new(workflow);
+        journal.0.lock().expect("state").tasks.insert(
+            "plan".to_owned(),
+            rw_types::workflow::WorkflowTaskState::Settled {
+                outcome: rw_types::workflow::WorkflowTaskOutcome::Completed {
+                    artifact: Arc::new(artifact("saved plan")),
+                },
+            },
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let executor = ReplayExecutor {
+            events: Arc::clone(&events),
+        };
+        let report = WorkflowRunner::new(&executor, &journal)
+            .run(workflow)
+            .await
+            .expect("resume");
+        assert_eq!(
+            report.steps[0].output.as_ref().expect("plan").final_text,
+            "saved plan"
+        );
+        assert_eq!(
+            *events.lock().expect("events"),
+            ["start:build", "finish:build"]
+        );
+        events.lock().expect("events").clear();
+        WorkflowRunner::new(&executor, &journal)
+            .run(workflow)
+            .await
+            .expect("terminal replay");
+        assert!(events.lock().expect("events").is_empty());
+        journal.0.lock().expect("state").tasks.insert(
+            "build".to_owned(),
+            rw_types::workflow::WorkflowTaskState::Started { child: None },
+        );
+        assert!(matches!(
+            WorkflowRunner::new(&executor, &journal).run(workflow).await,
+            Err(super::WorkflowRunError::UnsettledTask { .. })
+        ));
+        assert!(events.lock().expect("events").is_empty());
+    }
+
+    struct UnsettledExecutor;
+    #[async_trait]
+    impl WorkflowStepExecutor for UnsettledExecutor {
+        async fn execute_step(
+            &self,
+            request: WorkflowStepRequest,
+        ) -> Result<WorkflowStepArtifact, WorkflowStepExecutionError> {
+            if request.step_id == "uncertain" {
+                Err(WorkflowStepExecutionError::unsettled("cleanup missing"))
+            } else if request.step_id == "oversized" {
+                Ok(artifact(
+                    "x".repeat(rw_types::workflow::MAX_STEP_ARTIFACT_BYTES + 1),
+                ))
+            } else {
+                Ok(artifact(request.step_id))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_peer_does_not_discard_a_settled_parallel_receipt() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        write_workflow(
+            &project,
+            "description = \"settlement\"\n[[step]]\nid = \"uncertain\"\nagent = \"plan\"\nparallel = true\non-fail = \"continue\"\n[[step]]\nid = \"done\"\nagent = \"general\"\nparallel = true\n",
+        );
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(project, fixture.path().join("home"))
+                .with_project_trusted(true),
+        );
+        let workflow = catalog.workflow("delivery").expect("workflow");
+        let journal = MemoryJournal::new(workflow);
+        assert!(matches!(
+            WorkflowRunner::new(&UnsettledExecutor, &journal)
+                .run(workflow)
+                .await,
+            Err(super::WorkflowRunError::UnsettledTask { .. })
+        ));
+        let state = journal.0.lock().expect("state");
+        assert!(matches!(
+            state.tasks["uncertain"],
+            rw_types::workflow::WorkflowTaskState::Started { .. }
+        ));
+        assert!(matches!(
+            state.tasks["done"],
+            rw_types::workflow::WorkflowTaskState::Settled { .. }
+        ));
+    }
+    #[tokio::test]
+    async fn oversized_peer_does_not_discard_a_settled_parallel_receipt() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        write_workflow(
+            &project,
+            r#"description = "limits"
+[[step]]
+id = "oversized"
+agent = "plan"
+parallel = true
+[[step]]
+id = "done"
+agent = "general"
+parallel = true
+"#,
+        );
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(project, fixture.path().join("home"))
+                .with_project_trusted(true),
+        );
+        let workflow = catalog.workflow("delivery").expect("workflow");
+        let journal = MemoryJournal::new(workflow);
+        assert!(matches!(
+            WorkflowRunner::new(&UnsettledExecutor, &journal)
+                .run(workflow)
+                .await,
+            Err(super::WorkflowRunError::ArtifactLimit { .. })
+        ));
+        let state = journal.0.lock().expect("state");
+        assert!(matches!(
+            state.tasks["oversized"],
+            rw_types::workflow::WorkflowTaskState::Started { .. }
+        ));
+        assert!(matches!(
+            state.tasks["done"],
+            rw_types::workflow::WorkflowTaskState::Settled { .. }
+        ));
     }
 }

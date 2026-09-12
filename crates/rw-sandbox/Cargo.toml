@@ -6,15 +6,35 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "rw-sandbox-ownership-fixture"
+path = "tests/fixtures/ownership.rs"
+test = false
+bench = false
+
 [[test]]
 name = "linux_helper_driver"
 path = "tests/linux_helper_driver.rs"
 harness = false
 
+[[test]]
+name = "linux_preparation_driver"
+path = "tests/linux_preparation_driver.rs"
+harness = false
+
+[[test]]
+name = "process_creation_driver"
+path = "tests/process_creation_driver.rs"
+harness = false
+
 [dependencies]
 base64.workspace = true
+blake3.workspace = true
+sha2.workspace = true
 rw-types.workspace = true
-rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
+rustix.workspace = true
+nix = { workspace = true, features = ["socket"] }
+rustls = { version = "0.23.41", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -26,8 +46,11 @@ webpki-roots = "1.0.8"
 landlock = "0.4.5"
 libc = "0.2.183"
 nix = { workspace = true, features = ["fs", "socket"] }
-rustix.workspace = true
+rustix = { workspace = true, features = ["mount", "thread"] }
 seccompiler = "0.5.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rw-macos-bootstrap = { version = "0.1.4", path = "../rw-macos-bootstrap" }
 
 [dev-dependencies]
 tempfile = "3.23"

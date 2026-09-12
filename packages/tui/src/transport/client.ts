@@ -1,4 +1,13 @@
-import type { ClientCommand, CommandOutcome } from "../protocol"
+import { MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES } from "../../../../protocol/types"
+import { ClientAllocationError, ClientAllocationOwner } from "../client-allocation"
+import type { ReplyAllocation } from "./reply-allocation"
+import { EngineProtocolError, EngineTransportError } from "./errors"
+import type { ClientDiagnostics } from "../client-diagnostics"
+import validateCommandReply from "../../../../protocol/command-reply-validator.js"
+import { CLIENT_COMMAND_LANE, CLIENT_COMMAND_EXECUTION, ENGINE_EVENT_DELIVERY, MAX_COMMAND_REPLY_BYTES, PROTOCOL_VERSION } from "../protocol"
+import { boundedJson } from "./json"
+import { ClientCommandAdmission } from "./command-admission"
+import type { ClientCommand, CommandReply, EngineEvent } from "../protocol"
 import {
   DEFAULT_BACKOFF_POLICY,
   backoffDelay,
@@ -14,10 +23,11 @@ import {
   normalizeWireEngineEvent,
   type AttachSessionCommand,
   type TransportConnectionUpdate,
-  type WireEngineEvent,
 } from "./types"
 
 export interface EngineTransportOptions {
+  readonly allocations?: ClientAllocationOwner
+  readonly diagnostics?: ClientDiagnostics | undefined
   readonly socketPath: string
   readonly bootstrapToken: string | BootstrapTokenProvider
   readonly origin?: string
@@ -36,9 +46,10 @@ export type BootstrapTokenProvider = () => string | Promise<string>
 export type EngineStreamRestartMode = "immediate" | "backoff"
 
 export interface EngineSubscriptionOptions {
+  readonly allocation?: ReplyAllocation
   readonly attach: AttachSessionCommand
   readonly signal: AbortSignal
-  readonly onEvent: (event: WireEngineEvent) => void | Promise<void>
+  readonly onEvent: (event: EngineEvent) => void | Promise<void>
   readonly onConnection?: (update: TransportConnectionUpdate) => void
   readonly onReconnect?: () => void | Promise<void>
   readonly onReplayCursorAhead?: () => void | Promise<void>
@@ -52,6 +63,8 @@ interface ActiveEventStream {
 }
 
 export class EngineHttpSseClient {
+  readonly allocations: ClientAllocationOwner
+  readonly #diagnostics: ClientDiagnostics | undefined
   readonly #socketPath: string
   readonly #bootstrapToken: BootstrapTokenProvider
   readonly #origin: string
@@ -63,9 +76,12 @@ export class EngineHttpSseClient {
   readonly #scheduler: BackoffScheduler
   readonly #sse: SseParserOptions
   readonly #fetch: typeof fetch
+  readonly #commands: ClientCommandAdmission
   #clientAuth: ClientAuth | null = null
   #clientAuthRequest: Promise<ClientAuth> | null = null
   #activeEventStream: ActiveEventStream | null = null
+
+  get commandUsage() { return { reads: this.#commands.usage, controls: this.#commands.controlUsage, watches: this.#commands.watchUsage } }
 
   constructor(options: EngineTransportOptions) {
     if (options.socketPath.length === 0) {
@@ -74,6 +90,9 @@ export class EngineHttpSseClient {
     if (typeof options.bootstrapToken === "string" && options.bootstrapToken.length === 0) {
       throw new TypeError("engine bootstrap token must not be empty")
     }
+    this.allocations = options.allocations ?? new ClientAllocationOwner()
+    this.#diagnostics = options.diagnostics
+    this.#commands = new ClientCommandAdmission(options.diagnostics, this.allocations)
     this.#socketPath = options.socketPath
     this.#bootstrapToken =
       typeof options.bootstrapToken === "string"
@@ -91,19 +110,29 @@ export class EngineHttpSseClient {
     validateBackoffPolicy(this.#backoff)
   }
 
-  async postCommand(
-    command: ClientCommand,
-    signal?: AbortSignal,
-  ): Promise<CommandOutcome | null> {
-    const auth = await this.#ensureClientAuth(signal)
+  postCommand(command: ClientCommand, signal?: AbortSignal, allocation?: ReplyAllocation): Promise<CommandReply> {
+    return this.#commands.run(command, signal, (request, lifetime, prepare) => this.#postCommand(request, lifetime, allocation, prepare))
+  }
+
+  async #postCommand(command: ClientCommand, signal: AbortSignal | undefined, allocation: ReplyAllocation | undefined, prepare: (authenticated: ClientCommand) => void): Promise<CommandReply> {
+    signal?.throwIfAborted()
+    const replyAllocation = CLIENT_COMMAND_LANE[command.type] === "urgent" ? {
+      admit(bytes: number) {
+        if (bytes > MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES * 32) throw new EngineProtocolError("urgent reply allocation exceeds its allowance")
+        allocation?.admit(bytes)
+      },
+    } : allocation
+    const auth = await this.#ensureClientAuth(signal, replyAllocation)
+    signal?.throwIfAborted()
     const authenticatedCommand: ClientCommand = {
       ...command,
       meta: { ...command.meta, client_id: auth.clientId },
     }
+    prepare(authenticatedCommand)
     const response = await this.#fetch(this.#url(this.#commandPath), {
       unix: this.#socketPath,
       method: "POST",
-      headers: this.#clientHeaders(auth, { "Content-Type": "application/json" }),
+      headers: this.#clientHeaders(auth, { "Content-Type": "application/json", "x-rottweiler-command-lane": CLIENT_COMMAND_LANE[command.type] }),
       body: JSON.stringify(authenticatedCommand),
       ...(signal === undefined ? {} : { signal }),
     })
@@ -111,29 +140,43 @@ export class EngineHttpSseClient {
       if (response.status === 401 || response.status === 403) {
         this.#clientAuth = null
       }
+      await response.body?.cancel()
       throw new EngineTransportError("engine command rejected", response.status)
     }
-    if (response.status === 204 || response.headers.get("Content-Length") === "0") {
-      return null
+    const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase()
+    if (contentType !== "application/json") {
+      await response.body?.cancel()
+      throw new EngineProtocolError("engine command reply must use application/json")
     }
-    const contentType = response.headers.get("Content-Type") ?? ""
-    if (!contentType.toLowerCase().includes("application/json")) {
-      return null
-    }
-    const outcome: unknown = await response.json()
-    if (!isCommandOutcome(outcome)) {
-      throw new EngineTransportError("engine returned an invalid command outcome")
-    }
-    return outcome
+    const reply: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal, replyAllocation)
+    const validatedAt = this.#diagnostics?.start()
+    try {
+      if (!validateCommandReply(reply)) {
+        throw new EngineProtocolError("engine returned an invalid command reply")
+      }
+      const expectedReply = CLIENT_COMMAND_EXECUTION[command.type] === "read" ? "read" : "command"
+      if (reply.type !== expectedReply) {
+        throw new EngineProtocolError("engine reply class does not match the command")
+      }
+      if (reply.type === "read" && reply.events.some(event =>
+        ENGINE_EVENT_DELIVERY[event.type] !== "connection" || !("meta" in event) || event.meta.protocol_version !== PROTOCOL_VERSION
+        || !("client_id" in event.meta) || event.meta.client_id !== auth.clientId
+        || !("request_id" in event.meta) || event.meta.request_id !== command.meta.request_id
+        || ("session_id" in command && "session_id" in event && event.session_id !== command.session_id))) {
+        throw new EngineProtocolError("engine read reply contains non-query events")
+      }
+      return reply
+    } finally { if (validatedAt !== undefined) this.#diagnostics?.finish("reply_validation", validatedAt) }
   }
 
   async submitProviderApiKey(
     sessionId: string,
     provider: string,
     apiKey: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    allocation: ReplyAllocation,
   ): Promise<{ readonly stored: true; readonly activated: boolean; readonly warnings: readonly string[] }> {
-    const auth = await this.#ensureClientAuth(signal)
+    const auth = await this.#ensureClientAuth(signal, allocation)
     const response = await this.#fetch(this.#url(this.#providerApiKeyPath), {
       unix: this.#socketPath,
       method: "POST",
@@ -143,12 +186,13 @@ export class EngineHttpSseClient {
     })
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) this.#clientAuth = null
+      await response.body?.cancel()
       throw new EngineTransportError("provider credential submission failed", response.status)
     }
-    const value: unknown = await response.json()
+    const value: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, this.#diagnostics, signal, allocation)
     if (!isRecord(value) || value.stored !== true || typeof value.activated !== "boolean" || !Array.isArray(value.warnings)
       || value.warnings.some((warning) => typeof warning !== "string")) {
-      throw new EngineTransportError("engine returned an invalid credential result")
+      throw new EngineProtocolError("engine returned an invalid credential result")
     }
     return { stored: true, activated: value.activated, warnings: value.warnings as string[] }
   }
@@ -156,9 +200,10 @@ export class EngineHttpSseClient {
   async activateProvider(
     sessionId: string,
     provider: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    allocation: ReplyAllocation,
   ): Promise<void> {
-    const auth = await this.#ensureClientAuth(signal)
+    const auth = await this.#ensureClientAuth(signal, allocation)
     const response = await this.#fetch(this.#url("/v1/activate-provider"), {
       unix: this.#socketPath,
       method: "POST",
@@ -166,6 +211,7 @@ export class EngineHttpSseClient {
       body: JSON.stringify({ session_id: sessionId, provider }),
       ...(signal === undefined ? {} : { signal }),
     })
+    await response.body?.cancel()
     if (!response.ok) throw new EngineTransportError("provider activation failed", response.status)
   }
 
@@ -218,20 +264,23 @@ export class EngineHttpSseClient {
           },
           ...(lastSeen === null ? { last_seen_sequence: null } : { last_seen_sequence: lastSeen }),
         }
-        const outcome = await this.postCommand(attach, options.signal)
+        const reply = await this.postCommand(attach, options.signal, options.allocation)
+        const outcome = reply.outcome
         if (outcome?.type === "rejected") {
           throw new EngineTransportError(`engine rejected session attach: ${outcome.error.message}`)
         }
         if (reconnecting) {
           await options.onReconnect?.()
+          if (options.getLastSeenSequence !== undefined) lastSeen = options.getLastSeenSequence()
         }
 
+        const streamAuth = await this.#ensureClientAuth(options.signal, options.allocation)
         const response = await this.#fetch(
           this.#url(this.#eventsPath(options.attach.session_id, lastSeen)),
           {
             unix: this.#socketPath,
             method: "GET",
-            headers: this.#clientHeaders(await this.#ensureClientAuth(options.signal), {
+            headers: this.#clientHeaders(streamAuth, {
               Accept: "text/event-stream",
             }),
             signal: eventStreamController.signal,
@@ -241,28 +290,35 @@ export class EngineHttpSseClient {
           if (response.status === 401 || response.status === 403) {
             this.#clientAuth = null
           }
-          if (await isReplayCursorAheadResponse(response)) {
+          if (await isReplayCursorAheadResponse(response, options.allocation)) {
             throw new ReplayCursorAheadError(response.status)
           }
           throw new EngineTransportError("engine event stream rejected", response.status)
         }
         if (!response.body) {
-          throw new EngineTransportError("engine event stream has no response body")
+          throw new EngineProtocolError("engine event stream has no response body")
         }
         const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? ""
         if (!contentType.startsWith("text/event-stream")) {
-          throw new EngineTransportError("engine event stream has an invalid content type")
+          throw new EngineProtocolError("engine event stream has an invalid content type")
         }
         options.onConnection?.({ phase: "connected", attempt })
 
         for await (const frame of parseSseStream(
           response.body,
-          this.#sse,
+          { ...this.#sse, allocation: options.allocation },
           eventStreamController.signal,
         )) {
-          const value = normalizeWireEngineEvent(parseEventJson(frame.data))
+          const decodedAt = this.#diagnostics?.start()
+          let value: EngineEvent | null
+          try { value = normalizeWireEngineEvent(parseEventJson(frame.data)) }
+          finally { if (decodedAt !== undefined) this.#diagnostics?.finish("event_decode", decodedAt) }
           if (value === null) {
             throw new EngineProtocolError("engine event stream emitted an invalid event")
+          }
+          if (ENGINE_EVENT_DELIVERY[value.type] === "connection" && "meta" in value
+            && "client_id" in value.meta && value.meta.client_id !== streamAuth.clientId) {
+            throw new EngineProtocolError("engine event is addressed to another client")
           }
           await options.onEvent(value)
           receivedEvent = true
@@ -285,7 +341,7 @@ export class EngineHttpSseClient {
           }
           await options.onReplayCursorAhead()
           replayCursorReset = true
-          lastSeen = null
+          lastSeen = options.getLastSeenSequence?.() ?? null
           attempt = 0
           reconnecting = true
           options.onConnection?.({ phase: "disconnected", attempt })
@@ -301,7 +357,7 @@ export class EngineHttpSseClient {
           })
           // A bounded parser rejection is deterministic for the same replay
           // cursor. Retrying would request the identical poison event forever.
-          if (error instanceof SseLimitError || error instanceof EngineProtocolError) {
+          if (error instanceof SseLimitError || error instanceof EngineProtocolError || error instanceof ClientAllocationError) {
             throw error
           }
         }
@@ -349,12 +405,12 @@ export class EngineHttpSseClient {
     return `${this.#origin}${path}`
   }
 
-  async #ensureClientAuth(signal?: AbortSignal): Promise<ClientAuth> {
+  async #ensureClientAuth(signal?: AbortSignal, allocation?: ReplyAllocation): Promise<ClientAuth> {
     if (this.#clientAuth !== null) {
       return this.#clientAuth
     }
     if (this.#clientAuthRequest === null) {
-      this.#clientAuthRequest = this.#mintClientAuth(signal).finally(() => {
+      this.#clientAuthRequest = this.#mintClientAuth(signal, allocation).finally(() => {
         this.#clientAuthRequest = null
       })
     }
@@ -363,7 +419,7 @@ export class EngineHttpSseClient {
     return auth
   }
 
-  async #mintClientAuth(signal?: AbortSignal): Promise<ClientAuth> {
+  async #mintClientAuth(signal?: AbortSignal, allocation?: ReplyAllocation): Promise<ClientAuth> {
     const bootstrapToken = await this.#bootstrapToken()
     if (bootstrapToken.length === 0) {
       throw new EngineTransportError("engine bootstrap token source returned an empty token")
@@ -375,9 +431,10 @@ export class EngineHttpSseClient {
       ...(signal === undefined ? {} : { signal }),
     })
     if (!response.ok) {
+      await response.body?.cancel()
       throw new EngineTransportError("engine bootstrap connection rejected", response.status)
     }
-    const value: unknown = await response.json()
+    const value: unknown = await boundedJson(response, 64 * 1024, this.#diagnostics, signal, allocation)
     if (
       !isRecord(value) ||
       typeof value.client_id !== "string" ||
@@ -385,7 +442,7 @@ export class EngineHttpSseClient {
       typeof value.token !== "string" ||
       value.token.length === 0
     ) {
-      throw new EngineTransportError("engine returned invalid client credentials")
+      throw new EngineProtocolError("engine returned invalid client credentials")
     }
     return { clientId: value.client_id, token: value.token }
   }
@@ -404,23 +461,6 @@ export class EngineHttpSseClient {
   }
 }
 
-export class EngineTransportError extends Error {
-  readonly status: number | undefined
-
-  constructor(message: string, status?: number) {
-    super(status === undefined ? message : `${message} (HTTP ${status})`)
-    this.name = "EngineTransportError"
-    this.status = status
-  }
-}
-
-export class EngineProtocolError extends EngineTransportError {
-  constructor(message: string) {
-    super(message)
-    this.name = "EngineProtocolError"
-  }
-}
-
 class ReplayCursorAheadError extends EngineTransportError {
   constructor(status: number) {
     super("engine replay cursor is ahead of the durable log", status)
@@ -436,28 +476,11 @@ function defaultEventsPath(sessionId: string, lastSeenSequence: string | null): 
   return `/v1/events?${query.toString()}`
 }
 
-function isCommandOutcome(value: unknown): value is CommandOutcome {
-  if (!isRecord(value) || typeof value.type !== "string") {
-    return false
-  }
-  if (value.type === "accepted") {
-    return true
-  }
-  return (
-    value.type === "rejected" &&
-    isRecord(value.error) &&
-    typeof value.error.category === "string" &&
-    typeof value.error.code === "string" &&
-    typeof value.error.message === "string" &&
-    typeof value.error.retryable === "boolean"
-  )
-}
-
-async function isReplayCursorAheadResponse(response: Response): Promise<boolean> {
+async function isReplayCursorAheadResponse(response: Response, allocation?: ReplyAllocation): Promise<boolean> {
   const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? ""
   if (!contentType.includes("application/json")) return false
   try {
-    const value: unknown = await response.json()
+    const value: unknown = await boundedJson(response, MAX_COMMAND_REPLY_BYTES, undefined, undefined, allocation)
     return isRecord(value) &&
       isRecord(value.error) &&
       value.error.code === "replay_cursor_ahead"

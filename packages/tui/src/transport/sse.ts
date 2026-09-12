@@ -1,3 +1,5 @@
+import { CLIENT_ALLOCATION_LIMITS } from "../client-allocation"
+import { JsonAllocationShape, type ReplyAllocation } from "./reply-allocation"
 export interface SseMessage {
   readonly data: string
   readonly event?: string
@@ -6,6 +8,7 @@ export interface SseMessage {
 }
 
 export interface SseParserOptions {
+  readonly allocation?: ReplyAllocation | undefined
   readonly maxLineBytes?: number
   readonly maxDataBytes?: number
   readonly maxDataLines?: number
@@ -17,10 +20,14 @@ export interface SseParserOptions {
 const DEFAULT_MAX_DATA_BYTES = 16 * 1024 * 1024
 // The engine serializes each protocol event as one `data:` line. Keep the line
 // bound aligned with the event-data bound plus the SSE field prefix.
+const DATA_SEPARATOR = Uint8Array.of(10)
 const DEFAULT_MAX_LINE_BYTES = DEFAULT_MAX_DATA_BYTES + 16
 
 /** A bounded, incremental parser for the event-stream wire format. */
 export class SseParser {
+  readonly #allocation: ReplyAllocation | undefined
+  #shape = new JsonAllocationShape()
+  #inputBytes = 0
   readonly #decoder = new TextDecoder()
   readonly #maxLineBytes: number
   readonly #maxDataBytes: number
@@ -36,6 +43,7 @@ export class SseParser {
   #retry: number | undefined
 
   constructor(options: SseParserOptions = {}) {
+    this.#allocation = options.allocation
     this.#maxLineBytes = positiveBound(options.maxLineBytes, DEFAULT_MAX_LINE_BYTES)
     this.#maxDataBytes = positiveBound(options.maxDataBytes, DEFAULT_MAX_DATA_BYTES)
     this.#maxDataLines = positiveBound(options.maxDataLines, 1024)
@@ -46,6 +54,8 @@ export class SseParser {
   }
 
   *push(chunk: Uint8Array): Generator<SseMessage> {
+    this.#inputBytes = chunk.byteLength
+    this.#admit()
     let offset = 0
     while (offset < chunk.length) {
       const newline = chunk.indexOf(0x0a, offset)
@@ -86,6 +96,7 @@ export class SseParser {
     const required = this.#lineLength + segment.length
     if (required > this.#line.length) {
       const capacity = Math.min(this.#maxLineBytes, Math.max(required, this.#line.length * 2, 1024))
+      this.#admit(capacity, this.#line.byteLength, required)
       const expanded = new Uint8Array(capacity)
       expanded.set(this.#line.subarray(0, this.#lineLength))
       this.#copiedBytes += this.#lineLength
@@ -99,6 +110,7 @@ export class SseParser {
 
   #consumeLine(bytes: Uint8Array): SseMessage | null {
     const lineBytes = bytes.at(-1) === 0x0d ? bytes.subarray(0, -1) : bytes
+    this.#admit(this.#line.byteLength, 0, lineBytes.byteLength)
     const line = this.#decoder.decode(lineBytes)
 
     if (line.length === 0) {
@@ -127,6 +139,9 @@ export class SseParser {
         if (this.#dataBytes > this.#maxDataBytes) {
           throw new SseLimitError("SSE event data exceeds configured byte limit")
         }
+        if (separatorBytes > 0) this.#shape.append(DATA_SEPARATOR)
+        this.#shape.append(lineBytes.subarray(valueByteStart))
+        this.#admit()
         this.#data.push(value)
         break
       }
@@ -152,6 +167,15 @@ export class SseParser {
     return null
   }
 
+  #admit(capacity = this.#line.byteLength, previous = 0, lineBytes = 0): void {
+    // Retained source chunk, line growth, field decode/join and the parsed JSON graph overlap.
+    const metadata = ((this.#id?.length ?? 0) + (this.#event?.length ?? 0)) * 2
+    const peak = this.#shape.peak(capacity, previous) + this.#inputBytes + this.#dataBytes * 2 + lineBytes * 2 + metadata
+    if (peak > CLIENT_ALLOCATION_LIMITS.decoding) throw new SseLimitError("SSE prepared allocation admission exhausted")
+    try { this.#allocation?.admit(peak) }
+    catch { throw new SseLimitError("SSE prepared allocation admission exhausted") }
+  }
+
   #dispatch(): SseMessage | null {
     const message: SseMessage | null = this.#data.length === 0 ? null : {
         data: this.#data.join("\n"),
@@ -161,6 +185,7 @@ export class SseParser {
       }
     this.#data = []
     this.#dataBytes = 0
+    this.#shape = new JsonAllocationShape()
     this.#event = undefined
     this.#id = undefined
     this.#retry = undefined
@@ -192,8 +217,8 @@ export async function* parseSseStream(
     void cancelReader(signal?.reason)
   }
   if (signal?.aborted === true) {
-    await cancelReader(signal.reason)
-    reader.releaseLock()
+    try { await cancelReader(signal.reason) }
+    finally { reader.releaseLock(); options.allocation?.admit(0) }
     return
   } else {
     signal?.addEventListener("abort", onAbort, { once: true })
@@ -224,6 +249,7 @@ export async function* parseSseStream(
       // A rejecting underlying cancel must not strand the reader lock (or the
       // fetch body and its Unix socket) after an early consumer exit.
       reader.releaseLock()
+      options.allocation?.admit(0)
     }
   }
 }

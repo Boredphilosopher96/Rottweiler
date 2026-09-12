@@ -101,45 +101,46 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for MemoryComma
         let operation = parse_memory_operation(invocation.arguments())?;
         let workspace = self.workspace.clone();
         let storage_root = self.storage_root.clone();
-        let message = tokio::task::spawn_blocking(move || {
-            let store = ProjectMemoryStore::open_in(&storage_root, &workspace)?;
-            match operation {
-                MemoryOperation::List => {
-                    let entries = store.list()?;
-                    if entries.is_empty() {
-                        Ok("project memory is empty".to_owned())
-                    } else {
-                        Ok(frame_memory_entries(
-                            entries
-                                .into_iter()
-                                .map(|entry| format!("{}: {}", entry.id, entry.content)),
-                        ))
+        let message =
+            rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+                let store = ProjectMemoryStore::open_in(&storage_root, &workspace)?;
+                match operation {
+                    MemoryOperation::List => {
+                        let entries = store.list()?;
+                        if entries.is_empty() {
+                            Ok("project memory is empty".to_owned())
+                        } else {
+                            Ok(frame_memory_entries(
+                                entries
+                                    .into_iter()
+                                    .map(|entry| format!("{}: {}", entry.id, entry.content)),
+                            ))
+                        }
+                    }
+                    MemoryOperation::Read(id) => match store.read(id)? {
+                        Some(entry) => Ok(frame_memory_entries([format!(
+                            "{}: {}",
+                            entry.id, entry.content
+                        )])),
+                        None => Ok(format!("memory entry {id} does not exist")),
+                    },
+                    MemoryOperation::Write(content) => {
+                        let entry = store.write(content)?;
+                        Ok(format!("stored project memory entry {}", entry.id))
+                    }
+                    MemoryOperation::Clear => {
+                        let count = store.clear()?;
+                        Ok(format!("cleared {count} project memory entrie(s)"))
                     }
                 }
-                MemoryOperation::Read(id) => match store.read(id)? {
-                    Some(entry) => Ok(frame_memory_entries([format!(
-                        "{}: {}",
-                        entry.id, entry.content
-                    )])),
-                    None => Ok(format!("memory entry {id} does not exist")),
-                },
-                MemoryOperation::Write(content) => {
-                    let entry = store.write(content)?;
-                    Ok(format!("stored project memory entry {}", entry.id))
-                }
-                MemoryOperation::Clear => {
-                    let count = store.clear()?;
-                    Ok(format!("cleared {count} project memory entrie(s)"))
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            CommandExecutionError::new("memory_worker_failed", "project memory worker failed")
-        })?
-        .map_err(|error: rw_store::MemoryError| {
-            CommandExecutionError::new("memory_failed", error.to_string())
-        })?;
+            })
+            .await
+            .map_err(|_| {
+                CommandExecutionError::new("memory_worker_failed", "project memory worker failed")
+            })?
+            .map_err(|error: rw_store::MemoryError| {
+                CommandExecutionError::new("memory_failed", error.to_string())
+            })?;
 
         Ok(SessionCommandOutput {
             message,

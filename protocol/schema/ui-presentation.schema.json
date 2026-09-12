@@ -1,0 +1,478 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UiPresentation",
+  "description": "A self-contained, host-produced surface. A canonical tool result retains this\ndescriptor so historical rendering does not consult a different live plugin.",
+  "type": "object",
+  "properties": {
+    "owner": {
+      "$ref": "#/$defs/UiContributionOwner"
+    },
+    "descriptor": {
+      "$ref": "#/$defs/UiDisplayDescriptor"
+    },
+    "projected": {
+      "$ref": "#/$defs/UiProjectedFields"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "owner",
+    "descriptor",
+    "projected"
+  ],
+  "x-rw-max-json-bytes": 65536,
+  "x-rw-array-pair": {
+    "left": [
+      "descriptor",
+      "fields"
+    ],
+    "right": [
+      "projected",
+      "fields"
+    ],
+    "identity": "id",
+    "discriminator": "kind",
+    "maxItems": 32,
+    "collections": [
+      {
+        "tag": "list",
+        "values": "values",
+        "limit": "max_items"
+      },
+      {
+        "tag": "table",
+        "values": "rows",
+        "limit": "max_rows",
+        "width": "columns"
+      }
+    ]
+  },
+  "$defs": {
+    "UiContributionOwner": {
+      "type": "object",
+      "properties": {
+        "extension": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "generation": {
+          "$ref": "#/$defs/UiGenerationId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "extension",
+        "generation"
+      ]
+    },
+    "UiGenerationId": {
+      "description": "An application-minted endpoint epoch; restarting the same artifact creates a\ndifferent generation. It is a correlation identifier, never permission.",
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "UiDisplayDescriptor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "surface": {
+          "$ref": "#/$defs/UiDisplaySurface"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiDisplayField"
+          },
+          "maxItems": 32
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiDisplayAction"
+          },
+          "maxItems": 4
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "surface",
+        "fields",
+        "actions"
+      ]
+    },
+    "UiDisplaySurface": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tool_name": {
+              "type": "string"
+            },
+            "surface": {
+              "type": "string",
+              "const": "tool"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface",
+            "tool_name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "surface": {
+              "type": "string",
+              "const": "panel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "surface"
+          ]
+        }
+      ]
+    },
+    "UiDisplayField": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "kind": {
+              "type": "string",
+              "const": "badge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "max_items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "max_items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "x-rw-max-utf8-bytes": 128
+            },
+            "columns": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rw-max-utf8-bytes": 128,
+                "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+              }
+            },
+            "max_rows": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 32
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "columns",
+            "max_rows"
+          ]
+        }
+      ]
+    },
+    "UiDisplayAction": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "x-rw-max-utf8-bytes": 128
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "UiProjectedFields": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UiProjectedField"
+          },
+          "maxItems": 32
+        },
+        "truncated": {
+          "description": "At least one source value was truncated by a declared or aggregate bound.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "fields",
+        "truncated"
+      ]
+    },
+    "UiProjectedField": {
+      "description": "Host-produced data, keyed by the declared field identity. Missing/wrong-shaped\nsource values become null or empty collections instead of executing coercions.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "x-rw-max-utf8-bytes": 4096,
+                  "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "x-rw-max-utf8-bytes": 4096,
+                  "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "badge"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "values": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "maxLength": 4096,
+                "x-rw-max-utf8-bytes": 4096,
+                "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_.-]+$",
+              "x-rw-max-utf8-bytes": 128
+            },
+            "rows": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "x-rw-max-utf8-bytes": 4096,
+                  "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "rows"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -18,6 +18,12 @@ flags accepted by the installed version.
 | `rw serve` | Start the engine client server. |
 | `rw prompt dump` | Inspect the assembled prompt. |
 
+For an isolated SSH profile, set `ROTTWEILER_SSH_CONFIG` to an absolute readable
+regular file before `rw --remote <host>`. The engine control connection, socket
+forwarding, and foreground remote shell all pass that file to OpenSSH with `-F`.
+Without this variable, OpenSSH uses its standard configuration discovery.
+`ROTTWEILER_SSH_BIN` selects the SSH executable for those same connections.
+
 ## Global session and policy flags
 
 | Flag | Meaning |

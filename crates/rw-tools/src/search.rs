@@ -1,19 +1,27 @@
+mod presentation;
+use presentation::{GLOB_PRESENTATION, LS_PRESENTATION};
+
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
-use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{SearcherBuilder, sinks::UTF8};
-use ignore::WalkBuilder;
+mod grep;
+mod walk;
+use crate::files::operations::FileOperations;
 use rw_types::ToolCapability;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use walk::BoundedWalk;
 
 use crate::registry::{
     CapabilityManifest, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolResult,
     input_schema, parse_input,
 };
+
+const MAX_PATTERN_BYTES: usize = 64 * 1024;
+const MAX_REGEX_AUTOMATON_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SEARCH_LINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -29,24 +37,25 @@ pub struct GrepInput {
 #[derive(Clone, Debug)]
 pub struct GrepTool {
     limits: ToolLimits,
+    operations: FileOperations,
 }
 
 impl GrepTool {
     #[must_use]
     pub fn new(limits: ToolLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            operations: FileOperations::new(),
+        }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct GrepMatch {
-    path: PathBuf,
-    line: u64,
-    text: String,
 }
 
 #[async_trait]
 impl Tool for GrepTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.operations.settle().await
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<GrepInput>(
             "grep",
@@ -59,96 +68,12 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
-        context.cancellation.check()?;
-        let input: GrepInput = parse_input(input)?;
-        if input.pattern.is_empty() {
-            return Err(ToolError::InvalidInput(
-                "pattern must not be empty".to_owned(),
-            ));
-        }
-        let roots = context.resolve_search_roots(&input.path)?;
-        let regex = RegexMatcherBuilder::new()
-            .case_insensitive(input.case_insensitive)
-            .build(&input.pattern)
-            .map_err(|error| ToolError::InvalidInput(format!("invalid regex: {error}")))?;
-        let glob = input.glob.as_deref().map(compile_glob).transpose()?;
-        let mut findings = Vec::new();
-        let mut result_bytes = 0usize;
-        let mut truncated = false;
-
-        for root in roots {
-            for entry in WalkBuilder::new(&root)
-                .standard_filters(true)
-                .follow_links(false)
-                .sort_by_file_path(std::path::Path::cmp)
-                .build()
-                .filter_map(Result::ok)
-            {
-                context.cancellation.check()?;
-                if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-                    continue;
-                }
-                let relative = context.relative_display(entry.path());
-                if glob
-                    .as_ref()
-                    .is_some_and(|matcher| !matcher.is_match(&relative))
-                {
-                    continue;
-                }
-                let mut searcher = SearcherBuilder::new().line_number(true).build();
-                searcher
-                    .search_path(
-                        &regex,
-                        entry.path(),
-                        UTF8(|line, text| {
-                            if context.cancellation.is_cancelled()
-                                || findings.len() >= self.limits.max_search_results
-                            {
-                                truncated = true;
-                                return Ok(false);
-                            }
-                            let text = text.trim_end_matches(['\n', '\r']).to_owned();
-                            let prospective = relative.as_os_str().len() + text.len() + 32;
-                            if result_bytes.saturating_add(prospective)
-                                > self.limits.max_result_bytes
-                            {
-                                truncated = true;
-                                return Ok(false);
-                            }
-                            result_bytes = result_bytes.saturating_add(prospective);
-                            findings.push(GrepMatch {
-                                path: relative.clone(),
-                                line,
-                                text,
-                            });
-                            Ok(true)
-                        }),
-                    )
-                    .map_err(|error| ToolError::Io {
-                        operation: "search file",
-                        path: relative,
-                        source: std::io::Error::other(error),
-                    })?;
-                if truncated {
-                    break;
-                }
-            }
-            if truncated {
-                break;
-            }
-        }
-        context.cancellation.check()?;
-        let model_text = findings
-            .iter()
-            .map(|item| format!("{}:{}:{}", item.path.display(), item.line, item.text))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut result = ToolResult::new(
-            model_text,
-            json!({"matches": findings, "count": findings.len(), "truncated": truncated}),
-        );
-        result.truncated = truncated;
-        Ok(result)
+        let limits = self.limits;
+        self.operations
+            .read(context.clone(), move |context| {
+                grep::execute(context, input, limits)
+            })
+            .await
     }
 }
 
@@ -163,17 +88,25 @@ pub struct GlobInput {
 #[derive(Clone, Debug)]
 pub struct GlobTool {
     limits: ToolLimits,
+    operations: FileOperations,
 }
 
 impl GlobTool {
     #[must_use]
     pub fn new(limits: ToolLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            operations: FileOperations::new(),
+        }
     }
 }
 
 #[async_trait]
 impl Tool for GlobTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.operations.settle().await
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<GlobInput>("glob", "List non-ignored workspace paths matching a glob.")
     }
@@ -183,55 +116,56 @@ impl Tool for GlobTool {
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
-        context.cancellation.check()?;
-        let input: GlobInput = parse_input(input)?;
-        let roots = context.resolve_search_roots(&input.path)?;
-        let matcher = compile_glob(&input.pattern)?;
-        let mut paths = Vec::new();
-        let mut bytes = 0usize;
-        let mut truncated = false;
-        for root in roots {
-            for entry in WalkBuilder::new(&root)
-                .standard_filters(true)
-                .follow_links(false)
-                .sort_by_file_path(std::path::Path::cmp)
-                .build()
-                .filter_map(Result::ok)
-            {
+        let limits = self.limits;
+        self.operations
+            .read(context.clone(), move |context| {
                 context.cancellation.check()?;
-                if entry.path() == root {
-                    continue;
+                let input: GlobInput = parse_input(input)?;
+                let roots = context.resolve_search_roots(&input.path)?;
+                let matcher = compile_glob(&input.pattern)?;
+                let mut paths = Vec::new();
+                let mut bytes = 0usize;
+                let mut truncated = false;
+                for root in roots {
+                    for entry in BoundedWalk::new(&root, true, &context.cancellation)? {
+                        let entry = entry?;
+                        context.cancellation.check()?;
+                        if entry.path() == root {
+                            continue;
+                        }
+                        let relative = context.relative_display(entry.path());
+                        if !matcher.is_match(&relative) {
+                            continue;
+                        }
+                        let length = relative.as_os_str().len().saturating_add(1);
+                        if paths.len() >= limits.max_search_results
+                            || bytes.saturating_add(length) > limits.max_result_bytes
+                        {
+                            truncated = true;
+                            break;
+                        }
+                        bytes = bytes.saturating_add(length);
+                        paths.push(relative);
+                    }
+                    if truncated {
+                        break;
+                    }
                 }
-                let relative = context.relative_display(entry.path());
-                if !matcher.is_match(&relative) {
-                    continue;
-                }
-                let length = relative.as_os_str().len().saturating_add(1);
-                if paths.len() >= self.limits.max_search_results
-                    || bytes.saturating_add(length) > self.limits.max_result_bytes
-                {
-                    truncated = true;
-                    break;
-                }
-                bytes = bytes.saturating_add(length);
-                paths.push(relative);
-            }
-            if truncated {
-                break;
-            }
-        }
-        paths.sort();
-        let model_text = paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut result = ToolResult::new(
-            model_text,
-            json!({"paths": paths, "count": paths.len(), "truncated": truncated}),
-        );
-        result.truncated = truncated;
-        Ok(result)
+                paths.sort();
+                let model_text = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut result = ToolResult::new(
+                    model_text,
+                    json!({"paths": paths, "count": paths.len(), "truncated": truncated}),
+                )
+                .with_presentation(GLOB_PRESENTATION.plan()?);
+                result.truncated = truncated;
+                Ok(result)
+            })
+            .await
     }
 }
 
@@ -247,12 +181,16 @@ pub struct LsInput {
 #[derive(Clone, Debug)]
 pub struct LsTool {
     limits: ToolLimits,
+    operations: FileOperations,
 }
 
 impl LsTool {
     #[must_use]
     pub fn new(limits: ToolLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            operations: FileOperations::new(),
+        }
     }
 }
 
@@ -265,6 +203,10 @@ struct LsEntry {
 
 #[async_trait]
 impl Tool for LsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        self.operations.settle().await
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<LsInput>("ls", "List workspace directory entries and basic metadata.")
     }
@@ -274,77 +216,79 @@ impl Tool for LsTool {
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
-        context.cancellation.check()?;
-        let input: LsInput = parse_input(input)?;
-        let roots = context.resolve_search_roots(&input.path)?;
-        let mut entries = Vec::new();
-        let mut result_bytes = 0usize;
-        let mut truncated = false;
-        for root in roots {
-            if !root.is_dir() {
-                return Err(ToolError::InvalidInput(format!(
-                    "{} is not a directory",
-                    input.path.display()
-                )));
-            }
-            let iterator = WalkBuilder::new(&root)
-                .max_depth(if input.recursive { None } else { Some(1) })
-                .standard_filters(true)
-                .follow_links(false)
-                .sort_by_file_path(std::path::Path::cmp)
-                .build();
-            for entry in iterator.filter_map(Result::ok) {
+        let limits = self.limits;
+        self.operations
+            .read(context.clone(), move |context| {
                 context.cancellation.check()?;
-                if entry.path() == root {
-                    continue;
-                }
-                if entries.len() >= self.limits.max_directory_entries {
-                    truncated = true;
-                    break;
-                }
-                let metadata = entry.metadata().ok();
-                let kind = metadata.as_ref().map_or("other", |metadata| {
-                    if metadata.is_dir() {
-                        "directory"
-                    } else if metadata.is_file() {
-                        "file"
-                    } else if metadata.file_type().is_symlink() {
-                        "symlink"
-                    } else {
-                        "other"
+                let input: LsInput = parse_input(input)?;
+                let roots = context.resolve_search_roots(&input.path)?;
+                let mut entries = Vec::new();
+                let mut result_bytes = 0usize;
+                let mut truncated = false;
+                for root in roots {
+                    if !root.is_dir() {
+                        return Err(ToolError::InvalidInput(format!(
+                            "{} is not a directory",
+                            input.path.display()
+                        )));
                     }
-                });
-                let path = context.relative_display(entry.path());
-                let prospective = path.as_os_str().len().saturating_add(12);
-                if result_bytes.saturating_add(prospective) > self.limits.max_result_bytes {
-                    truncated = true;
-                    break;
+                    let iterator = BoundedWalk::new(&root, input.recursive, &context.cancellation)?;
+                    for entry in iterator {
+                        let entry = entry?;
+                        context.cancellation.check()?;
+                        if entry.path() == root {
+                            continue;
+                        }
+                        if entries.len() >= limits.max_directory_entries {
+                            truncated = true;
+                            break;
+                        }
+                        let metadata = entry.metadata().ok();
+                        let kind = metadata.as_ref().map_or("other", |metadata| {
+                            if metadata.is_dir() {
+                                "directory"
+                            } else if metadata.is_file() {
+                                "file"
+                            } else if metadata.file_type().is_symlink() {
+                                "symlink"
+                            } else {
+                                "other"
+                            }
+                        });
+                        let path = context.relative_display(entry.path());
+                        let prospective = path.as_os_str().len().saturating_add(12);
+                        if result_bytes.saturating_add(prospective) > limits.max_result_bytes {
+                            truncated = true;
+                            break;
+                        }
+                        result_bytes = result_bytes.saturating_add(prospective);
+                        entries.push(LsEntry {
+                            path,
+                            kind,
+                            bytes: metadata
+                                .filter(std::fs::Metadata::is_file)
+                                .map(|value| value.len()),
+                        });
+                    }
+                    if truncated {
+                        break;
+                    }
                 }
-                result_bytes = result_bytes.saturating_add(prospective);
-                entries.push(LsEntry {
-                    path,
-                    kind,
-                    bytes: metadata
-                        .filter(std::fs::Metadata::is_file)
-                        .map(|value| value.len()),
-                });
-            }
-            if truncated {
-                break;
-            }
-        }
-        entries.sort_by(|left, right| left.path.cmp(&right.path));
-        let model_text = entries
-            .iter()
-            .map(|entry| format!("{:<9} {}", entry.kind, entry.path.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut result = ToolResult::new(
-            model_text,
-            json!({"entries": entries, "count": entries.len(), "truncated": truncated}),
-        );
-        result.truncated = truncated;
-        Ok(result)
+                entries.sort_by(|left, right| left.path.cmp(&right.path));
+                let model_text = entries
+                    .iter()
+                    .map(|entry| format!("{:<9} {}", entry.kind, entry.path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut result = ToolResult::new(
+                    model_text,
+                    json!({"entries": entries, "count": entries.len(), "truncated": truncated}),
+                )
+                .with_presentation(LS_PRESENTATION.plan()?);
+                result.truncated = truncated;
+                Ok(result)
+            })
+            .await
     }
 }
 
@@ -362,9 +306,9 @@ fn descriptor<T: JsonSchema>(name: &str, description: &str) -> ToolDescriptor {
 }
 
 fn compile_glob(pattern: &str) -> Result<GlobMatcher, ToolError> {
-    if pattern.is_empty() {
+    if pattern.is_empty() || pattern.len() > MAX_PATTERN_BYTES {
         return Err(ToolError::InvalidInput(
-            "glob pattern must not be empty".to_owned(),
+            "glob pattern must contain 1..=65536 bytes".to_owned(),
         ));
     }
     Glob::new(pattern)
@@ -436,6 +380,40 @@ mod tests {
         let a = ls.content.find("src/a.rs").expect("a entry");
         let b = ls.content.find("src/b.rs").expect("b entry");
         assert!(a < b);
+    }
+
+    #[tokio::test]
+    async fn grep_rejects_oversized_line_scratch_before_result_construction() {
+        let root = tempdir().expect("root");
+        fs::write(root.path().join("huge.txt"), "x".repeat(2 * 1024 * 1024)).expect("large line");
+        let context = ToolContext::new(root.path()).expect("context");
+        let tool = GrepTool::new(ToolLimits::default());
+        assert!(
+            tool.execute(&context, json!({"pattern": "x"}))
+                .await
+                .is_err()
+        );
+        tool.settle_effects()
+            .await
+            .expect("physical search settled");
+    }
+
+    #[tokio::test]
+    async fn grep_checks_selected_line_before_copying_it_into_findings() {
+        let root = tempdir().expect("root");
+        fs::write(root.path().join("large.txt"), "x".repeat(128 * 1024)).expect("large line");
+        let context = ToolContext::new(root.path()).expect("context");
+        let tool = GrepTool::new(ToolLimits {
+            max_result_bytes: 1024,
+            ..ToolLimits::default()
+        });
+        let result = tool
+            .execute(&context, json!({"pattern": "x"}))
+            .await
+            .expect("bounded result");
+        assert!(result.truncated);
+        assert_eq!(result.data["count"], 0);
+        assert!(result.content.is_empty());
     }
 
     #[tokio::test]

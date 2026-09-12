@@ -1,10 +1,10 @@
+import { TextRenderable } from "./text"
 import {
   BoxRenderable,
   InputRenderable,
   InputRenderableEvents,
   SelectRenderable,
   SelectRenderableEvents,
-  TextRenderable,
   type KeyEvent,
   type RenderContext,
 } from "@opentui/core"
@@ -88,12 +88,22 @@ export interface PickerItem<T> {
   readonly sectionHeader?: boolean
 }
 
+export interface TextPromptOptions {
+  readonly title: string
+  readonly placeholder: string
+  readonly onSubmit: (value: string) => void
+  readonly maxBytes: number
+  readonly empty: "allow" | "reject"
+}
+
 export class FuzzyPickerRenderable<T> extends BoxRenderable {
   readonly input: InputRenderable
   readonly status: TextRenderable
   readonly select: SelectRenderable
   #items: readonly PickerItem<T>[] = []
   #filtered: readonly PickerItem<T>[] = []
+  #clientStateRevision = 0
+  get clientStateRevision(): number { return this.#clientStateRevision }
   #onSelect: ((item: PickerItem<T>) => void) | undefined
   #onQuery: ((query: string) => void) | undefined
   #query = ""
@@ -105,7 +115,9 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #secretValue = ""
   #onSecretSubmit: ((secret: string) => void) | undefined
   #onTextSubmit: ((value: string) => void) | undefined
+  readonly #queryMaxLength: number
   #textMaxBytes = 2048
+  #textAllowsEmpty = false
   #theme: RottweilerTheme
   #onKey = (key: KeyEvent) => {
     if (!this.visible) return
@@ -122,7 +134,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     if (this.#textMode && !key.ctrl && !key.meta && !key.option) {
       if (key.name === "return" || key.name === "kpenter") {
         const value = this.input.value.trim()
-        if (value.length > 0) {
+        if (value.length > 0 || this.#textAllowsEmpty) {
           const onSubmit = this.#onTextSubmit
           this.#clearInputModes()
           onSubmit?.(value)
@@ -131,7 +143,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
         this.input.value = Array.from(this.input.value).slice(0, -1).join("")
       } else if (isPrintableInput(key.sequence)) {
         const candidate = this.input.value + key.sequence
-        if (new TextEncoder().encode(candidate).length <= this.#textMaxBytes) {
+        if (Buffer.byteLength(candidate) <= this.#textMaxBytes) {
           this.input.value = candidate
         }
       } else {
@@ -155,7 +167,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
         this.#secretValue = Array.from(this.#secretValue).slice(0, -1).join("")
         this.#renderSecretMask()
       } else if (plain && isPrintableInput(key.sequence)) {
-        if (new TextEncoder().encode(this.#secretValue).length + new TextEncoder().encode(key.sequence).length <= 8 * 1024) {
+        if (Buffer.byteLength(this.#secretValue) + Buffer.byteLength(key.sequence) <= 8 * 1024) {
           this.#secretValue += key.sequence
           this.#renderSecretMask()
         }
@@ -220,7 +232,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     }
     if (this.#textMode) {
       const candidate = this.input.value + pasted
-      if (new TextEncoder().encode(candidate).length <= this.#textMaxBytes) {
+      if (Buffer.byteLength(candidate) <= this.#textMaxBytes) {
         this.input.value = candidate
       }
       event.preventDefault()
@@ -267,6 +279,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       focusedBackgroundColor: theme.backgroundElement,
       focusedTextColor: theme.text,
     })
+    this.#queryMaxLength = this.input.maxLength
     this.select = new SelectRenderable(ctx, {
       id: "picker-results",
       width: "100%",
@@ -375,7 +388,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#configurePresentation(false, 0)
     this.title = ` ${title} `
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.select.options = []
     this.select.visible = false
     this.status.visible = false
@@ -387,15 +400,17 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.focus()
   }
 
-  openTextPrompt(title: string, placeholder: string, onSubmit: (value: string) => void, maxBytes = 2048): void {
+  openTextPrompt({ title, placeholder, onSubmit, maxBytes, empty }: TextPromptOptions): void {
     this.#clearInputModes()
     this.#textMode = true
+    this.#textAllowsEmpty = empty === "allow"
     this.#onTextSubmit = onSubmit
     this.#textMaxBytes = Math.max(1, Math.min(maxBytes, 8192))
+    this.input.maxLength = this.#textMaxBytes
     this.#configurePresentation(false, 0)
     this.title = ` ${title} `
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.select.options = []
     this.select.visible = false
     this.status.visible = false
@@ -413,7 +428,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#anchored = anchored
     this.title = ` ${title} `
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.#onSelect = undefined
     this.input.blur()
     this.select.options = []
@@ -441,6 +456,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       this.open(title, items, onSelect, compact)
       return
     }
+    const resumed = this.status.visible
     this.#configurePresentation(
       false,
       items.length,
@@ -455,6 +471,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#onSelect = onSelect
     this.#query = this.input.value
     this.#filter(this.input.value, true)
+    if (resumed) this.input.focus()
   }
 
   /** Composer-anchored autocomplete keeps editing focus in the textarea. */
@@ -547,13 +564,22 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#onSelect = undefined
     this.#clearInputModes()
     this.#items = []
-    this.#filtered = []
+    this.#replaceFiltered([])
     this.#query = ""
     this.select.options = []
     this.input.value = ""
   }
 
+  override destroyRecursively(): void {
+    if (!this.isDestroyed) this.close()
+    super.destroyRecursively()
+  }
+
   override destroy(): void {
+    if (this.isDestroyed) return
+    if (!this.select.isDestroyed) this.close()
+    this.#items = []; this.#replaceFiltered([]); this.#onSelect = undefined
+    this.#onQuery = undefined; this.#onSecretSubmit = undefined; this.#onTextSubmit = undefined
     this.ctx.keyInput.off("keypress", this.#onKey)
     this.ctx.keyInput.off("paste", this.#onPaste)
     super.destroy()
@@ -569,9 +595,11 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#secretMode = false
     this.#onSecretSubmit = undefined
     this.#textMode = false
+    this.#textAllowsEmpty = false
     this.#onTextSubmit = undefined
     this.#textMaxBytes = 2048
     this.input.value = ""
+    this.input.maxLength = this.#queryMaxLength
   }
 
   #configurePresentation(
@@ -601,6 +629,14 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.height = this.#desiredHeight
   }
 
+  #replaceFiltered(items: readonly PickerItem<T>[]): void {
+    if (items.length !== this.#filtered.length || items.some((item, index) => {
+      const before = this.#filtered[index]
+      return item.id !== before?.id || item.selectable !== before.selectable
+    })) this.#clientStateRevision++
+    this.#filtered = items
+  }
+
   #filter(query: string, preserveSelection = false): void {
     const selectedId = preserveSelection ? this.select.getSelectedOption()?.value : undefined
     const selectedIndex = preserveSelection ? this.select.getSelectedIndex() : 0
@@ -616,7 +652,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       .filter((entry) => entry.score !== null)
       .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.index - right.index)
     const noMatches = query.trim().length > 0 && ranked.length === 0
-    this.#filtered = noMatches
+    this.#replaceFiltered(noMatches
       ? [{
           id: "picker.no-matches",
           label: `No matches for “${query.trim()}”`,
@@ -624,7 +660,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
           value: null as T,
           selectable: false,
         }]
-      : ranked.map((entry) => entry.item)
+      : ranked.map((entry) => entry.item))
     const selected = pickerSelectionColors(this.#theme)
     this.select.textColor = noMatches ? this.#theme.textMuted : this.#theme.text
     this.select.selectedTextColor = noMatches ? this.#theme.textMuted : selected.foreground

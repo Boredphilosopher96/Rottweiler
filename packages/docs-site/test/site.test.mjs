@@ -28,8 +28,8 @@ test("the agent index is complete, unique, and source-owned", async () => {
 test("machine artifacts remain exact projections of repository owners", async () => {
   prepare()
   const pairs = [
-    ["public/generated/plugin/schema.json", "../plugin-sdk/fixtures/wire/protocol-2.schema.json"],
-    ["public/generated/plugin/wire-example.json", "../plugin-sdk/fixtures/wire/protocol-2.json"],
+    ["public/generated/plugin/schema.json", "../plugin-sdk/fixtures/wire/protocol-3.schema.json"],
+    ["public/generated/plugin/wire-example.json", "../plugin-sdk/fixtures/wire/protocol-3.json"],
     ["public/generated/client/client-command.schema.json", "../../protocol/schema/client-command.schema.json"],
     ["public/generated/session/event-envelope.schema.json", "../../protocol/session-event-envelope.schema.json"],
   ]
@@ -43,7 +43,7 @@ test("the compact agent map presents one product truth", async () => {
   const llms = await readFile(join(root, "public/llms.txt"), "utf8")
   assert.match(llms, /complete product documentation/i)
   assert.match(llms, /## Product documentation/)
-  assert.doesNotMatch(llms, /unreleased|current main|protocol 2|protocol 1/i)
+  assert.doesNotMatch(llms, /unreleased|current main|protocol [123]/i)
   assert.match(llms, /docs-index\.json/)
 })
 

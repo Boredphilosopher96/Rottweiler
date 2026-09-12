@@ -1,3 +1,4 @@
+import { todoState } from "./fixtures/todos"
 import { describe, expect, test } from "bun:test"
 
 import { createInitialState } from "../src/state"
@@ -47,7 +48,7 @@ describe("pure UI presentation policy", () => {
     })).toBeFalse()
     expect(contextPanelHasContent({
       ...empty,
-      todos: [{ id: "one", content: "Inspect", status: "pending" }],
+      todos: todoState([{ id: "one", content: "Inspect", status: "pending" }]),
     })).toBeTrue()
   })
 

@@ -19,10 +19,10 @@ the signed update specification are advertised as released platforms.
 A complete release contains:
 
 - `rw`, the public application and Rust supervisor;
-- `rottweiler-tui`, the compiled OpenTUI client;
+- `rottweiler-js-host`, one private executable with explicit `tui` and `source-plugin` roles;
 - the OpenTUI native renderer library;
 - `rottweiler-wasm-host`;
-- `rottweiler-plugin-host`;
+- the WASM host identity document;
 - the archive installer.
 
 The archive contract owns names, modes, per-member size ceilings, and platform

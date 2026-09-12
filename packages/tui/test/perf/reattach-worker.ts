@@ -1,8 +1,13 @@
+import { ClientCache } from "../../src/history/cache"
+import type { HistoryCacheValue } from "../../src/history/controller"
+import { BootstrapPresentation } from "../../src/app/bootstrap"
+import type { SessionBootstrap } from "../../src/runtime-bootstrap"
+import type { EngineEvent } from "../../src/protocol"
 import { writeFileSync } from "node:fs"
 
 import { createEngineRuntimeFromEnvironment, type RuntimeApp } from "../../src/runtime"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
-import type { WireEngineEvent } from "../../src/transport"
+
 
 const targetSequence = process.env.ROTTWEILER_TEST_TARGET_SEQUENCE ?? "never"
 const reportFile = process.env.ROTTWEILER_TEST_REPORT_FILE
@@ -12,10 +17,13 @@ const receivedSequences: string[] = []
 
 class WorkerApp implements RuntimeApp {
   state = createInitialState()
+  readonly historyCache = new ClientCache<HistoryCacheValue>()
+  readonly bootstrap = new BootstrapPresentation(state => this.setState(state))
+  installBootstrap(value: SessionBootstrap): void { this.bootstrap.install(value) }
 
   setSessionId(_sessionId: string): void {}
 
-  handleEvent(event: WireEngineEvent): void {
+  handleEvent(event: EngineEvent): void {
     this.state = reduceRottweilerState(this.state, engineEvent(event))
     if (
       "meta" in event &&
@@ -50,7 +58,7 @@ class WorkerApp implements RuntimeApp {
 
 const app = new WorkerApp()
 
-const runtime = await createEngineRuntimeFromEnvironment()
+const runtime = await createEngineRuntimeFromEnvironment({ allocations: app.historyCache.allocations })
 if (runtime === null) {
   throw new Error("reattach worker requires an engine runtime")
 }

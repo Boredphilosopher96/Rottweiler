@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import shutil
 import unittest
 
 
@@ -21,6 +22,8 @@ class ToolchainOwnershipTests(unittest.TestCase):
         (root / ".github/workflows").mkdir(parents=True)
         (root / "scripts").mkdir()
         (root / "contracts").mkdir()
+        for name in ("opentui-native.json", "release-contract.json"):
+            shutil.copyfile(ROOT / "contracts" / name, root / "contracts" / name)
         (root / "contracts/package-inventory.json").write_text(json.dumps({
             "schema_version": 1, "packages": [
                 {"id": name, "directory": "packages/" + name, "checks": ["test"]}
@@ -33,7 +36,7 @@ class ToolchainOwnershipTests(unittest.TestCase):
             directory = root / "packages" / package
             directory.mkdir(parents=True)
             (directory / "package.json").write_text(
-                json.dumps({"packageManager": "bun@1.2.3", "engines": {"bun": "1.2.3"}}),
+                json.dumps({"packageManager": "bun@1.2.3", "engines": {"bun": "1.2.3"}, "dependencies": {"@opentui/core": json.loads((ROOT / "contracts/opentui-native.json").read_text())["package_version"]}}),
                 encoding="utf-8",
             )
         (root / "packages/tui/.bun-version").write_text("1.2.3\n", encoding="utf-8")

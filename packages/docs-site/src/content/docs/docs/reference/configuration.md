@@ -110,3 +110,21 @@ Formatter and linter commands run after matching file edits. The test command
 runs once at the turn boundary. A failing test marks the turn failed and adds a
 bounded diagnostic to durable conversation context so the next turn can act on
 it.
+
+For toolchains installed outside the system runtime paths, declare their read
+roots explicitly in trusted configuration:
+
+```toml
+[toolchain]
+runtime_read_roots = ["/home/alice/.cargo/bin", "/home/alice/.rustup"]
+formatter = "rustfmt {file}"
+```
+
+Supply existing absolute paths for your installation, up to 32 paths of 4096
+UTF-8 bytes each. These read-only grants belong to formatter, linter, and test
+commands. Ordinary Bash and declarative shell hooks do not inherit them; writes
+remain limited to the workspace and private scratch, network access remains
+denied, and sensitive credential paths remain excluded. Linux adds these roots
+to its system-read baseline; macOS retains its general-read policy with
+credential exclusions. Changing PATH or HOME does not grant read authority.
+Project toolchain configuration takes effect only after project trust.

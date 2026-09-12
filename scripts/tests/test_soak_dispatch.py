@@ -44,12 +44,12 @@ class FakeGitHub:
     def pages(self, path, field):
         if path == "actions/runs/100/jobs?filter=all":
             # Only Linux succeeded. macOS's failure must not suppress it.
-            return [{"name": "Build isolated Linux performance binary", "conclusion": self.producer_conclusion,
+            return [{"name": "Build native Linux candidate", "conclusion": self.producer_conclusion,
                      "run_attempt": self.producer_attempt},
-                    {"name": "Build isolated macOS performance binary", "conclusion": "failure", "run_attempt": 2}]
+                    {"name": "Build native macOS candidate", "conclusion": "failure", "run_attempt": 2}]
         if path == "actions/runs/100/artifacts":
-            return [{"name": name, "expired": self.expired}
-                    for name in MODULE.artifact_names("linux-x86_64", 100, self.producer_attempt)]
+            return [{"name": MODULE.artifact_name("linux-x86_64", 100, self.producer_attempt),
+                     "expired": self.expired}]
         if path == "actions/runs/900/jobs":
             return [{"name": "Eight-hour workload", "status": self.worker}]
         if path == "actions/workflows/protected-soak.yml/runs":
@@ -123,7 +123,7 @@ class SoakDispatchTests(unittest.TestCase):
         api = FakeGitHub("in_progress")
         api.producer_attempt = 1
         names = MODULE.validate_candidate(api, "linux-x86_64", 100, 2, SHA)
-        self.assertEqual(names, ("linux-performance-rw-100-1", "linux-soak-tui-100-1"))
+        self.assertEqual(names, "linux-native-candidate-100-1")
         api.producer_attempt = 2
         api.producer_conclusion = "failure"
         self.assertEqual(self.execute(api)[0], 1)

@@ -1,5 +1,9 @@
 //! Typed configuration schema shared by the engine and SDK consumers.
 
+mod provider_body;
+pub use provider_body::provider_body_field_is_controlled;
+
+use rw_memory_derive::PrepareAllocation as Allocation;
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
@@ -212,6 +216,7 @@ impl Default for ModelConfig {
 /// Provider-neutral thinking effort selected by a model alias or session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum ThinkingLevel {
     /// Do not request provider reasoning output.
     #[default]
@@ -425,24 +430,8 @@ impl ProviderConfig {
             ));
         }
 
-        for key in self.extra_body.keys() {
-            let lower = key.to_ascii_lowercase();
-            if matches!(
-                lower.as_str(),
-                "model"
-                    | "messages"
-                    | "input"
-                    | "tools"
-                    | "tool_choice"
-                    | "stream"
-                    | "stream_options"
-                    | "max_tokens"
-                    | "max_completion_tokens"
-                    | "max_output_tokens"
-                    | "temperature"
-            ) || lower == "reasoning"
-                || lower.starts_with("reasoning_")
-            {
+        for (key, value) in &self.extra_body {
+            if provider_body_field_is_controlled(key, value) {
                 return Err(format!(
                     "extra_body field {key:?} is engine-controlled and cannot be overridden"
                 ));
@@ -633,6 +622,7 @@ impl Default for WebSearchConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
 pub enum PermissionDecision {
     /// Ask the active driver for approval.
     #[default]
@@ -707,10 +697,18 @@ pub struct SandboxConfig {
     pub safe_list: Vec<String>,
 }
 
+/// Maximum explicitly configured toolchain runtime read roots.
+pub const MAX_TOOLCHAIN_RUNTIME_READ_ROOTS: usize = 32;
+/// Maximum UTF-8 bytes in one toolchain runtime read root.
+pub const MAX_TOOLCHAIN_RUNTIME_ROOT_BYTES: usize = 4096;
+
 /// Declarative commands registered onto the shared post-tool hook pipeline.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolchainConfig {
+    /// Absolute runtime paths read only by configured formatter, linter, and test commands.
+    #[schemars(length(max = MAX_TOOLCHAIN_RUNTIME_READ_ROOTS))]
+    pub runtime_read_roots: Vec<std::path::PathBuf>,
     /// Formatter applied when no more-specific rule overrides it.
     pub formatter: Option<String>,
     /// Linters applied when no more-specific rule overrides them.
@@ -720,6 +718,18 @@ pub struct ToolchainConfig {
     /// Glob-specific toolchain overrides, in declaration order.
     #[serde(rename = "rule")]
     pub rules: Vec<ToolchainRule>,
+}
+
+/// Whether explicitly supplied toolchain runtime paths fit the configuration contract.
+#[must_use]
+pub fn valid_toolchain_runtime_read_roots(roots: &[std::path::PathBuf]) -> bool {
+    roots.len() <= MAX_TOOLCHAIN_RUNTIME_READ_ROOTS
+        && roots.iter().all(|root| {
+            root.is_absolute()
+                && root.to_str().is_some_and(|text| {
+                    text.len() <= MAX_TOOLCHAIN_RUNTIME_ROOT_BYTES && !text.contains('\0')
+                })
+        })
 }
 
 /// One file-glob-specific toolchain rule.

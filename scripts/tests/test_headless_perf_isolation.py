@@ -4,12 +4,18 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
+import signal
+import time
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
 
 
 def workflow_job(workflow: str, name: str) -> str:
@@ -23,163 +29,57 @@ def workflow_job(workflow: str, name: str) -> str:
 
 
 class HeadlessPerformanceIsolationTests(unittest.TestCase):
-    def test_platform_builders_use_noindex_runner_temp_and_checksum_binary(
-        self,
-    ) -> None:
-        cases = [
-            ("linux", "Linux", "sha256sum rw > rw.sha256"),
-            ("macos", "Darwin", "shasum -a 256 rw > rw.sha256"),
-        ]
-        for platform, uname, checksum in cases:
-            with self.subTest(platform=platform):
-                builder = (
-                    REPO / f"scripts/prepare-{platform}-performance-binary.sh"
-                ).read_text(encoding="utf-8")
+    def test_candidate_builders_publish_one_attempt_bound_complete_product(self) -> None:
+        for filename, platforms in (("ci.yml", ("linux", "macos")),
+                                    ("nightly.yml", ("linux", "macos")),
+                                    ("performance.yml", ("linux",))):
+            workflow = (REPO / ".github/workflows" / filename).read_text()
+            for platform in platforms:
+                with self.subTest(workflow=filename, platform=platform):
+                    build = workflow_job(workflow, platform + "-candidate-build")
+                    self.assertNotIn("\n    needs:", build)
+                    self.assertNotIn("\n    if:", build)
+                    self.assertEqual(build.count("scripts/build-native-candidate.py"), 1)
+                    cache = re.search(r'workspaces: "\. -> ([^"]+)"', build)
+                    self.assertIsNotNone(cache)
+                    relative_target = Path(cache.group(1))
+                    self.assertFalse(relative_target.is_absolute())
+                    self.assertNotIn("..", relative_target.parts)
+                    self.assertNotIn("${{", str(relative_target))
+                    self.assertIn(f'--target-dir "$GITHUB_WORKSPACE/{relative_target}"', build)
+                    self.assertIn("$RUNNER_TEMP/native-candidates.noindex", build)
+                    self.assertIn("--github-output", build)
+                    self.assertIn("candidate_artifact:", build)
+                    self.assertIn("${{ github.run_id }}-${{ github.run_attempt }}", build)
+                    self.assertIn("if-no-files-found: error", build)
+                    self.assertNotIn("overwrite: true", build)
+                    self.assertNotIn("perf_gate.sh", build)
 
-                self.assertIn(f'if [ "$(uname -s)" != {uname} ]', builder)
-                self.assertIn(
-                    f"$RUNNER_TEMP/rottweiler-{platform}-performance-build.noindex",
-                    builder,
-                )
-                self.assertIn(
-                    f"$RUNNER_TEMP/rottweiler-{platform}-performance-artifact.noindex",
-                    builder,
-                )
-                self.assertIn('CARGO_TARGET_DIR="$build_root"', builder)
-                self.assertIn("install -m 700", builder)
-                self.assertIn(checksum, builder)
-
-    def test_manual_performance_builds_linux_artifact_only(self) -> None:
-        workflow = (REPO / ".github/workflows/performance.yml").read_text(
-            encoding="utf-8"
-        )
-        linux_build = workflow_job(workflow, "linux-performance-build")
-        self.assertNotIn("  macos-performance-build:", workflow)
-        self.assertNotIn("\n    needs:", linux_build)
-        self.assertNotIn("\n    if:", linux_build)
-        self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_build)
-        self.assertIn("actions/upload-artifact@043fb46d", linux_build)
-        self.assertIn("if-no-files-found: error", linux_build)
-        self.assertIn("overwrite: true", linux_build)
-        self.assertIn("timeout-minutes: 30", linux_build)
-
-    def test_manual_performance_consumers_are_platform_independent(self) -> None:
-        workflow = (REPO / ".github/workflows/performance.yml").read_text(
-            encoding="utf-8"
-        )
-        cases = (
-            (
-                "linux",
-                workflow_job(workflow, "performance-linux"),
-                "linux-performance-build",
-                "macos-performance-build",
-                "runs-on: ubuntu-24.04",
-                "sha256sum -c rw.sha256",
-                "Headless performance gate (Linux prebuilt binary)",
-                "manual-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
-            ),
-            (
-                "macos",
-                workflow_job(workflow, "performance-macos"),
-                None,
-                "linux-performance-build",
-                "runs-on: macos-15",
-                None,
-                "Headless performance gate (macOS measurement-host binary)",
-                "manual-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
-            ),
-        )
-        for (
-            platform,
-            performance,
-            builder,
-            other_builder,
-            runner,
-            checksum,
-            gate,
-            evidence,
-        ) in cases:
-            with self.subTest(platform=platform):
-                if builder is None:
-                    self.assertNotIn("    needs:", performance)
-                else:
-                    self.assertIn(builder, performance)
-                self.assertNotIn(other_builder, performance)
-                self.assertNotIn("runner-contract", performance)
-                self.assertIn(runner, performance)
-                if platform == "macos":
-                    self.assertNotIn("actions/download-artifact@3e5f45b2", performance)
-                    self.assertIn(
-                        "scripts/prepare-macos-performance-binary.sh", performance
-                    )
-                else:
-                    self.assertIn("actions/download-artifact@3e5f45b2", performance)
-                    assert checksum is not None
-                    self.assertIn(checksum, performance)
-                self.assertEqual(performance.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
-                self.assertEqual(performance.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
-                self.assertIn(gate, performance)
-                self.assertNotIn("Headless performance gate (Linux source build)", performance)
-                self.assertIn(evidence, performance)
-                self.assertIn("timeout-minutes: 60", performance)
-                if platform == "macos":
-                    self.assertLess(
-                        performance.index("Install Rust toolchain"),
-                        performance.index(gate),
-                    )
-                else:
-                    self.assertLess(
-                        performance.index(gate),
-                        performance.index("Install Rust toolchain"),
-                    )
-
-    def test_nightly_reuses_isolated_platform_measurements_independently(
-        self,
-    ) -> None:
-        nightly = (REPO / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
-        linux_builder = nightly.split("  linux-performance-build:", 1)[1].split(
-            "  macos-performance-build:", 1
-        )[0]
-        macos_builder = nightly.split("  macos-performance-build:", 1)[1].split(
-            "  linux-release-budget:", 1
-        )[0]
-        linux = nightly.split("  linux-release-budget:", 1)[1].split(
-            "  macos-release-budget:", 1
-        )[0]
-        macos = nightly.split("  macos-release-budget:", 1)[1].split(
-            "  macos-soak-dispatch:", 1
-        )[0]
-
-        self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_builder)
-        self.assertIn("scripts/prepare-macos-performance-binary.sh", macos_builder)
-        self.assertIn("actions/upload-artifact@043fb46d", linux_builder)
-        self.assertIn("actions/upload-artifact@043fb46d", macos_builder)
-        self.assertIn("linux-soak-tui-${{ github.run_id }}", linux_builder)
-        self.assertIn("macos-soak-tui-${{ github.run_id }}", macos_builder)
-        self.assertIn("needs: linux-performance-build", linux)
-        self.assertNotIn("macos-performance-build", linux)
-        self.assertNotIn("needs: runner-contract", macos)
-        self.assertNotIn("linux-performance-build", macos)
-        self.assertIn("runs-on: ubuntu-24.04", linux)
-        self.assertIn("runs-on: macos-15", macos)
-        self.assertNotIn("self-hosted", macos)
-        self.assertIn("sha256sum -c rw.sha256", linux)
-        self.assertNotIn("actions/download-artifact@3e5f45b2", macos)
-        self.assertIn("scripts/prepare-macos-performance-binary.sh", macos)
-        self.assertIn("Headless performance gate (Linux prebuilt binary)", linux)
-        self.assertIn("Headless performance gate (macOS measurement-host binary)", macos)
-        self.assertNotIn("Headless performance gate (Linux source build)", linux)
-        for measured in (linux, macos):
-            self.assertEqual(measured.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
-            self.assertEqual(measured.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
-        self.assertLess(
-            linux.index("Headless performance gate"),
-            linux.index("Install Rust toolchain"),
-        )
-        self.assertLess(
-            macos.index("Install Rust toolchain"),
-            macos.index("Headless performance gate"),
-        )
+    def test_native_measurements_keep_platform_provenance_and_fixed_samples(self) -> None:
+        for filename, linux_job, macos_job in (("performance.yml", "performance-linux", "performance-macos"),
+                                              ("nightly.yml", "linux-release-budget", "macos-release-budget")):
+            workflow = (REPO / ".github/workflows" / filename).read_text()
+            linux = workflow_job(workflow, linux_job)
+            macos = workflow_job(workflow, macos_job)
+            self.assertIn("needs: linux-candidate-build", linux)
+            self.assertNotIn("macos-candidate-build", linux)
+            self.assertIn("runs-on: ubuntu-24.04", linux)
+            self.assertIn("native_candidate.py prepare", linux)
+            self.assertNotIn("scripts/build-native-candidate.py", linux)
+            self.assertNotIn("\n    needs:", macos)
+            self.assertNotIn("actions/download-artifact@", macos)
+            self.assertIn("runs-on: macos-15", macos)
+            self.assertEqual(macos.count("scripts/build-native-candidate.py"), 1)
+            self.assertLess(macos.index("scripts/build-native-candidate.py"), macos.index("perf_gate.sh"))
+            for measured in (linux, macos):
+                self.assertNotIn("runner-contract", measured)
+                self.assertNotIn("ROTTWEILER_PERF_PREBUILT_RW", measured)
+                self.assertEqual(measured.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
+                self.assertNotIn("build-release.sh", measured)
+                self.assertIn("m4_release_gate.sh", measured)
+                self.assertIn("timeout-minutes: 60", measured)
+            self.assertIn('perf_gate.sh "$RUNNER_TEMP/native-candidate.noindex"', linux)
+            self.assertIn('perf_gate.sh "${{ steps.candidate.outputs.candidate }}"', macos)
 
     def test_release_consumes_preflight_evidence_without_remeasuring(self) -> None:
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -212,14 +112,14 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
     def test_release_compresses_embedded_wasm_and_never_rewrites_compiled_elf(
         self,
     ) -> None:
-        build = (REPO / "packages/tui/build.ts").read_text(encoding="utf-8")
+        build = (REPO / "packages/js-host/build.ts").read_text(encoding="utf-8")
         runtime = (
             REPO / "packages/tui/src/tree-sitter-runtime.ts"
         ).read_text(encoding="utf-8")
         native_strip = (
             "stripLinuxNativeLibrary(outputNativePath)"
         )
-        bundle_gate = "enforceTuiBundleSize(outputExecutable, outputNativePath)"
+        bundle_gate = "enforceJavaScriptBundleSize(outputExecutable, outputNativePath)"
         embedded_smoke = "compiled embedded-parser smoke failed"
 
         self.assertIn('name: "rottweiler-compressed-tree-sitter-assets"', build)
@@ -239,13 +139,13 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("Bun.zstdDecompressSync(compressed)", runtime)
         self.assertIn("bytes.byteLength !== expectedBytes", runtime)
         self.assertNotIn("maxOutputLength", runtime)
-        self.assertIn('target: "bun-linux-x64-baseline" as const', build)
+        self.assertIn('"bun-linux-x64-baseline" as const', build)
         self.assertIn("const MAX_RUNTIME_BYTES = 32 * 1024 * 1024", runtime)
         self.assertIn("Linux Bun compiled output bytes:", build)
         self.assertIn(native_strip, build)
-        self.assertIn("process.platform === \"darwin\"", build)
+        self.assertIn("process.platform !== \"darwin\"", build)
         self.assertIn("releasePlatformForNodeTarget", build)
-        self.assertIn("productBudgets.tuiBundleLessThanBytes", build)
+        self.assertIn("productBudgets.jsBundleLessThanBytes", build)
         self.assertNotIn("100_000_000", build)
         self.assertNotIn("150_000_000", build)
         self.assertIn(bundle_gate, build)
@@ -256,14 +156,14 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertLess(build.index(bundle_gate), build.index(embedded_smoke))
 
     def test_gate_preserves_fixed_sampling_and_writes_evidence_first(self) -> None:
-        gate = (REPO / "crates/rw-cli/tests/perf_gate.sh").read_text(
+        gate = (REPO / "crates/rw-cli/tests/perf_gate.py").read_text(
             encoding="utf-8"
         )
 
         self.assertIn('smoke = os.environ.get("ROTTWEILER_PERF_SMOKE") == "1"', gate)
         self.assertIn('"100" if smoke else "500"', gate)
         self.assertIn("minimum_samples = 100", gate)
-        self.assertIn("time.sleep(60)", gate)
+        self.assertIn("wait_between_samples(60)", gate)
         self.assertNotIn('sys.platform == "darwin" else 1', gate)
         self.assertIn("for index in range(-5, 0)", gate)
         self.assertNotIn("warmup_count", gate)
@@ -282,60 +182,167 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("from release_contract import load_contract", gate)
         self.assertIn("product_budgets.engine_less_than_bytes", gate)
         self.assertNotIn("40_000_000", gate)
-        self.assertNotIn("28_000_000", gate)
+        self.assertNotRegex(gate, r"binary_limit\s*=\s*[0-9][0-9_]*")
         self.assertLess(
             gate.index("evidence_temporary.replace(evidence)"),
             gate.index("if smoke and start_p50 >= 80"),
         )
 
+    def prepared_gate(self, binary_source):
+        from test_native_candidate import NativeCandidateTests, packager, native_candidate
+        fixture = NativeCandidateTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        for relative in ("crates/rw-cli/tests/perf_gate.sh", "crates/rw-cli/tests/perf_gate.py", "scripts/perf_scratch.py", "scripts/perf_process_scope.py", "scripts/perf_process_owner.py", "scripts/perf_process_deadline.py", "scripts/perf_process_wait.py", "scripts/native_candidate.py",
+                         "scripts/opentui_native.py", "scripts/native_profile.py", "scripts/native-linux-unwind.ld", "scripts/artifact_bundle.py", "scripts/release_contract.py", "scripts/perf_process.py"):
+            destination = fixture.repo / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO / relative, destination)
+        gate = fixture.repo / "crates/rw-cli/tests/perf_gate.sh"
+        binary = fixture.stage / "bin/rw"
+        binary.write_text(binary_source)
+        packager.package(fixture.stage, fixture.archive, 1700000000)
+        fixture.identity["source"] = native_candidate.source_identity(fixture.repo)
+        fixture.publish()
+        site = root / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(
+            f"import sys\nsys.path.insert(0, {str(fixture.repo / 'scripts')!r})\nimport perf_process\nperf_process.wait_between_samples = lambda _seconds: None\n", encoding="utf-8"
+        )
+        output = root / "results" / "headless.json"
+        env = {
+            **os.environ,
+            "GITHUB_ACTIONS": "true",
+            "PYTHONPATH": str(site),
+            "ROTTWEILER_PERF_OUTPUT": str(output),
+            "ROTTWEILER_PERF_SAMPLES": "100",
+            "RUNNER_TEMP": str(root),
+        }
+        return fixture, gate, output, env
+
+    def test_standalone_sigterm_reaps_sample_and_retains_failed_scratch(self) -> None:
+        self.assert_cancelled_gate(delegated=False)
+
+    def test_cancelled_gate_reaps_sample_and_retains_failed_scratch(self) -> None:
+        self.assert_cancelled_gate(delegated=True)
+
+    def test_failed_startup_is_reaped_when_readiness_assertion_fails(self):
+        import perf_process_owner
+        from perf_process_wait import observe_exit, require_group_disappearance
+        original_prepare = self.prepared_gate
+        original_owner = perf_process_owner.OwnedProcess
+        created = []
+        def failed_startup(source):
+            fixture, gate, output, env = original_prepare(source)
+            gate.write_text("#!/bin/sh\nexit 17\n")
+            return fixture, gate, output, env
+        def capture(*args, **options):
+            owner = original_owner(*args, **options)
+            created.append(owner)
+            return owner
+        with patch.object(self, "prepared_gate", side_effect=failed_startup), \
+                patch.object(perf_process_owner, "OwnedProcess", side_effect=capture):
+            with self.assertRaises(AssertionError):
+                self.assert_cancelled_gate(delegated=False)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].process.returncode, 17)
+        with self.assertRaises(ChildProcessError):
+            observe_exit(created[0].process.pid)
+        require_group_disappearance(created[0].process.pid, timeout=0)
+
+    def assert_cancelled_gate(self, *, delegated: bool) -> None:
+        from perf_process_owner import OwnedProcess
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "sample.pid"
+            fixture, gate, output, env = self.prepared_gate(
+                f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nexec sleep 60\n"
+            )
+            wrapper = OwnedProcess([str(gate), str(fixture.root)], cwd=fixture.repo,
+                                   env=env, delegated=delegated)
+            owner = wrapper.process
+            try:
+                deadline = time.monotonic() + 3
+                while not pid_path.exists() and time.monotonic() < deadline:
+                    if wrapper.observe_exit() is not None:
+                        break
+                    time.sleep(.01)
+                self.assertTrue(pid_path.exists())
+                # Cancel actual warmup work. Candidate verification and Python
+                # startup are outside this cancellation oracle; the process
+                # supervisor has separate deadline and forced-death tests.
+                os.kill(owner.pid, signal.SIGTERM)
+                exited_by = time.monotonic() + 5
+                while wrapper.observe_exit() is None and time.monotonic() < exited_by:
+                    time.sleep(.01)
+                self.assertIsNotNone(wrapper.observe_exit(), "cancelled gate did not exit")
+                self.assertNotEqual(wrapper.observe_exit(), 0)
+                wrapper.settle()
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(int(pid_path.read_text()), 0)
+                retained = list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*"))
+                self.assertEqual(len(retained), 1)
+                self.assertEqual(json.loads(output.with_suffix(".failed-scratch.json").read_text())["retained_scratch"], str(retained[0]))
+                evidence = json.loads(output.with_name("headless.evidence.json").read_text())
+                self.assertEqual(evidence["status"], "fail")
+                self.assertEqual(evidence["phase"], "warmup")
+            finally:
+                wrapper.settle()
+
+    def test_unproven_sample_closure_retains_headless_storage(self):
+        fixture, gate, output, env = self.prepared_gate("#!/bin/sh\nexit 99\n")
+        site = Path(env["PYTHONPATH"]) / "sitecustomize.py"
+        with site.open("a") as stream:
+            stream.write("from perf_process_scope import UnsettledScope\n"
+                         "def unsettled(*args, **kwargs): raise UnsettledScope('unacknowledged fixture child')\n"
+                         "perf_process.run_sample = unsettled\n")
+        result = subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env,
+                                capture_output=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"UnsettledScope", result.stderr)
+        retained = Path(json.loads(output.with_suffix(".failed-scratch.json").read_text())["retained_scratch"])
+        self.assertTrue((retained / "rw").is_file())
+        self.assertEqual(json.loads(output.with_name("headless.evidence.json").read_text())["phase"], "warmup")
+
     def test_prebuilt_gate_keeps_metrics_schema_and_writes_ordered_evidence(self) -> None:
-        gate = REPO / "crates/rw-cli/tests/perf_gate.sh"
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            binary = root / "rw"
-            binary.write_text(
-                "#!/bin/sh\n"
-                "printf 'ready\\n'\n"
-                "printf 'rw_perf_zero_latency_turn_us=1000\\n' >&2\n",
-                encoding="utf-8",
-            )
-            binary.chmod(0o700)
-            site = root / "site"
-            site.mkdir()
-            (site / "sitecustomize.py").write_text(
-                "import time\ntime.sleep = lambda _seconds: None\n", encoding="utf-8"
-            )
-            output = root / "results" / "headless.json"
-            env = {
-                **os.environ,
-                "GITHUB_ACTIONS": "true",
-                "PYTHONPATH": str(site),
-                "ROTTWEILER_PERF_OUTPUT": str(output),
-                "ROTTWEILER_PERF_PREBUILT_RW": str(binary),
-                "ROTTWEILER_PERF_SAMPLES": "100",
-                "RUNNER_TEMP": str(root),
-            }
+        from test_native_candidate import native_candidate
+        fixture, gate, output, env = self.prepared_gate(
+            "#!/bin/sh\nprintf 'ready\\n'\nprintf 'rw_perf_zero_latency_turn_us=100\\n' >&2\n"
+        )
+        subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env, check=True)
+        self.assertEqual(list(Path(env["RUNNER_TEMP"]).glob("rottweiler-perf.*")), [])
+        metrics = json.loads(output.read_text())
+        self.assertEqual(set(metrics), {"schema_version", "metrics"})
+        evidence = json.loads(output.with_name("headless.evidence.json").read_text())
+        self.assertEqual(set(evidence), {
+            "schema_version", "sample_count", "samples", "runner", "candidate", "status", "phase", "error"
+        })
+        self.assertEqual(evidence["candidate"]["engine_sha256"], native_candidate.hash_file(fixture.stage / "bin/rw"))
+        self.assertEqual(evidence["sample_count"], 100)
+        self.assertEqual(evidence["status"], "pass")
+        self.assertEqual(evidence["phase"], "complete")
+        self.assertIsNone(evidence["error"])
+        self.assertEqual([sample["index"] for sample in evidence["samples"]], list(range(100)))
+        self.assertTrue(all(set(sample) == {"index", "headless_print_us", "turn_overhead_us"}
+                            for sample in evidence["samples"]))
 
-            subprocess.run([str(gate)], cwd=REPO, env=env, check=True)
-
-            metrics = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(set(metrics), {"schema_version", "metrics"})
-            evidence_path = output.with_name("headless.evidence.json")
-            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                set(evidence), {"schema_version", "sample_count", "samples", "runner"}
-            )
-            self.assertEqual(evidence["sample_count"], 100)
-            self.assertEqual(
-                [sample["index"] for sample in evidence["samples"]], list(range(100))
-            )
-            self.assertTrue(
-                all(
-                    set(sample)
-                    == {"index", "headless_print_us", "turn_overhead_us"}
-                    for sample in evidence["samples"]
-                )
-            )
+    def test_invalid_sample_retains_prior_observations_and_failing_phase(self):
+        fixture, gate, output, env = self.prepared_gate(
+            "#!/bin/sh\nprintf 'ready\\n'\n"
+            "case \"$HOME\" in *home-2) printf 'rw_perf_zero_latency_turn_us=-1\\n' >&2;;\n"
+            "*) printf 'rw_perf_zero_latency_turn_us=100\\n' >&2;; esac\n"
+        )
+        run = subprocess.run([str(gate), str(fixture.root)], cwd=fixture.repo, env=env, capture_output=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertFalse(output.exists())
+        evidence = json.loads(output.with_name("headless.evidence.json").read_text())
+        self.assertEqual(evidence["status"], "fail")
+        self.assertEqual(evidence["phase"], "sampling")
+        self.assertIn("invalid or duplicate performance marker", evidence["error"])
+        self.assertEqual([sample["index"] for sample in evidence["samples"]], [0, 1])
+        self.assertEqual(evidence["candidate"]["source"], fixture.identity["source"])
 
 
 if __name__ == "__main__":

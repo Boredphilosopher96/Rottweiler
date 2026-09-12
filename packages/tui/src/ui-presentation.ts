@@ -157,7 +157,7 @@ export function contextPanelHasContent(state: RottweilerState): boolean {
   const hasChangedFiles = statusPaths === undefined
     ? (state.review?.files.length ?? 0) > 0
     : statusPaths.length > 0
-  return state.todos.length > 0 ||
+  return state.todos.snapshot.items.length > 0 || state.todos.phase === "loading" || state.todos.phase === "failed" ||
     hasChangedFiles ||
     state.runtimeServices.some((service) => service.name.length > 0) ||
     state.mcpServers.some((server) =>

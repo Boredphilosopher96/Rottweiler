@@ -20,14 +20,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from soak_journal import EventLogProbe
+from soak_outages import Outages
+from release_contract import load_contract
+from perf_process import run_sample, delegated_success_scope, check_sample_cancellation
+from perf_process_scope import UnsettledScope
+from perf_process_wait import observe_exit
+from perf_scratch import retained_scratch
+from soak_process import terminate_supervisor, kill_direct_child
+from soak_identity import SoakInputs, verify_unchanged
+
+TUI_ROLE = load_contract(Path(__file__).resolve().parents[1] / "contracts/release-contract.json").js_host_roles["tui"]
+
+
 DEFAULT_SECONDS = 8 * 60 * 60
 DEFAULT_RSS_LIMIT_MIB = 600
 DEFAULT_TURN_SECONDS = 2.0
 TERMINAL_SUBMIT = b"\r"
-SOAK_TOKEN = re.compile(rb"SOAK_(?:INPUT|STEP)_[0-9]{6}(?:_DONE)?")
-EVENT_TYPE = re.compile(rb'"type"\s*:\s*"([a-z0-9_]+)"')
 MAX_DIAGNOSTIC_CHARS = 4_000
-MAX_DIAGNOSTIC_EVENT_BYTES = 64 * 1024
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
 
 
@@ -132,12 +143,13 @@ def parse_process_table(output: str) -> dict[int, ProcessRow]:
 
 
 def process_table() -> dict[int, ProcessRow]:
-    output = subprocess.run(
+    result = run_sample(
         ["ps", "-axo", "pid=,ppid=,rss=,command="],
-        check=True,
-        stdout=subprocess.PIPE,
-        text=True,
-    ).stdout
+        cwd=Path.cwd(), env=dict(os.environ), timeout=2, output_limit=1024 * 1024,
+    )
+    if result.returncode:
+        raise RuntimeError("could not observe soak process tree")
+    output = result.stdout.decode("utf-8", errors="replace")
     return parse_process_table(output)
 
 
@@ -160,13 +172,15 @@ def process_rss(root_pid: int) -> tuple[int, int]:
 
 
 def find_descendant(
-    rows: dict[int, ProcessRow], root_pid: int, executable: Path, required: str = ""
+    rows: dict[int, ProcessRow], root_pid: int, executable: Path, required: str = "", *, role: str | None = None
 ) -> int | None:
     executable_text = str(executable)
     for pid in sorted(descendants(rows, root_pid)):
         if pid == root_pid:
             continue
         command = rows[pid].command
+        if role is not None and command != f"{executable_text} {role}":
+            continue
         if executable_text in command and (not required or required in command):
             return pid
     return None
@@ -180,89 +194,6 @@ def validate_executable(path: Path, label: str) -> Path:
     if not os.access(path, os.X_OK):
         raise ValueError(f"{label} is not executable")
     return path
-
-
-def terminate_group(process: subprocess.Popen[bytes]) -> None:
-    terminate_tree(process, {})
-
-
-def pid_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-def terminate_tree(
-    process: subprocess.Popen[bytes], owned_processes: dict[int, str]
-) -> None:
-    """Gracefully stop the supervisor, then kill every retained owned group."""
-    if process.poll() is None:
-        try:
-            rows = process_table()
-            selected = descendants(rows, process.pid)
-            owned_processes.clear()
-            owned_processes.update({pid: rows[pid].command for pid in selected})
-        except (OSError, subprocess.SubprocessError):
-            pass
-        try:
-            # Signal only the supervisor first so its managed-child cleanup can
-            # terminate and wait for the TUI and independently grouped engine.
-            os.kill(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
-        except ProcessLookupError:
-            pass
-        except subprocess.TimeoutExpired:
-            pass
-
-    try:
-        current_rows = process_table()
-    except (OSError, subprocess.SubprocessError):
-        current_rows = {}
-    # Retaining historical PIDs across an eight-hour run risks PID reuse. The
-    # latest snapshot replaces older ones, and fallback signals only a PID
-    # whose current command still exactly matches the owned process.
-    live = {
-        pid
-        for pid, command in owned_processes.items()
-        if pid in current_rows and current_rows[pid].command == command
-    }
-    groups: set[int] = set()
-    for pid in live:
-        try:
-            group = os.getpgid(pid)
-            if group != os.getpgrp():
-                groups.add(group)
-        except ProcessLookupError:
-            pass
-    for group in groups:
-        try:
-            os.killpg(group, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline and any(pid_exists(pid) for pid in live):
-        time.sleep(0.02)
-    for group in groups:
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    for pid in live:
-        if pid_exists(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-    if process.poll() is None:
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
 
 
 def text_events(marker: str, index: int) -> list[dict[str, object]]:
@@ -321,132 +252,6 @@ def build_workload(
     return steps, scripts
 
 
-class EventLogProbe:
-    """Incrementally observes durable logs without repeatedly rereading them."""
-
-    def __init__(self, sessions_root: Path) -> None:
-        self.sessions_root = sessions_root
-        self.offsets: dict[Path, int] = {}
-        self.tails: dict[Path, bytes] = {}
-        self.seen_markers: set[str] = set()
-        self.marker_locations: dict[str, tuple[Path, int]] = {}
-        self.event_counts: dict[str, int] = {}
-        self.bytes_observed = 0
-        self.pending_records: dict[Path, bytes] = {}
-        self.last_events: dict[Path, dict[str, object]] = {}
-
-    def poll(self, marker: str | None = None) -> bool:
-        found = marker in self.seen_markers if marker is not None else False
-        for path in sorted(self.sessions_root.glob("*/events.jsonl")):
-            try:
-                size = path.stat().st_size
-                offset = self.offsets.get(path, 0)
-                if size < offset:
-                    offset = 0
-                    self.pending_records.pop(path, None)
-                    self.last_events.pop(path, None)
-                if size == offset:
-                    continue
-                with path.open("rb") as handle:
-                    handle.seek(offset)
-                    raw = handle.read()
-                self.offsets[path] = offset + len(raw)
-                self.bytes_observed += len(raw)
-                self.observe_metadata(path, raw)
-                tail = self.tails.get(path, b"")
-                combined = tail + raw
-                self.tails[path] = combined[-256:]
-                for match in SOAK_TOKEN.finditer(combined):
-                    if match.end() <= len(tail):
-                        continue
-                    token = match.group().decode("ascii")
-                    self.seen_markers.add(token)
-                    self.marker_locations[token] = (
-                        path,
-                        max(0, offset - len(tail) + match.start()),
-                    )
-                for match in EVENT_TYPE.finditer(combined):
-                    if match.end() <= len(tail):
-                        continue
-                    event_type = match.group(1).decode("ascii")
-                    self.event_counts[event_type] = (
-                        self.event_counts.get(event_type, 0) + 1
-                    )
-                if marker is not None and marker in self.seen_markers:
-                    found = True
-            except FileNotFoundError:
-                continue
-        return found
-
-    def observe_metadata(self, path: Path, raw: bytes) -> None:
-        records = (self.pending_records.pop(path, b"") + raw).splitlines(keepends=True)
-        for record in records:
-            if not record.endswith(b"\n"):
-                if len(record) <= MAX_DIAGNOSTIC_EVENT_BYTES:
-                    self.pending_records[path] = record
-                continue
-            if len(record) > MAX_DIAGNOSTIC_EVENT_BYTES:
-                continue
-            try:
-                envelope = json.loads(record)
-            except (ValueError, UnicodeError):
-                continue
-            if not isinstance(envelope, dict) or not isinstance(envelope.get("event"), dict):
-                continue
-            event = envelope["event"]
-            meta = event.get("meta")
-            if not isinstance(meta, dict):
-                meta = {}
-            # Only protocol identities enter diagnostics, never event bodies.
-            fields = {
-                "session_id": meta.get("session_id", path.parent.name),
-                "sequence_id": meta.get("sequence_id", envelope.get("sequence")),
-                "turn_id": event.get("turn_id"),
-                "request_id": meta.get("caused_by"),
-                "event_type": event.get("type"),
-            }
-            self.last_events[path] = {
-                key: value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) else None
-                for key, value in fields.items()
-            }
-
-    def diagnostics(self) -> list[dict[str, object]]:
-        return [
-            {**self.last_events.get(path, {}), "observed_bytes": offset}
-            for path, offset in sorted(self.offsets.items())[-16:]
-        ]
-
-    def saw(self, marker: str) -> bool:
-        return marker in self.seen_markers
-
-    def event_count(self, event_type: str) -> int:
-        return self.event_counts.get(event_type, 0)
-
-    def marker_persisted(self, marker: str) -> bool:
-        """Re-read only the exact recorded marker range from the durable log."""
-        location = self.marker_locations.get(marker)
-        if location is None:
-            return False
-        path, offset = location
-        encoded = marker.encode()
-        try:
-            if path.stat().st_size < offset + len(encoded):
-                return False
-            with path.open("rb") as handle:
-                handle.seek(offset)
-                return handle.read(len(encoded)) == encoded
-        except FileNotFoundError:
-            return False
-
-    def durable_bytes(self) -> int:
-        total = 0
-        for path in self.sessions_root.glob("*/events.jsonl"):
-            try:
-                total += path.stat().st_size
-            except FileNotFoundError:
-                pass
-        return total
-
 
 def write_replay_script(
     path: Path, duration: float, turn_seconds: float, compact_every: int, tool_every: int
@@ -478,14 +283,14 @@ def run_soak(
             rw, tui, duration, sample_seconds, rss_limit, turn_seconds,
             compact_every, tool_every, restart_after_turns, script_delay_ms, progress,
         )
-        if progress_path is not None:
-            write_result(progress_path, result)
         return result
     except BaseException as error:
         details = progress.snapshot()
         if isinstance(error, SoakFailure):
             details.update(error.details)
         details["error_type"] = type(error).__name__
+        if isinstance(error, UnsettledScope):
+            details["physical_settlement"] = "UNSETTLED"
         failure = SoakFailure(redact_diagnostic(str(error)), details)
         if progress_path is not None:
             try:
@@ -511,8 +316,8 @@ def _run_soak(
     progress: SoakProgress,
 ) -> dict[str, object]:
     rw = validate_executable(rw, "rw")
-    tui_executable = validate_executable(
-        tui if tui is not None else rw.with_name("rottweiler-tui"),
+    js_host_executable = validate_executable(
+        tui if tui is not None else rw.with_name("rottweiler-js-host"),
         "TUI",
     )
     if duration <= 0 or sample_seconds <= 0 or turn_seconds <= 0:
@@ -543,8 +348,10 @@ def _run_soak(
     # Unix-domain sockets have a small platform path limit (104 bytes on
     # macOS). Keep the private harness root short before the supervisor adds
     # its randomized runtime directory.
-    with tempfile.TemporaryDirectory(prefix="rws-", dir="/tmp") as temporary:
-        root = Path(temporary)
+    with delegated_success_scope(), retained_scratch(
+        "rws-", parent=Path("/tmp"),
+        evidence=lambda path: progress.snapshot(retained_scratch=str(path)),
+    ) as root:
         home = root / "h"
         workspace = root / "w"
         state = root / "s"
@@ -575,36 +382,13 @@ def _run_soak(
             "SOAK_FIXTURE_API_KEY": "offline-soak-fixture",
             "ROTTWEILER_HOME": str(state),
             "ROTTWEILER_DRIVER_READY_MARKER": "SOAK_DRIVER_READY",
+            "ROTTWEILER_PROCESS_START_MARKER": "SOAK_TUI_PROCESS_START",
+            "ROTTWEILER_INTERACTIVE_MARKER": "SOAK_TUI_INPUT_ACK",
             "TERM": "xterm-256color",
         }
         if tui is not None:
-            environment["ROTTWEILER_TUI_BIN"] = str(tui_executable)
-        master, slave = pty.openpty()
-        os.set_blocking(master, False)
-        try:
-            process = subprocess.Popen(
-                [
-                str(rw),
-                "--permission-mode",
-                "auto-safe",
-                "--in-memory-replay-script",
-                str(replay_script),
-                "--record-script-delay-ms",
-                str(script_delay_ms),
-                ],
-                cwd=workspace,
-                env=environment,
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                start_new_session=True,
-            )
-        except BaseException:
-            os.close(master)
-            os.close(slave)
-            raise
-        os.close(slave)
-        owned_processes: dict[int, str] = {}
+            environment["ROTTWEILER_JS_HOST_BIN"] = str(js_host_executable)
+        owned_processes: set[int] = set()
         # The isolated workspace has no executable project configuration. Deny
         # the one-time trust prompt explicitly so the production supervisor starts.
         probe = EventLogProbe(state / "sessions")
@@ -625,7 +409,7 @@ def _run_soak(
         terminal_tail = bytearray()
         engine_diagnostic = "not observed"
         driver_ready_count = 0
-        ready_marker_tail = b""
+        outages = Outages(started)
         ready_tui_pid: int | None = None
         restart_ready_before = 0
         readiness_deadline: float | None = started + 20
@@ -640,6 +424,7 @@ def _run_soak(
                        "driver_readiness" if ready_tui_pid is None else "ready"),
                 supervisor_pid=process.pid,
                 driver_ready_count=driver_ready_count,
+                tui_outages=outages.snapshot(complete=False),
                 ready_tui_pid=ready_tui_pid,
                 engine_generations=engine_generations[-16:],
                 tui_generations=tui_generations[-16:],
@@ -675,13 +460,40 @@ def _run_soak(
                 forced_restart_completed=forced_restart_completed,
             )
 
+        master, slave = pty.openpty()
+        os.set_blocking(master, False)
+        try:
+            process = subprocess.Popen(
+                [
+                str(rw),
+                "--permission-mode",
+                "auto-safe",
+                "--in-memory-replay-script",
+                str(replay_script),
+                "--record-script-delay-ms",
+                str(script_delay_ms),
+                ],
+                cwd=workspace,
+                env=environment,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+            )
+        except BaseException:
+            os.close(master)
+            os.close(slave)
+            raise
+        os.close(slave)
         try:
             os.write(master, b"n\r")
             while time.monotonic() - started < duration:
-                if process.poll() is not None:
+                check_sample_cancellation()
+                status = observe_exit(process.pid)
+                if status is not None:
                     raise RuntimeError(
                         "supervised Rottweiler exited early with "
-                        f"{process.returncode}: "
+                        f"{status}: "
                         f"submitted={submitted} completed={completed} "
                         f"waiting={waiting}; terminal tail: "
                         f"engine={engine_diagnostic}; "
@@ -692,14 +504,12 @@ def _run_soak(
                 if readable:
                     try:
                         while chunk := os.read(master, 64 * 1024):
-                            readiness_bytes = ready_marker_tail + chunk
-                            markers = readiness_bytes.count(b"SOAK_DRIVER_READY")
-                            ready_marker_tail = readiness_bytes[-(len(b"SOAK_DRIVER_READY") - 1):]
+                            def observed_ready_tui() -> int | None:
+                                return find_descendant(process_table(), process.pid, js_host_executable, role=TUI_ROLE)
+                            markers = outages.feed(chunk, time.monotonic(), observed_ready_tui)
                             driver_ready_count += markers
                             if markers:
-                                ready_tui_pid = find_descendant(
-                                    process_table(), process.pid, tui_executable
-                                )
+                                ready_tui_pid = outages.generations[-1]["pid"]
                             # The first marker is initial readiness; every later
                             # marker is a successfully reattached TUI, including
                             # planned memory recycles and the forced probe below.
@@ -729,7 +539,7 @@ def _run_soak(
                     except BlockingIOError:
                         pass
                     except OSError:
-                        if process.poll() is None:
+                        if observe_exit(process.pid) is None:
                             raise
 
                 if waiting is not None and probe.poll(waiting.marker):
@@ -771,7 +581,7 @@ def _run_soak(
                                     f"engine={engine_diagnostic}; terminal tail: "
                                     f"{terminal_tail.decode('utf-8', errors='replace')[-4000:]}"
                                 )
-                            current_tui = find_descendant(process_table(), process.pid, tui_executable)
+                            current_tui = find_descendant(process_table(), process.pid, js_host_executable, role=TUI_ROLE)
                             if current_tui is None or current_tui != ready_tui_pid:
                                 raise RuntimeError(
                                     f"TUI driver changed before input acceptance for {waiting.marker}"
@@ -807,10 +617,14 @@ def _run_soak(
                 ):
                     rows = process_table()
                     engine_pid = find_descendant(rows, process.pid, rw, " serve ")
-                    tui_pid = find_descendant(rows, process.pid, tui_executable)
-                    if engine_pid is not None and tui_pid is not None:
-                        os.kill(tui_pid, signal.SIGKILL)
-                        restart_old_tui = tui_pid
+                    def current_direct_tui() -> int | None:
+                        current_rows = process_table()
+                        pid = find_descendant(current_rows, process.pid, js_host_executable, role=TUI_ROLE)
+                        return pid if pid is not None and current_rows[pid].parent == process.pid else None
+                    fault = kill_direct_child(process, current_direct_tui) if engine_pid is not None else None
+                    if engine_pid is not None and fault is not None:
+                        outages.force(fault.signal_started, fault.signal_finished)
+                        restart_old_tui = fault.pid
                         restart_engine = engine_pid
                         restart_ready_before = driver_ready_count
                         ready_tui_pid = None
@@ -819,7 +633,7 @@ def _run_soak(
                 if restart_old_tui is not None:
                     rows = process_table()
                     current_engine = find_descendant(rows, process.pid, rw, " serve ")
-                    current_tui = find_descendant(rows, process.pid, tui_executable)
+                    current_tui = find_descendant(rows, process.pid, js_host_executable, role=TUI_ROLE)
                     if (
                         current_engine == restart_engine
                         and current_tui is not None
@@ -845,15 +659,17 @@ def _run_soak(
                     and now >= next_submit
                     and submitted < len(steps)
                 ):
-                    current_tui = find_descendant(process_table(), process.pid, tui_executable)
+                    current_tui = find_descendant(process_table(), process.pid, js_host_executable, role=TUI_ROLE)
                     if current_tui is None or current_tui != ready_tui_pid:
                         if readiness_deadline is None:
                             readiness_deadline = now + 20
                         if now >= readiness_deadline:
                             raise RuntimeError("current TUI did not establish driver readiness before input")
                     else:
+                        outages.confirm_ready(now, current_tui)
                         readiness_deadline = None
                         waiting = steps[submitted]
+                        probe.begin(waiting.marker, waiting.kind)
                         # The production composer submits on plain Return. The soak
                         # drives an xterm-compatible PTY, matching the M4 release
                         # gate and a physical Return key in that terminal.
@@ -873,10 +689,10 @@ def _run_soak(
                 if now >= next_sample:
                     rows = process_table()
                     selected = descendants(rows, process.pid)
-                    owned_processes = {pid: rows[pid].command for pid in selected}
+                    owned_processes = selected
                     for generations, current in (
                         (engine_generations, find_descendant(rows, process.pid, rw, " serve ")),
-                        (tui_generations, find_descendant(rows, process.pid, tui_executable)),
+                        (tui_generations, find_descendant(rows, process.pid, js_host_executable, role=TUI_ROLE)),
                     ):
                         if current is not None and (not generations or generations[-1] != current):
                             generations.append(current)
@@ -932,15 +748,25 @@ def _run_soak(
                 )
             if streamed_turns == 0 or tool_turns == 0 or compactions == 0:
                 raise RuntimeError("soak did not exercise every required production path")
+            outages.require_complete()
             if not forced_restart_completed or tui_restarts < 1:
                 raise RuntimeError("soak did not complete the supervised TUI reconnect")
             durable_bytes = probe.durable_bytes()
             if durable_bytes <= 0 or last_completed_marker is None:
                 raise RuntimeError("soak did not persist a durable transcript")
         finally:
+            primary = sys.exception()
             capture_progress()
+            progress.snapshot(tui_outages=outages.snapshot())
+            if primary is not None:
+                progress.snapshot(primary_error=redact_diagnostic(str(primary)),
+                                  primary_error_type=type(primary).__name__)
             try:
-                terminate_tree(process, owned_processes)
+                terminate_supervisor(
+                    process, master, owned_processes,
+                    lambda: descendants(process_table(), process.pid),
+                )
+                progress.snapshot(physical_settlement="proved")
             finally:
                 os.close(master)
 
@@ -973,7 +799,7 @@ def failure_result(error: Exception) -> dict[str, object]:
     }
     if isinstance(error, SoakFailure):
         result.update(error.details)
-    result["status"] = "fail"
+    result["status"] = "UNSETTLED" if result.get("physical_settlement") == "UNSETTLED" else "fail"
     result["schema_version"] = 1
     return result
 
@@ -999,10 +825,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rw", required=True, type=Path)
     parser.add_argument(
-        "--tui",
+        "--js-host",
         type=Path,
         help="development-only TUI override; release bundles discover the private sibling",
     )
+    identity = parser.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--candidate", type=Path)
+    identity.add_argument("--release-archive", type=Path)
+    parser.add_argument("--release-version")
     parser.add_argument("--duration-seconds", type=float, default=DEFAULT_SECONDS)
     parser.add_argument("--sample-seconds", type=float, default=5.0)
     parser.add_argument("--rss-limit-mib", type=int, default=DEFAULT_RSS_LIMIT_MIB)
@@ -1014,14 +844,16 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
-    def interrupted(signum: int, _frame: object) -> None:
-        raise InterruptedError(f"soak interrupted by signal {signum}")
-
-    previous_termination = signal.signal(signal.SIGTERM, interrupted)
+    inputs = SoakInputs(Path(__file__).resolve().parents[1], args.rw, args.js_host,
+                        args.candidate, args.release_archive, args.release_version)
+    before = None
+    result = None
+    error = None
     try:
+        before = inputs.verify()
         result = run_soak(
             args.rw,
-            args.tui,
+            args.js_host,
             args.duration_seconds,
             args.sample_seconds,
             args.rss_limit_mib * 1024 * 1024,
@@ -1032,16 +864,29 @@ def main() -> None:
             args.script_delay_ms,
             progress_path=args.output,
         )
-    except Exception as error:
-        result = failure_result(error)
+    except BaseException as failure:
+        error = failure
+        result = failure_result(failure)
+    finally:
+        if result is None:
+            result = {"schema_version": 1, "status": "fail"}
+        if before is not None:
+            result["artifact_identity_before"] = before
+            try:
+                result["artifact_identity_after"] = verify_unchanged(inputs, before)
+            except BaseException as failure:
+                result["artifact_verification_error"] = redact_diagnostic(str(failure))
+                if result["status"] != "UNSETTLED":
+                    result["status"] = "fail"
+                error = failure
         try:
             write_result(args.output, result)
         except OSError as write_error:
             result["evidence_write_error"] = type(write_error).__name__
+            error = write_error
+    if error is not None:
         print(json.dumps(result, sort_keys=True), file=sys.stderr)
         raise SystemExit(1) from None
-    finally:
-        signal.signal(signal.SIGTERM, previous_termination)
     print(json.dumps(result, sort_keys=True))
 
 

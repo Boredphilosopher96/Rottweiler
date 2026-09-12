@@ -7,14 +7,15 @@ cd "$repo"
 export ROTTWEILER_CREDENTIAL_BACKEND=file
 export CARGO_PROFILE_RELEASE_DEBUG=0
 
-scripts/cargo-release.sh build --locked --release -p rw-cli
-release_dir=$(scripts/cargo-release.sh artifact-dir)
-(cd packages/tui && bun run build)
-
+if [ "$#" -ne 1 ]; then
+  echo "usage: m4_release_gate.sh CANDIDATE_DIRECTORY (build with scripts/build-native-candidate.py)" >&2
+  exit 2
+fi
+candidate=$1
+python3 scripts/native_candidate.py prepare "$candidate" >/dev/null
 set -- \
   --repo "$repo" \
-  --rw "$release_dir/rw" \
-  --tui "$repo/packages/tui/dist/rottweiler-tui" \
+  --candidate "$candidate" \
   --samples "${ROTTWEILER_M4_PERF_SAMPLES:-100}"
 
 if [ "${ROTTWEILER_M4_SKIP_PERFORMANCE:-0}" = 1 ]; then

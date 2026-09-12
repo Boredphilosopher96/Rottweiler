@@ -1,6 +1,6 @@
 import { StyledText, bold, fg } from "@opentui/core"
 
-import { fuzzyMatch, type FuzzyMatch } from "./components/picker"
+import { fuzzyMatch } from "./components/picker"
 import type {
   ListDetailItemRow,
   ListDetailPresentation,

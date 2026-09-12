@@ -3,10 +3,9 @@ import { builtinModules } from "node:module"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 
-import { runPlugin, type PluginDefinition } from "@rottweiler/plugin"
+import type { PluginDefinition } from "@rottweiler/plugin"
 
-export const SOURCE_HOST_ABI = 1 as const
-export const SOURCE_BUNDLE_FORMAT = "bun-esm-v1" as const
+import { SOURCE_HOST_ABI, SOURCE_BUNDLE_FORMAT } from "./protocol"
 
 interface GraphInput {
   readonly path: string
@@ -163,6 +162,7 @@ async function run(bundleArgument: string): Promise<void> {
   if (!isRecord(loaded) || !isPluginDefinition(loaded.plugin)) {
     throw new Error("source bundle must export one plugin definition named plugin")
   }
+  const { runPlugin } = await import("@rottweiler/plugin")
   await runPlugin(loaded.plugin)
 }
 
@@ -190,15 +190,5 @@ export async function main(argv: readonly string[]): Promise<void> {
     await run(args[0])
     return
   }
-  throw new Error("usage: rottweiler-plugin-host version|graph ROOT ENTRY|bundle ROOT ENTRY OUTDIR|run BUNDLE")
-}
-
-if (import.meta.main) {
-  try {
-    await main(process.argv.slice(2))
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "plugin host failed"
-    process.stderr.write(`${message.slice(0, 4096)}\n`)
-    process.exitCode = 1
-  }
+  throw new Error("usage: rottweiler-js-host source-plugin version|graph ROOT ENTRY|bundle ROOT ENTRY OUTDIR|run BUNDLE")
 }

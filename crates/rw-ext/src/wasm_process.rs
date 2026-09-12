@@ -1,16 +1,13 @@
-//! Bounded one-shot protocol for the private WASM helper process.
+//! Bounded protocol and adapters for the private WASM worker pool.
+mod pool;
+pub use pool::{WasmWorkerPool, WasmWorkerStats};
 
-use std::{
-    path::PathBuf,
-    process::Stdio,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use rw_plugin_protocol::PluginManifest;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
@@ -21,19 +18,15 @@ use crate::{
 pub const MAX_WASM_HOST_HEADER_BYTES: usize = 1024 * 1024;
 pub const MAX_WASM_HOST_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const WASM_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const WASM_HOST_REAP_TIMEOUT: Duration = Duration::from_secs(1);
-static WASM_HELPER_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WasmHostRequest {
-    Validate {
-        manifest: PluginManifest,
+    Load {
+        manifest: Box<PluginManifest>,
         limits: WasmHookLimits,
     },
     Invoke {
-        manifest: PluginManifest,
-        limits: WasmHookLimits,
         event: String,
         input: String,
     },
@@ -42,10 +35,8 @@ pub enum WasmHostRequest {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WasmHostResponse {
-    Valid,
-    Continue,
-    Replace { payload: Value },
-    Block { message: String },
+    Valid {},
+    Directive { directive: HookDirective },
     Error { message: String },
 }
 
@@ -53,10 +44,8 @@ pub enum WasmHostResponse {
 /// actually invoked. `rw` itself therefore has no Wasmtime dependency.
 #[derive(Clone)]
 pub struct WasmProcessHook {
-    helper: PathBuf,
-    manifest: PluginManifest,
-    component: Arc<[u8]>,
-    limits: WasmHookLimits,
+    pool: Arc<WasmWorkerPool>,
+    generation: Arc<pool::Generation>,
 }
 
 impl WasmProcessHook {
@@ -66,7 +55,8 @@ impl WasmProcessHook {
     /// # Errors
     /// Returns an error for invalid manifests, capabilities, or component size.
     pub fn new(
-        helper: PathBuf,
+        pool: Arc<WasmWorkerPool>,
+        helper: rw_tools::ApprovedExecutable,
         manifest: PluginManifest,
         component: Vec<u8>,
         limits: WasmHookLimits,
@@ -86,11 +76,24 @@ impl WasmProcessHook {
         {
             return Err(WasmHookHostError::UnsupportedCapability);
         }
+        let mut hash = blake3::Hasher::new();
+        hash.update(blake3::hash(&component).as_bytes());
+        let identity = serde_json::to_vec(&(manifest.clone(), limits)).map_err(|error| {
+            WasmHookHostError::Compile {
+                message: error.to_string(),
+            }
+        })?;
+        hash.update(&identity);
         Ok(Self {
-            helper,
-            manifest,
-            component: component.into(),
-            limits,
+            pool,
+            generation: Arc::new(pool::Generation {
+                helper,
+                manifest,
+                component: component.into(),
+                limits,
+                digest: hash.finalize(),
+                jobs: std::sync::Mutex::default(),
+            }),
         })
     }
 
@@ -103,11 +106,11 @@ impl WasmProcessHook {
         dispatcher: &mut HookDispatcher,
     ) -> Result<(), HookRegistrationError> {
         let shared: Arc<dyn HookHandler> = Arc::new(self.clone());
-        for declaration in &self.manifest.capabilities.hooks {
+        for declaration in &self.generation.manifest.capabilities.hooks {
             let hook = declaration.name;
-            let id = format!("wasm:{}:{}", self.manifest.name, hook.as_str());
+            let id = format!("wasm:{}:{}", self.generation.manifest.name, hook.as_str());
             dispatcher.register_shared(
-                crate::plugin_hook_registration(*declaration, id),
+                crate::plugin_hook_registration(*declaration, id, crate::HookEffect::ReadOnly),
                 Arc::clone(&shared),
             )?;
         }
@@ -119,19 +122,18 @@ impl WasmProcessHook {
     /// # Errors
     /// Returns an error when the helper cannot start or rejects the component.
     pub async fn validate(&self) -> Result<(), WasmHookHostError> {
-        let response = invoke_helper(
-            &self.helper,
-            &WasmHostRequest::Validate {
-                manifest: self.manifest.clone(),
-                limits: self.limits,
-            },
-            &self.component,
-        )
-        .await?;
+        let response = self
+            .pool
+            .request(
+                Arc::clone(&self.generation),
+                None,
+                WASM_HOST_REQUEST_TIMEOUT,
+            )
+            .await?;
         match response {
-            WasmHostResponse::Valid => Ok(()),
+            WasmHostResponse::Valid {} => Ok(()),
             WasmHostResponse::Error { message } => Err(WasmHookHostError::Compile { message }),
-            _ => Err(WasmHookHostError::Execution {
+            WasmHostResponse::Directive { .. } => Err(WasmHookHostError::Execution {
                 message: "WASM helper returned an unexpected validation response".to_owned(),
             }),
         }
@@ -140,28 +142,26 @@ impl WasmProcessHook {
 
 #[async_trait]
 impl HookHandler for WasmProcessHook {
+    async fn settle_effects(&self) -> Result<(), HookError> {
+        self.generation
+            .settle()
+            .await
+            .map_err(|error| HookError::new("effects_unsettled", error.to_string()))
+    }
+
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
         if invocation.cancellation().is_cancelled() {
             return Err(HookError::new("cancelled", "WASM hook was cancelled"));
         }
-        let input = encode_input(invocation.payload(), self.limits.max_input_bytes)
+        let input = encode_input(invocation.input(), self.generation.limits.max_input_bytes)
             .map_err(|error| HookError::new("wasm_input", error.to_string()))?;
-        let request = WasmHostRequest::Invoke {
-            manifest: self.manifest.clone(),
-            limits: self.limits,
-            event: rw_plugin_protocol::PluginHook::from(invocation.event())
-                .as_str()
-                .to_owned(),
-            input,
-        };
+        let event = invocation.event().as_str().to_owned();
         tokio::select! {
-            result = invoke_helper(&self.helper, &request, &self.component) => {
+            result = self.pool.request(Arc::clone(&self.generation), Some((event, input)), WASM_HOST_REQUEST_TIMEOUT) => {
                 match result.map_err(|error| HookError::new("wasm_hook", error.to_string()))? {
-                    WasmHostResponse::Continue => Ok(HookDirective::Continue),
-                    WasmHostResponse::Replace { payload } => Ok(HookDirective::Replace(payload)),
-                    WasmHostResponse::Block { message } => Ok(HookDirective::Block { message }),
+                    WasmHostResponse::Directive { directive } => Ok(directive),
                     WasmHostResponse::Error { message } => Err(HookError::new("wasm_hook", message)),
-                    WasmHostResponse::Valid => Err(HookError::new("wasm_hook", "WASM helper returned an unexpected invocation response")),
+                    WasmHostResponse::Valid {} => Err(HookError::new("wasm_hook", "WASM helper returned an unexpected invocation response")),
                 }
             }
             () = invocation.cancellation().cancelled() => {
@@ -171,263 +171,13 @@ impl HookHandler for WasmProcessHook {
     }
 }
 
-/// Sends one bounded request and exact component byte sequence to the helper.
-///
-/// # Errors
-/// Returns an error for wire-limit, process, I/O, or malformed-response failures.
-pub async fn invoke_helper(
-    helper: &std::path::Path,
-    request: &WasmHostRequest,
-    component: &[u8],
-) -> Result<WasmHostResponse, WasmHookHostError> {
-    invoke_helper_with_timeout(helper, request, component, WASM_HOST_REQUEST_TIMEOUT).await
-}
-
-async fn invoke_helper_with_timeout(
-    helper: &std::path::Path,
-    request: &WasmHostRequest,
-    component: &[u8],
-    request_timeout: Duration,
-) -> Result<WasmHostResponse, WasmHookHostError> {
-    invoke_helper_with_timeout_and_slot(
-        helper,
-        request,
-        component,
-        request_timeout,
-        &WASM_HELPER_SLOT,
-    )
-    .await
-}
-
-async fn invoke_helper_with_timeout_and_slot(
-    helper: &std::path::Path,
-    request: &WasmHostRequest,
-    component: &[u8],
-    request_timeout: Duration,
-    helper_slot: &tokio::sync::Semaphore,
-) -> Result<WasmHostResponse, WasmHookHostError> {
-    let started = Instant::now();
-    let _permit = tokio::time::timeout(request_timeout, helper_slot.acquire())
-        .await
-        .map_err(|_| helper_deadline_error())?
-        .map_err(|_| WasmHookHostError::Execution {
-            message: "private WASM helper is unavailable".to_owned(),
-        })?;
-    let remaining = request_timeout.saturating_sub(started.elapsed());
-    if remaining.is_zero() {
-        return Err(helper_deadline_error());
-    }
-    let header = serde_json::to_vec(request).map_err(|error| WasmHookHostError::Execution {
-        message: format!("WASM helper request could not encode: {error}"),
-    })?;
-    if header.len() > MAX_WASM_HOST_HEADER_BYTES {
-        return Err(WasmHookHostError::InputTooLarge {
-            limit: MAX_WASM_HOST_HEADER_BYTES,
-        });
-    }
-    let component_len =
-        u32::try_from(component.len()).map_err(|_| WasmHookHostError::ComponentTooLarge {
-            limit: u32::MAX as usize,
-        })?;
-    let header_len = u32::try_from(header.len()).map_err(|_| WasmHookHostError::InputTooLarge {
-        limit: MAX_WASM_HOST_HEADER_BYTES,
-    })?;
-    let mut child = tokio::process::Command::new(helper)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| WasmHookHostError::Execution {
-            message: format!("private WASM helper could not start: {error}"),
-        })?;
-    let exchange = async {
-        write_helper_request(&mut child, header_len, component_len, &header, component).await?;
-        read_helper_response(&mut child).await
-    };
-    match tokio::time::timeout(remaining, exchange).await {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(error)) => {
-            terminate_and_reap(&mut child).await;
-            Err(error)
-        }
-        Err(_) => {
-            terminate_and_reap(&mut child).await;
-            Err(helper_deadline_error())
-        }
-    }
-}
-
-async fn write_helper_request(
-    child: &mut tokio::process::Child,
-    header_len: u32,
-    component_len: u32,
-    header: &[u8],
-    component: &[u8],
-) -> Result<(), WasmHookHostError> {
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| WasmHookHostError::Execution {
-            message: "private WASM helper stdin is unavailable".to_owned(),
-        })?;
-    stdin
-        .write_all(&header_len.to_be_bytes())
-        .await
-        .map_err(|error| io_error(&error))?;
-    stdin
-        .write_all(&component_len.to_be_bytes())
-        .await
-        .map_err(|error| io_error(&error))?;
-    stdin
-        .write_all(header)
-        .await
-        .map_err(|error| io_error(&error))?;
-    stdin
-        .write_all(component)
-        .await
-        .map_err(|error| io_error(&error))?;
-    stdin.shutdown().await.map_err(|error| io_error(&error))
-}
-
-async fn read_helper_response(
-    child: &mut tokio::process::Child,
-) -> Result<WasmHostResponse, WasmHookHostError> {
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| WasmHookHostError::Execution {
-            message: "private WASM helper stdout is unavailable".to_owned(),
-        })?;
-    let response_len = match stdout.read_u32().await {
-        Ok(length) => length as usize,
-        Err(error) => return Err(helper_read_error(child, &error).await),
-    };
-    if response_len > MAX_WASM_HOST_RESPONSE_BYTES {
-        return Err(WasmHookHostError::OutputTooLarge {
-            limit: MAX_WASM_HOST_RESPONSE_BYTES,
-        });
-    }
-    let mut response = vec![0; response_len];
-    if let Err(error) = stdout.read_exact(&mut response).await {
-        return Err(helper_read_error(child, &error).await);
-    }
-    let status = child.wait().await.map_err(|error| io_error(&error))?;
-    if !status.success() {
-        return Err(WasmHookHostError::Execution {
-            message: "private WASM helper exited unsuccessfully".to_owned(),
-        });
-    }
-    serde_json::from_slice(&response).map_err(|error| WasmHookHostError::InvalidDirective {
-        message: format!("private WASM helper returned malformed output: {error}"),
-    })
-}
-
-async fn helper_read_error(
-    child: &mut tokio::process::Child,
-    error: &std::io::Error,
-) -> WasmHookHostError {
-    let status = tokio::time::timeout(WASM_HOST_REAP_TIMEOUT, child.wait())
-        .await
-        .ok()
-        .and_then(Result::ok);
-    io_error_with_status(error, status.as_ref())
-}
-
 fn helper_deadline_error() -> WasmHookHostError {
     WasmHookHostError::Execution {
         message: "private WASM helper exceeded its request deadline".to_owned(),
     }
 }
-
-async fn terminate_and_reap(child: &mut tokio::process::Child) {
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(WASM_HOST_REAP_TIMEOUT, child.wait()).await;
-}
-
 fn io_error(error: &std::io::Error) -> WasmHookHostError {
     WasmHookHostError::Execution {
         message: format!("private WASM helper communication failed: {error}"),
-    }
-}
-
-fn io_error_with_status(
-    error: &std::io::Error,
-    status: Option<&std::process::ExitStatus>,
-) -> WasmHookHostError {
-    let outcome = status.map_or_else(
-        || "without an exit status".to_owned(),
-        |status| {
-            status.code().map_or_else(
-                || "after a signal".to_owned(),
-                |code| format!("with exit code {code}"),
-            )
-        },
-    );
-    WasmHookHostError::Execution {
-        message: format!("private WASM helper communication failed {outcome}: {error}"),
-    }
-}
-
-#[cfg(all(test, unix))]
-#[allow(clippy::expect_used)]
-mod tests {
-    use std::{os::unix::fs::PermissionsExt as _, time::Instant};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn hanging_helper_is_bounded_killed_and_reaped() {
-        let fixture = tempfile::tempdir().expect("fixture");
-        let helper = fixture.path().join("hanging-helper");
-        let pid_file = fixture.path().join("helper.pid");
-        std::fs::write(
-            &helper,
-            format!(
-                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\ntrap '' TERM\nwhile :; do sleep 1; done\n",
-                pid_file.display()
-            ),
-        )
-        .expect("helper script");
-        let mut permissions = std::fs::metadata(&helper)
-            .expect("helper metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&helper, permissions).expect("helper permissions");
-        let request = WasmHostRequest::Validate {
-            manifest: PluginManifest {
-                name: "deadline-test".to_owned(),
-                version: "1.0.0".to_owned(),
-                protocol: rw_plugin_protocol::PROTOCOL_VERSION,
-                capabilities: rw_plugin_protocol::PluginCapabilities::default(),
-            },
-            limits: WasmHookLimits::default(),
-        };
-        let started = Instant::now();
-        let helper_slot = tokio::sync::Semaphore::new(1);
-        let error = invoke_helper_with_timeout_and_slot(
-            &helper,
-            &request,
-            b"component",
-            Duration::from_secs(2),
-            &helper_slot,
-        )
-        .await
-        .expect_err("hanging helper must time out");
-        assert!(error.to_string().contains("deadline"));
-        assert!(started.elapsed() < Duration::from_secs(4));
-
-        let pid = std::fs::read_to_string(&pid_file)
-            .expect("helper pid")
-            .trim()
-            .to_owned();
-        let status = std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("probe process");
-        assert!(!status.success(), "timed-out helper must be reaped");
     }
 }

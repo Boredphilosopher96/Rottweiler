@@ -169,20 +169,21 @@ pub struct McpCatalogEntry {
     pub uri: Option<String>,
 }
 
-/// Reference to a complete result written outside the provider context window.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OverflowReference {
-    pub id: String,
-    pub bytes: usize,
+/// The consumer decides whether a large result can be attached to canonical tool history.
+#[derive(Clone, Copy, Debug)]
+pub enum McpResponseUse {
+    CanonicalTool,
+    Inline { max_bytes: usize },
 }
 
-/// Compact model-facing result.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Compact model-facing result with native-only retained owners.
+#[derive(Debug, Eq, PartialEq)]
 pub struct CappedResponse {
     pub encoded: String,
     pub format: String,
     pub truncated: bool,
-    pub overflow: Option<OverflowReference>,
+    pub overflow: Option<rw_types::SessionPayloadReference>,
+    pub payloads: rw_tools::ToolResultPayloads,
 }
 
 /// Limits for model-facing MCP data and graceful shutdown.
@@ -203,8 +204,15 @@ impl Default for McpLimits {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum McpError {
+    #[error("MCP HTTP transport failed")]
+    Transport,
+    #[error("MCP effects unsettled for {server}: {message}")]
+    EffectsUnsettled {
+        server: McpServerId,
+        message: String,
+    },
     #[error("invalid MCP executable or argument: {0}")]
     InvalidCommand(String),
     #[error("MCP server is already registered: {0}")]
@@ -223,8 +231,6 @@ pub enum McpError {
     Encoding(String),
     #[error("MCP overflow spool failed: {0}")]
     Spool(String),
-    #[error("MCP shutdown timed out for server: {0}")]
-    ShutdownTimeout(McpServerId),
     #[error("MCP login required for server {server} and resource {resource}")]
     PendingLogin {
         server: McpServerId,

@@ -1,8 +1,9 @@
+import { emptyBootstrapReply } from "../runtime/snapshot-fixtures"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import type { ClientCommand } from "../../src/protocol"
+import { CLIENT_COMMAND_EXECUTION, type ClientCommand, type CommandReply } from "../../src/protocol"
 
 export interface StreamPlan {
   readonly chunks: readonly Uint8Array[]
@@ -29,7 +30,7 @@ export class AuthenticatedMockEngine {
   #plans: StreamPlan[]
   readonly #streamControllers = new Set<ReadableStreamDefaultController<Uint8Array>>()
 
-  constructor(plans: readonly StreamPlan[] = []) {
+  constructor(plans: readonly StreamPlan[] = [], readonly onCommand?: (command: ClientCommand) => Promise<CommandReply> | CommandReply) {
     this.#plans = [...plans]
   }
 
@@ -78,8 +79,12 @@ export class AuthenticatedMockEngine {
     }
 
     if (url.pathname === "/v1/command" && request.method === "POST") {
-      this.commands.push(JSON.parse(body) as ClientCommand)
-      return Response.json({ type: "accepted" }, { status: 202 })
+      const command = JSON.parse(body) as ClientCommand
+      this.commands.push(command)
+      const reply = await this.onCommand?.(command) ?? emptyBootstrapReply(command) ?? (CLIENT_COMMAND_EXECUTION[command.type] === "read"
+        ? { type: "read", outcome: { type: "accepted" }, events: [] }
+        : { type: "command", outcome: { type: "accepted" } })
+      return Response.json(reply, { status: reply.type === "read" ? 200 : 202 })
     }
     if (url.pathname === "/v1/events" && request.method === "GET") {
       server.timeout(request, 0)

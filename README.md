@@ -90,9 +90,24 @@ TypeScript plugin host, and SDK, then validates the archive contract.
 git clone https://github.com/Boredphilosopher96/Rottweiler.git
 cd Rottweiler
 rustup toolchain install 1.97.1 --profile minimal
-bun install --cwd packages/tui --frozen-lockfile
-scripts/build-release.sh
+python3 scripts/build-native-candidate.py --print archive
 ```
+
+The builder prints the verified archive path and reuses an existing candidate
+when its source, toolchain, target, and profile still match. To run acceptance
+against that same product:
+
+```sh
+candidate=$(python3 scripts/build-native-candidate.py)
+crates/rw-cli/tests/perf_gate.sh "$candidate"
+crates/rw-cli/tests/m4_release_gate.sh "$candidate"
+```
+
+After builds and tests finish, preview disposable output with
+`python3 scripts/clean-build-artifacts.py`, then repeat with `--apply` to remove
+Cargo targets and compiled bundles. Session data, verification evidence, and
+installed dependencies are retained. Use `--target-dir PATH` to clean only a
+specific Cargo cache, or `--worktrees` to preview all registered worktrees.
 
 ## Repository map
 

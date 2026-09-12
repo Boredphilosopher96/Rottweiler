@@ -12,6 +12,7 @@ import tomllib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ci_inventory import package_manifests
+import opentui_native
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = r"[0-9]+\.[0-9]+\.[0-9]+"
@@ -35,6 +36,11 @@ def validate_repository(root: Path) -> list[str]:
         rust, bun = _read_owners(root)
     except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
         return [str(error)]
+
+    try:
+        opentui_native.contract(root)
+    except (OSError, ValueError, KeyError) as error:
+        failures.append(f"OpenTUI native toolchain contract: {error}")
 
     workflow_root = root / ".github" / "workflows"
     workflow_files = sorted(workflow_root.glob("*.yml")) + sorted(workflow_root.glob("*.yaml"))

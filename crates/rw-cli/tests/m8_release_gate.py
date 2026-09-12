@@ -5,19 +5,30 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import hashlib
 import json
 import math
 import os
 import pathlib
-import pty
 import re
-import select
 import shutil
-import signal
 import statistics
+import stat
+import sys
 import subprocess
 import tempfile
 import time
+
+
+REPO = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO / "scripts"))
+from perf_process import run_sample, check_sample_cancellation, delegated_success_scope
+from perf_process_wait import observe_exit, require_group_disappearance
+from perf_process_scope import UnsettledScope
+from perf_scratch import retained_scratch
+from m8_process import Terminal, append_bounded
+import m8_inputs
 
 
 PROMPT_READY_MARKER = b"rw_perf_prompt_ready=1\n"
@@ -141,91 +152,35 @@ def grant_exact_project_trust(
     env: dict[str, str],
     inventory_file: pathlib.Path,
 ) -> None:
-    pid, descriptor = pty.fork()
-    if pid == 0:
-        os.chdir(workspace)
-        os.execve(str(rw), [str(rw), "trust", "grant"], env)
+    terminal = Terminal([str(rw), "trust", "grant"], cwd=workspace, env=env)
     captured = bytearray()
+    prompted_hash = None
     try:
         deadline = time.monotonic() + 10
-        prompted = False
-        prompted_hash: str | None = None
-        prompt_validation_error: RuntimeError | None = None
         while time.monotonic() < deadline:
-            ready, _, _ = select.select([descriptor], [], [], 0.05)
-            if not ready:
-                continue
-            try:
-                chunk = os.read(descriptor, 65536)
-            except OSError:
+            check_sample_cancellation()
+            output, errors = terminal.read(.05)
+            append_bounded(captured, output)
+            append_bounded(captured, errors)
+            if prompted_hash is None and PROJECT_TRUST_PROMPT.encode() in captured:
+                prompted_hash = validate_project_trust_inventory(
+                    bytes(captured), workspace, inventory_file, expected_state="Untrusted",
+                    require_initial_addition=True, require_prompt=True,
+                )
+                terminal.write(b"y\n", deadline=deadline)
+            if terminal.observe_exit() is not None:
                 break
-            if not chunk:
-                break
-            captured.extend(chunk)
-            if not prompted and PROJECT_TRUST_PROMPT.encode() in captured:
-                try:
-                    prompted_hash = validate_project_trust_inventory(
-                        bytes(captured),
-                        workspace,
-                        inventory_file,
-                        expected_state="Untrusted",
-                        require_initial_addition=True,
-                        require_prompt=True,
-                    )
-                except RuntimeError as error:
-                    prompt_validation_error = error
-                    break
-                os.write(descriptor, b"y\n")
-                prompted = True
+        status = terminal.observe_exit()
+        if prompted_hash is None:
+            raise RuntimeError(f"exact project trust challenge was not shown: {captured[-2000:]!r}")
+        if status != 0:
+            raise RuntimeError(f"project trust grant failed or timed out: {status}: {captured[-2000:]!r}")
     finally:
-        with contextlib.suppress(OSError):
-            os.close(descriptor)
-    status: int | None = None
-    reap_deadline = time.monotonic() + 2
-    while time.monotonic() < reap_deadline:
-        found, candidate = os.waitpid(pid, os.WNOHANG)
-        if found == pid:
-            status = candidate
-            break
-        time.sleep(0.01)
-    if status is None:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pid, signal.SIGTERM)
-        time.sleep(0.1)
-        found, candidate = os.waitpid(pid, os.WNOHANG)
-        if found == pid:
-            status = candidate
-        else:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(pid, signal.SIGKILL)
-            _, status = os.waitpid(pid, 0)
-    exit_code = os.waitstatus_to_exitcode(status)
-    if prompt_validation_error is not None:
-        raise prompt_validation_error
-    if not prompted or prompted_hash is None:
-        raise RuntimeError(
-            "exact project extension inventory trust challenge was not shown: "
-            f"{captured[-2000:]!r}"
-        )
-    if exit_code != 0:
-        raise RuntimeError(
-            "project extension inventory trust grant failed with exit code "
-            f"{exit_code}: {captured[-2000:]!r}"
-        )
-    status_run = subprocess.run(
-        [str(rw), "trust", "status"],
-        cwd=workspace,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=10,
-        check=False,
-    )
+        terminal.close()
+    status_run = run_sample([str(rw), "trust", "status"], cwd=workspace, env=env, timeout=10,
+                            output_limit=4 * 1024 * 1024)
     if status_run.returncode != 0:
-        raise RuntimeError(
-            "persisted project extension inventory trust could not be read: "
-            f"stdout={status_run.stdout!r} stderr={status_run.stderr!r}"
-        )
+        raise RuntimeError(f"persisted project trust could not be read: {status_run.stderr[-2000:]!r}")
     validate_project_trust_inventory(
         status_run.stdout,
         workspace,
@@ -242,7 +197,7 @@ def run_command(
     provider_script: pathlib.Path,
     command: str,
 ) -> subprocess.CompletedProcess[bytes]:
-    run = subprocess.run(
+    run = run_sample(
         [
             str(rw),
             "-p",
@@ -257,10 +212,8 @@ def run_command(
         ],
         cwd=workspace,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         timeout=15,
-        check=False,
+        output_limit=4 * 1024 * 1024,
     )
     if run.returncode != 0:
         raise RuntimeError(
@@ -344,14 +297,18 @@ def parse_status(
 
 
 def process_table() -> list[tuple[int, int, int, str]]:
-    output = subprocess.check_output(
-        ["ps", "-axo", "pid=,ppid=,pgid=,command="], text=True
-    )
+    observed = run_sample(["/bin/ps", "-axo", "pid=,ppid=,pgid=,command="],
+                          cwd=REPO, env=dict(os.environ), timeout=5, output_limit=4 * 1024 * 1024)
+    if observed.returncode != 0:
+        raise RuntimeError("M8 process observation failed")
+    output = observed.stdout.decode("utf-8", errors="strict")
+    if not output.strip():
+        raise RuntimeError("M8 process observation was empty")
     records: list[tuple[int, int, int, str]] = []
     for line in output.splitlines():
         fields = line.strip().split(maxsplit=3)
         if len(fields) != 4:
-            continue
+            raise RuntimeError("M8 process observation was malformed")
         records.append((int(fields[0]), int(fields[1]), int(fields[2]), fields[3]))
     return records
 
@@ -370,16 +327,68 @@ def descendant_processes(root_pid: int) -> list[tuple[int, int, int, str]]:
     return descendants
 
 
+def process_image_path(pid: int) -> pathlib.Path:
+    """Ask the kernel for the executing image, independent of its argv spelling."""
+    if sys.platform == "linux":
+        return pathlib.Path(f"/proc/{pid}/exe")
+    if sys.platform == "darwin":
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        library.proc_pidpath.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+        if library.proc_pidpath(pid, buffer, len(buffer)) <= 0:
+            cause = ctypes.get_errno()
+            raise OSError(cause, f"cannot identify running image for PID {pid}")
+        return pathlib.Path(os.fsdecode(buffer.value))
+    raise RuntimeError(f"unsupported M8 process-image platform: {sys.platform}")
+
+
+def image_identity(path: pathlib.Path, expected_bytes: int) -> tuple[tuple[int, ...], str] | None:
+    """Hash a bounded, stable descriptor; private copies and sealed memfds are valid."""
+    with path.open("rb") as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size != expected_bytes:
+            return None
+        digest = hashlib.sha256()
+        copied = 0
+        while chunk := source.read(64 * 1024):
+            copied += len(chunk)
+            if copied > expected_bytes:
+                raise RuntimeError("running image grew during identity verification")
+            digest.update(chunk)
+        after = os.fstat(source.fileno())
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    identity = tuple(getattr(before, field) for field in fields)
+    if copied != expected_bytes or identity != tuple(getattr(after, field) for field in fields):
+        raise RuntimeError("running image changed during identity verification")
+    return identity, digest.hexdigest()
+
+
 def fixture_processes(
     descendants: list[tuple[int, int, int, str]], fixture: pathlib.Path
 ) -> list[tuple[int, int]]:
     fixtures: list[tuple[int, int]] = []
-    expected = fixture.resolve()
-    for pid, _, pgid, command in descendants:
-        program = command.split(maxsplit=1)[0]
-        with contextlib.suppress(OSError):
-            if pathlib.Path(program).resolve() == expected:
-                fixtures.append((pid, pgid))
+    expected_bytes = fixture.stat().st_size
+    expected = image_identity(fixture, expected_bytes)
+    if expected is None:
+        raise RuntimeError("approved fixture is not a regular executable image")
+    for pid, _, pgid, _ in descendants:
+        try:
+            image = process_image_path(pid)
+            identity = image_identity(image, expected_bytes)
+            if identity is None or identity[1] != expected[1]:
+                continue
+            # The process must still execute that descriptor in the captured group.
+            current = process_image_path(pid).stat()
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if tuple(getattr(current, field) for field in fields) != identity[0]:
+                raise RuntimeError(f"fixture PID {pid} changed its running image")
+            if os.getpgid(pid) != pgid:
+                raise RuntimeError(f"fixture PID {pid} changed its process group")
+            fixtures.append((pid, pgid))
+        except (FileNotFoundError, ProcessLookupError):
+            # A descendant may naturally retire while its snapshot is inspected.
+            continue
     return sorted(fixtures)
 
 
@@ -387,44 +396,12 @@ def group_members(groups: set[int]) -> list[tuple[int, int]]:
     return sorted((pid, pgid) for pid, _, pgid, _ in process_table() if pgid in groups)
 
 
-def signal_groups(groups: set[int], signal_number: signal.Signals) -> None:
-    own_group = os.getpgrp()
-    for group in sorted(groups):
-        if group <= 0 or group == own_group:
-            continue
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(group, signal_number)
-
-
-def terminate_process_tree(
-    process: subprocess.Popen[bytes], captured_child_groups: set[int]
-) -> None:
-    refreshed = {record[2] for record in descendant_processes(process.pid)}
-    child_groups = (captured_child_groups | refreshed) - {process.pid}
-    signal_groups(child_groups, signal.SIGTERM)
-    signal_groups({process.pid}, signal.SIGTERM)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=0.5)
-    signal_groups(child_groups, signal.SIGKILL)
-    signal_groups({process.pid}, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=2)
-    # A helper can fork between the first snapshot and parent termination.
-    signal_groups(child_groups, signal.SIGKILL)
-
-
-def write_terminal_line(descriptor: int, line: str) -> None:
+def write_terminal_line(terminal: Terminal, line: str) -> None:
+    deadline = time.monotonic() + STATUS_READY_TIMEOUT_SECONDS
     for byte in line.encode("utf-8"):
-        os.write(descriptor, bytes([byte]))
+        terminal.write(bytes([byte]), deadline=deadline)
         time.sleep(0.001)
-    os.write(descriptor, b"\r")
-
-
-def append_bounded(buffer: bytearray, chunk: bytes) -> None:
-    buffer.extend(chunk)
-    limit = 4 * 1024 * 1024
-    if len(buffer) > limit:
-        del buffer[: len(buffer) - limit]
+    terminal.write(b"\r", deadline=deadline)
 
 
 def one_sample(
@@ -454,21 +431,9 @@ def one_sample(
         "text",
         "--perf-markers",
     ]
-    terminal_master, terminal_slave = pty.openpty()
-    started = time.perf_counter_ns()
-    process = subprocess.Popen(
-        command,
-        cwd=workspace,
-        env=env,
-        stdin=terminal_slave,
-        stdout=terminal_slave,
-        stderr=subprocess.PIPE,
-        bufsize=0,
-        start_new_session=True,
-    )
-    os.close(terminal_slave)
-    assert process.stderr is not None
-    stderr_descriptor = process.stderr.fileno()
+    terminal = Terminal(command, cwd=workspace, env=env)
+    started = terminal.spawn_started_ns
+    process = terminal.owner.process
     captured_stderr = bytearray()
     terminal_output = bytearray()
     prompt_ready_ms: float | None = None
@@ -478,22 +443,10 @@ def one_sample(
     deadline = time.monotonic() + 10
     try:
         while time.monotonic() < deadline:
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            if not ready:
-                if process.poll() is not None:
-                    break
-                continue
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
+            check_sample_cancellation()
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
             if (
                 PROMPT_READY_MARKER in captured_stderr
                 and b"rw> " in terminal_output
@@ -507,7 +460,7 @@ def one_sample(
                 f"sample {sample} exited before composition plus line prompt were ready: "
                 f"terminal={terminal_output[-1500:]!r} stderr={captured_stderr[-1500:]!r}"
             )
-        write_terminal_line(terminal_master, "/mcp status")
+        write_terminal_line(terminal, "/mcp status")
         # Status rendering is a functional assertion after the measured
         # prompt-ready interval. Protected runners can briefly deschedule the
         # PTY consumer while the command is already queued, so give that
@@ -515,18 +468,10 @@ def one_sample(
         status_deadline = time.monotonic() + STATUS_READY_TIMEOUT_SECONDS
         status_ready = False
         while time.monotonic() < status_deadline:
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
+            check_sample_cancellation()
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
             with contextlib.suppress(RuntimeError):
                 parse_status(
                     bytes(terminal_output),
@@ -536,7 +481,7 @@ def one_sample(
                 status_ready = True
             if status_ready:
                 break
-            if process.poll() is not None:
+            if observe_exit(process.pid) is not None:
                 break
         if not status_ready:
             raise RuntimeError(
@@ -558,23 +503,15 @@ def one_sample(
         # activation path before verifying catalogs and shutdown/reaping.
         activated_servers: set[str] = set()
         for server in server_names:
-            write_terminal_line(terminal_master, f"/mcp enable {server}")
+            write_terminal_line(terminal, f"/mcp enable {server}")
             activated_servers.add(server)
             activation_deadline = time.monotonic() + 10
             activated = False
             while time.monotonic() < activation_deadline:
-                ready, _, _ = select.select(
-                    [stderr_descriptor, terminal_master], [], [], 0.01
-                )
-                for descriptor in ready:
-                    try:
-                        chunk = os.read(descriptor, 65536)
-                    except OSError:
-                        chunk = b""
-                    if descriptor == stderr_descriptor:
-                        append_bounded(captured_stderr, chunk)
-                    else:
-                        append_bounded(terminal_output, chunk)
+                check_sample_cancellation()
+                stdout, stderr = terminal.read()
+                append_bounded(terminal_output, stdout)
+                append_bounded(captured_stderr, stderr)
                 with contextlib.suppress(RuntimeError):
                     parse_status(
                         bytes(terminal_output),
@@ -584,7 +521,7 @@ def one_sample(
                     activated = True
                 if activated:
                     break
-                if process.poll() is not None:
+                if observe_exit(process.pid) is not None:
                     break
             if not activated:
                 raise RuntimeError(
@@ -601,49 +538,29 @@ def one_sample(
             terminal_output.count(b"rw> ") < expected_prompts
             and time.monotonic() < exit_deadline
         ):
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
         if terminal_output.count(b"rw> ") < expected_prompts:
             raise RuntimeError(
                 f"sample {sample} line client did not return after MCP activation: "
                 f"{terminal_output[-3000:]!r}"
             )
-        # Rustyline maps Ctrl-D at an empty prompt to EOF; the production REPL
-        # then follows its normal MCP shutdown path.
-        os.write(terminal_master, b"\x04")
+        # The bounded line client accepts Ctrl-D at an empty prompt as EOF,
+        # then awaits its normal MCP shutdown path.
+        terminal.write(b"\x04", deadline=time.monotonic() + 10)
         shutdown_deadline = time.monotonic() + 10
         while time.monotonic() < shutdown_deadline:
-            ready, _, _ = select.select(
-                [stderr_descriptor, terminal_master], [], [], 0.01
-            )
-            for descriptor in ready:
-                try:
-                    chunk = os.read(descriptor, 65536)
-                except OSError:
-                    chunk = b""
-                if descriptor == stderr_descriptor:
-                    append_bounded(captured_stderr, chunk)
-                else:
-                    append_bounded(terminal_output, chunk)
-            if process.poll() is not None:
+            check_sample_cancellation()
+            stdout, stderr = terminal.read()
+            append_bounded(terminal_output, stdout)
+            append_bounded(captured_stderr, stderr)
+            if observe_exit(process.pid) is not None:
                 break
-        process.wait(timeout=1)
-    except BaseException:
-        terminate_process_tree(process, child_groups)
-        raise
+        if observe_exit(process.pid) is None:
+            raise TimeoutError("M8 normal EOF shutdown exceeded its 10s deadline")
     finally:
-        with contextlib.suppress(OSError):
-            os.close(terminal_master)
+        terminal.close()
     if process.returncode != 0:
         raise RuntimeError(
             f"sample {sample} failed rc={process.returncode}: "
@@ -653,15 +570,17 @@ def one_sample(
     fixture_groups = {group for _, group in fixture_records}
     if len(fixture_pids) != 3 or len(fixture_groups) != 3:
         raise RuntimeError(
-            f"sample {sample} did not expose three canonical fixture processes in distinct "
+            f"sample {sample} did not expose three exact approved fixture images in distinct "
             f"groups after explicit activation: {fixture_records!r}"
         )
     leaked = group_members(child_groups)
     if leaked:
-        signal_groups(child_groups, signal.SIGKILL)
-        raise RuntimeError(
+        raise UnsettledScope(
             f"sample {sample} did not shutdown/reap complete MCP child groups: {leaked!r}"
         )
+    # Observed group IDs are absence checks only, never signal authority.
+    for group in child_groups:
+        require_group_disappearance(group, timeout=0)
     shutil.rmtree(sample_root)
     return prompt_ready_ms
 
@@ -673,28 +592,28 @@ def percentile(values: list[float], quantile: float) -> float:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rw", type=pathlib.Path, required=True)
-    parser.add_argument("--fixture", type=pathlib.Path, required=True)
+    parser.add_argument("--rw", type=pathlib.Path)
+    parser.add_argument("--candidate", type=pathlib.Path)
+    parser.add_argument("--fixture-receipt", type=pathlib.Path)
+    parser.add_argument("--fixture", type=pathlib.Path)
     parser.add_argument("--samples", type=int, default=100)
     parser.add_argument("--functional-only", action="store_true")
     parser.add_argument("--metrics-json", type=pathlib.Path)
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def run(args, source_rw, source_fixture, measurements: list[float], expected_hashes: tuple[str, str]) -> int:
     if args.samples < 100 and not args.functional_only:
         raise RuntimeError("M8 p99 release gate requires at least 100 samples")
-    if args.samples < 1:
-        raise RuntimeError("M8 gate requires at least one sample")
+    if not 1 <= args.samples <= 5000:
+        raise RuntimeError("M8 gate requires between one and 5000 samples")
     if args.metrics_json is not None and args.functional_only:
         raise RuntimeError("metric output requires the complete M8 performance gate")
-    source_rw = args.rw.resolve()
-    source_fixture = args.fixture.resolve()
     if not source_rw.is_file() or not source_fixture.is_file():
         raise RuntimeError("release rw and rw-mcp-fixture binaries must exist")
-    with tempfile.TemporaryDirectory(
-        prefix="rw8-", dir=tempfile.gettempdir()
+    with delegated_success_scope(), retained_scratch(
+        "rw8-", parent=pathlib.Path(tempfile.gettempdir()),
+        evidence=lambda path: print(json.dumps({"retained_scratch": str(path)}), file=sys.stderr),
     ) as temporary:
         # `/tmp` is a symlink on macOS. Production protocol launchers reject
         # any symlink provenance, so every path placed into config or argv must
@@ -709,6 +628,9 @@ def main() -> int:
         shutil.copyfile(source_fixture, fixture)
         rw.chmod(0o700)
         fixture.chmod(0o700)
+        copied = tuple(m8_inputs.native_candidate.hash_file(path) for path in (rw, fixture))
+        if copied != expected_hashes:
+            raise ValueError("M8 private executable copy differs from its admitted source bytes")
         workspace = root / "workspace"
         workspace.mkdir(mode=0o700)
         agents = workspace / ".agents"
@@ -770,19 +692,11 @@ def main() -> int:
                     server_names,
                     sample,
                 )
-        measurements = [
-            one_sample(
-                rw,
-                workspace,
-                home,
-                samples_root / f"sample-{sample}",
-                provider_script,
-                fixture,
-                server_names,
-                sample,
-            )
-            for sample in range(args.samples)
-        ]
+        for sample in range(args.samples):
+            measurements.append(one_sample(
+                rw, workspace, home, samples_root / f"sample-{sample}",
+                provider_script, fixture, server_names, sample,
+            ))
         p99 = percentile(measurements, 0.99)
         print(
             "M8 warm-cache fresh-process startup: "
@@ -810,6 +724,51 @@ def main() -> int:
             )
             temporary.replace(args.metrics_json)
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    if args.functional_only:
+        if args.rw is None or args.fixture is None or args.candidate is not None or args.fixture_receipt is not None:
+            raise ValueError("functional M8 requires explicit nonqualifying engine and fixture artifacts")
+        sources = (args.rw.resolve(strict=True), args.fixture.resolve(strict=True))
+        return run(args, *sources, [], tuple(m8_inputs.native_candidate.hash_file(path) for path in sources))
+    if args.candidate is None or args.fixture_receipt is None or args.rw is not None or args.fixture is not None:
+        raise ValueError("M8 qualification requires candidate and prepared fixture receipt")
+    before = m8_inputs.verify(args.candidate, args.fixture_receipt, REPO)
+    engine = args.candidate / before["candidate_receipt"]["components"]["engine"]["path"]
+    fixture = args.fixture_receipt.parent / m8_inputs.FIXTURE
+    # Identity and physical closure both precede the gate's success acknowledgement.
+    samples: list[float] = []
+    record = {"schema_version": 1, "status": "running", "inputs_before": before,
+              "sample_count": args.samples, "prompt_ready_ms": samples}
+    with delegated_success_scope():
+        try:
+            hashes = (before["candidate_receipt"]["components"]["engine"]["sha256"],
+                      before["prepared"]["fixture"]["sha256"])
+            status = run(args, engine, fixture, samples, hashes)
+            record["status"] = "pass"
+            return status
+        except BaseException as error:
+            record.update(status="UNSETTLED" if isinstance(error, UnsettledScope) else "fail",
+                          error=str(error)[-4096:])
+            raise
+        finally:
+            try:
+                after = m8_inputs.verify(args.candidate, args.fixture_receipt, REPO)
+                record["inputs_after"] = after
+                if before != after:
+                    raise ValueError("M8 inputs changed during acceptance")
+            except BaseException as error:
+                record.update(status="fail", verification_error=str(error)[-4096:])
+                raise
+            finally:
+                if args.metrics_json is not None:
+                    destination = args.metrics_json.with_suffix(".evidence.json")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    staging = destination.with_suffix(".tmp")
+                    staging.write_text(json.dumps(record, sort_keys=True) + "\n")
+                    staging.replace(destination)
 
 
 if __name__ == "__main__":

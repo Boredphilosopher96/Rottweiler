@@ -202,6 +202,7 @@ fn load_session_facts(
     start: &UtcTimestamp,
     end: &UtcTimestamp,
 ) -> Result<Vec<SessionFacts>> {
+    let metadata_budget = rw_runtime::CanonicalReadBudget::new();
     let sessions_root = storage_root.join("sessions");
     let metadata = fs::symlink_metadata(&sessions_root)
         .map_err(|_| miette!("session storage could not be read"))?;
@@ -238,7 +239,7 @@ fn load_session_facts(
     for id in ids {
         let remaining = MAX_STATS_HISTORY_BYTES.saturating_sub(total_bytes);
         let (inherited_through, metadata_bytes) =
-            inherited_accounting_boundary(storage_root, &id, remaining)?;
+            inherited_accounting_boundary(storage_root, &id, remaining, &metadata_budget)?;
         add_history_scan_totals(&mut total_bytes, &mut total_events, metadata_bytes, 0)?;
         let remaining = MAX_STATS_HISTORY_BYTES.saturating_sub(total_bytes);
         let (events, event_bytes) =
@@ -334,6 +335,7 @@ fn inherited_accounting_boundary(
     storage_root: &Path,
     session_id: &str,
     max_bytes: u64,
+    budget: &rw_runtime::CanonicalReadBudget,
 ) -> Result<(Option<rw_core::SequenceId>, u64)> {
     let path = storage_root
         .join("sessions")
@@ -344,6 +346,7 @@ fn inherited_accounting_boundary(
             storage_root,
             session_id,
             max_bytes,
+            budget.reserve(),
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, 0)),
         Err(_) => Err(miette!("session metadata could not be inspected")),
@@ -752,6 +755,7 @@ mod tests {
             meta: meta(sequence),
             turn_id: TurnId("1".to_owned()),
             tool_call_id: ToolCallId(format!("tool-{sequence}")),
+            invocation_id: rw_types::ToolInvocationId(format!("tool-{sequence}")),
             name: name.to_owned(),
             args: serde_json::json!({}),
             call_index: 0,
@@ -848,6 +852,7 @@ mod tests {
                 meta: meta(parent_id, 0, "2026-07-10T01:00:00.000Z"),
                 turn_id: TurnId("1".to_owned()),
                 tool_call_id: ToolCallId("read-1".to_owned()),
+                invocation_id: rw_types::ToolInvocationId("read-1".to_owned()),
                 name: "read".to_owned(),
                 args: serde_json::json!({}),
                 call_index: 0,
@@ -881,6 +886,7 @@ mod tests {
                 meta: meta(child_id, 0, "2026-07-10T02:00:00.000Z"),
                 turn_id: TurnId("1".to_owned()),
                 tool_call_id: ToolCallId("read-2".to_owned()),
+                invocation_id: rw_types::ToolInvocationId("read-2".to_owned()),
                 name: "read".to_owned(),
                 args: serde_json::json!({}),
                 call_index: 0,
@@ -969,9 +975,8 @@ mod tests {
         assert!(json.contains("\"subscription_quota_entries\":1"));
         assert!(json.contains("\"attribution\":\"subagent\""));
 
-        AccountingLedger::open(root.path())
-            .and_then(|ledger| ledger.replace_all(&[]))
-            .expect("make projection stale");
+        std::fs::remove_file(root.path().join("index.sqlite")).expect("remove fixture index");
+        AccountingLedger::open(root.path()).expect("create an empty stale fixture index");
         assert!(
             collect(
                 root.path(),

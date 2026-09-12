@@ -2,11 +2,7 @@
 
 use std::{fs, path::Path, process::Stdio};
 
-use rmcp::{
-    ServiceExt as _,
-    model::CallToolRequestParams,
-    transport::{ConfigureCommandExt as _, TokioChildProcess},
-};
+use rmcp::{ServiceExt as _, model::CallToolRequestParams};
 use rw_providers::{FinishReason, ProviderEvent};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -39,31 +35,62 @@ fn private_directory(path: &Path) {
     }
 }
 
-async fn client(
-    workspace: &Path,
-    home: &Path,
-    script: &Path,
-) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
-    let transport = TokioChildProcess::new(
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_rw")).configure(|command| {
-            command
-                .env_clear()
-                .env("HOME", home)
-                .env("ROTTWEILER_HOME", home)
-                .current_dir(workspace)
-                .arg("--in-memory-replay-script")
-                .arg(script)
-                .arg("mcp-server")
-                .arg("stdio")
-                .arg("--workspace")
-                .arg(workspace)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit());
-        }),
-    )
-    .expect("spawn rw MCP server");
-    ().serve(transport).await.expect("initialize MCP client")
+async fn client(workspace: &Path, home: &Path, script: &Path) -> ExternalClient {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_rw"))
+        .env_clear()
+        .env("HOME", home)
+        .env("ROTTWEILER_HOME", home)
+        .current_dir(workspace)
+        .arg("--in-memory-replay-script")
+        .arg(script)
+        .arg("mcp-server")
+        .arg("stdio")
+        .arg("--workspace")
+        .arg(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn rw MCP server");
+    let stdin = child.stdin.take().expect("MCP stdin");
+    let stdout = child.stdout.take().expect("MCP stdout");
+    match Box::pin(().serve((stdout, stdin))).await {
+        Ok(service) => ExternalClient { service, child },
+        Err(error) => {
+            child.kill().await.expect("retire failed MCP handshake");
+            panic!("initialize MCP client: {error}");
+        }
+    }
+}
+
+struct ExternalClient {
+    service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    child: tokio::process::Child,
+}
+impl std::ops::Deref for ExternalClient {
+    type Target = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+    fn deref(&self) -> &Self::Target {
+        &self.service
+    }
+}
+impl ExternalClient {
+    async fn close(&mut self) {
+        let protocol = self.service.close().await;
+        let exited =
+            tokio::time::timeout(std::time::Duration::from_secs(3), self.child.wait()).await;
+        let status = if let Ok(status) = exited {
+            status.expect("reap MCP server")
+        } else {
+            self.child
+                .kill()
+                .await
+                .expect("kill and reap stalled MCP server");
+            panic!("MCP server did not exit after closing stdin");
+        };
+        protocol.expect("close external MCP client");
+        assert!(status.success(), "MCP server exited with {status}");
+    }
 }
 
 #[tokio::test]
@@ -102,7 +129,7 @@ async fn another_agent_drives_real_rw_process_without_seeing_foreign_sessions() 
         .as_str()
         .expect("foreign id")
         .to_owned();
-    first.close().await.expect("close first server");
+    first.close().await;
 
     let mut second = client(&workspace, &home, &script).await;
     let read = second
@@ -166,5 +193,5 @@ async fn another_agent_drives_real_rw_process_without_seeing_foreign_sessions() 
         .await
         .expect("foreign send result");
     assert_eq!(denied.is_error, Some(true));
-    second.close().await.expect("close second server");
+    second.close().await;
 }

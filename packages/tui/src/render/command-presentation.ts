@@ -2,14 +2,10 @@ import type {
   BoundedCommandTextProjection,
   CommandResultProjection,
   StructuredCommandResultRow,
-} from "../state/model"
+} from "./command-types"
 
 export function commandResultMarkdown(projection: CommandResultProjection): string {
   switch (projection.kind) {
-    case "context":
-      return contextCommandMarkdown(projection)
-    case "cost":
-      return costCommandMarkdown(projection)
     case "help":
       if (projection.commands.length === 0) {
         return projection.fallback === null
@@ -99,64 +95,6 @@ export function commandResultMarkdown(projection: CommandResultProjection): stri
   }
 }
 
-function contextCommandMarkdown(
-  projection: Extract<CommandResultProjection, { readonly kind: "context" }>,
-): string {
-  const used = unsigned(projection.usedTokens)
-  const usable = unsigned(projection.usableTokens)
-  const reserved = unsigned(projection.reservedTokens)
-  const percent = projection.contextWindowKnown && usable > 0n
-    ? Number((used * 100n) / usable)
-    : null
-  const filled = percent === null ? 0 : Math.min(20, Math.round(percent / 5))
-  const meter = percent === null
-    ? ""
-    : `\`${"█".repeat(filled)}${"░".repeat(20 - filled)}\` ${percent}%`
-  const rows = [...projection.groups]
-    .sort((left, right) => {
-      const leftTokens = unsigned(left.estimatedTokens)
-      const rightTokens = unsigned(right.estimatedTokens)
-      return leftTokens === rightTokens
-        ? left.kind.localeCompare(right.kind)
-        : leftTokens > rightTokens ? -1 : 1
-    })
-    .map((group) =>
-      `| ${contextKindLabel(group.kind)} | ${group.itemCount} | ${compactNumber(unsigned(group.estimatedTokens))} |`)
-  const capacity = projection.contextWindowKnown
-    ? `**${compactNumber(used)} / ${compactNumber(usable)} tokens** · ${compactNumber(reserved)} reserved`
-    : `**${compactNumber(used)} tokens used** · context limit unavailable`
-  return [
-    capacity,
-    ...(meter === "" ? [] : [meter]),
-    `**${projection.itemCount} items** in the active context`,
-    ...(rows.length === 0
-      ? ["\n_No context items yet._"]
-      : ["\n| Source | Items | Tokens |", "| --- | ---: | ---: |", ...rows]),
-  ].join("\n")
-}
-
-function costCommandMarkdown(
-  projection: Extract<CommandResultProjection, { readonly kind: "cost" }>,
-): string {
-  const cachePercent = (projection.cacheHitBasisPoints / 100).toFixed(
-    projection.cacheHitBasisPoints % 100 === 0 ? 0 : 2,
-  )
-  const subscription = unsigned(projection.subscriptionQuotaEntries) > 0n
-  const unavailable = unsigned(projection.costUnavailableEntries) > 0n
-  const billing = subscription
-    ? "Covered by subscription quota"
-    : unavailable || !projection.monetaryAccountingComplete
-      ? "Cost unavailable for part of this session"
-      : formatMicrosUsd(projection.costMicrosUsd)
-  return [
-    `**${billing}**`,
-    "| Input | Output | Reasoning | Cache read | Cache hit |",
-    "| ---: | ---: | ---: | ---: | ---: |",
-    `| ${compactNumber(unsigned(projection.inputTokens))} | ${compactNumber(unsigned(projection.outputTokens))} | ${compactNumber(unsigned(projection.reasoningTokens))} | ${compactNumber(unsigned(projection.cacheReadTokens))} | ${cachePercent}% |`,
-    `\n${projection.accountedTurnCount} accounted turn${projection.accountedTurnCount === 1 ? "" : "s"} · ${projection.utcDay} UTC`,
-  ].join("\n")
-}
-
 function permissionCommandMarkdown(
   projection: Extract<CommandResultProjection, { readonly kind: "permissions" }>,
 ): string {
@@ -234,45 +172,6 @@ function structuredValueText(row: StructuredCommandResultRow): string {
 
 function markdownCell(value: string): string {
   return value.replaceAll("|", "\\|").replaceAll("`", "'")
-}
-
-function contextKindLabel(kind: string): string {
-  return ({
-    system: "System",
-    tool_definitions: "Tools",
-    project_instructions: "Project instructions",
-    conversation: "Conversation",
-    tool_result: "Tool results",
-    pinned: "Pinned",
-    queued_message: "Queued messages",
-  } as Record<string, string>)[kind] ?? humanLabel(kind)
-}
-
-function compactNumber(value: bigint): string {
-  const units = [[1_000_000_000n, "B"], [1_000_000n, "M"], [1_000n, "k"]] as const
-  for (const [divisor, suffix] of units) {
-    if (value < divisor) continue
-    const whole = value / divisor
-    const tenth = (value % divisor) * 10n / divisor
-    return `${whole}${tenth === 0n ? "" : `.${tenth}`}${suffix}`
-  }
-  return value.toString()
-}
-
-function formatMicrosUsd(value: string): string {
-  const micros = unsigned(value)
-  const dollars = micros / 1_000_000n
-  const cents = (micros % 1_000_000n) / 10_000n
-  return `$${dollars}.${cents.toString().padStart(2, "0")}`
-}
-
-function unsigned(value: string): bigint {
-  try {
-    const parsed = BigInt(value)
-    return parsed < 0n ? 0n : parsed
-  } catch {
-    return 0n
-  }
 }
 
 function sentenceCase(value: string): string {

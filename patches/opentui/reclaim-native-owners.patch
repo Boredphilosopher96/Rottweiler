@@ -1,0 +1,110 @@
+--- a/packages/native/src/lib.zig
++++ b/packages/native/src/lib.zig
+@@ -601,8 +601,6 @@
+     .safety = build_options.gpa_safe_stats,
+ }) = .init;
+ const globalAllocator = gpa.allocator();
+-var arena = std.heap.ArenaAllocator.init(globalAllocator);
+-const globalArena = arena.allocator();
+ 
+ pub const ExternalBuildOptions = extern struct {
+     gpa_safe_stats: bool,
+@@ -1104,7 +1102,8 @@
+ }
+ 
+ export fn getArenaAllocatedBytes() u64 {
+-    return @intCast(arena.queryCapacity());
++    // Native views and interned entries are individually reclaimable.
++    return 0;
+ }
+ 
+ export fn getBuildOptions(out_ptr: *ExternalBuildOptions) void {
+@@ -1164,8 +1163,8 @@
+         else => .local,
+     };
+ 
+-    const pool = gp.initGlobalPool(globalArena);
+-    _ = link.initGlobalLinkPool(globalArena);
++    const pool = gp.initGlobalPool(globalAllocator);
++    _ = link.initGlobalLinkPool(globalAllocator);
+     const output_target: renderer.CliRenderer.OutputTarget = if (feedPtr) |feed|
+         .{ .feed = feed }
+     else switch (bufferedDestinationKind) {
+@@ -1441,8 +1440,8 @@
+         return INVALID_HANDLE;
+     }
+ 
+-    const pool = gp.initGlobalPool(globalArena);
+-    const link_pool = link.initGlobalLinkPool(globalArena);
++    const pool = gp.initGlobalPool(globalAllocator);
++    const link_pool = link.initGlobalLinkPool(globalAllocator);
+     const wMethod = widthMethodFromInt(widthMethod);
+     const id = sliceFromPtrLen(idPtr, idLen);
+ 
+@@ -1953,7 +1952,7 @@
+ 
+ export fn linkAlloc(urlPtr: ?[*]const u8, urlLen: u32) u32 {
+     const url = sliceFromPtrLen(urlPtr, urlLen);
+-    const link_pool = link.initGlobalLinkPool(globalArena);
++    const link_pool = link.initGlobalLinkPool(globalAllocator);
+     return link_pool.alloc(url) catch 0;
+ }
+ 
+@@ -1961,7 +1960,7 @@
+     if (maxLen == 0) return 0;
+ 
+     const out = outPtr orelse return 0;
+-    const link_pool = link.initGlobalLinkPool(globalArena);
++    const link_pool = link.initGlobalLinkPool(globalAllocator);
+     const url_bytes = link_pool.get(id) catch return 0;
+     const copyLen = @min(url_bytes.len, @as(usize, maxLen));
+     @memcpy(out[0..copyLen], url_bytes[0..copyLen]);
+@@ -2200,8 +2199,8 @@
+ }
+ 
+ export fn createTextBuffer(widthMethod: u8) NativeHandle {
+-    const pool = gp.initGlobalPool(globalArena);
+-    const link_pool = link.initGlobalLinkPool(globalArena);
++    const pool = gp.initGlobalPool(globalAllocator);
++    const link_pool = link.initGlobalLinkPool(globalAllocator);
+     const wMethod = widthMethodFromInt(widthMethod);
+ 
+     const tb = text_buffer.UnifiedTextBuffer.init(globalAllocator, pool, link_pool, wMethod) catch {
+@@ -2555,8 +2554,8 @@
+ }
+ 
+ export fn createEditBuffer(widthMethod: u8, event_sink_handle: NativeHandle) NativeHandle {
+-    const pool = gp.initGlobalPool(globalArena);
+-    const link_pool = link.initGlobalLinkPool(globalArena);
++    const pool = gp.initGlobalPool(globalAllocator);
++    const link_pool = link.initGlobalLinkPool(globalAllocator);
+     const wMethod = widthMethodFromInt(widthMethod);
+     const event_sink_ptr = if (event_sink_handle == INVALID_HANDLE) null else acquireEventSink(event_sink_handle);
+     const event_sink = if (event_sink_ptr) |object_ptr| object_ptr else null;
+@@ -2872,7 +2871,7 @@
+ 
+ export fn createEditorView(edit_handle: NativeHandle, viewport_width: u32, viewport_height: u32) NativeHandle {
+     const object_ptr = acquireEditBuffer(edit_handle) orelse return INVALID_HANDLE;
+-    const view = editor_view.EditorView.init(globalArena, object_ptr, viewport_width, viewport_height) catch return INVALID_HANDLE;
++    const view = editor_view.EditorView.init(globalAllocator, object_ptr, viewport_width, viewport_height) catch return INVALID_HANDLE;
+     const view_handle = handles.insertOwnedChild(.editor_view, erasePtr(view), edit_handle) catch {
+         view.deinit();
+         return INVALID_HANDLE;
+@@ -3836,7 +3835,7 @@
+         return true;
+     }
+ 
+-    const pool = gp.initGlobalPool(globalArena);
++    const pool = gp.initGlobalPool(globalAllocator);
+     const wMethod = widthMethodFromInt(widthMethod);
+ 
+     // Check if ASCII only for optimization
+@@ -3956,7 +3955,7 @@
+     }
+ 
+     const chars = charsPtr.?[0..@as(usize, charsLen)];
+-    const pool = gp.initGlobalPool(globalArena);
++    const pool = gp.initGlobalPool(globalAllocator);
+ 
+     for (chars) |encoded_char| {
+         const char = encoded_char.char;

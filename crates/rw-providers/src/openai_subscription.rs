@@ -309,6 +309,7 @@ impl OpenAiSubscriptionAuth {
             ("client_id", self.config.client_id.clone()),
         ];
         crate::http::require_process_network()?;
+        let _network_lease = crate::http::network_admission()?;
         let response = self
             .client
             .post(self.config.token_endpoint.clone())

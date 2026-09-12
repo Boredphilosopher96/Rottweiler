@@ -42,7 +42,10 @@ const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShellTarget {
     Local,
-    Remote { host: String },
+    Remote {
+        ssh: crate::remote::SshOptions,
+        host: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -192,9 +195,9 @@ async fn run_launch(
             )
             .await
         }
-        ShellTarget::Remote { host } => {
+        ShellTarget::Remote { ssh, host } => {
             let spawner = TokioTerminalSpawner::for_remote_tty();
-            let argv = remote_tty_argv(host, &launch.command).map_err(|message| {
+            let argv = remote_tty_argv(ssh, host, &launch.command).map_err(|message| {
                 ShellBrokerError::Protocol(format!("invalid remote foreground command: {message}"))
             })?;
             run_argv_after_durable_shell_start(
@@ -294,11 +297,19 @@ impl BrokerClient {
             status,
             captured_output: captured_output.map(str::to_owned),
         };
-        let body = serde_json::to_vec(&command)
+        let body = crate::command_encoding::encode(&command)
             .map_err(|_| ShellBrokerError::Protocol("completion could not serialize".to_owned()))?;
         let request = Request::builder()
             .method(Method::POST)
             .uri("/v1/command")
+            .header(
+                crate::server::COMMAND_LANE_HEADER,
+                if command.is_urgent() {
+                    "urgent"
+                } else {
+                    "normal"
+                },
+            )
             .header(hyper::header::HOST, "localhost")
             .header(AUTHORIZATION, format!("Bearer {}", self.credentials.token))
             .header(CLIENT_HEADER, &self.credentials.client_id.0)
@@ -311,9 +322,9 @@ impl BrokerClient {
                 "engine rejected shell completion transport",
             ));
         }
-        let outcome: CommandOutcome = collect_json(response.into_body()).await?;
-        match outcome {
-            CommandOutcome::Accepted => Ok(()),
+        let reply: rw_core::CommandReply = collect_json(response.into_body()).await?;
+        match reply.outcome() {
+            CommandOutcome::Accepted {} => Ok(()),
             CommandOutcome::Rejected { error } => Err(ShellBrokerError::Protocol(format!(
                 "shell completion was rejected: {}",
                 error.code
@@ -699,7 +710,7 @@ mod tests {
             &self,
             _bound_client: ClientId,
             _command: ClientCommand,
-        ) -> Result<CommandOutcome, String> {
+        ) -> Result<rw_core::HostReply, String> {
             Err("interactive dispatch is unused by this fixture".to_owned())
         }
 
@@ -709,19 +720,28 @@ mod tests {
             _session_id: Option<SessionId>,
             _last_seen: Option<SequenceId>,
         ) -> Result<
-            mpsc::Receiver<Result<EngineEvent, String>>,
+            mpsc::Receiver<Result<rw_core::HostEvent, String>>,
             crate::server::EventSubscriptionError,
         > {
             let (send, receive) = mpsc::channel(4);
             self.subscribed.notify_one();
             if !self.first_generation {
-                send.send(Ok(shell_event(1, true)))
+                send.send(Ok(rw_core::HostEventBudget::default()
+                    .encode(&shell_event(1, true))
+                    .await
+                    .expect("encoded fixture event")))
                     .await
                     .map_err(|_| "fixture replay receiver closed".to_owned())?;
-                send.send(Ok(shell_event(2, false)))
+                send.send(Ok(rw_core::HostEventBudget::default()
+                    .encode(&shell_event(2, false))
+                    .await
+                    .expect("encoded fixture event")))
                     .await
                     .map_err(|_| "fixture replay receiver closed".to_owned())?;
-                send.send(Ok(replay_complete()))
+                send.send(Ok(rw_core::HostEventBudget::default()
+                    .encode(&replay_complete())
+                    .await
+                    .expect("encoded fixture event")))
                     .await
                     .map_err(|_| "fixture replay receiver closed".to_owned())?;
             }

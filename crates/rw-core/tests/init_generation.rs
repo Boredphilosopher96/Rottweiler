@@ -252,12 +252,21 @@ fn generated_files_are_byte_rewindable_from_the_planned_checkpoint_scope() {
         plan_init(root.path(), InitDepth::Deep, DEFAULT_INIT_FILE_BUDGET_BYTES),
         "plan deep init",
     );
+    let blobs = must(
+        rw_store::checkpoint::CheckpointBlobStore::open(storage.path(), root.path()),
+        "open workspace blob authority",
+    );
     let store = must(
-        rw_store::checkpoint::CheckpointStore::open(storage.path(), root.path()),
+        rw_store::checkpoint::CheckpointStore::open(storage.path(), root.path(), blobs),
         "open checkpoint store",
     );
     must(
-        store.checkpoint_known("init-session", 1, plan.files().keys().cloned()),
+        store.checkpoint_known(
+            "init-session",
+            1,
+            plan.files().keys().cloned(),
+            &mut rw_store::checkpoint::CheckpointOperation::default(),
+        ),
         "checkpoint generated paths",
     );
     let created = must(apply_init_plan(&plan), "apply init plan");

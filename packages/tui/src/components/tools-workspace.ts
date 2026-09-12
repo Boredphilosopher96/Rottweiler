@@ -1,8 +1,8 @@
+import { TextRenderable } from "./text"
 import type { ClientBlockState } from "../recycle-state"
 import {
   BoxRenderable,
   ScrollBoxRenderable,
-  TextRenderable,
   fg,
   t,
   type RenderContext,
@@ -19,7 +19,7 @@ import {
 import type { RottweilerTheme } from "../theme"
 
 export interface ToolsWorkspaceOptions {
-  readonly onOpenToolOutput: (toolCallId: string) => void
+  readonly onOpenToolOutput: (invocationId: string) => void
 }
 
 export class ToolActivityRowRenderable extends BoxRenderable {
@@ -27,19 +27,30 @@ export class ToolActivityRowRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly output: TextRenderable
   readonly marker: TextRenderable
-  #model: ActivityPresentation
+  #retainedModel: ActivityPresentation | null = null
+  get #model(): ActivityPresentation {
+    const value = this.#retainedModel
+    if (value === null) throw new Error("renderable model is released")
+    return value
+  }
+  set #model(value: ActivityPresentation) { this.#retainedModel = value }
   #expanded: boolean
   #selected = false
   #theme: RottweilerTheme
   #availableWidth = 20
   #headerSignature = ""
-  #onOpenToolOutput: (toolCallId: string) => void
+  #onOpenToolOutput: (invocationId: string) => void
+
+  override destroy(): void {
+    this.#retainedModel = null
+    super.destroy()
+  }
 
   constructor(
     ctx: RenderContext,
     theme: RottweilerTheme,
     model: ActivityPresentation,
-    onOpenToolOutput: (toolCallId: string) => void,
+    onOpenToolOutput: (invocationId: string) => void,
   ) {
     super(ctx, {
       id: model.key,
@@ -145,7 +156,7 @@ export class ToolActivityRowRenderable extends BoxRenderable {
 
   openOutput(): boolean {
     if (this.#model.kind !== "tool" || !this.#model.canOpenRetainedOutput) return false
-    this.#onOpenToolOutput(this.#model.toolCallId)
+    this.#onOpenToolOutput(this.#model.invocationId)
     return true
   }
 
@@ -236,6 +247,11 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
   #theme: RottweilerTheme
   #terminalWidth: number
   #terminalHeight: number
+
+  override destroy(): void {
+    this.#model = null; this.#rows.clear()
+    super.destroy()
+  }
 
   constructor(
     ctx: RenderContext,
@@ -370,6 +386,9 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
     return this.#selectedRowKey
   }
 
+  #clientStateRevision = 0
+  get clientStateRevision(): number { return this.#clientStateRevision }
+
   captureClientState(): ClientBlockState {
     return {
       selectedId: this.#selectedRowKey,
@@ -396,6 +415,7 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
       if (desiredKeys.has(key)) continue
       this.activityScroller.remove(row)
       this.#rows.delete(key)
+      this.#clientStateRevision++
       row.destroyRecursively()
     }
     for (const rowModel of model.rows) {
@@ -408,6 +428,7 @@ export class ToolsWorkspaceRenderable extends BoxRenderable {
           this.#options.onOpenToolOutput,
         )
         this.#rows.set(rowModel.key, row)
+        this.#clientStateRevision++
         this.activityScroller.add(row)
       }
     }

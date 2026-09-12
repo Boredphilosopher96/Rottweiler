@@ -1,9 +1,16 @@
+mod presentation;
+use crate::presentation::BuiltinToolPresentation;
+use presentation::{
+    DEFINITION_PRESENTATION, DIAGNOSTICS_PRESENTATION, REFERENCES_PRESENTATION, RENAME_PRESENTATION,
+};
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+use crate::protocol::ProcessOwner;
 use async_trait::async_trait;
 use rw_intel::{
     CodeIntelligence, Diagnostic, IntelligenceResult, Language, Location, LspError,
@@ -15,7 +22,6 @@ use rw_types::ToolCapability;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::process::Child;
 
 /// PATH discovery for optional language servers. Candidates are rejected when
 /// their path provenance contains symlinks, is group/other writable, or lands
@@ -94,7 +100,7 @@ fn path_has_symlink_provenance(path: &Path) -> bool {
 pub struct SandboxedLspSpawner {
     workspace_roots: Vec<PathBuf>,
     scratch: PathBuf,
-    helper_executable: PathBuf,
+    helper_executable: rw_sandbox::SandboxHelper,
     rustup_home: Option<PathBuf>,
     cargo_home: Option<PathBuf>,
 }
@@ -109,7 +115,7 @@ impl SandboxedLspSpawner {
     pub fn new(
         workspace_roots: &[PathBuf],
         scratch: impl AsRef<Path>,
-        helper_executable: impl AsRef<Path>,
+        helper_executable: &rw_sandbox::SandboxHelper,
     ) -> Result<Self, LspError> {
         let workspace_roots = workspace_roots
             .iter()
@@ -124,7 +130,7 @@ impl SandboxedLspSpawner {
         Ok(Self {
             workspace_roots,
             scratch,
-            helper_executable: helper_executable.as_ref().to_path_buf(),
+            helper_executable: helper_executable.clone(),
             rustup_home,
             cargo_home,
         })
@@ -145,45 +151,15 @@ impl SandboxedLspSpawner {
     }
 }
 
-struct TokioLspHandle {
-    child: Child,
-    process_group: Option<u32>,
-}
-
+struct TokioLspHandle(ProcessOwner);
 #[async_trait]
 impl LspProcessHandle for TokioLspHandle {
+    fn request_termination(&mut self) -> io::Result<()> {
+        self.0.request_termination()
+    }
+
     async fn kill(&mut self) -> io::Result<()> {
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|value| i32::try_from(value).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        #[cfg(not(unix))]
-        self.child.start_kill()?;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait())
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "LSP child did not exit"))??;
-        #[cfg(unix)]
-        if let Some(group) = self
-            .process_group
-            .and_then(|value| i32::try_from(value).ok())
-            .and_then(rustix::process::Pid::from_raw)
-        {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-            while rustix::process::test_kill_process_group(group).is_ok() {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "LSP process group did not exit",
-                    ));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-        Ok(())
+        self.0.settle(std::time::Duration::from_secs(2)).await
     }
 }
 
@@ -194,6 +170,8 @@ impl LspProcessSpawner for SandboxedLspSpawner {
         workspace: &Path,
         server: &LspServerConfig,
     ) -> Result<SpawnedLspProcess, LspError> {
+        let process_credit = rw_resources::try_acquire(rw_resources::ResourceClass::Process)
+            .map_err(io::Error::other)?;
         let mut plan = self.launch_plan(server)?;
         let mut command = tokio::process::Command::new(&plan.program);
         command
@@ -214,16 +192,19 @@ impl LspProcessSpawner for SandboxedLspSpawner {
         }
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn()?;
+        let child = command.spawn()?;
         release_lsp_launch_pin(&mut plan);
-        let process_group = child.id();
-        let stdin = child.stdin.take().ok_or(LspError::Unavailable)?;
-        let stdout = child.stdout.take().ok_or(LspError::Unavailable)?;
+        let mut owner = ProcessOwner::new(
+            child,
+            self.helper_executable.clone(),
+            process_credit,
+            None,
+            crate::protocol::ProcessExecutable::TrustedBinary,
+        );
+        let stdin = owner.child()?.stdin.take().ok_or(LspError::Unavailable)?;
+        let stdout = owner.child()?.stdout.take().ok_or(LspError::Unavailable)?;
         Ok(SpawnedLspProcess {
-            handle: Box::new(TokioLspHandle {
-                child,
-                process_group,
-            }),
+            handle: Box::new(TokioLspHandle(owner)),
             stdin: Box::pin(stdin),
             stdout: Box::pin(stdout),
         })
@@ -364,6 +345,10 @@ constructor!(RenameTool);
 
 #[async_trait]
 impl Tool for DiagnosticsTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<DiagnosticsInput>(
             "diagnostics",
@@ -401,12 +386,17 @@ impl Tool for DiagnosticsTool {
             &result.items,
             json!({"backend": result.backend, "diagnostics": result.items, "note": result.note}),
             self.limits,
+            &DIAGNOSTICS_PRESENTATION,
         )
     }
 }
 
 #[async_trait]
 impl Tool for DefinitionTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<PositionInput>(
             "definition",
@@ -427,12 +417,16 @@ impl Tool for DefinitionTool {
             .definition(&input.path, position(&input))
             .await;
         result.items.truncate(self.limits.max_search_results);
-        location_result("definitions", result, self.limits)
+        location_result("definitions", result, self.limits, &DEFINITION_PRESENTATION)
     }
 }
 
 #[async_trait]
 impl Tool for ReferencesTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<PositionInput>(
             "references",
@@ -453,12 +447,16 @@ impl Tool for ReferencesTool {
             .references(&input.path, position(&input))
             .await;
         result.items.truncate(self.limits.max_search_results);
-        location_result("references", result, self.limits)
+        location_result("references", result, self.limits, &REFERENCES_PRESENTATION)
     }
 }
 
 #[async_trait]
 impl Tool for RenameTool {
+    async fn settle_effects(&self) -> std::result::Result<(), crate::ToolError> {
+        Ok(())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         descriptor::<RenameInput>(
             "rename",
@@ -491,6 +489,7 @@ impl Tool for RenameTool {
             &result.edits,
             json!({"backend":result.backend, "edits":result.edits, "applied":false, "note":result.note}),
             self.limits,
+            &RENAME_PRESENTATION,
         )
     }
 }
@@ -518,6 +517,7 @@ fn location_result(
     label: &'static str,
     result: IntelligenceResult<Location>,
     limits: ToolLimits,
+    presentation: &BuiltinToolPresentation,
 ) -> Result<ToolResult, ToolError> {
     let IntelligenceResult {
         backend,
@@ -525,7 +525,7 @@ fn location_result(
         note,
     } = result;
     let data = json!({"backend":backend, label:&items, "note":note});
-    untrusted_result(label, &items, data, limits)
+    untrusted_result(label, &items, data, limits, presentation)
 }
 
 fn untrusted_result<T: serde::Serialize>(
@@ -533,6 +533,7 @@ fn untrusted_result<T: serde::Serialize>(
     items: &[T],
     mut data: Value,
     limits: ToolLimits,
+    presentation: &BuiltinToolPresentation,
 ) -> Result<ToolResult, ToolError> {
     let encoded = serde_json::to_string(items)
         .map_err(|_| ToolError::Intelligence("could not encode intelligence result".to_owned()))?;
@@ -554,7 +555,9 @@ fn untrusted_result<T: serde::Serialize>(
     let truncated = end < escaped.len();
     let content = format!("{prefix}{}{suffix}", &escaped[..end]);
     sanitize_json_strings(&mut data);
-    let mut result = ToolResult::new(content, data).with_protected_framing(prefix, suffix);
+    let mut result = ToolResult::new(content, data)
+        .with_protected_framing(prefix, suffix)
+        .with_presentation(presentation.plan()?);
     result.truncated = truncated;
     Ok(result)
 }
@@ -652,7 +655,7 @@ mod tests {
         let spawner = SandboxedLspSpawner::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            &executable,
+            &rw_sandbox::SandboxHelper::from_running(&executable).expect("running helper"),
         )
         .expect("spawner");
         let policy = spawner.policy().expect("policy");
@@ -788,7 +791,7 @@ if "TYPE_ERROR" in text:
             SandboxedLspSpawner::new(
                 &[workspace.path().to_path_buf()],
                 scratch.path(),
-                std::env::current_exe().expect("helper executable"),
+                &crate::test_support::sandbox_helper(),
             )
             .expect("spawner"),
         );
@@ -855,7 +858,7 @@ if "TYPE_ERROR" in text:
         let spawner = SandboxedLspSpawner::new(
             &[workspace.path().to_path_buf()],
             scratch.path(),
-            std::env::current_exe().expect("helper executable"),
+            &crate::test_support::sandbox_helper(),
         )
         .expect("spawner");
         let mut process = spawner
@@ -881,19 +884,26 @@ if "TYPE_ERROR" in text:
                 "process-tree fixture did not announce readiness: {ready:?}; cleanup: {cleanup:?}"
             );
         }
-        let descendant = readiness.trim().parse::<i32>().expect("descendant pid");
+        assert!(
+            readiness
+                .trim()
+                .parse::<u32>()
+                .expect("descendant namespace PID")
+                > 0
+        );
         process.handle.kill().await.expect("kill process group");
-        let descendant = rustix::process::Pid::from_raw(descendant).expect("positive pid");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            match rustix::process::test_kill_process(descendant) {
-                Err(rustix::io::Errno::SRCH) => break,
-                Ok(()) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                result => panic!("descendant process survived group teardown: {result:?}"),
-            }
-        }
+        // The descendant inherits stdout and holds it until death. Its numeric
+        // PID belongs to the sandbox PID namespace, not the test's host table.
+        // Require both the physical owner's settlement proof and pipe EOF.
+        let mut remaining = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::io::AsyncReadExt::read_to_end(&mut process.stdout, &mut remaining),
+        )
+        .await
+        .expect("descendant retained stdout after group teardown")
+        .expect("descendant stdout EOF");
+        assert!(remaining.is_empty());
     }
 
     struct MockIntel;

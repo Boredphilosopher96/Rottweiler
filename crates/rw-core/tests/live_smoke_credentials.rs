@@ -149,7 +149,7 @@ fn tool_request(model: String) -> ProviderRequest {
         }],
         tool_choice: ToolChoice::Named {
             name: "live_smoke_ping".to_owned(),
-        },
+        }, output: rw_providers::OutputContract::Text {},
         max_output_tokens: 64,
         temperature: None,
         thinking: ThinkingLevel::Off,

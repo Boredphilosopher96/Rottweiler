@@ -1,25 +1,17 @@
-use std::{
-    collections::BTreeMap,
-    io,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::Duration,
-};
+mod calls;
+mod catalog;
+mod closure;
+mod inbound;
+mod ingress;
+mod start;
+mod transport;
+pub use inbound::McpInboundRouter;
+
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-#[cfg(feature = "test-support")]
-use rmcp::transport::TokioChildProcess;
-#[cfg(feature = "test-support")]
-use rmcp::transport::streamable_http_client::{
-    StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
-};
 use rmcp::{
-    ServiceExt as _,
-    model::{
-        CallToolRequestParams, GetPromptRequestParams, JsonObject, PaginatedRequestParams,
-        ReadResourceRequestParams,
-    },
+    model::{CallToolRequestParams, GetPromptRequestParams, JsonObject, ReadResourceRequestParams},
     service::{RoleClient, RunningService},
 };
 use rw_tools::{
@@ -27,18 +19,11 @@ use rw_tools::{
 };
 use rw_types::McpServerId;
 use serde_json::Value;
-#[cfg(feature = "test-support")]
-use tokio::process::Command;
-use tokio::{
-    io::{AsyncRead, ReadBuf},
-    sync::Mutex,
-};
 
 use crate::McpTransportConfig;
-use crate::{McpError, McpServerConfig};
+use crate::{McpError, McpResponse, McpResponseLimits, McpResponseSlot, McpServerConfig};
 
 const MAX_PAGINATED_ENTRIES: usize = 256;
-const MAX_STDIO_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Host gate invoked before any MCP connection is opened. Implementations bind
 /// approval to the complete non-secret launch/endpoint configuration and its
@@ -50,12 +35,36 @@ pub trait McpConnectionApprovalPolicy: Send + Sync {
 
 #[async_trait]
 pub trait McpClient: Send + Sync {
-    async fn list_tools(&self) -> Result<Vec<Value>, McpError>;
-    async fn list_resources(&self) -> Result<Vec<Value>, McpError>;
-    async fn list_prompts(&self) -> Result<Vec<Value>, McpError>;
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError>;
-    async fn read_resource(&self, uri: &str) -> Result<Value, McpError>;
-    async fn get_prompt(&self, name: &str, arguments: Value) -> Result<Value, McpError>;
+    /// Whether the connected catalog snapshot remains authoritative.
+    /// A notification that revokes it requires explicit reconnection and review.
+    fn catalog_valid(&self) -> bool;
+    fn response_limits(&self) -> McpResponseLimits;
+    async fn list_tools(&self, slot: McpResponseSlot) -> Result<McpResponse<Vec<Value>>, McpError>;
+    async fn list_resources(
+        &self,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<Value>>, McpError>;
+    async fn list_prompts(
+        &self,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<Value>>, McpError>;
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, McpError>;
+    async fn read_resource(
+        &self,
+        uri: &str,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, McpError>;
+    async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, McpError>;
     async fn close(&self, timeout: Duration) -> Result<(), McpError>;
 }
 
@@ -75,69 +84,6 @@ pub trait McpAuthorizationProvider: Send + Sync {
         server: &McpServerId,
         resource: &str,
     ) -> Result<Option<crate::SecretToken>, McpError>;
-}
-
-/// Production Streamable HTTP connector. The HTTP implementation is injected;
-/// `rw-mcp` never constructs reqwest or any ambient/default network client.
-#[cfg(feature = "test-support")]
-pub struct GuardedStreamableHttpConnector<C> {
-    client: C,
-    authorization: Arc<dyn McpAuthorizationProvider>,
-    channel_capacity: usize,
-    approval: Arc<dyn McpConnectionApprovalPolicy>,
-}
-
-#[cfg(feature = "test-support")]
-impl<C> GuardedStreamableHttpConnector<C> {
-    #[must_use]
-    pub fn new(
-        client: C,
-        authorization: Arc<dyn McpAuthorizationProvider>,
-        approval: Arc<dyn McpConnectionApprovalPolicy>,
-    ) -> Self {
-        Self {
-            client,
-            authorization,
-            channel_capacity: 16,
-            approval,
-        }
-    }
-
-    #[must_use]
-    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
-        self.channel_capacity = capacity.clamp(1, 256);
-        self
-    }
-}
-
-#[async_trait]
-#[cfg(feature = "test-support")]
-impl<C> McpConnector for GuardedStreamableHttpConnector<C>
-where
-    C: StreamableHttpClient + Send + Sync,
-{
-    async fn connect(&self, config: &McpServerConfig) -> Result<Arc<dyn McpClient>, McpError> {
-        let McpTransportConfig::StreamableHttp { endpoint, oauth } = &config.transport else {
-            return Err(McpError::Policy(
-                "stdio MCP requires the sandboxed stdio connector".to_owned(),
-            ));
-        };
-        self.approval.approve(config).await?;
-        let token = if *oauth {
-            self.authorization.token(&config.id, endpoint).await?
-        } else {
-            None
-        };
-        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(endpoint.clone());
-        transport_config.channel_buffer_capacity = self.channel_capacity;
-        if let Some(token) = token {
-            transport_config = transport_config.auth_header(token.expose().to_owned());
-        }
-        let transport =
-            StreamableHttpClientTransport::with_client(self.client.clone(), transport_config);
-        let service = ().serve(transport).await.map_err(protocol)?;
-        Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
-    }
 }
 
 /// Production stdio connector generic over the host's sandboxed launcher.
@@ -172,6 +118,7 @@ where
             ));
         };
         self.approval.approve(config).await?;
+        let ingress = ingress::Ingress::new(McpInboundRouter::default())?;
         let spawned = self
             .launcher
             .spawn(&ProtocolChildRequest {
@@ -190,159 +137,107 @@ where
         let rw_tools::SpawnedProtocolChild {
             stdin,
             stdout,
-            mut handle,
+            handle,
         } = spawned;
-        if let Ok(service) =
-            ().serve((BoundedLineReader::new(stdout, MAX_STDIO_FRAME_BYTES), stdin))
-                .await
-        {
-            Ok(Arc::new(RmcpClient::new(
-                config.id.clone(),
-                service,
-                Some(handle),
-            )))
-        } else {
-            // Child stderr is deliberately not exposed because it is an
-            // untrusted extension channel and can contain secrets. An
-            // already-observed process status is safe, bounded evidence
-            // that distinguishes an early child exit from malformed MCP.
-            let early_exit = handle
-                .observe_exit(Duration::from_millis(50))
-                .await
-                .ok()
-                .flatten();
-            let _ = handle.terminate_and_reap(Duration::from_secs(3)).await;
-            early_exit.map_or_else(
-                || Err(protocol_failure()),
-                |status| {
-                    Err(McpError::Protocol(format!(
-                        "MCP process exited before protocol initialization ({status})"
-                    )))
-                },
-            )
-        }
+        let transport = match ingress::stdio::StdioTransport::new(
+            Box::pin(stdout),
+            Box::pin(stdin),
+            Arc::clone(&ingress),
+        ) {
+            Ok(transport) => transport,
+            Err(error) => {
+                closure::retire_process(handle, Duration::from_secs(3))
+                    .await
+                    .map_err(|_| McpError::EffectsUnsettled {
+                        server: config.id.clone(),
+                        message: "MCP framing admission failed without native process settlement"
+                            .into(),
+                    })?;
+                return Err(error);
+            }
+        };
+        start::start(
+            config.id.clone(),
+            transport::ClientTransport::Stdio(transport),
+            ingress,
+            Some(handle),
+        )
+        .await
     }
 }
 
-/// Unsandboxed direct stdio connector for deterministic fixtures only.
-/// Production must inject an `McpConnector` that owns sandbox/process-tree supervision.
 #[cfg(feature = "test-support")]
-pub struct TestOnlyUnsandboxedStdioConnector {
-    policy: Arc<dyn McpConnectionApprovalPolicy>,
-}
-
+mod test_connector;
 #[cfg(feature = "test-support")]
-impl TestOnlyUnsandboxedStdioConnector {
-    #[must_use]
-    pub fn new(policy: Arc<dyn McpConnectionApprovalPolicy>) -> Self {
-        Self { policy }
-    }
-}
+pub use test_connector::TestOnlyUnsandboxedStdioConnector;
 
 struct RmcpClient {
     server: McpServerId,
-    service: Mutex<Option<RunningService<RoleClient, ()>>>,
-    child: Mutex<Option<Box<dyn ProtocolProcessHandle>>>,
+    peer: rmcp::Peer<RoleClient>,
+    inbound: McpInboundRouter,
+    closure: closure::ConnectionClosure,
+    ingress: Arc<ingress::Ingress>,
 }
 
 impl RmcpClient {
-    fn new(
+    async fn new(
         server: McpServerId,
-        service: RunningService<RoleClient, ()>,
+        service: RunningService<RoleClient, McpInboundRouter>,
         child: Option<Box<dyn ProtocolProcessHandle>>,
+        ingress: Arc<ingress::Ingress>,
     ) -> Self {
-        Self {
+        let client = Self {
             server,
-            service: Mutex::new(Some(service)),
-            child: Mutex::new(child),
-        }
+            peer: service.peer().clone(),
+            inbound: service.service().clone(),
+            closure: closure::ConnectionClosure::new(service, child, Arc::clone(&ingress)),
+            ingress,
+        };
+        // The manager owns reviewed catalogs; rmcp must not retain a second,
+        // uncharged response cache or replay stale remote bodies after errors.
+        client
+            .peer
+            .set_response_cache_config(rmcp::ClientCacheConfig::disabled())
+            .await;
+        client
     }
 
-    async fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
-        self.service
-            .lock()
-            .await
-            .as_ref()
-            .map(|service| service.peer().clone())
-            .ok_or_else(|| McpError::NotConnected(self.server.clone()))
+    fn peer(&self) -> Result<rmcp::Peer<RoleClient>, McpError> {
+        if self.closure.is_closed() || !self.catalog_valid() {
+            Err(McpError::NotConnected(self.server.clone()))
+        } else {
+            Ok(self.peer.clone())
+        }
     }
 }
 
-/// Composition-root bridge for the concrete guarded HTTP implementation.
-/// Generic rmcp HTTP construction remains private/test-only.
-#[doc(hidden)]
-#[must_use]
-pub fn boxed_running_http_client(
+/// Opens a policy-approved raw HTTP connection under admitted transport ownership.
+pub async fn connect_http(
     server: McpServerId,
-    service: RunningService<RoleClient, ()>,
-) -> Arc<dyn McpClient> {
-    Arc::new(RmcpClient::new(server, service, None))
+    endpoint: String,
+    token: Option<crate::SecretToken>,
+    client: Arc<dyn crate::McpHttpClient>,
+    capacity: usize,
+) -> Result<Arc<dyn McpClient>, McpError> {
+    let ingress = ingress::Ingress::new(McpInboundRouter::default())?;
+    let transport =
+        ingress::http::HttpTransport::new(endpoint, token, client, Arc::clone(&ingress), capacity)?;
+    start::start(
+        server,
+        transport::ClientTransport::Http(transport),
+        ingress,
+        None,
+    )
+    .await
 }
 
-#[async_trait]
-#[cfg(feature = "test-support")]
-impl McpConnector for TestOnlyUnsandboxedStdioConnector {
-    async fn connect(&self, config: &McpServerConfig) -> Result<Arc<dyn McpClient>, McpError> {
-        match &config.transport {
-            McpTransportConfig::Stdio {
-                executable,
-                args,
-                working_directory,
-                environment,
-                ..
-            } => {
-                self.policy.approve(config).await?;
-                validate_stdio(executable, args, environment)?;
-                let mut command = Command::new(executable);
-                command
-                    .env_clear()
-                    .args(args)
-                    .envs(environment.iter().cloned())
-                    .kill_on_drop(true);
-                if let Some(working_directory) = working_directory {
-                    command.current_dir(working_directory);
-                }
-                let transport = TokioChildProcess::new(command)
-                    .map_err(|error| McpError::Protocol(error.to_string()))?;
-                let service = ().serve(transport).await.map_err(|_| protocol_failure())?;
-                Ok(Arc::new(RmcpClient::new(config.id.clone(), service, None)))
-            }
-            McpTransportConfig::StreamableHttp { .. } => Err(McpError::Policy(
-                "remote MCP requires a host-injected guarded McpConnector".to_owned(),
-            )),
-        }
+fn json_object(value: Value) -> Result<JsonObject, McpError> {
+    match value {
+        Value::Object(object) => Ok(object),
+        _ => Err(McpError::Protocol(
+            "MCP arguments must be a JSON object".to_owned(),
+        )),
     }
-}
-
-#[cfg(feature = "test-support")]
-fn validate_stdio(
-    executable: &std::path::Path,
-    args: &[String],
-    environment: &[(String, String)],
-) -> Result<(), McpError> {
-    if executable.as_os_str().is_empty() || executable.to_string_lossy().contains('\0') {
-        return Err(McpError::InvalidCommand(
-            "empty or NUL executable".to_owned(),
-        ));
-    }
-    if args.iter().any(|arg| arg.contains('\0')) {
-        return Err(McpError::InvalidCommand("argument contains NUL".to_owned()));
-    }
-    for (key, value) in environment {
-        if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
-            return Err(McpError::InvalidCommand(
-                "invalid environment entry".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn json_object(value: &Value) -> Result<JsonObject, McpError> {
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| McpError::Protocol("MCP arguments must be a JSON object".to_owned()))
 }
 
 fn protocol(_error: impl std::fmt::Display) -> McpError {
@@ -353,202 +248,73 @@ fn protocol_failure() -> McpError {
     McpError::Protocol("remote MCP protocol operation failed".to_owned())
 }
 
-struct BoundedLineReader<R> {
-    inner: R,
-    line_bytes: usize,
-    max_line_bytes: usize,
-}
-
-impl<R> BoundedLineReader<R> {
-    const fn new(inner: R, max_line_bytes: usize) -> Self {
-        Self {
-            inner,
-            line_bytes: 0,
-            max_line_bytes,
-        }
-    }
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for BoundedLineReader<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        destination: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let capacity = destination.remaining().min(8 * 1024);
-        if capacity == 0 {
-            return Poll::Ready(Ok(()));
-        }
-        let mut buffer = [0_u8; 8 * 1024];
-        let mut temporary = ReadBuf::new(&mut buffer[..capacity]);
-        match Pin::new(&mut self.inner).poll_read(context, &mut temporary) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => {
-                let bytes = temporary.filled();
-                let mut line_bytes = self.line_bytes;
-                for byte in bytes {
-                    if *byte == b'\n' {
-                        line_bytes = 0;
-                    } else {
-                        line_bytes = line_bytes.saturating_add(1);
-                        if line_bytes > self.max_line_bytes {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "MCP stdio frame exceeded its size cap",
-                            )));
-                        }
-                    }
-                }
-                self.line_bytes = line_bytes;
-                destination.put_slice(bytes);
-                Poll::Ready(Ok(()))
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl McpClient for RmcpClient {
-    async fn list_tools(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
-        let mut cursor = None;
-        let mut values = Vec::new();
-        loop {
-            let page = peer
-                .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-                .await
-                .map_err(protocol)?;
-            if values.len().saturating_add(page.tools.len()) > MAX_PAGINATED_ENTRIES {
-                return Err(McpError::Protocol(
-                    "MCP tool pagination limit exceeded".to_owned(),
-                ));
-            }
-            values.extend(
-                page.tools
-                    .into_iter()
-                    .map(|value| serde_json::to_value(value).map_err(protocol))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(values)
+    fn catalog_valid(&self) -> bool {
+        self.inbound.catalog_valid() && !self.peer.is_transport_closed()
     }
 
-    async fn list_resources(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
-        let mut cursor = None;
-        let mut values = Vec::new();
-        loop {
-            let page = peer
-                .list_resources(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-                .await
-                .map_err(protocol)?;
-            if values.len().saturating_add(page.resources.len()) > MAX_PAGINATED_ENTRIES {
-                return Err(McpError::Protocol(
-                    "MCP resource pagination limit exceeded".to_owned(),
-                ));
-            }
-            values.extend(
-                page.resources
-                    .into_iter()
-                    .map(|value| serde_json::to_value(value).map_err(protocol))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(values)
+    fn response_limits(&self) -> McpResponseLimits {
+        McpResponseLimits::WIRE
     }
 
-    async fn list_prompts(&self) -> Result<Vec<Value>, McpError> {
-        let peer = self.peer().await?;
-        let mut cursor = None;
-        let mut values = Vec::new();
-        loop {
-            let page = peer
-                .list_prompts(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-                .await
-                .map_err(protocol)?;
-            if values.len().saturating_add(page.prompts.len()) > MAX_PAGINATED_ENTRIES {
-                return Err(McpError::Protocol(
-                    "MCP prompt pagination limit exceeded".to_owned(),
-                ));
-            }
-            values.extend(
-                page.prompts
-                    .into_iter()
-                    .map(|value| serde_json::to_value(value).map_err(protocol))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(values)
+    async fn list_tools(&self, slot: McpResponseSlot) -> Result<McpResponse<Vec<Value>>, McpError> {
+        self.catalog(catalog::Catalog::Tools, slot).await
     }
-
-    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
-        let request =
-            CallToolRequestParams::new(name.to_owned()).with_arguments(json_object(&arguments)?);
-        let result = self
-            .peer()
-            .await?
-            .call_tool(request)
+    async fn list_resources(
+        &self,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<Value>>, McpError> {
+        self.catalog(catalog::Catalog::Resources, slot).await
+    }
+    async fn list_prompts(
+        &self,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Vec<Value>>, McpError> {
+        self.catalog(catalog::Catalog::Prompts, slot).await
+    }
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, McpError> {
+        let params =
+            CallToolRequestParams::new(name.to_owned()).with_arguments(json_object(arguments)?);
+        let request = rmcp::model::CallToolRequest::new(params);
+        self.value_request(request.into(), calls::ResultKind::Tool, slot)
             .await
-            .map_err(protocol)?;
-        serde_json::to_value(result).map_err(protocol)
     }
-
-    async fn read_resource(&self, uri: &str) -> Result<Value, McpError> {
-        let result = self
-            .peer()
-            .await?
-            .read_resource(ReadResourceRequestParams::new(uri))
+    async fn read_resource(
+        &self,
+        uri: &str,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, McpError> {
+        let request = rmcp::model::ReadResourceRequest::new(ReadResourceRequestParams::new(uri));
+        self.value_request(request.into(), calls::ResultKind::Resource, slot)
             .await
-            .map_err(protocol)?;
-        serde_json::to_value(result).map_err(protocol)
     }
-
-    async fn get_prompt(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
-        let request = GetPromptRequestParams::new(name).with_arguments(json_object(&arguments)?);
-        let result = self
-            .peer()
-            .await?
-            .get_prompt(request)
+    async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: Value,
+        slot: McpResponseSlot,
+    ) -> Result<McpResponse<Value>, McpError> {
+        let request = rmcp::model::GetPromptRequest::new(
+            GetPromptRequestParams::new(name).with_arguments(json_object(arguments)?),
+        );
+        self.value_request(request.into(), calls::ResultKind::Prompt, slot)
             .await
-            .map_err(protocol)?;
-        serde_json::to_value(result).map_err(protocol)
     }
 
     async fn close(&self, timeout: Duration) -> Result<(), McpError> {
-        let service_result = if let Some(mut service) = self.service.lock().await.take() {
-            match service.close_with_timeout(timeout).await {
-                Ok(Some(_)) => Ok(()),
-                Ok(None) => Err(McpError::ShutdownTimeout(self.server.clone())),
-                Err(_) => Err(protocol_failure()),
-            }
-        } else {
-            Ok(())
-        };
-        let child_result = if let Some(mut child) = self.child.lock().await.take() {
-            child
-                .terminate_and_reap(timeout)
-                .await
-                .map_err(|_| protocol_failure())
-        } else {
-            Ok(())
-        };
-        match (service_result, child_result) {
-            (Err(error), _) | (_, Err(error)) => Err(error),
-            _ => Ok(()),
-        }
+        self.closure
+            .close(timeout)
+            .await
+            .map_err(|message| McpError::EffectsUnsettled {
+                server: self.server.clone(),
+                message: message.to_string(),
+            })
     }
 }
 
@@ -565,7 +331,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use std::io;
 
     #[cfg(unix)]
     struct AllowConnection;
@@ -655,6 +421,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn request_arguments_transfer_existing_backing_and_reject_non_objects() {
+        let text = "owned argument".repeat(8192);
+        let pointer = text.as_ptr();
+        let mut fields = JsonObject::new();
+        fields.insert("text".into(), Value::String(text));
+        let transferred = json_object(Value::Object(fields)).expect("object arguments");
+        assert_eq!(
+            transferred["text"].as_str().expect("text").as_ptr(),
+            pointer
+        );
+        assert!(json_object(Value::Array(vec![])).is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stdio_connector_reports_bounded_natural_exit_without_child_stderr() {
@@ -676,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn stdio_connector_keeps_live_transport_failure_generic() {
         let connector = SandboxedStdioConnector::new(
-            ShellLauncher("exec 1>&-; sleep 10"),
+            ShellLauncher("exec 1>&-; exec sleep 10"),
             Arc::new(AllowConnection),
         );
         let error = connector
@@ -688,21 +468,5 @@ mod tests {
             error.to_string(),
             "MCP protocol error: remote MCP protocol operation failed"
         );
-    }
-
-    #[tokio::test]
-    async fn bounded_stdio_reader_rejects_an_oversized_line_before_delivery() {
-        let (mut writer, reader) = tokio::io::duplex(64);
-        let writing = tokio::spawn(async move {
-            writer.write_all(b"12345\n").await.expect("write");
-        });
-        let mut reader = BoundedLineReader::new(reader, 4);
-        let mut bytes = Vec::new();
-        let error = reader
-            .read_to_end(&mut bytes)
-            .await
-            .expect_err("oversized line");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        writing.await.expect("writer");
     }
 }

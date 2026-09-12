@@ -6,9 +6,13 @@ members = [
     "crates/rw-ext",
     "crates/rw-intel",
     "crates/rw-mcp",
+    "crates/rw-memory-derive",
+    "crates/rw-macos-bootstrap",
+    "crates/rw-operation-contract",
     "crates/rw-plugin-protocol",
     "crates/rw-providers",
     "crates/rw-runtime",
+    "crates/rw-resources",
     "crates/rw-sandbox",
     "crates/rw-store",
     "crates/rw-tools",
@@ -46,18 +50,29 @@ incremental = false
 debug = "line-tables-only"
 incremental = false
 
+# Executable admission hashes complete native images before sandbox startup.
+# Keep cryptographic compression at native speed in debug/test service lifecycles.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 strip = true
 # Official release builds route through scripts/cargo-release.sh. Its native
-# macOS profile uses the measured speed winner; Linux retains its independently
-# size-qualified `s` override until the same comparison runs there.
+# macOS profile optimizes execution speed; Linux uses its platform-specific
+# `s` override to fit the native distribution size budget.
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
+rw-resources = { version = "0.1.4", path = "crates/rw-resources" }
+redb = "=4.2.0"
+memchr = "2.8.3"
+rw-operation-contract = { version = "0.1.4", path = "crates/rw-operation-contract" }
 base64 = "0.23.0"
+http = "1.3.1"
+bytes = "1.11.1"
 blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive"] }
 ed25519-dalek = "3.0.0"
@@ -73,11 +88,11 @@ nix = { version = "0.31.3", features = ["poll"] }
 portable-pty = "0.9.0"
 rpassword = "=7.5.4"
 regex = "1.12.2"
-rmcp = { version = "=3.1.2", default-features = false, features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-server"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rmcp = { version = "=3.1.2", default-features = false, features = ["client"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "hooks"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 schemars = { version = "1.2.1", features = ["preserve_order"] }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 semver = "1.0.28"
 shell-words = "1.1.0"
@@ -89,7 +104,8 @@ tar = "0.4.44"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+# Strict Serde tests and generated-contract checks own attributes that ts-rs cannot interpret.
+ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-json-impl"] }
 url = "2.5"
 wasmtime = { version = "47.0.4", default-features = false, features = ["async", "component-model-async", "cranelift", "pulley", "runtime", "std"] }
 

@@ -25,8 +25,13 @@ the plugin receives the reference and response bytes, never the credential value
 
 Pushes are JSON-RPC requests and must be listed exactly in `capabilities.push`
 before `context.push` will emit them. Every handler receives an `AbortSignal`;
-the SDK cancels it on shutdown, request cancellation, and—except for provider
-streams—after the bounded generated default handler timeout.
+the SDK cancels it on shutdown and request cancellation. Hook, command and catalog
+handlers keep the five-second handler deadline. Tools receive host-issued total
+and idle deadlines in `params.lifetime` (default five minutes total, ninety seconds
+idle). `context.progress({ message, amount?: { completed, total } })` renews only
+idle time. Progress is bounded, coalesced and transient; final responses follow
+any progress write already in flight. Native timeout or cancellation still requires
+the host's process and effect-settlement proof.
 
 `serve()` keeps reading replies and cancellation while handlers run. Handlers
 may overlap, so keep mutable plugin state scoped to a request or synchronize it

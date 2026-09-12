@@ -19,11 +19,17 @@ impl LocalTokenEstimator {
         usize_to_u64(text.len()).div_ceil(4)
     }
 
-    /// Estimates tokens for a JSON value after canonicalizing object keys.
+    /// Estimates tokens using the canonical JSON byte length.
     #[must_use]
     pub fn value(value: &Value) -> u64 {
-        let bytes = serde_json::to_vec(&canonicalize_json(value)).unwrap_or_default();
-        usize_to_u64(bytes.len()).div_ceil(4)
+        Self::serialized(value)
+    }
+
+    fn serialized(value: &impl serde::Serialize) -> u64 {
+        let mut counter = JsonByteCounter::default();
+        // Key order changes the bytes, but not their length. Counting the same
+        // serializer's output avoids cloning the value and allocating its JSON.
+        serde_json::to_writer(&mut counter, value).map_or(u64::MAX, |()| counter.bytes.div_ceil(4))
     }
 
     /// Estimates one provider-neutral conversation turn.
@@ -46,7 +52,9 @@ impl LocalTokenEstimator {
         })
     }
 
-    fn block(block: &Block) -> u64 {
+    /// Estimate one immutable block, including its provider-neutral framing.
+    #[must_use]
+    pub fn block(block: &Block) -> u64 {
         let body = match block {
             Block::Text { text } => Self::text(text),
             Block::Thinking { content, signature } => {
@@ -58,9 +66,9 @@ impl LocalTokenEstimator {
             Block::ToolResult { id, output, .. } => {
                 Self::text(&id.0).saturating_add(Self::tool_output(output))
             }
-            Block::Image { media_type, data } => Self::text(media_type).saturating_add(
-                Self::value(&serde_json::to_value(data).unwrap_or(Value::Null)),
-            ),
+            Block::Image { media_type, data } => {
+                Self::text(media_type).saturating_add(Self::serialized(data))
+            }
             Block::Citation {
                 uri,
                 title,
@@ -80,14 +88,29 @@ impl LocalTokenEstimator {
                 let estimate = match part {
                     ToolOutputPart::Text { text } => Self::text(text),
                     ToolOutputPart::Structured { value } => Self::value(value),
-                    ToolOutputPart::Image { media_type, data } => Self::text(media_type)
-                        .saturating_add(Self::value(
-                            &serde_json::to_value(data).unwrap_or(Value::Null),
-                        )),
+                    ToolOutputPart::Image { media_type, data } => {
+                        Self::text(media_type).saturating_add(Self::serialized(data))
+                    }
                 };
                 total.saturating_add(estimate)
             }),
         }
+    }
+}
+
+#[derive(Default)]
+struct JsonByteCounter {
+    bytes: u64,
+}
+
+impl std::io::Write for JsonByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(usize_to_u64(bytes.len()));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -115,6 +138,7 @@ fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::{LocalTokenEstimator, canonicalize_json};
@@ -129,5 +153,50 @@ mod tests {
     #[test]
     fn estimator_is_monotonic_for_text() {
         assert!(LocalTokenEstimator::text("four more bytes") > LocalTokenEstimator::text("four"));
+    }
+
+    #[test]
+    fn counted_json_matches_canonical_serialization() -> Result<(), Box<dyn std::error::Error>> {
+        let values = [
+            json!(null),
+            json!(true),
+            json!([0, -1, u64::MAX, i64::MIN, 1.25, 1e-100]),
+            json!({"z": ["\u{0}\n\r\t\"\\", "é🙂"], "a": {"x": false}}),
+            json!({"large": "\"\n🙂".repeat(256 * 1024)}),
+        ];
+        for value in values {
+            let canonical = serde_json::to_vec(&canonicalize_json(&value))?;
+            assert_eq!(
+                LocalTokenEstimator::value(&value),
+                u64::try_from(canonical.len())?.div_ceil(4)
+            );
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn counted_json_preserves_estimates_for_nested_values(value in json_value()) {
+            let expected = serde_json::to_vec(&canonicalize_json(&value))
+                .ok()
+                .map(|bytes| super::usize_to_u64(bytes.len()).div_ceil(4));
+            prop_assert_eq!(Some(LocalTokenEstimator::value(&value)), expected);
+        }
+    }
+
+    fn json_value() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::from),
+            any::<i64>().prop_map(serde_json::Value::from),
+            ".{0,64}".prop_map(serde_json::Value::from),
+        ]
+        .prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(serde_json::Value::Array),
+                proptest::collection::btree_map(".{0,16}", inner, 0..8)
+                    .prop_map(|entries| serde_json::Value::Object(entries.into_iter().collect())),
+            ]
+        })
     }
 }

@@ -1,3 +1,16 @@
+import { utf8Prefix } from "../state/display-buffer"
+import { truncateToCells } from "./text"
+
+export const MAX_ERROR_FRAGMENT_BYTES = 2048
+export const MAX_ERROR_REQUEST_BYTES = 512
+const MAX_ERROR_TAG_BYTES = 256
+
+// Copy a bounded prefix before regex/Unicode work so retained display strings
+// cannot keep an arbitrarily large engine/transport error string alive.
+function errorPreview(value: string, maximum: number): string {
+  return Buffer.from(utf8Prefix(value.slice(0, maximum), maximum), "utf8").toString("utf8")
+}
+
 export type ErrorSeverity = "info" | "warning" | "error"
 
 export interface PresentErrorInput {
@@ -91,8 +104,8 @@ function error(text: string): KnownError {
 
 /** Converts engine and transport failures into stable, safe UI copy. */
 export function presentError(input: PresentErrorInput): PresentedError {
-  const category = input.category ?? ""
-  const code = input.code ?? ""
+  const category = errorPreview(input.category ?? "", MAX_ERROR_TAG_BYTES)
+  const code = errorPreview(input.code ?? "", MAX_ERROR_TAG_BYTES)
   if (category === "protocol" && (code === "subagent_replay_gap" || code.endsWith("_projection_failed"))) {
     return {
       text: sanitizeErrorFragment(input.message),
@@ -125,7 +138,7 @@ function dynamicKnownError(category: string, code: string): KnownError | undefin
 function presentRequestId(requestId: string | undefined): string {
   if (requestId === undefined) return ""
   const value = truncateToCells(
-    requestId.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/\s+/g, " ").trim(),
+    errorPreview(requestId, MAX_ERROR_REQUEST_BYTES).replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/\s+/g, " ").trim(),
     64,
   )
   return value.length === 0 ? "" : ` · request ${value}`
@@ -136,7 +149,7 @@ function presentRequestId(requestId: string | undefined): string {
  * Control characters and trailing stack/path frames are removed; no severity or framing is added.
  */
 export function sanitizeErrorFragment(message: string | undefined): string {
-  const source = message ?? ""
+  const source = errorPreview(message ?? "", MAX_ERROR_FRAGMENT_BYTES)
   const stackStart = source.search(/\s+at\s/)
   const pathStart = source.match(/\S+\.(?:ts|rs):\d/)?.index ?? -1
   const fragmentStart = [stackStart, pathStart].filter((index) => index >= 0).sort((left, right) => left - right)[0] ?? -1
@@ -149,7 +162,7 @@ export function sanitizeErrorFragment(message: string | undefined): string {
 }
 
 function inferredSeverity(category: string, code: string, message: string): ErrorSeverity {
-  const detail = `${code} ${message}`.toLowerCase()
+  const detail = `${errorPreview(code, MAX_ERROR_TAG_BYTES)} ${errorPreview(message, MAX_ERROR_FRAGMENT_BYTES)}`.toLowerCase()
   if (/pending|stored/.test(detail)) return "info"
   if (/connection|retry|transient|unavailable|offline|reconnect|recovery|replay|busy/.test(detail)) {
     return "warning"
@@ -159,4 +172,3 @@ function inferredSeverity(category: string, code: string, message: string): Erro
   }
   return "error"
 }
-import { truncateToCells } from "./text"

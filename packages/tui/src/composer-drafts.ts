@@ -1,0 +1,236 @@
+import { ClientAllocationOwner, MAX_CLIENT_DRAFT_BYTES, type ClientAllocationLease } from "./client-allocation"
+export { MAX_CLIENT_DRAFT_BYTES } from "./client-allocation"
+import { MAX_ATTACHMENTS_PER_MESSAGE, type Attachment } from "./protocol"
+import type { ComposerDraft } from "./subagent-state"
+
+export const MAX_COMPOSER_TEXT_BYTES = 128 * 1024
+export const COMPOSER_TEXT_LIMIT_NOTICE = "Composer text is limited to 128 KiB. Attach large content as a file."
+export const MAX_CLIENT_DRAFTS = 256
+export const MAX_ATTACHMENTS_PER_DRAFT = 2 * MAX_ATTACHMENTS_PER_MESSAGE
+const EMPTY: ComposerDraft = { content: "", attachments: [] }
+const ENTRY_BYTES = 256
+
+/** Conservatively charge JS text plus the editable native buffer, without encoding it per keystroke. */
+export function composerDraftBytes(draft: ComposerDraft): number {
+  return draftBytes(draft.content.length, draft.attachments)
+}
+
+function draftBytes(contentLength: number, attachments: readonly Attachment[]): number {
+  if (contentLength === 0 && attachments.length === 0) return 0
+  let bytes = ENTRY_BYTES + contentLength * 6
+  for (const attachment of attachments) {
+    bytes += 256 + 2 * (attachment.name.length + attachment.media_type.length + (attachment.source_path?.length ?? 0))
+    bytes += 2 * (attachment.data.type === "text" ? attachment.data.content.length : attachment.data.data.length)
+  }
+  return bytes
+}
+
+interface Entry { readonly draft: ComposerDraft; readonly bytes: number }
+interface Submission { readonly scope: string; readonly entry: Entry; active: boolean }
+export interface DraftTextReservation {
+  /** Transfer a completely read body into the submission/recovery owner. */
+  finish(text: string): DraftSubmission
+  cancel(): void
+}
+export interface DraftReadReservation {
+  finish(draft: ComposerDraft): DraftSubmission
+  cancel(): void
+}
+interface DraftRead { readonly scope: string; readonly bytes: number; readonly attachmentSlots: number; active: boolean }
+export interface DraftSubmission {
+  readonly draft: ComposerDraft
+  /** Settlement consumes this reservation exactly once, independently of the active scope. */
+  settle(accepted: boolean): ComposerDraft | null
+}
+
+/** Editable data is admitted or preserved; it is never an evictable display cache. */
+export class ComposerDraftStore {
+  readonly #drafts = new Map<string, Entry>()
+  readonly #pending = new Set<Submission>()
+  readonly #reads = new Set<DraftRead>()
+  #retainedBytes = 0
+  #allocation: ClientAllocationLease
+  get #bytes(): number { return this.#retainedBytes }
+  set #bytes(bytes: number) { this.#allocation.resize(bytes); this.#retainedBytes = bytes }
+  #fits(bytes: number): boolean {
+    return bytes <= this.maximumBytes && this.allocations.canReserve("drafts", bytes, this.#bytes)
+  }
+  constructor(readonly maximumBytes = MAX_CLIENT_DRAFT_BYTES, readonly maximumDrafts = MAX_CLIENT_DRAFTS, readonly allocations = new ClientAllocationOwner()) {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || !Number.isSafeInteger(maximumDrafts) || maximumDrafts <= 0) {
+      throw new RangeError("invalid draft limits")
+    }
+    this.#allocation = allocations.reserve("drafts", 0)
+  }
+  get usage() { return { bytes: this.#bytes, drafts: this.#drafts.size, pending: this.#pending.size + this.#reads.size } }
+  get(scope: string): ComposerDraft { return this.#drafts.get(scope)?.draft ?? EMPTY }
+  entries(): readonly { readonly scope: string; readonly draft: ComposerDraft }[] {
+    return [...this.#drafts].map(([scope, entry]) => ({ scope, draft: entry.draft }))
+  }
+  canRetainText(scope: string, codeUnits: number, attachments: readonly Attachment[]): boolean {
+    if (!Number.isSafeInteger(codeUnits) || codeUnits < 0 || codeUnits > MAX_COMPOSER_TEXT_BYTES || !this.#attachmentsFit(scope, attachments.length)) return false
+    const payload = draftBytes(codeUnits, attachments)
+    const bytes = payload === 0 ? 0 : payload + scope.length * 2
+    const previous = this.#drafts.get(scope)
+    return this.#fits(this.#bytes - (previous?.bytes ?? 0) + bytes)
+      && (bytes === 0 || previous !== undefined || this.#drafts.size + this.#pending.size + this.#reads.size < this.maximumDrafts)
+  }
+  set(scope: string, draft: ComposerDraft): boolean {
+    if (!this.#textFits(scope, draft.content) || !this.#attachmentsFit(scope, draft.attachments.length)) return false
+    const old = this.#drafts.get(scope)
+    const bytes = composerDraftBytes(draft) + (draft.content === "" && draft.attachments.length === 0 ? 0 : scope.length * 2)
+    if (!this.#fits(this.#bytes - (old?.bytes ?? 0) + bytes)
+      || (bytes > 0 && old === undefined && this.#drafts.size + this.#pending.size + this.#reads.size >= this.maximumDrafts)) return false
+    this.#bytes += bytes - (old?.bytes ?? 0)
+    if (bytes === 0) this.#drafts.delete(scope)
+    else this.#drafts.set(scope, { draft: snapshot(draft), bytes })
+    return true
+  }
+  #textFits(scope: string, content: string): boolean { return this.canRetainTextBytes(scope, Buffer.byteLength(content)) }
+  canRetainTextBytes(scope: string, bytes: number): boolean {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) return false
+    for (const pending of this.#pending) if (pending.active && pending.scope === scope && pending.entry.draft.content !== "") {
+      bytes += Buffer.byteLength(pending.entry.draft.content) + (bytes > 0 ? 1 : 0)
+    }
+    return bytes <= MAX_COMPOSER_TEXT_BYTES
+  }
+  #attachmentsFit(scope: string, count: number): boolean {
+    for (const item of this.#pending) {
+      if (item.active && item.scope === scope) return count <= MAX_ATTACHMENTS_PER_MESSAGE
+    }
+    let reserved = 0
+    for (const read of this.#reads) if (read.active && read.scope === scope) reserved += read.attachmentSlots
+    return count + reserved <= MAX_ATTACHMENTS_PER_DRAFT
+  }
+  remove(scope: string): void {
+    for (const read of this.#reads) if (read.scope === scope) read.active = false
+    for (const pending of this.#pending) if (pending.scope === scope) pending.active = false
+    const entry = this.#drafts.get(scope)
+    if (entry !== undefined) { this.#bytes -= entry.bytes; this.#drafts.delete(scope) }
+  }
+  clear(): void {
+    for (const entry of this.#drafts.values()) this.#bytes -= entry.bytes
+    this.#drafts.clear()
+    // Accepted asynchronous work keeps its allocation charge until settlement.
+    for (const read of this.#reads) read.active = false
+    for (const pending of this.#pending) pending.active = false
+  }
+
+  replace(drafts: readonly { readonly scope: string; readonly draft: ComposerDraft }[]): boolean {
+    if (this.#pending.size > 0 || this.#reads.size > 0) return false
+    const candidate = new ComposerDraftStore(this.maximumBytes, this.maximumDrafts, this.allocations)
+    for (const { scope, draft } of drafts) if (!candidate.set(scope, draft)) { candidate.clear(); candidate.#allocation.release(); return false }
+    this.clear()
+    for (const [scope, entry] of candidate.#drafts) this.#drafts.set(scope, entry)
+    this.#allocation.release()
+    this.#allocation = candidate.#allocation
+    this.#retainedBytes = candidate.#retainedBytes
+    candidate.#drafts.clear()
+    candidate.#retainedBytes = 0
+    return true
+  }
+
+  /** Reserve chunk storage, final joining and editable copies before reading source bodies. */
+  reserveText(scope: string, maximumTextBytes: number): DraftTextReservation | null {
+    if (!Number.isSafeInteger(maximumTextBytes) || maximumTextBytes < 0 || maximumTextBytes > MAX_COMPOSER_TEXT_BYTES) return null
+    const reservation = this.reserveDraft(scope, 512 + maximumTextBytes * 10, 0)
+    return reservation === null ? null : {
+      cancel: () => reservation.cancel(),
+      finish: text => {
+        if (Buffer.byteLength(text) > maximumTextBytes) throw new Error("source text exceeds its reservation")
+        return reservation.finish({ content: text, attachments: [] })
+      },
+    }
+  }
+
+  /** One accepted input read owns eventual draft capacity until its operation settles. */
+  reserveDraft(scope: string, maximumBytes: number, attachmentSlots: number): DraftReadReservation | null {
+    const bytes = maximumBytes + scope.length * 2
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || !Number.isSafeInteger(attachmentSlots)
+      || attachmentSlots < 0 || attachmentSlots > MAX_ATTACHMENTS_PER_DRAFT
+      || this.get(scope).attachments.length + attachmentSlots > MAX_ATTACHMENTS_PER_DRAFT
+      || !this.#fits(this.#bytes + bytes)
+      || this.#drafts.size + this.#pending.size + this.#reads.size >= this.maximumDrafts
+      || this.#reads.size > 0 || this.#pending.size > 0) return null
+    const read: DraftRead = { scope, bytes, attachmentSlots, active: true }
+    this.#reads.add(read)
+    this.#bytes += bytes
+    let live = true
+    const release = () => {
+      live = false
+      this.#reads.delete(read)
+      this.#bytes -= bytes
+    }
+    return {
+      cancel: () => { if (live) release() },
+      finish: draft => {
+        if (!live) throw new Error("input read reservation has settled")
+        const retained = composerDraftBytes(draft) + scope.length * 2
+        if (retained > bytes || !this.#textFits(scope, mergeDrafts(draft, this.get(scope)).content) || draft.attachments.length > attachmentSlots) {
+          throw new Error("input exceeds its draft reservation")
+        }
+        release()
+        const submission: Submission = { scope, active: read.active,
+          entry: { draft: snapshot(draft), bytes: retained } }
+        this.#pending.add(submission)
+        this.#bytes += retained
+        return this.#submission(submission)
+      },
+    }
+  }
+
+  /** Transfer rather than duplicate the draft's capacity before asynchronous submission. */
+  submit(scope: string): DraftSubmission | null {
+    const entry = this.#drafts.get(scope)
+    if (entry === undefined || entry.draft.attachments.length > MAX_ATTACHMENTS_PER_MESSAGE || this.#pending.size > 0 || this.#reads.size > 0) return null
+    const submission = { scope, entry, active: true }
+    this.#drafts.delete(scope)
+    this.#pending.add(submission)
+    return this.#submission(submission)
+  }
+
+  #submission(submission: Submission): DraftSubmission {
+    let live: Submission | null = submission
+    return {
+      get draft() { if (live === null) throw new Error("draft submission has settled"); return live.entry.draft },
+      settle: accepted => {
+        const owned = live
+        live = null
+        return owned === null ? null : this.#settle(owned, accepted)
+      },
+    }
+  }
+
+  #settle(submission: Submission, accepted: boolean): ComposerDraft | null {
+    if (!this.#pending.delete(submission)) return null
+    this.#bytes -= submission.entry.bytes
+    if (accepted || !submission.active) return null
+    const current = this.#drafts.get(submission.scope)
+    const restored = mergeDrafts(submission.entry.draft, current?.draft ?? EMPTY)
+    // Two charged entries cover their concatenation (including its separator and metadata).
+    if (!this.set(submission.scope, restored)) throw new Error("reserved submission no longer fits its draft owner")
+    return this.get(submission.scope)
+  }
+}
+
+function snapshot(draft: ComposerDraft): ComposerDraft {
+  return { content: draft.content, attachments: draft.attachments.map(attachment =>
+    Object.isFrozen(attachment) && Object.isFrozen(attachment.data) ? attachment
+      : Object.freeze({ ...attachment, data: Object.freeze({ ...attachment.data }) })) }
+
+}
+
+export function sameAttachment(left: Attachment, right: Attachment): boolean {
+  return left.name === right.name && left.media_type === right.media_type && left.source_path === right.source_path
+    && left.data.type === right.data.type
+    && (left.data.type === "text" ? right.data.type === "text" && left.data.content === right.data.content
+      : right.data.type === "inline_base64" && left.data.data === right.data.data)
+}
+
+function mergeDrafts(submitted: ComposerDraft, current: ComposerDraft): ComposerDraft {
+  const attachments = [...current.attachments]
+  for (const attachment of submitted.attachments) {
+    if (!attachments.some(existing => sameAttachment(existing, attachment))) attachments.push(attachment)
+  }
+  return { content: submitted.content === "" ? current.content : current.content === "" ? submitted.content
+    : `${submitted.content}\n${current.content}`, attachments }
+}
