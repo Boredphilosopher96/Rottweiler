@@ -4,6 +4,12 @@ use rustix::process::{Pid, WaitId, WaitIdOptions};
 use std::{io, process::ExitStatus, time::Duration};
 
 const STDERR_BYTES: usize = 4096;
+const STDERR_ATTEMPTS: usize = 32;
+const STDERR_BYTE_BOUND: &str = "stderr capture reached 4096-byte bound; content omitted";
+const STDERR_PIPE_OPEN: &str =
+    "stderr capture incomplete: pipe remained open after helper reap; content omitted";
+const STDERR_READ_FAILED: &str = "stderr capture read failed; content omitted";
+const STDERR_READ_ATTEMPTS: &str = "stderr capture exceeded 32 read attempts; content omitted";
 
 pub(super) fn retire(child: &mut Child, pid: u32, cause: &io::Error) -> PluginProcessError {
     let before_kill = observe_exit(pid);
@@ -61,7 +67,7 @@ fn read_stderr(stderr: &impl std::os::fd::AsFd) -> String {
     }
     let mut bytes = [0_u8; STDERR_BYTES];
     let mut used = 0;
-    for _ in 0..32 {
+    for _ in 0..STDERR_ATTEMPTS {
         match rustix::io::read(stderr, &mut bytes[used..]) {
             Ok(0) if used < STDERR_BYTES => {
                 return format!("stderr={}", String::from_utf8_lossy(&bytes[..used]));
@@ -69,16 +75,17 @@ fn read_stderr(stderr: &impl std::os::fd::AsFd) -> String {
             Ok(count) => {
                 used += count;
                 if used == STDERR_BYTES {
-                    break;
+                    return STDERR_BYTE_BOUND.to_owned();
                 }
             }
             Err(rustix::io::Errno::INTR) => {}
-            Err(_) => break,
+            Err(rustix::io::Errno::AGAIN) => return STDERR_PIPE_OPEN.to_owned(),
+            Err(_) => return STDERR_READ_FAILED.to_owned(),
         }
     }
     // A truncated credential cannot be redacted as a complete known secret.
-    // Report incomplete capture without publishing its potentially partial text.
-    "stderr capture incomplete or exceeded 4096 bytes; content omitted".to_owned()
+    // Report read exhaustion without publishing its potentially partial text.
+    STDERR_READ_ATTEMPTS.to_owned()
 }
 
 #[cfg(test)]

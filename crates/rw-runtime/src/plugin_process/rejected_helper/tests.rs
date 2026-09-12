@@ -8,9 +8,13 @@ const EXIT_TEST: &str = "plugin_process::rejected_helper::tests::rejected_helper
 #[tokio::test]
 async fn rejected_helper_preserves_exit_status_and_stderr_after_actual_reap() {
     let result = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, || {
-        if std::env::var_os(ISOLATED).is_none() {
-            isolated_exit_probe();
-            return;
+        match std::env::var_os(ISOLATED) {
+            None => {
+                isolated_exit_probe();
+                return;
+            }
+            Some(value) if value.as_os_str() == std::ffi::OsStr::new("1") => {}
+            Some(_) => panic!("isolated diagnostic marker must equal 1"),
         }
         let _process = super::super::process_fixture_lease();
         let mut child = tokio::process::Command::new("/bin/sh")
@@ -83,7 +87,7 @@ fn isolated_exit_probe() {
         .read_to_string(&mut diagnostic)
         .expect("bounded diagnostics");
     assert!(
-        status.as_ref().is_ok_and(|status| status.success()),
+        status.as_ref().is_ok_and(std::process::ExitStatus::success),
         "{status:?}\n{diagnostic}"
     );
 }
@@ -135,7 +139,7 @@ async fn reaped_helper_with_retained_stderr_writer_omits_incomplete_capture() {
             error.message.contains("reaped=exit status: 23"),
             "{error:?}"
         );
-        assert!(error.message.contains("content omitted"), "{error:?}");
+        assert!(error.message.ends_with(STDERR_PIPE_OPEN), "{error:?}");
         assert!(!error.message.contains("partial-credential"), "{error:?}");
         drop(writer);
     })
@@ -149,12 +153,12 @@ fn incomplete_stderr_never_exposes_a_partial_credential() {
     read.set_nonblocking(true)
         .expect("nonblocking diagnostic pipe");
     rustix::io::write(&write, b"partial-secret").expect("fixture bytes");
-    assert!(!read_stderr(&read).contains("partial-secret"));
+    assert_eq!(read_stderr(&read), STDERR_PIPE_OPEN);
     drop(write);
 }
 
 #[test]
-fn oversized_stderr_is_omitted_with_finite_capture() {
+fn stderr_at_capture_byte_bound_is_omitted_with_exact_category() {
     let (read, write) = std::os::unix::net::UnixStream::pair().expect("diagnostic pipe");
     read.set_nonblocking(true)
         .expect("nonblocking diagnostic pipe");
@@ -164,5 +168,5 @@ fn oversized_stderr_is_omitted_with_finite_capture() {
         bytes.len()
     );
     drop(write);
-    assert!(read_stderr(&read).contains("content omitted"));
+    assert_eq!(read_stderr(&read), STDERR_BYTE_BOUND);
 }
