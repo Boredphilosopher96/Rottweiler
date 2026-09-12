@@ -1,7 +1,25 @@
 import { expect, test } from "bun:test"
-import { cp, mkdtemp, rm, symlink } from "node:fs/promises"
+import { cp, mkdtemp, readFile, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { renderTypeScriptScaffold } from "../src/scaffold"
+
+test("scaffolds use the SDK's exact checked declaration graph and runtime", async () => {
+  const sdk = JSON.parse(await readFile(join(import.meta.dir, "../package.json"), "utf8"))
+  const files = renderTypeScriptScaffold()
+  const generated = JSON.parse(files.find((file) => file.path === "package.json")!.contents)
+  expect(generated.dependencies).toEqual({ [sdk.name]: sdk.version })
+  expect(generated.devDependencies).toEqual(sdk.devDependencies)
+  for (const version of Object.values(generated.devDependencies)) {
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/)
+  }
+  expect(generated.packageManager).toBe(sdk.packageManager)
+  expect(generated.engines).toEqual(sdk.engines)
+  const sourceConfig = JSON.parse(await readFile(join(import.meta.dir, "../tsconfig.json"), "utf8"))
+  const generatedConfig = JSON.parse(files.find((file) => file.path === "tsconfig.json")!.contents)
+  expect(sourceConfig.compilerOptions.skipLibCheck).not.toBe(true)
+  expect(generatedConfig.compilerOptions.skipLibCheck).not.toBe(true)
+})
 
 test("packing a clean SDK builds every exported runtime and declaration", async () => {
   const root = await mkdtemp(join(tmpdir(), "rottweiler-clean-sdk-pack-"))
