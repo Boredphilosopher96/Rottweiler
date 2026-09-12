@@ -4,13 +4,68 @@
 mod common;
 use rw_sandbox::{NetworkPolicy, PluginRendezvous, SandboxPolicy, shell_launch_plan};
 use std::{
-    fs,
-    io::{BufRead as _, BufReader},
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead as _, BufReader, Read as _, Write as _},
     os::unix::process::CommandExt as _,
     path::Path,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+
+const MAX_PID_RECEIPT_BYTES: u64 = 10;
+
+fn parse_supervisor_pid(receipt: &[u8]) -> io::Result<rustix::process::Pid> {
+    if receipt.is_empty()
+        || receipt.len() as u64 > MAX_PID_RECEIPT_BYTES
+        || !receipt.iter().all(u8::is_ascii_digit)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "supervisor PID receipt must be 1-10 ASCII digits",
+        ));
+    }
+    let raw = std::str::from_utf8(receipt)
+        .expect("ASCII digits are UTF-8")
+        .parse::<i32>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    rustix::process::Pid::from_raw(raw).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "supervisor PID receipt must identify a positive process",
+        )
+    })
+}
+
+fn read_supervisor_pid(path: &Path) -> io::Result<rustix::process::Pid> {
+    let mut receipt = Vec::new();
+    File::open(path)?
+        .take(MAX_PID_RECEIPT_BYTES + 1)
+        .read_to_end(&mut receipt)?;
+    parse_supervisor_pid(&receipt)
+}
+
+fn publish_supervisor_pid_with(
+    path: &Path,
+    pid: u32,
+    before_rename: impl FnOnce(&Path),
+) -> io::Result<()> {
+    let receipt = pid.to_string();
+    parse_supervisor_pid(receipt.as_bytes())?;
+    let temporary = path.with_extension("tmp");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(receipt.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    before_rename(&temporary);
+    fs::rename(temporary, path)
+}
+
+fn publish_supervisor_pid(path: &Path, pid: u32) -> io::Result<()> {
+    publish_supervisor_pid_with(path, pid, |_| {})
+}
 
 #[test]
 fn controller() {
@@ -63,7 +118,7 @@ fn controller() {
         .read_line(&mut pid)
         .expect("effect identity");
     assert!(!pid.trim().is_empty(), "effect published readiness");
-    fs::write(root.join("ready"), child.id().to_string()).expect("ready receipt");
+    publish_supervisor_pid(&root.join("ready"), child.id()).expect("ready receipt");
     child.wait().expect("controller owns the supervisor wait");
     drop(control);
 }
@@ -105,9 +160,12 @@ fn parent_sigkill_retires_real_single_process_sandbox() {
     let root = tempfile::tempdir().expect("fixture root");
     let mut controller = start(root.path(), false);
     let deadline = Instant::now() + Duration::from_secs(15);
-    let pids = loop {
-        if let Ok(value) = fs::read_to_string(root.path().join("ready")) {
-            break value;
+    let ready = root.path().join("ready");
+    let pid = loop {
+        match read_supervisor_pid(&ready) {
+            Ok(pid) => break pid,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("invalid supervisor PID receipt: {error}"),
         }
         assert!(
             Instant::now() < deadline,
@@ -115,7 +173,6 @@ fn parent_sigkill_retires_real_single_process_sandbox() {
         );
         std::thread::sleep(Duration::from_millis(10));
     };
-    let pid = rustix::process::Pid::from_raw(pids.parse().expect("supervisor pid")).expect("pid");
     controller.0.kill().expect("SIGKILL only Rust owner");
     controller.0.wait().expect("reap Rust owner");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -125,6 +182,51 @@ fn parent_sigkill_retires_real_single_process_sandbox() {
             "supervisor group remained after parent loss: {pid}"
         );
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn supervisor_pid_receipt_is_hidden_until_complete() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let ready = root.path().join("ready");
+    let pid = std::process::id();
+    publish_supervisor_pid_with(&ready, pid, |temporary| {
+        assert_eq!(
+            fs::read(temporary).expect("complete temporary receipt"),
+            pid.to_string().as_bytes()
+        );
+        assert_eq!(
+            read_supervisor_pid(&ready)
+                .expect_err("receipt is not published yet")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    })
+    .expect("publish receipt");
+    assert_eq!(
+        read_supervisor_pid(&ready)
+            .expect("published PID")
+            .as_raw_nonzero()
+            .get(),
+        i32::try_from(pid).expect("test PID fits i32")
+    );
+}
+
+#[test]
+fn supervisor_pid_receipt_rejects_invalid_content() {
+    for invalid in [
+        b"".as_slice(),
+        b"0",
+        b"-1",
+        b"12\n",
+        b"pid",
+        b"2147483648",
+        b"12345678901",
+    ] {
+        assert!(
+            parse_supervisor_pid(invalid).is_err(),
+            "accepted invalid PID receipt {invalid:?}"
+        );
     }
 }
 
