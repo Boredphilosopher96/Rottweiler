@@ -137,7 +137,7 @@
       "source_owners": [
         "packaging/homebrew/README.md",
         "contracts/release-contract.json",
-        "scripts/build-release.sh"
+        "scripts/build-native-candidate.py"
       ]
     },
     {

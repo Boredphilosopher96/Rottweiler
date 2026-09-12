@@ -57,7 +57,7 @@ the maintainer architecture documents.
 ```sh
 rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
 bun install --cwd packages/tui --frozen-lockfile
-scripts/build-release.sh
+python3 scripts/build-native-candidate.py --print archive
 ```
 
 The release builder compiles and validates every required sibling executable.
@@ -66,8 +66,8 @@ The release builder compiles and validates every required sibling executable.
 
 - Add a fact to its domain owner, then generate or check projections.
 - Do not copy protocol values into docs, SDKs, hosts, or tests.
-- Do not add compatibility aliases. Migrate callers and delete the obsolete
-  surface in the same change.
+- Keep implementation, callers, schemas, and fixtures aligned with the owned
+  contract. Reject inputs outside that contract.
 - Keep UI behavior in the client and session behavior in the Rust engine.
 - Keep `/updates/**` under the release workflow's exclusive ownership.
 
@@ -91,7 +91,6 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 cargo run --locked --quiet -p xtask -- codegen --check
-cargo run --locked --quiet -p rw-plugin-protocol --bin rw-plugin-protocol-codegen -- --check
 python3 scripts/check-dependency-direction.py
 python3 scripts/check-ownership.py
 python3 scripts/check-toolchain-ownership.py
@@ -106,7 +105,7 @@ bun test --cwd packages/plugin-sdk
 bun run --cwd packages/plugin-sdk build
 bun run --cwd packages/tui typecheck
 bun test --cwd packages/tui
-bun run --cwd packages/tui build
+bun run --cwd packages/js-host build
 bun run --cwd packages/docs-site check
 bun test --cwd packages/docs-site
 bun run --cwd packages/docs-site build
@@ -216,8 +215,8 @@ Generated schemas, fixtures, SDK declarations, raw Markdown, agent indexes, and
 HTML are projections. A projection has a drift check or is created during the
 build; it does not become a second hand-maintained authority.
 
-Compatibility aliases are not part of this model. Callers move to the owned
-surface and obsolete APIs are deleted.
+Implementations and callers use the owned contract directly. Boundary validators
+reject inputs outside it.
 
 ---
 
@@ -519,7 +518,7 @@ channel. Signed metadata prevents version rollback unless rollback is explicit.
 # Installation
 Section: product
 Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/installation/
-Source owners: packaging/homebrew/README.md, contracts/release-contract.json, scripts/build-release.sh
+Source owners: packaging/homebrew/README.md, contracts/release-contract.json, scripts/build-native-candidate.py
 
 Rottweiler is one application made from several supervised processes. Install
 the complete bundle; installing only the Rust CLI does not install the terminal
@@ -573,7 +572,7 @@ git clone https://github.com/Boredphilosopher96/Rottweiler.git
 cd Rottweiler
 rustup toolchain install 1.97.1 --profile minimal
 bun install --cwd packages/tui --frozen-lockfile
-scripts/build-release.sh
+python3 scripts/build-native-candidate.py --print archive
 ```
 
 The command prints the validated archive path. Extract that archive and run its
@@ -671,6 +670,12 @@ flags accepted by the installed version.
 | `rw --remote <host>` | Run the local TUI against an engine reached over SSH. |
 | `rw serve` | Start the engine client server. |
 | `rw prompt dump` | Inspect the assembled prompt. |
+
+For an isolated SSH profile, set `ROTTWEILER_SSH_CONFIG` to an absolute readable
+regular file before `rw --remote <host>`. The engine control connection, socket
+forwarding, and foreground remote shell all pass that file to OpenSSH with `-F`.
+Without this variable, OpenSSH uses its standard configuration discovery.
+`ROTTWEILER_SSH_BIN` selects the SSH executable for those same connections.
 
 ## Global session and policy flags
 
@@ -884,6 +889,24 @@ runs once at the turn boundary. A failing test marks the turn failed and adds a
 bounded diagnostic to durable conversation context so the next turn can act on
 it.
 
+For toolchains installed outside the system runtime paths, declare their read
+roots explicitly in trusted configuration:
+
+```toml
+[toolchain]
+runtime_read_roots = ["/home/alice/.cargo/bin", "/home/alice/.rustup"]
+formatter = "rustfmt {file}"
+```
+
+Supply existing absolute paths for your installation, up to 32 paths of 4096
+UTF-8 bytes each. These read-only grants belong to formatter, linter, and test
+commands. Ordinary Bash and declarative shell hooks do not inherit them; writes
+remain limited to the workspace and private scratch, network access remains
+denied, and sensitive credential paths remain excluded. Linux adds these roots
+to its system-read baseline; macOS retains its general-read policy with
+credential exclusions. Changing PATH or HOME does not grant read authority.
+Project toolchain configuration takes effect only after project trust.
+
 ---
 
 # Platforms and releases
@@ -906,10 +929,10 @@ the signed update specification are advertised as released platforms.
 A complete release contains:
 
 - `rw`, the public application and Rust supervisor;
-- `rottweiler-tui`, the compiled OpenTUI client;
+- `rottweiler-js-host`, one private executable with explicit `tui` and `source-plugin` roles;
 - the OpenTUI native renderer library;
 - `rottweiler-wasm-host`;
-- `rottweiler-plugin-host`;
+- the WASM host identity document;
 - the archive installer.
 
 The archive contract owns names, modes, per-member size ceilings, and platform
@@ -1004,6 +1027,46 @@ await runPlugin(plugin)
 
 The manifest is the capability boundary. Declaring a capability does not by
 itself grant approval; the host binds approval to the manifest fingerprint.
+
+## Long-running tools
+
+Tool handlers receive a `ToolHandlerContext`. Use `signal` to stop cooperative
+work and `progress` to replace the current observation:
+
+```ts
+example_work: async (_params, context) => {
+  context.progress({ message: "Reading workspace", amount: { completed: 1, total: 3 } })
+  // Perform bounded work and observe context.signal between steps.
+  return { content: "Completed", data: null }
+}
+```
+
+The host supplies immutable total and renewable idle deadlines in
+`params.lifetime`. Defaults are five minutes total and ninety seconds idle.
+Progress renews only the idle deadline, is coalesced and limited to four deliveries
+per second, and is discarded when the operation closes. Messages contain at most
+256 Unicode characters without control characters. Counts are unsigned 32-bit
+integers with `completed <= total` and `total > 0`.
+
+Progress is transient display state. It does not create durable history, grant
+permissions, or prove that cancelled native work stopped. Hook, command and
+catalog handlers keep the ordinary five-second deadline.
+
+## Hook contracts
+
+Each declaration requires a hook name, class, and failure policy. Transform
+handlers run before policy handlers. A `HookHandler`
+receives the input type for its declared event. It can transform only that
+phase's mutable fields; tool-call and session identity stay fixed.
+
+Policy hooks can block an operation. Permission policies return `allow`, `ask`,
+or `deny`, with the strictest result taking precedence. An `ask` result requires
+fresh approval. Use durable event subscriptions for asynchronous observation;
+event delivery does not block hook phases.
+
+Cancellation aborts `context.signal`. The request remains active until the
+handler and its cleanup settle. The host terminates an uncooperative plugin at
+its deadline before allowing conflicting work to continue.
 
 ## Scaffold a project
 

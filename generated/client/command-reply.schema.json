@@ -1,3130 +1,3250 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "EngineEvent",
-  "description": "Events streamed to clients and persisted in the session event log.",
+  "title": "CommandReply",
+  "description": "Direct response on the authenticated command channel. Read data never enters SSE or mutation dedupe.",
   "oneOf": [
     {
       "type": "object",
       "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "target": {
-          "$ref": "#/$defs/SessionNavigationTarget"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_navigation_requested"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "target"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/SessionStateSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_state_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/SessionControlsSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_controls_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/FamilyControlsSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "family_controls_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "target": {
-          "$ref": "#/$defs/ChildControlTarget"
-        },
-        "result": {
-          "$ref": "#/$defs/ChildReadScopeResult"
-        },
-        "type": {
-          "type": "string",
-          "const": "child_read_scope_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "target",
-        "result"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "target": {
-          "$ref": "#/$defs/ChildControlTarget"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/SessionStateSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "child_state_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "target",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "target": {
-          "$ref": "#/$defs/ChildControlTarget"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/ChildControlsSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "child_controls_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "target",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "catalog": {
-          "$ref": "#/$defs/UiCatalog"
-        },
-        "type": {
-          "type": "string",
-          "const": "ui_catalog_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "catalog"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "panels": {
-          "$ref": "#/$defs/UiPanels"
-        },
-        "type": {
-          "type": "string",
-          "const": "ui_panels_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "panels"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/TodoSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "todo_state_committed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "result": {
-          "$ref": "#/$defs/SessionChildrenResult"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_children_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "result"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "result": {
-          "$ref": "#/$defs/TodoReadResult"
-        },
-        "type": {
-          "type": "string",
-          "const": "todos_read"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "result"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "result": {
-          "$ref": "#/$defs/TranscriptTailResult"
-        },
-        "type": {
-          "type": "string",
-          "const": "transcript_tail_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "result"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "result": {
-          "$ref": "#/$defs/TranscriptReadResult"
-        },
-        "type": {
-          "type": "string",
-          "const": "transcript_page_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "result"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "page": {
-          "$ref": "#/$defs/TranscriptContentPage"
-        },
-        "type": {
-          "type": "string",
-          "const": "transcript_content_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "page"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SessionId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "outcome": {
           "$ref": "#/$defs/CommandOutcome"
         },
         "type": {
           "type": "string",
-          "const": "command_acknowledged"
+          "const": "command"
         }
       },
       "additionalProperties": false,
       "required": [
         "type",
-        "meta",
         "outcome"
       ]
     },
     {
       "type": "object",
       "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
+        "outcome": {
+          "$ref": "#/$defs/CommandOutcome"
         },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/ContextSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "context_snapshot_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/CostSnapshot"
-        },
-        "type": {
-          "type": "string",
-          "const": "cost_snapshot_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "snapshot"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "review": {
-          "$ref": "#/$defs/SessionReview"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_review_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "review"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "path": {
-          "type": "string"
-        },
-        "decision": {
-          "$ref": "#/$defs/ReviewFileDecision"
-        },
-        "review": {
-          "$ref": "#/$defs/SessionReview"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_review_updated"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "path",
-        "decision",
-        "review"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "dump": {
-          "$ref": "#/$defs/PromptDump"
-        },
-        "type": {
-          "type": "string",
-          "const": "prompt_dump_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "dump"
-      ]
-    },
-    {
-      "description": "Paged historical content is available; no durable replay cursor is implied.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "through_sequence": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "session_history_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "through_sequence": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "session_replay_completed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "parent_session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "child": {
-          "$ref": "#/$defs/SessionDescriptor"
-        },
-        "at_turn": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_forked"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "parent_session_id",
-        "child",
-        "at_turn"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "output_path": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_exported"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "output_path"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "sessions": {
+        "events": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/SessionDescriptor"
+            "$ref": "#/$defs/EngineEvent"
           }
         },
         "type": {
           "type": "string",
-          "const": "sessions_listed"
+          "const": "read"
         }
       },
       "additionalProperties": false,
       "required": [
         "type",
-        "meta",
-        "sessions"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "subagents": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SubagentDescriptor"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "subagents_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "subagents"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "query": {
-          "type": "string"
-        },
-        "hits": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SessionSearchHit"
-          }
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "sessions_search_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "query",
-        "hits",
-        "truncated"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "commands": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CommandDescriptor"
-          }
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "command_descriptors_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "commands",
-        "truncated"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "modes": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ModeDescriptor"
-          }
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "modes_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "modes",
-        "truncated"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SessionId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "models": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ModelDescriptor"
-          }
-        },
-        "aliases": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ModelAliasDescriptor"
-          }
-        },
-        "providers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ProviderDescriptor"
-          }
-        },
-        "cached": {
-          "type": "boolean"
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "models_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "models",
-        "aliases",
-        "providers",
-        "cached",
-        "truncated"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "settings": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/UserSettingDescriptor"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "settings_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "settings"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "servers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/McpServerDescriptor"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "mcp_servers_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "servers"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "services": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/RuntimeServiceDescriptor"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "runtime_services_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "services"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "review": {
-          "$ref": "#/$defs/McpApprovalReview"
-        },
-        "type": {
-          "type": "string",
-          "const": "mcp_server_approval_reviewed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "review"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "permissions": {
-          "$ref": "#/$defs/PermissionStateDescriptor"
-        },
-        "type": {
-          "type": "string",
-          "const": "permissions_listed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "permissions"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "attempt_id": {
-          "$ref": "#/$defs/ProviderAuthAttemptId"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "challenge": {
-          "$ref": "#/$defs/ProviderAuthChallenge"
-        },
-        "warnings": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "provider_auth_started"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "attempt_id",
-        "provider",
-        "challenge",
-        "warnings"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "auth_kind": {
-          "$ref": "#/$defs/ProviderAuthKind"
-        },
-        "type": {
-          "type": "string",
-          "const": "provider_configured"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "provider",
-        "auth_kind"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "attempt_id": {
-          "$ref": "#/$defs/ProviderAuthAttemptId"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "success": {
-          "type": "boolean"
-        },
-        "message": {
-          "type": "string"
-        },
-        "warnings": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "provider_auth_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "attempt_id",
-        "provider",
-        "success",
-        "message",
-        "warnings"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "success": {
-          "type": "boolean"
-        },
-        "message": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "provider_activation_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "provider",
-        "success",
-        "message"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "matches": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkspaceFileMatch"
-          }
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "workspace_files_found"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "matches",
-        "truncated"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "preview": {
-          "$ref": "#/$defs/WorkspaceFilePreview"
-        },
-        "type": {
-          "type": "string",
-          "const": "workspace_file_preview_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "preview"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "status": {
-          "$ref": "#/$defs/WorkspaceStatus"
-        },
-        "type": {
-          "type": "string",
-          "const": "workspace_status_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "status"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "diff": {
-          "$ref": "#/$defs/WorkspaceDiff"
-        },
-        "type": {
-          "type": "string",
-          "const": "workspace_diff_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "session_id",
-        "diff"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/CommandAckMeta"
-        },
-        "type": {
-          "type": "string",
-          "const": "host_shutdown"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "driver_client_id": {
-          "$ref": "#/$defs/ClientId"
-        },
-        "type": {
-          "type": "string",
-          "const": "session_created"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "driver_client_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "generation": {
-          "type": "string"
-        },
-        "effective_from_turn": {
-          "type": "string"
-        },
-        "roots": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkspaceRootDescriptor"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "workspace_roots_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "generation",
-        "effective_from_turn",
-        "roots"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "driver_client_id": {
-          "$ref": "#/$defs/ClientId"
-        },
-        "type": {
-          "type": "string",
-          "const": "driver_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "driver_client_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "position": {
-          "type": "string"
-        },
-        "content": {
-          "type": "string"
-        },
-        "attachments": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/StoredAttachment"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "message_queued"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "position",
-        "content",
-        "attachments"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "position": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "queued_message_removed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "position"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "type": {
-          "type": "string",
-          "const": "queued_messages_cleared"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "accepted_source": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "type": {
-          "type": "string",
-          "const": "user_message_retained"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "accepted_source"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "agent_turn": {
-          "type": "string"
-        },
-        "content": {
-          "type": "string"
-        },
-        "attachments": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/StoredAttachment"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "user_message_accepted"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "agent_turn",
-        "content",
-        "attachments"
-      ]
-    },
-    {
-      "description": "Human-facing title selected asynchronously after the first successful\nassistant turn. This is durable so replay and session lists agree.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "title": {
-          "type": "string"
-        },
-        "usage": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Usage"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "cost": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Cost"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "session_title_updated"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "title"
-      ]
-    },
-    {
-      "description": "A plugin-originated user message was admitted through the bounded\nmachine boundary. The ordinary message/turn events remain authoritative\nfor conversation reconstruction.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "plugin_id": {
-          "type": "string"
-        },
-        "content": {
-          "type": "string"
-        },
-        "queued": {
-          "type": "boolean"
-        },
-        "type": {
-          "type": "string",
-          "const": "plugin_message_injected"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "plugin_id",
-        "content",
-        "queued"
-      ]
-    },
-    {
-      "description": "Session-local status text published by an approved plugin.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "plugin_id": {
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "plugin_status_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "plugin_id",
-        "status"
-      ]
-    },
-    {
-      "description": "An actor-authorized extension state transaction committed to this session.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "plugin_id": {
-          "type": "string"
-        },
-        "transaction": {
-          "$ref": "#/$defs/ExtensionStateTransaction"
-        },
-        "type": {
-          "type": "string",
-          "const": "extension_state_committed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "plugin_id",
-        "transaction"
-      ]
-    },
-    {
-      "description": "Session-local UI notification published by an approved plugin.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "plugin_id": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "ui_notification"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "plugin_id",
-        "title",
-        "message"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "agent_turn": {
-          "type": "string"
-        },
-        "selection": {
-          "$ref": "#/$defs/ContextSelection"
-        },
-        "type": {
-          "type": "string",
-          "const": "conversation_context_committed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "agent_turn",
-        "selection"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "agent_turn": {
-          "type": "string"
-        },
-        "accepted_source": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "selection": {
-          "$ref": "#/$defs/InputSelection"
-        },
-        "type": {
-          "type": "string",
-          "const": "conversation_input_committed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "agent_turn",
-        "accepted_source",
-        "selection"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "agent_turn": {
-          "type": "string"
-        },
-        "results": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ToolResultReference"
-          }
-        },
-        "logical": {
-          "$ref": "#/$defs/ToolResultAdmission"
-        },
-        "type": {
-          "type": "string",
-          "const": "conversation_tool_results_committed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "agent_turn",
-        "results",
-        "logical"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "agent_turn": {
-          "type": "string"
-        },
-        "turn": {
-          "$ref": "#/$defs/Turn"
-        },
-        "type": {
-          "type": "string",
-          "const": "conversation_turn_committed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "agent_turn",
-        "turn"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "to_agent_turn": {
-          "type": "string"
-        },
-        "operation_id": {
-          "type": "string"
-        },
-        "unrestorable_paths": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/UnrestorablePath"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "conversation_rewound"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "to_agent_turn",
-        "operation_id",
-        "unrestorable_paths"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "type": {
-          "type": "string",
-          "const": "turn_started"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "text": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "text_delta"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "text"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "text": {
-          "type": "string"
-        },
-        "signature": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "thinking_delta"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "text"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "uri": {
-          "type": "string"
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "citation_delta"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "uri"
-      ]
-    },
-    {
-      "description": "Replaceable operational display state, excluded from the durable journal.",
-      "type": "object",
-      "properties": {
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/ToolInvocationId"
-        },
-        "progress": {
-          "$ref": "#/$defs/ToolProgress"
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_progress"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "session_id",
-        "turn_id",
-        "tool_call_id",
-        "invocation_id",
-        "progress"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/ToolInvocationId"
-        },
-        "name": {
-          "type": "string"
-        },
-        "args": true,
-        "call_index": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_call_started"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "tool_call_id",
-        "invocation_id",
-        "name",
-        "args",
-        "call_index"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/ToolInvocationId"
-        },
-        "decision": {
-          "$ref": "#/$defs/ApprovalDecision"
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_approval_resolved"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "tool_call_id",
-        "invocation_id",
-        "decision"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/ToolInvocationId"
-        },
-        "name": {
-          "type": "string"
-        },
-        "args": true,
-        "capabilities": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ToolCapability"
-          }
-        },
-        "rationale": {
-          "type": "string"
-        },
-        "diff": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UnifiedDiff"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_approval_needed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "tool_call_id",
-        "invocation_id",
-        "name",
-        "args",
-        "capabilities",
-        "rationale"
-      ]
-    },
-    {
-      "description": "Redacted mutation preview retained independently of whether the active\npermission mode needed to ask the user. This keeps inline review\navailable under remembered approvals and YOLO without coupling display\nstate to a permission dialog.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/ToolInvocationId"
-        },
-        "diff": {
-          "$ref": "#/$defs/UnifiedDiff"
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_diff_ready"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "tool_call_id",
-        "invocation_id",
-        "diff"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/ToolInvocationId"
-        },
-        "stream": {
-          "$ref": "#/$defs/ToolOutputStream"
-        },
-        "chunk": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_output_delta"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "tool_call_id",
-        "invocation_id",
-        "stream",
-        "chunk"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "payloads": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SessionPayloadReference"
-          },
-          "maxItems": 8
-        },
-        "presentation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UiPresentation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "tool_call_id": {
-          "$ref": "#/$defs/ToolCallId"
-        },
-        "invocation_id": {
-          "$ref": "#/$defs/ToolInvocationId"
-        },
-        "output": {
-          "$ref": "#/$defs/ToolOutput"
-        },
-        "is_error": {
-          "type": "boolean"
-        },
-        "call_index": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_call_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "payloads",
-        "presentation",
-        "meta",
-        "turn_id",
-        "tool_call_id",
-        "invocation_id",
-        "output",
-        "is_error",
-        "call_index"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "question_id": {
-          "$ref": "#/$defs/QuestionId"
-        },
-        "question": {
-          "$ref": "#/$defs/Question"
-        },
-        "type": {
-          "type": "string",
-          "const": "question_asked"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "question_id",
-        "question"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "question_id": {
-          "$ref": "#/$defs/QuestionId"
-        },
-        "answer": {
-          "$ref": "#/$defs/Answer"
-        },
-        "type": {
-          "type": "string",
-          "const": "question_answered"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "question_id",
-        "answer"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "call": {
-          "$ref": "#/$defs/ProviderCallIdentity"
-        },
-        "actuals": {
-          "$ref": "#/$defs/ProviderCallActuals"
-        },
-        "type": {
-          "type": "string",
-          "const": "provider_call_accounted"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "call",
-        "actuals"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "status": {
-          "$ref": "#/$defs/TurnStatus"
-        },
-        "usage": {
-          "$ref": "#/$defs/Usage"
-        },
-        "cost": {
-          "$ref": "#/$defs/Cost"
-        },
-        "type": {
-          "type": "string",
-          "const": "turn_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "status",
-        "usage",
-        "cost"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "used_tokens": {
-          "type": "string"
-        },
-        "usable_tokens": {
-          "type": "string"
-        },
-        "reserved_tokens": {
-          "type": "string"
-        },
-        "context_window_known": {
-          "description": "False when zero capacity means unknown rather than exhausted.",
-          "type": "boolean"
-        },
-        "context_window_reason": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "stable_prefix_hash": {
-          "type": "string"
-        },
-        "cache_hit_basis_points": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "estimated_input_tokens": {
-          "type": "string"
-        },
-        "provider_input_tokens": {
-          "type": "string"
-        },
-        "correction_millionths": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "context_usage_updated"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "used_tokens",
-        "usable_tokens",
-        "reserved_tokens",
-        "context_window_known",
-        "stable_prefix_hash",
-        "cache_hit_basis_points",
-        "estimated_input_tokens",
-        "provider_input_tokens",
-        "correction_millionths"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "level": {
-          "$ref": "#/$defs/BudgetLevel"
-        },
-        "scope": {
-          "$ref": "#/$defs/BudgetScope"
-        },
-        "unit": {
-          "$ref": "#/$defs/BudgetUnit"
-        },
-        "current": {
-          "type": "string"
-        },
-        "limit": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "budget_status_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "level",
-        "scope",
-        "unit",
-        "current",
-        "limit"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "reason": {
-          "$ref": "#/$defs/CompactionReason"
-        },
-        "type": {
-          "type": "string",
-          "const": "compaction_started"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "reason"
-      ]
-    },
-    {
-      "description": "Connection-scoped boundary for one compaction provider attempt.\nThis never enters the durable session sequence.",
-      "type": "object",
-      "properties": {
-        "started": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "revision": {
-          "type": "string"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "summary_turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "attempt": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "type": {
-          "type": "string",
-          "const": "compaction_attempt_started"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "started",
-        "revision",
-        "session_id",
-        "summary_turn_id",
-        "attempt"
-      ]
-    },
-    {
-      "description": "Connection-scoped provider text produced while a compaction summary is\ngenerated. This never enters the durable session sequence.",
-      "type": "object",
-      "properties": {
-        "started": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "revision": {
-          "type": "string"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "summary_turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "attempt": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "text": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "compaction_text_delta"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "started",
-        "revision",
-        "session_id",
-        "summary_turn_id",
-        "attempt",
-        "text"
-      ]
-    },
-    {
-      "description": "Connection-scoped provider reasoning produced during compaction.",
-      "type": "object",
-      "properties": {
-        "started": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "revision": {
-          "type": "string"
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "summary_turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "attempt": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "text": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "compaction_thinking_delta"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "started",
-        "revision",
-        "session_id",
-        "summary_turn_id",
-        "attempt",
-        "text"
-      ]
-    },
-    {
-      "description": "Accounting for one billed compaction provider attempt that did not\nproduce the committed summary. This event is deliberately non-terminal:\nfallback attempts continue inside the same compaction transaction.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "summary_turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "usage": {
-          "$ref": "#/$defs/Usage"
-        },
-        "cost": {
-          "$ref": "#/$defs/Cost"
-        },
-        "type": {
-          "type": "string",
-          "const": "compaction_attempt_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "summary_turn_id",
-        "usage",
-        "cost"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "summary_turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "reclaimed_tokens": {
-          "type": "string"
-        },
-        "usage": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Usage"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "cost": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Cost"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "compaction_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "summary_turn_id",
-        "reclaimed_tokens"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "summary_turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "type": {
-          "type": "string",
-          "const": "compaction_failed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "summary_turn_id"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "child_session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "task": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "subagent_spawned"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "subagent_id",
-        "child_session_id",
-        "task"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "result": {
-          "$ref": "#/$defs/SubagentResult"
-        },
-        "type": {
-          "type": "string",
-          "const": "subagent_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "subagent_id",
-        "result"
-      ]
-    },
-    {
-      "description": "Connection-scoped child progress. This is never appended to the parent log.",
-      "type": "object",
-      "properties": {
-        "parent_session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "subagent_id": {
-          "$ref": "#/$defs/SubagentId"
-        },
-        "child_session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "child_sequence": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SequenceId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "event": {
-          "description": "Null invalidates child history at the required canonical `child_sequence`.\nA non-null value is a bounded preview; complete content remains in the child log."
-        },
-        "type": {
-          "type": "string",
-          "const": "subagent_progress"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "parent_session_id",
-        "subagent_id",
-        "child_session_id",
-        "event"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "source": {
-          "$ref": "#/$defs/ContextBlockId"
-        },
-        "reclaimed_tokens": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "tool_output_pruned"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "source",
-        "reclaimed_tokens"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "mode": {
-          "$ref": "#/$defs/ModeId"
-        },
-        "definition_fingerprint": {
-          "description": "BLAKE3 hash of the canonical mode semantics.",
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "mode_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "mode",
-        "definition_fingerprint"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "mode": {
-          "description": "Session-local override. `None` restores the configured policy.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "permission_mode_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "artifact": {
-          "$ref": "#/$defs/PlanArtifact"
-        },
-        "type": {
-          "type": "string",
-          "const": "plan_submitted"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "artifact"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "artifact": {
-          "$ref": "#/$defs/PlanArtifact"
-        },
-        "decision": {
-          "$ref": "#/$defs/PlanDecision"
-        },
-        "revisions": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "plan_reviewed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "artifact",
-        "decision"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "model": {
-          "$ref": "#/$defs/ModelAlias"
-        },
-        "provider": {
-          "description": "Exact provider route selected for this session, or `None` for the\nalias's automatic fallback chain.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "thinking": {
-          "description": "Durable per-session effort applied to this selection, including\nconcrete provider/model routes.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ThinkingLevel"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "model_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "model"
-      ]
-    },
-    {
-      "description": "The user explicitly chose to start the selected model without prior\nconversation. System and project instructions remain available.",
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "strategy": {
-          "$ref": "#/$defs/ModelContextTransfer"
-        },
-        "type": {
-          "type": "string",
-          "const": "model_context_cleared"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "strategy"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "item_id": {
-          "$ref": "#/$defs/ContextItemId"
-        },
-        "effective_after_agent_turn": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "context_item_pinned"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "item_id",
-        "effective_after_agent_turn"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "item_id": {
-          "$ref": "#/$defs/ContextItemId"
-        },
-        "effective_after_agent_turn": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "context_item_evicted"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "item_id",
-        "effective_after_agent_turn"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "shell_id": {
-          "$ref": "#/$defs/ShellId"
-        },
-        "command": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "active": {
-          "type": "boolean"
-        },
-        "status": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int32"
-        },
-        "captured_output": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "type": "string",
-          "const": "user_shell_state_changed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "shell_id",
-        "active"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "event": {
-          "type": "string"
-        },
-        "hook_id": {
-          "type": "string"
-        },
-        "fail_closed": {
-          "type": "boolean"
-        },
-        "message": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "hook_failed"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "event",
-        "hook_id",
-        "fail_closed",
-        "message"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "name": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        },
-        "unrestorable_paths": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/UnrestorablePath"
-          }
-        },
-        "type": {
-          "type": "string",
-          "const": "command_finished"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "name",
-        "message",
-        "unrestorable_paths"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "turn_id": {
-          "$ref": "#/$defs/TurnId"
-        },
-        "guard": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "const": "guard_triggered"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "turn_id",
-        "guard",
-        "message"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "meta": {
-          "$ref": "#/$defs/EventMeta"
-        },
-        "error": {
-          "$ref": "#/$defs/EngineError"
-        },
-        "type": {
-          "type": "string",
-          "const": "error"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "meta",
-        "error"
+        "outcome",
+        "events"
       ]
     }
   ],
   "$defs": {
+    "CommandOutcome": {
+      "description": "Immediate disposition of a client command, delivered on the event channel.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "accepted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/EngineError"
+            },
+            "type": {
+              "type": "string",
+              "const": "rejected"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "error"
+          ]
+        }
+      ]
+    },
+    "EngineError": {
+      "description": "Actionable client-safe error payload.",
+      "type": "object",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/EngineErrorCategory"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": true
+      },
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "EngineErrorCategory": {
+      "description": "Stable error categories used across engine boundaries.",
+      "type": "string",
+      "enum": [
+        "provider",
+        "tool",
+        "sandbox",
+        "config",
+        "extension",
+        "protocol",
+        "internal"
+      ]
+    },
+    "EngineEvent": {
+      "description": "Events streamed to clients and persisted in the session event log.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "target": {
+              "$ref": "#/$defs/SessionNavigationTarget"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_navigation_requested"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/SessionStateSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_state_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/SessionControlsSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_controls_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/FamilyControlsSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "family_controls_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "target": {
+              "$ref": "#/$defs/ChildControlTarget"
+            },
+            "result": {
+              "$ref": "#/$defs/ChildReadScopeResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "child_read_scope_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "target": {
+              "$ref": "#/$defs/ChildControlTarget"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/SessionStateSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "child_state_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "target": {
+              "$ref": "#/$defs/ChildControlTarget"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/ChildControlsSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "child_controls_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "target",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "catalog": {
+              "$ref": "#/$defs/UiCatalog"
+            },
+            "type": {
+              "type": "string",
+              "const": "ui_catalog_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "catalog"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "panels": {
+              "$ref": "#/$defs/UiPanels"
+            },
+            "type": {
+              "type": "string",
+              "const": "ui_panels_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "panels"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/TodoSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "todo_state_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "result": {
+              "$ref": "#/$defs/SessionChildrenResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_children_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "result": {
+              "$ref": "#/$defs/TodoReadResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "todos_read"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "result": {
+              "$ref": "#/$defs/TranscriptTailResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "transcript_tail_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "result": {
+              "$ref": "#/$defs/TranscriptReadResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "transcript_page_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "page": {
+              "$ref": "#/$defs/TranscriptContentPage"
+            },
+            "type": {
+              "type": "string",
+              "const": "transcript_content_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "page"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outcome": {
+              "$ref": "#/$defs/CommandOutcome"
+            },
+            "type": {
+              "type": "string",
+              "const": "command_acknowledged"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "outcome"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/ContextSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "context_snapshot_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/CostSnapshot"
+            },
+            "type": {
+              "type": "string",
+              "const": "cost_snapshot_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "review": {
+              "$ref": "#/$defs/SessionReview"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_review_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "review"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "path": {
+              "type": "string"
+            },
+            "decision": {
+              "$ref": "#/$defs/ReviewFileDecision"
+            },
+            "review": {
+              "$ref": "#/$defs/SessionReview"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_review_updated"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "path",
+            "decision",
+            "review"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "dump": {
+              "$ref": "#/$defs/PromptDump"
+            },
+            "type": {
+              "type": "string",
+              "const": "prompt_dump_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "dump"
+          ]
+        },
+        {
+          "description": "Paged historical content is available; no durable replay cursor is implied.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "through_sequence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "session_history_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "through_sequence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "session_replay_completed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "parent_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "child": {
+              "$ref": "#/$defs/SessionDescriptor"
+            },
+            "at_turn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_forked"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "parent_session_id",
+            "child",
+            "at_turn"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "output_path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_exported"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "output_path"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionDescriptor"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "sessions_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "sessions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "subagents": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SubagentDescriptor"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "subagents_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "subagents"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "query": {
+              "type": "string"
+            },
+            "hits": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionSearchHit"
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "sessions_search_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "query",
+            "hits",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CommandDescriptor"
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "command_descriptors_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "commands",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "modes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ModeDescriptor"
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "modes_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "modes",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ModelDescriptor"
+              }
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ModelAliasDescriptor"
+              }
+            },
+            "providers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProviderDescriptor"
+              }
+            },
+            "cached": {
+              "type": "boolean"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "models_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "models",
+            "aliases",
+            "providers",
+            "cached",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "settings": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UserSettingDescriptor"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "settings_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "settings"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "servers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/McpServerDescriptor"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "mcp_servers_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "servers"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "services": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RuntimeServiceDescriptor"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "runtime_services_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "services"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "review": {
+              "$ref": "#/$defs/McpApprovalReview"
+            },
+            "type": {
+              "type": "string",
+              "const": "mcp_server_approval_reviewed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "review"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "permissions": {
+              "$ref": "#/$defs/PermissionStateDescriptor"
+            },
+            "type": {
+              "type": "string",
+              "const": "permissions_listed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "permissions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/ProviderAuthAttemptId"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "challenge": {
+              "$ref": "#/$defs/ProviderAuthChallenge"
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "provider_auth_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "attempt_id",
+            "provider",
+            "challenge",
+            "warnings"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "auth_kind": {
+              "$ref": "#/$defs/ProviderAuthKind"
+            },
+            "type": {
+              "type": "string",
+              "const": "provider_configured"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "provider",
+            "auth_kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/ProviderAuthAttemptId"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "provider_auth_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "attempt_id",
+            "provider",
+            "success",
+            "message",
+            "warnings"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "provider_activation_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "provider",
+            "success",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "matches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/WorkspaceFileMatch"
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "workspace_files_found"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "matches",
+            "truncated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "preview": {
+              "$ref": "#/$defs/WorkspaceFilePreview"
+            },
+            "type": {
+              "type": "string",
+              "const": "workspace_file_preview_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "preview"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "status": {
+              "$ref": "#/$defs/WorkspaceStatus"
+            },
+            "type": {
+              "type": "string",
+              "const": "workspace_status_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "diff": {
+              "$ref": "#/$defs/WorkspaceDiff"
+            },
+            "type": {
+              "type": "string",
+              "const": "workspace_diff_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "session_id",
+            "diff"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/CommandAckMeta"
+            },
+            "type": {
+              "type": "string",
+              "const": "host_shutdown"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "driver_client_id": {
+              "$ref": "#/$defs/ClientId"
+            },
+            "type": {
+              "type": "string",
+              "const": "session_created"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "driver_client_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "generation": {
+              "type": "string"
+            },
+            "effective_from_turn": {
+              "type": "string"
+            },
+            "roots": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/WorkspaceRootDescriptor"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "workspace_roots_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "generation",
+            "effective_from_turn",
+            "roots"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "driver_client_id": {
+              "$ref": "#/$defs/ClientId"
+            },
+            "type": {
+              "type": "string",
+              "const": "driver_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "driver_client_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "position": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/StoredAttachment"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "message_queued"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "position",
+            "content",
+            "attachments"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "position": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "queued_message_removed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "position"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "type": {
+              "type": "string",
+              "const": "queued_messages_cleared"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "accepted_source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "type": {
+              "type": "string",
+              "const": "user_message_retained"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "accepted_source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "agent_turn": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/StoredAttachment"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "user_message_accepted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "agent_turn",
+            "content",
+            "attachments"
+          ]
+        },
+        {
+          "description": "Human-facing title selected asynchronously after the first successful\nassistant turn. This is durable so replay and session lists agree.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "title": {
+              "type": "string"
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Usage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Cost"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "session_title_updated"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "title"
+          ]
+        },
+        {
+          "description": "A plugin-originated user message was admitted through the bounded\nmachine boundary. The ordinary message/turn events remain authoritative\nfor conversation reconstruction.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "queued": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "plugin_message_injected"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "plugin_id",
+            "content",
+            "queued"
+          ]
+        },
+        {
+          "description": "Session-local status text published by an approved plugin.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "plugin_status_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "plugin_id",
+            "status"
+          ]
+        },
+        {
+          "description": "An actor-authorized extension state transaction committed to this session.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "transaction": {
+              "$ref": "#/$defs/ExtensionStateTransaction"
+            },
+            "type": {
+              "type": "string",
+              "const": "extension_state_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "plugin_id",
+            "transaction"
+          ]
+        },
+        {
+          "description": "Session-local UI notification published by an approved plugin.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "ui_notification"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "plugin_id",
+            "title",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "agent_turn": {
+              "type": "string"
+            },
+            "selection": {
+              "$ref": "#/$defs/ContextSelection"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_context_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "agent_turn",
+            "selection"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "agent_turn": {
+              "type": "string"
+            },
+            "accepted_source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "selection": {
+              "$ref": "#/$defs/InputSelection"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_input_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "agent_turn",
+            "accepted_source",
+            "selection"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "agent_turn": {
+              "type": "string"
+            },
+            "results": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolResultReference"
+              }
+            },
+            "logical": {
+              "$ref": "#/$defs/ToolResultAdmission"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_tool_results_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "agent_turn",
+            "results",
+            "logical"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "agent_turn": {
+              "type": "string"
+            },
+            "turn": {
+              "$ref": "#/$defs/Turn"
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_turn_committed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "agent_turn",
+            "turn"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "to_agent_turn": {
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "unrestorable_paths": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UnrestorablePath"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "conversation_rewound"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "to_agent_turn",
+            "operation_id",
+            "unrestorable_paths"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "type": {
+              "type": "string",
+              "const": "turn_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text_delta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "text": {
+              "type": "string"
+            },
+            "signature": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "thinking_delta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "uri": {
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "citation_delta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "uri"
+          ]
+        },
+        {
+          "description": "Replaceable operational display state, excluded from the durable journal.",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "progress": {
+              "$ref": "#/$defs/ToolProgress"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_progress"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "session_id",
+            "turn_id",
+            "tool_call_id",
+            "invocation_id",
+            "progress"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "name": {
+              "type": "string"
+            },
+            "args": true,
+            "call_index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_call_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "tool_call_id",
+            "invocation_id",
+            "name",
+            "args",
+            "call_index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "decision": {
+              "$ref": "#/$defs/ApprovalDecision"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_approval_resolved"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "tool_call_id",
+            "invocation_id",
+            "decision"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "name": {
+              "type": "string"
+            },
+            "args": true,
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolCapability"
+              }
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "diff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/UnifiedDiff"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_approval_needed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "tool_call_id",
+            "invocation_id",
+            "name",
+            "args",
+            "capabilities",
+            "rationale"
+          ]
+        },
+        {
+          "description": "Redacted mutation preview retained independently of whether the active\npermission mode needed to ask the user. This keeps inline review\navailable under remembered approvals and YOLO without coupling display\nstate to a permission dialog.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "diff": {
+              "$ref": "#/$defs/UnifiedDiff"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_diff_ready"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "tool_call_id",
+            "invocation_id",
+            "diff"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "stream": {
+              "$ref": "#/$defs/ToolOutputStream"
+            },
+            "chunk": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_output_delta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "tool_call_id",
+            "invocation_id",
+            "stream",
+            "chunk"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "payloads": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SessionPayloadReference"
+              },
+              "maxItems": 8
+            },
+            "presentation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/UiPresentation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "tool_call_id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "invocation_id": {
+              "$ref": "#/$defs/ToolInvocationId"
+            },
+            "output": {
+              "$ref": "#/$defs/ToolOutput"
+            },
+            "is_error": {
+              "type": "boolean"
+            },
+            "call_index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_call_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "payloads",
+            "presentation",
+            "meta",
+            "turn_id",
+            "tool_call_id",
+            "invocation_id",
+            "output",
+            "is_error",
+            "call_index"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "question_id": {
+              "$ref": "#/$defs/QuestionId"
+            },
+            "question": {
+              "$ref": "#/$defs/Question"
+            },
+            "type": {
+              "type": "string",
+              "const": "question_asked"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "question_id",
+            "question"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "question_id": {
+              "$ref": "#/$defs/QuestionId"
+            },
+            "answer": {
+              "$ref": "#/$defs/Answer"
+            },
+            "type": {
+              "type": "string",
+              "const": "question_answered"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "question_id",
+            "answer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "call": {
+              "$ref": "#/$defs/ProviderCallIdentity"
+            },
+            "actuals": {
+              "$ref": "#/$defs/ProviderCallActuals"
+            },
+            "type": {
+              "type": "string",
+              "const": "provider_call_accounted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "call",
+            "actuals"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "status": {
+              "$ref": "#/$defs/TurnStatus"
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            },
+            "cost": {
+              "$ref": "#/$defs/Cost"
+            },
+            "type": {
+              "type": "string",
+              "const": "turn_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "status",
+            "usage",
+            "cost"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "used_tokens": {
+              "type": "string"
+            },
+            "usable_tokens": {
+              "type": "string"
+            },
+            "reserved_tokens": {
+              "type": "string"
+            },
+            "context_window_known": {
+              "description": "False when zero capacity means unknown rather than exhausted.",
+              "type": "boolean"
+            },
+            "context_window_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stable_prefix_hash": {
+              "type": "string"
+            },
+            "cache_hit_basis_points": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "estimated_input_tokens": {
+              "type": "string"
+            },
+            "provider_input_tokens": {
+              "type": "string"
+            },
+            "correction_millionths": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "context_usage_updated"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "used_tokens",
+            "usable_tokens",
+            "reserved_tokens",
+            "context_window_known",
+            "stable_prefix_hash",
+            "cache_hit_basis_points",
+            "estimated_input_tokens",
+            "provider_input_tokens",
+            "correction_millionths"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "level": {
+              "$ref": "#/$defs/BudgetLevel"
+            },
+            "scope": {
+              "$ref": "#/$defs/BudgetScope"
+            },
+            "unit": {
+              "$ref": "#/$defs/BudgetUnit"
+            },
+            "current": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "budget_status_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "level",
+            "scope",
+            "unit",
+            "current",
+            "limit"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "reason": {
+              "$ref": "#/$defs/CompactionReason"
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "reason"
+          ]
+        },
+        {
+          "description": "Connection-scoped boundary for one compaction provider attempt.\nThis never enters the durable session sequence.",
+          "type": "object",
+          "properties": {
+            "started": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "revision": {
+              "type": "string"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "summary_turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_attempt_started"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "started",
+            "revision",
+            "session_id",
+            "summary_turn_id",
+            "attempt"
+          ]
+        },
+        {
+          "description": "Connection-scoped provider text produced while a compaction summary is\ngenerated. This never enters the durable session sequence.",
+          "type": "object",
+          "properties": {
+            "started": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "revision": {
+              "type": "string"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "summary_turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_text_delta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "started",
+            "revision",
+            "session_id",
+            "summary_turn_id",
+            "attempt",
+            "text"
+          ]
+        },
+        {
+          "description": "Connection-scoped provider reasoning produced during compaction.",
+          "type": "object",
+          "properties": {
+            "started": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "revision": {
+              "type": "string"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "summary_turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_thinking_delta"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "started",
+            "revision",
+            "session_id",
+            "summary_turn_id",
+            "attempt",
+            "text"
+          ]
+        },
+        {
+          "description": "Accounting for one billed compaction provider attempt that did not\nproduce the committed summary. This event is deliberately non-terminal:\nfallback attempts continue inside the same compaction transaction.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "summary_turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            },
+            "cost": {
+              "$ref": "#/$defs/Cost"
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_attempt_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "summary_turn_id",
+            "usage",
+            "cost"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "summary_turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "reclaimed_tokens": {
+              "type": "string"
+            },
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Usage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Cost"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "summary_turn_id",
+            "reclaimed_tokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "summary_turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "type": {
+              "type": "string",
+              "const": "compaction_failed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "summary_turn_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "subagent_id": {
+              "$ref": "#/$defs/SubagentId"
+            },
+            "child_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "task": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "subagent_spawned"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "subagent_id",
+            "child_session_id",
+            "task"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "subagent_id": {
+              "$ref": "#/$defs/SubagentId"
+            },
+            "result": {
+              "$ref": "#/$defs/SubagentResult"
+            },
+            "type": {
+              "type": "string",
+              "const": "subagent_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "subagent_id",
+            "result"
+          ]
+        },
+        {
+          "description": "Connection-scoped child progress. This is never appended to the parent log.",
+          "type": "object",
+          "properties": {
+            "parent_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "subagent_id": {
+              "$ref": "#/$defs/SubagentId"
+            },
+            "child_session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "child_sequence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "event": {
+              "description": "Null invalidates child history at the required canonical `child_sequence`.\nA non-null value is a bounded preview; complete content remains in the child log."
+            },
+            "type": {
+              "type": "string",
+              "const": "subagent_progress"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "parent_session_id",
+            "subagent_id",
+            "child_session_id",
+            "event"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "source": {
+              "$ref": "#/$defs/ContextBlockId"
+            },
+            "reclaimed_tokens": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_output_pruned"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "source",
+            "reclaimed_tokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "mode": {
+              "$ref": "#/$defs/ModeId"
+            },
+            "definition_fingerprint": {
+              "description": "BLAKE3 hash of the canonical mode semantics.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "mode_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "mode",
+            "definition_fingerprint"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "mode": {
+              "description": "Session-local override. `None` restores the configured policy.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "permission_mode_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "artifact": {
+              "$ref": "#/$defs/PlanArtifact"
+            },
+            "type": {
+              "type": "string",
+              "const": "plan_submitted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "artifact"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "artifact": {
+              "$ref": "#/$defs/PlanArtifact"
+            },
+            "decision": {
+              "$ref": "#/$defs/PlanDecision"
+            },
+            "revisions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "plan_reviewed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "artifact",
+            "decision"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "model": {
+              "$ref": "#/$defs/ModelAlias"
+            },
+            "provider": {
+              "description": "Exact provider route selected for this session, or `None` for the\nalias's automatic fallback chain.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "thinking": {
+              "description": "Durable per-session effort applied to this selection, including\nconcrete provider/model routes.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ThinkingLevel"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "model_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "model"
+          ]
+        },
+        {
+          "description": "The user explicitly chose to start the selected model without prior\nconversation. System and project instructions remain available.",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "strategy": {
+              "$ref": "#/$defs/ModelContextTransfer"
+            },
+            "type": {
+              "type": "string",
+              "const": "model_context_cleared"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "strategy"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "item_id": {
+              "$ref": "#/$defs/ContextItemId"
+            },
+            "effective_after_agent_turn": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "context_item_pinned"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "item_id",
+            "effective_after_agent_turn"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "item_id": {
+              "$ref": "#/$defs/ContextItemId"
+            },
+            "effective_after_agent_turn": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "context_item_evicted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "item_id",
+            "effective_after_agent_turn"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "shell_id": {
+              "$ref": "#/$defs/ShellId"
+            },
+            "command": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "active": {
+              "type": "boolean"
+            },
+            "status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            },
+            "captured_output": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "user_shell_state_changed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "shell_id",
+            "active"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "event": {
+              "type": "string"
+            },
+            "hook_id": {
+              "type": "string"
+            },
+            "fail_closed": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "hook_failed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "event",
+            "hook_id",
+            "fail_closed",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "name": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "unrestorable_paths": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UnrestorablePath"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "command_finished"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "name",
+            "message",
+            "unrestorable_paths"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "guard": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "guard_triggered"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "turn_id",
+            "guard",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meta": {
+              "$ref": "#/$defs/EventMeta"
+            },
+            "error": {
+              "$ref": "#/$defs/EngineError"
+            },
+            "type": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "meta",
+            "error"
+          ]
+        }
+      ]
+    },
     "CommandAckMeta": {
       "description": "Metadata for immediate command acknowledgements before session sequencing.",
       "type": "object",
@@ -6535,80 +6655,6 @@
         "total_bytes",
         "format",
         "text"
-      ]
-    },
-    "CommandOutcome": {
-      "description": "Immediate disposition of a client command, delivered on the event channel.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "accepted"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "error": {
-              "$ref": "#/$defs/EngineError"
-            },
-            "type": {
-              "type": "string",
-              "const": "rejected"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "type",
-            "error"
-          ]
-        }
-      ]
-    },
-    "EngineError": {
-      "description": "Actionable client-safe error payload.",
-      "type": "object",
-      "properties": {
-        "category": {
-          "$ref": "#/$defs/EngineErrorCategory"
-        },
-        "code": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        },
-        "retryable": {
-          "type": "boolean"
-        },
-        "details": true
-      },
-      "additionalProperties": false,
-      "required": [
-        "category",
-        "code",
-        "message",
-        "retryable"
-      ]
-    },
-    "EngineErrorCategory": {
-      "description": "Stable error categories used across engine boundaries.",
-      "type": "string",
-      "enum": [
-        "provider",
-        "tool",
-        "sandbox",
-        "config",
-        "extension",
-        "protocol",
-        "internal"
       ]
     },
     "ContextSnapshot": {
