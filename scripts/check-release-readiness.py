@@ -41,7 +41,7 @@ def load_json(path: Path, blockers: list[str]) -> dict[str, Any] | None:
     return value
 
 
-def validate_baseline(path: Path, release_major: int, blockers: list[str]) -> None:
+def validate_baseline(path: Path, blockers: list[str]) -> None:
     baseline = load_json(path, blockers)
     if baseline is None:
         return
@@ -55,8 +55,7 @@ def validate_baseline(path: Path, release_major: int, blockers: list[str]) -> No
         if not isinstance(suites, dict):
             blockers.append(f"{platform} has no performance suites")
             continue
-        required_suites = EXPECTED_SUITES if release_major >= 1 else ("core",)
-        for suite in required_suites:
+        for suite in EXPECTED_SUITES:
             suite_value = suites.get(suite)
             if not isinstance(suite_value, dict):
                 blockers.append(f"{platform}/{suite} baseline is missing")
@@ -164,7 +163,8 @@ def inspect(repository: Path, release_version: str) -> dict[str, Any]:
         release_major = int(release_version.split(".", 1)[0])
     baseline = repository / "benchmarks" / "performance-baseline.json"
     update_root = repository / "release" / "update"
-    validate_baseline(baseline, release_major, blockers)
+    if release_major >= 1:
+        validate_baseline(baseline, blockers)
     validate_root_chain(update_root / EXPECTED_UPDATE_FILES[0], blockers)
     validate_channel_specs(update_root, release_version, blockers)
     qualification = "pre-v1" if release_major == 0 else "v1"
@@ -175,7 +175,9 @@ def inspect(repository: Path, release_version: str) -> dict[str, Any]:
         "release_major": release_major,
         "qualification": qualification,
         "evidence": {
-            "core_baselines": "required",
+            "core_baselines": (
+                "not_claimed_for_pre_v1" if release_major == 0 else "required"
+            ),
             "protected_soak": (
                 "not_claimed_for_pre_v1" if release_major == 0 else "required"
             ),

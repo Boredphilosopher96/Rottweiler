@@ -24,7 +24,7 @@ resolver = "3"
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.97"
@@ -66,10 +66,12 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
-rw-resources = { version = "0.1.4", path = "crates/rw-resources" }
+rw-memory-derive = { version = "0.1.5", path = "crates/rw-memory-derive" }
+rw-macos-bootstrap = { version = "0.1.5", path = "crates/rw-macos-bootstrap" }
+rw-resources = { version = "0.1.5", path = "crates/rw-resources" }
 redb = "=4.2.0"
 memchr = "2.8.3"
-rw-operation-contract = { version = "0.1.4", path = "crates/rw-operation-contract" }
+rw-operation-contract = { version = "0.1.5", path = "crates/rw-operation-contract" }
 base64 = "0.23.0"
 http = "1.3.1"
 bytes = "1.11.1"
@@ -109,15 +111,15 @@ ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-json-impl"
 url = "2.5"
 wasmtime = { version = "47.0.4", default-features = false, features = ["async", "component-model-async", "cranelift", "pulley", "runtime", "std"] }
 
-rw-context = { version = "0.1.4", path = "crates/rw-context" }
-rw-core = { version = "0.1.4", path = "crates/rw-core" }
-rw-ext = { version = "0.1.4", path = "crates/rw-ext" }
-rw-intel = { version = "0.1.4", path = "crates/rw-intel" }
-rw-mcp = { version = "0.1.4", path = "crates/rw-mcp" }
-rw-plugin-protocol = { version = "0.1.4", path = "crates/rw-plugin-protocol" }
-rw-providers = { version = "0.1.4", path = "crates/rw-providers" }
-rw-runtime = { version = "0.1.4", path = "crates/rw-runtime" }
-rw-sandbox = { version = "0.1.4", path = "crates/rw-sandbox" }
-rw-store = { version = "0.1.4", path = "crates/rw-store" }
-rw-tools = { version = "0.1.4", path = "crates/rw-tools" }
-rw-types = { version = "0.1.4", path = "crates/rw-types" }
+rw-context = { version = "0.1.5", path = "crates/rw-context" }
+rw-core = { version = "0.1.5", path = "crates/rw-core" }
+rw-ext = { version = "0.1.5", path = "crates/rw-ext" }
+rw-intel = { version = "0.1.5", path = "crates/rw-intel" }
+rw-mcp = { version = "0.1.5", path = "crates/rw-mcp" }
+rw-plugin-protocol = { version = "0.1.5", path = "crates/rw-plugin-protocol" }
+rw-providers = { version = "0.1.5", path = "crates/rw-providers" }
+rw-runtime = { version = "0.1.5", path = "crates/rw-runtime" }
+rw-sandbox = { version = "0.1.5", path = "crates/rw-sandbox" }
+rw-store = { version = "0.1.5", path = "crates/rw-store" }
+rw-tools = { version = "0.1.5", path = "crates/rw-tools" }
+rw-types = { version = "0.1.5", path = "crates/rw-types" }

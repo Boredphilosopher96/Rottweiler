@@ -7,6 +7,7 @@ multi-ecosystem-groups:
       day: monday
       time: "07:00"
       timezone: America/Chicago
+    open-pull-requests-limit: 1
 
   automation-dependencies:
     schedule:
@@ -14,44 +15,39 @@ multi-ecosystem-groups:
       day: monday
       time: "08:00"
       timezone: America/Chicago
+    open-pull-requests-limit: 1
 
 updates:
   - package-ecosystem: cargo
     directory: /
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
-    open-pull-requests-limit: 1
 
   # BEGIN package inventory projection
   - package-ecosystem: bun
     directory: /packages/docs-site
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
-    open-pull-requests-limit: 1
 
   - package-ecosystem: bun
     directory: /packages/plugin-host
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
-    open-pull-requests-limit: 1
 
   - package-ecosystem: bun
     directory: /packages/plugin-sdk
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
-    open-pull-requests-limit: 1
 
   - package-ecosystem: bun
     directory: /packages/tui
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
-    open-pull-requests-limit: 1
 
   - package-ecosystem: bun
     directory: /packages/js-host
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
-    open-pull-requests-limit: 1
 
   # END package inventory projection
 
@@ -59,10 +55,8 @@ updates:
     directory: /scripts
     patterns: ["*"]
     multi-ecosystem-group: application-dependencies
-    open-pull-requests-limit: 1
 
   - package-ecosystem: github-actions
     directory: /
     patterns: ["*"]
     multi-ecosystem-group: automation-dependencies
-    open-pull-requests-limit: 1

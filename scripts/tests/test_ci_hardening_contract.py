@@ -183,6 +183,10 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("needs.build-linux.result == 'success'", sign_and_publish)
         self.assertIn("needs.build-macos.result == 'success'", sign_and_publish)
         self.assertIn("Casks/rottweiler.rb", sign_and_publish)
+        self.assertNotIn("actions/setup-node@", sign_and_publish)
+        self.assertNotIn("oven-sh/setup-bun@", sign_and_publish)
+        self.assertNotIn("npm publish", sign_and_publish)
+        self.assertNotIn("@rottweiler/plugin", sign_and_publish)
         self.assertIn(
             'packaging/homebrew/README.md "$tap/README.md"', sign_and_publish
         )
@@ -205,6 +209,44 @@ class CiHardeningContractTests(unittest.TestCase):
             "if: ${{ always() && needs.sign-and-publish.result == 'success' }}",
             deployment,
         )
+
+    def test_plugin_sdk_publication_uses_an_independent_exact_tag_workflow(self) -> None:
+        workflow = (ROOT / ".github/workflows/plugin-sdk-release.yml").read_text(
+            encoding="utf-8"
+        )
+        release = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assert_checkout_credentials_are_not_persisted(workflow)
+        self.assertIn("on:\n  workflow_dispatch:", workflow)
+        self.assertNotIn("\n  push:", workflow)
+        publish = workflow_job(workflow, "publish")
+        job_header = publish.split("    steps:", 1)[0]
+        self.assertIn("environment: release", job_header)
+        self.assertIn("contents: read", job_header)
+        self.assertIn("id-token: write", job_header)
+        self.assertNotIn("contents: write", job_header)
+        self.assertIn("git/ref/tags/$RELEASE_TAG", publish)
+        self.assertIn("releases/tags/$RELEASE_TAG", publish)
+        self.assertIn("ref: refs/tags/${{ inputs.tag }}", publish)
+        self.assertIn("git show-ref --verify --quiet", publish)
+        self.assertIn('["workspace"]["package"]["version"]', publish)
+        self.assertIn('packages/plugin-sdk/package.json', publish)
+        self.assertIn("npm publish --access public packages/plugin-sdk", publish)
+        self.assertIn('npm pack --silent "@rottweiler/plugin@$version"', publish)
+        self.assertIn('cmp "$candidate"', publish)
+        self.assertIn("plugin scaffold --lang ts", publish)
+        self.assertIn('bun install --cwd "$scaffold"', publish)
+        self.assertNotIn("NODE_AUTH_TOKEN", workflow)
+        self.assertNotIn("npm publish", workflow_job(release, "sign-and-publish"))
+
+        ci_test = workflow_job(ci, "test")
+        self.assertIn("Packed TypeScript plugin scaffold conformance", ci_test)
+        self.assertIn("npm pack --silent --pack-destination", ci_test)
+        self.assertIn('npm install --prefix "$root/plugin" "$candidate"', ci_test)
+        self.assertNotIn("npm publish", ci_test)
 
     def test_hosted_performance_is_independent_of_private_runner_configuration(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(
@@ -330,10 +372,11 @@ class CiHardeningContractTests(unittest.TestCase):
         for group in document["multi-ecosystem-groups"].values():
             self.assertEqual(group["schedule"]["interval"], "weekly")
             self.assertEqual(group["schedule"]["day"], "monday")
+            self.assertEqual(group["open-pull-requests-limit"], "1")
         for entry in updates:
             expected_group = "automation-dependencies" if entry["package-ecosystem"] == "github-actions" else "application-dependencies"
             self.assertEqual(entry["multi-ecosystem-group"], expected_group)
-            self.assertEqual(entry["open-pull-requests-limit"], "1")
+            self.assertNotIn("open-pull-requests-limit", entry)
         self.assertNotIn("version-update:semver-major", configuration)
 
     def test_javascript_dependencies_do_not_use_version_specific_patches(

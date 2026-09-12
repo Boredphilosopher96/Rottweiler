@@ -1,6 +1,6 @@
 {
   "name": "@rottweiler/plugin",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Official TypeScript SDK for capability-bound Rottweiler plugins",
   "license": "Apache-2.0",
   "repository": {
