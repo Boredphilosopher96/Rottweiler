@@ -3,7 +3,6 @@
 #[cfg(target_os = "linux")]
 fn main() {
     use std::collections::BTreeMap;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
 
     use rw_sandbox::{NetworkPolicy, SandboxPolicy, SandboxSupport};
@@ -40,30 +39,7 @@ fn main() {
         let scratch_owner = rw_tools::CommandScratch::create("fixture").expect("scratch owner");
         let scratch = scratch_owner.path().to_path_buf();
         std::fs::create_dir(&workspace).expect("workspace");
-        let shadow_bin = workspace.join("shadow-bin");
-        std::fs::create_dir(&shadow_bin).expect("shadow bin");
-        let shadow_python = shadow_bin.join("python3");
-        std::fs::write(
-            &shadow_python,
-            "#!/bin/sh\nprintf 'PATH python3 was selected' >&2\nexit 91\n",
-        )
-        .expect("shadow python");
-        std::fs::set_permissions(&shadow_python, std::fs::Permissions::from_mode(0o700))
-            .expect("shadow python permissions");
-        let probe = workspace.join("network-denial-probe.py");
-        std::fs::write(
-            &probe,
-            r#"import errno, os, socket, sys
-if any(os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")):
-    sys.exit(94)
-try:
-    socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-except OSError as error:
-    sys.exit(0 if error.errno in (errno.EPERM, errno.EACCES) else 93)
-sys.exit(92)
-"#,
-        )
-        .expect("network denial probe");
+        let (probe, shadow_bin) = prepare_probe(&workspace);
         let command = format!(
             "/usr/bin/python3 -I {}",
             shell_words::quote(&probe.to_string_lossy())
@@ -149,4 +125,35 @@ mod output {
                 .collect()
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_probe(workspace: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let shadow_bin = workspace.join("shadow-bin");
+    std::fs::create_dir(&shadow_bin).expect("shadow bin");
+    let shadow_python = shadow_bin.join("python3");
+    std::fs::write(
+        &shadow_python,
+        "#!/bin/sh\nprintf 'PATH python3 was selected' >&2\nexit 91\n",
+    )
+    .expect("shadow python");
+    std::fs::set_permissions(&shadow_python, std::fs::Permissions::from_mode(0o700))
+        .expect("shadow python permissions");
+    let probe = workspace.join("network-denial-probe.py");
+    std::fs::write(
+        &probe,
+        r#"import errno, os, socket, sys
+if any(os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")):
+sys.exit(94)
+try:
+socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+except OSError as error:
+sys.exit(0 if error.errno in (errno.EPERM, errno.EACCES) else 93)
+sys.exit(92)
+"#,
+    )
+    .expect("network denial probe");
+    (probe, shadow_bin)
 }
