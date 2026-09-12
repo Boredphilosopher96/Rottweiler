@@ -4,12 +4,12 @@ mod transport;
 use super::*;
 use rw_core::{
     BoundClient, ClientCommand, ClientId, CommandMeta, CommandOutcome, EngineHost,
-    EngineHostConfig, RequestId,
+    EngineHostConfig, RequestId, SessionHandle,
 };
 use rw_providers::{FinishReason, ProviderEvent};
 use std::{sync::atomic::Ordering, time::Duration};
 
-const MAX_DURATION: Duration = Duration::from_secs(120);
+const MAX_DURATION: Duration = Duration::from_mins(2);
 const STREAM_LINES: usize = 2_000;
 const LINE: &str = "joined stream line: bounded native rendering\n";
 
@@ -27,99 +27,9 @@ async fn joined_streaming_native_client() {
     let workspace = private_test_directory(&directory.join("workspace"));
     let storage = private_test_directory(&directory.join("state"));
     let options = options(&storage, &workspace);
-    let factory = Arc::new(
-        RuntimeSessionFactory::new(options.clone())
-            .await
-            .expect("factory"),
-    );
-    let initial = factory
-        .create(CreateSessionRequest {
-            session_id: SessionId(source::SESSION.into()),
-            workspace: workspace.display().to_string(),
-            model: None,
-        })
-        .await
-        .expect("initial metadata");
-    initial
-        .handle()
-        .close()
-        .await
-        .expect("seed preparation session closed");
-    drop(initial);
-    factory
-        .shutdown()
-        .await
-        .expect("preparation factory settled");
-    drop(factory);
-    let storage_copy = storage.clone();
-    let seeded = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-        source::seed(&storage_copy)
-    })
-    .await
-    .expect("bounded source seeding owner");
-    let factory = Arc::new(
-        RuntimeSessionFactory::new(options)
-            .await
-            .expect("measurement factory"),
-    );
-    let host = EngineHost::new(
-        EngineHostConfig::default(),
-        factory.clone(),
-        factory.clone(),
-    )
-    .expect("actual EngineHost");
-    host.prepare_session(
-        CreateSessionRequest {
-            session_id: SessionId(source::SESSION.into()),
-            workspace: workspace.display().to_string(),
-            model: None,
-        },
-        true,
-    )
-    .await
-    .expect("actual canonical reopen");
-    host.prepare_session(
-        CreateSessionRequest {
-            session_id: SessionId("joined-control".into()),
-            workspace: workspace.display().to_string(),
-            model: None,
-        },
-        false,
-    )
-    .await
-    .expect("independent control session");
-    let control = host
-        .session(&SessionId("joined-control".into()))
-        .await
-        .expect("control actor")
-        .handle();
-    assert_eq!(
-        control
-            .dispatch(ClientCommand::AttachSession {
-                meta: metadata("control-attach", "local"),
-                session_id: control.session_id().clone(),
-                last_seen_sequence: None,
-                role: rw_types::ClientRole::Driver
-            })
-            .await
-            .expect("control driver"),
-        CommandOutcome::Accepted {}
-    );
-    let socket = directory.join("joined.sock");
-    let token = directory.join("bootstrap.token");
-    fs::write(&token, transport::BOOTSTRAP).expect("private token");
-    #[cfg(unix)]
-    fs::set_permissions(&token, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-        .expect("private token mode");
-    let mut http = transport::Transport::start(&socket, host.clone()).await;
-    publish(
-        &directory,
-        "joined-input.json",
-        &serde_json::json!({"socketPath":socket,"bootstrapTokenFile":token,
-        "sessionId":source::SESSION,"history":seeded,"streamLines":STREAM_LINES,"streamLine":LINE,
-        "host_kind":"optimized-production-EngineHost","http_kind":"bounded-test-forwarder"}),
-    )
-    .await;
+    let seeded = seed_history(&options, &storage, &workspace).await;
+    let (factory, host, control) = measurement_host(options, &workspace).await;
+    let mut http = start_transport(&directory, &host, &seeded).await;
     let body = async {
         assert_eq!(
             http.controls.recv().await.as_deref(),
@@ -176,6 +86,121 @@ async fn joined_streaming_native_client() {
         "source":seeded,"storage":pressure,"forwarded_commands":commands,"forwarded_events":events,
         "forwarded_event_json_bytes":event_bytes,"streamLines":STREAM_LINES,"streamBytes":STREAM_LINES*LINE.len(),
         "approved_write":true,"host_settled":true,"transport_settled":true})).await;
+}
+
+async fn seed_history(
+    options: &RuntimeHostOptions,
+    storage: &Path,
+    workspace: &Path,
+) -> serde_json::Value {
+    let factory = Arc::new(
+        RuntimeSessionFactory::new(options.clone())
+            .await
+            .expect("factory"),
+    );
+    let initial = factory
+        .create(CreateSessionRequest {
+            session_id: SessionId(source::SESSION.into()),
+            workspace: workspace.display().to_string(),
+            model: None,
+        })
+        .await
+        .expect("initial metadata");
+    initial
+        .handle()
+        .close()
+        .await
+        .expect("seed preparation session closed");
+    drop(initial);
+    factory
+        .shutdown()
+        .await
+        .expect("preparation factory settled");
+    drop(factory);
+    let storage_copy = storage.to_path_buf();
+    rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        source::seed(&storage_copy)
+    })
+    .await
+    .expect("bounded source seeding owner")
+}
+
+async fn measurement_host(
+    options: RuntimeHostOptions,
+    workspace: &Path,
+) -> (Arc<RuntimeSessionFactory>, EngineHost, SessionHandle) {
+    let factory = Arc::new(
+        RuntimeSessionFactory::new(options)
+            .await
+            .expect("measurement factory"),
+    );
+    let host = EngineHost::new(
+        EngineHostConfig::default(),
+        factory.clone(),
+        factory.clone(),
+    )
+    .expect("actual EngineHost");
+    host.prepare_session(
+        CreateSessionRequest {
+            session_id: SessionId(source::SESSION.into()),
+            workspace: workspace.display().to_string(),
+            model: None,
+        },
+        true,
+    )
+    .await
+    .expect("actual canonical reopen");
+    host.prepare_session(
+        CreateSessionRequest {
+            session_id: SessionId("joined-control".into()),
+            workspace: workspace.display().to_string(),
+            model: None,
+        },
+        false,
+    )
+    .await
+    .expect("independent control session");
+    let control = host
+        .session(&SessionId("joined-control".into()))
+        .await
+        .expect("control actor")
+        .handle();
+    assert_eq!(
+        control
+            .dispatch(ClientCommand::AttachSession {
+                meta: metadata("control-attach", "local"),
+                session_id: control.session_id().clone(),
+                last_seen_sequence: None,
+                role: rw_types::ClientRole::Driver
+            })
+            .await
+            .expect("control driver"),
+        CommandOutcome::Accepted {}
+    );
+    (factory, host, control)
+}
+
+async fn start_transport(
+    directory: &Path,
+    host: &EngineHost,
+    seeded: &serde_json::Value,
+) -> transport::Transport {
+    let socket = directory.join("joined.sock");
+    let token = directory.join("bootstrap.token");
+    fs::write(&token, transport::BOOTSTRAP).expect("private token");
+    #[cfg(unix)]
+    fs::set_permissions(&token, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("private token mode");
+    let http = transport::Transport::start(&socket, host.clone());
+    publish(
+        directory,
+        "joined-input.json",
+        &serde_json::json!({"socketPath":socket,"bootstrapTokenFile":token,
+        "sessionId":source::SESSION,"history":seeded,"streamLines":STREAM_LINES,"streamLine":LINE,
+        "host_kind":"optimized-production-EngineHost","http_kind":"bounded-test-forwarder"}),
+    )
+    .await;
+    http
 }
 
 fn options(storage: &Path, workspace: &Path) -> RuntimeHostOptions {

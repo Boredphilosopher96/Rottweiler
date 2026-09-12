@@ -85,7 +85,10 @@ pub(super) fn seed(storage: &Path) -> serde_json::Value {
         });
         journal.append_batch(batch).expect("durable seed batch");
     }
-    assert_eq!(body_bytes, CONVERSATIONS as usize * 2 * TEXT_BYTES);
+    assert_eq!(
+        body_bytes,
+        usize::try_from(CONVERSATIONS).expect("bounded conversation count") * 2 * TEXT_BYTES
+    );
     // Transcript history stays canonical and searchable; provider context starts
     // empty, as after the supported explicit StartWithoutContext model transition.
     journal

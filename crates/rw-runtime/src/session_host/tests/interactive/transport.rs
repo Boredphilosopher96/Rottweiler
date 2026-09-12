@@ -1,4 +1,4 @@
-//! Bounded test HTTP framing; all command outcomes and event bytes come from EngineHost.
+//! Bounded test HTTP framing; all command outcomes and event bytes come from `EngineHost`.
 use http_body_util::{BodyExt as _, Full, Limited, StreamBody, combinators::UnsyncBoxBody};
 use hyper::{
     Request, Response, StatusCode,
@@ -46,7 +46,7 @@ pub(super) struct Transport {
     task: tokio::task::JoinHandle<()>,
 }
 impl Transport {
-    pub async fn start(path: &Path, host: EngineHost) -> Self {
+    pub fn start(path: &Path, host: EngineHost) -> Self {
         let listener = UnixListener::bind(path).expect("bind isolated HTTP adapter");
         let (controls, receive) = mpsc::channel(8);
         let counts = Arc::new(Counts::default());
@@ -108,23 +108,8 @@ fn response(status: StatusCode, bytes: impl Into<Bytes>) -> Response<Body> {
 }
 async fn dispatch(request: Request<Incoming>, state: State) -> Result<Response<Body>, Infallible> {
     let path = request.uri().path().to_owned();
-    let bearer = request
-        .headers()
-        .get("authorization")
-        .and_then(|h| h.to_str().ok());
     if path == "/v1/connect" {
-        return Ok(
-            if request.method() == hyper::Method::POST
-                && bearer == Some(&format!("Bearer {BOOTSTRAP}"))
-            {
-                response(
-                    StatusCode::OK,
-                    format!("{{\"client_id\":\"{CLIENT}\",\"token\":\"{TOKEN}\"}}"),
-                )
-            } else {
-                response(StatusCode::UNAUTHORIZED, "{}")
-            },
-        );
+        return Ok(connect_response(&request));
     }
     if request.method() == hyper::Method::POST
         && matches!(
@@ -132,84 +117,118 @@ async fn dispatch(request: Request<Incoming>, state: State) -> Result<Response<B
             "/fixture/stall" | "/fixture/release" | "/fixture/done"
         )
     {
-        return Ok(if bearer != Some(&format!("Bearer {BOOTSTRAP}")) {
-            response(StatusCode::UNAUTHORIZED, "{}")
-        } else if state.controls.try_send(path).is_ok() {
-            response(StatusCode::ACCEPTED, "{}")
-        } else {
-            response(StatusCode::SERVICE_UNAVAILABLE, "{}")
-        });
+        return Ok(control_response(&request, path, &state));
     }
-    if bearer != Some(&format!("Bearer {TOKEN}"))
-        || request
-            .headers()
-            .get("x-rottweiler-client")
-            .and_then(|h| h.to_str().ok())
-            != Some(CLIENT)
-    {
+    if !client_authorized(&request) {
         return Ok(response(StatusCode::UNAUTHORIZED, "{}"));
     }
     if path == "/v1/commands" && request.method() == hyper::Method::POST {
-        let body = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            Limited::new(request.into_body(), MAX_REQUEST_BYTES).collect(),
-        )
-        .await;
-        let Ok(Ok(body)) = body else {
-            return Ok(response(StatusCode::BAD_REQUEST, "{}"));
-        };
-        let Ok(command) = serde_json::from_slice::<ClientCommand>(&body.to_bytes()) else {
-            return Ok(response(StatusCode::BAD_REQUEST, "{}"));
-        };
-        state.counts.commands.fetch_add(1, Ordering::Relaxed);
-        // No fixture success, event, read projection or queue metric is synthesized here.
-        let reply = state
-            .host
-            .dispatch(
-                BoundClient {
-                    client_id: ClientId(CLIENT.into()),
-                },
-                command,
-            )
-            .await;
-        return Ok(response(StatusCode::ACCEPTED, reply.bytes));
+        return Ok(command_response(request, &state).await);
     }
     if path == "/v1/events" && request.method() == hyper::Method::GET {
-        let Ok((session, sequence)) = event_position(request.uri().query().unwrap_or_default())
-        else {
-            return Ok(response(StatusCode::BAD_REQUEST, "{}"));
-        };
-        let Ok(mut events) = state
-            .host
-            .subscribe(
-                BoundClient {
-                    client_id: ClientId(CLIENT.into()),
-                },
-                session,
-                sequence,
-            )
-            .await
-        else {
-            return Ok(response(StatusCode::BAD_REQUEST, "{}"));
-        };
-        let stream = async_stream::stream! {
-            while let Some(event) = events.recv().await {
-                let event = event.expect("real host event");
-                state.counts.events.fetch_add(1, Ordering::Relaxed);
-                state.counts.event_bytes.fetch_add(event.json.len() as u64, Ordering::Relaxed);
-                let prefix = event.sequence.map_or_else(|| "data: ".to_owned(), |sequence| format!("id: {}\ndata: ", sequence.0));
-                yield Ok::<_, Infallible>(Frame::data(Bytes::from(prefix)));
-                yield Ok(Frame::data(event.json));
-                yield Ok(Frame::data(Bytes::from_static(b"\n\n")));
-            }
-        };
-        return Ok(Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(StreamBody::new(stream).boxed_unsync())
-            .expect("SSE body"));
+        return Ok(event_response(&request, &state).await);
     }
     Ok(response(StatusCode::NOT_FOUND, "{}"))
+}
+
+fn bearer_is(request: &Request<Incoming>, token: &str) -> bool {
+    request
+        .headers()
+        .get("authorization")
+        .and_then(|header| header.to_str().ok())
+        == Some(&format!("Bearer {token}"))
+}
+
+fn connect_response(request: &Request<Incoming>) -> Response<Body> {
+    if request.method() == hyper::Method::POST && bearer_is(request, BOOTSTRAP) {
+        response(
+            StatusCode::OK,
+            format!("{{\"client_id\":\"{CLIENT}\",\"token\":\"{TOKEN}\"}}"),
+        )
+    } else {
+        response(StatusCode::UNAUTHORIZED, "{}")
+    }
+}
+
+fn control_response(request: &Request<Incoming>, path: String, state: &State) -> Response<Body> {
+    if !bearer_is(request, BOOTSTRAP) {
+        response(StatusCode::UNAUTHORIZED, "{}")
+    } else if state.controls.try_send(path).is_ok() {
+        response(StatusCode::ACCEPTED, "{}")
+    } else {
+        response(StatusCode::SERVICE_UNAVAILABLE, "{}")
+    }
+}
+
+fn client_authorized(request: &Request<Incoming>) -> bool {
+    bearer_is(request, TOKEN)
+        && request
+            .headers()
+            .get("x-rottweiler-client")
+            .and_then(|header| header.to_str().ok())
+            == Some(CLIENT)
+}
+
+async fn command_response(request: Request<Incoming>, state: &State) -> Response<Body> {
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        Limited::new(request.into_body(), MAX_REQUEST_BYTES).collect(),
+    )
+    .await;
+    let Ok(Ok(body)) = body else {
+        return response(StatusCode::BAD_REQUEST, "{}");
+    };
+    let Ok(command) = serde_json::from_slice::<ClientCommand>(&body.to_bytes()) else {
+        return response(StatusCode::BAD_REQUEST, "{}");
+    };
+    state.counts.commands.fetch_add(1, Ordering::Relaxed);
+    // No fixture success, event, read projection or queue metric is synthesized here.
+    let reply = state
+        .host
+        .dispatch(
+            BoundClient {
+                client_id: ClientId(CLIENT.into()),
+            },
+            command,
+        )
+        .await;
+    response(StatusCode::ACCEPTED, reply.bytes)
+}
+
+async fn event_response(request: &Request<Incoming>, state: &State) -> Response<Body> {
+    let Ok((session, sequence)) = event_position(request.uri().query().unwrap_or_default()) else {
+        return response(StatusCode::BAD_REQUEST, "{}");
+    };
+    let Ok(mut events) = state
+        .host
+        .subscribe(
+            BoundClient {
+                client_id: ClientId(CLIENT.into()),
+            },
+            session,
+            sequence,
+        )
+        .await
+    else {
+        return response(StatusCode::BAD_REQUEST, "{}");
+    };
+    let counts = Arc::clone(&state.counts);
+    let stream = async_stream::stream! {
+        while let Some(event) = events.recv().await {
+            let event = event.expect("real host event");
+            counts.events.fetch_add(1, Ordering::Relaxed);
+            counts.event_bytes.fetch_add(event.json.len() as u64, Ordering::Relaxed);
+            let prefix = event.sequence.map_or_else(|| "data: ".to_owned(), |sequence| format!("id: {}\ndata: ", sequence.0));
+            yield Ok::<_, Infallible>(Frame::data(Bytes::from(prefix)));
+            yield Ok(Frame::data(event.json));
+            yield Ok(Frame::data(Bytes::from_static(b"\n\n")));
+        }
+    };
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(StreamBody::new(stream).boxed_unsync())
+        .expect("SSE body")
 }
 
 fn event_position(query: &str) -> Result<(Option<SessionId>, Option<SequenceId>), ()> {
@@ -218,10 +237,10 @@ fn event_position(query: &str) -> Result<(Option<SessionId>, Option<SequenceId>)
     for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match name.as_ref() {
             "session_id" if session.is_none() => {
-                session = Some(SessionId::parse(value.into_owned()).map_err(|_| ())?)
+                session = Some(SessionId::parse(value.into_owned()).map_err(|_| ())?);
             }
             "last_seen_sequence" if sequence.is_none() => {
-                sequence = Some(SequenceId(value.parse::<u64>().map_err(|_| ())?))
+                sequence = Some(SequenceId(value.parse::<u64>().map_err(|_| ())?));
             }
             _ => return Err(()),
         }
