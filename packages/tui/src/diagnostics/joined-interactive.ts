@@ -1,18 +1,14 @@
-import { appendFile, lstat, readFile, writeFile } from "node:fs/promises"
+import { appendFile, lstat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { EngineEvent, SessionSearchMatch } from "../protocol"
-import { connectedApp, connectedInput, requireThat } from "./connected-app"
+import { connectedApp, requireThat } from "./connected-app"
+import { joinedInteractiveInput, readBoundedPrivateFile } from "./connected-input"
 import { FrameSamples } from "./connected/frame-samples"
 
 /** Compiled client/renderer, real EngineHost and durable store; the host HTTP adapter is a fixture. */
 export async function runJoinedInteractive(directory: string): Promise<void> {
-  const input = await connectedInput(directory, "joined-input.json")
-  requireThat(typeof input.history === "object" && input.history !== null && input.streamLines === 2000
-    && typeof input.streamLine === "string", "joined workload configuration differs")
-  const history = input.history as { text_bytes: number; first_source: string; source_through: string; source_digest: number[] }
-  requireThat(history.text_bytes === 10_240_000 && typeof history.first_source === "string"
-    && typeof history.source_through === "string" && Array.isArray(history.source_digest) && history.source_digest.length === 32 && history.source_digest.every(value => Number.isInteger(value) && value >= 0 && value <= 255),
-  "joined history source differs from 10,240,000 bytes")
+  const input = await joinedInteractiveInput(directory)
+  const history = input.history
   const line = input.streamLine
   let streamBytes = 0, streamLines = 0, parentFinished = false, childEvents = 0
   let firstStreamAt: number | null = null, lastStreamAt: number | null = null
@@ -33,9 +29,9 @@ export async function runJoinedInteractive(directory: string): Promise<void> {
   const { app, setup, until } = client
   const samples = new FrameSamples()
   const milestones: Record<string, unknown>[] = []
-  const tokenInfo = await lstat(input.bootstrapTokenFile)
-  requireThat(tokenInfo.isFile() && tokenInfo.size <= 128, "fixture control token is not bounded")
-  const token = (await readFile(input.bootstrapTokenFile, "utf8")).trim()
+  const token = new TextDecoder("utf-8", { fatal: true })
+    .decode(await readBoundedPrivateFile(input.bootstrapTokenFile, 128)).trim()
+  requireThat(/^[\x21-\x7e]{1,128}$/.test(token), "fixture control token is invalid")
   const control = async (name: string) => {
     const reply = await fetch(`http://localhost/fixture/${name}`, { unix: input.socketPath, method: "POST",
       headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) })

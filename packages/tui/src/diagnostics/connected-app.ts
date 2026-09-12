@@ -1,30 +1,9 @@
-import { lstat, readFile } from "node:fs/promises"
-import { isAbsolute, join } from "node:path"
 import type { ClientCommand, EngineEvent } from "../protocol"
 import { createRottweilerApp } from "../app"
 import { ClientDiagnostics } from "../client-diagnostics"
 import { createEngineRuntimeFromEnvironment } from "../runtime"
+import type { ConnectedInput } from "./connected-input"
 import { createMemoryRenderer } from "./memory-renderer"
-
-export interface ConnectedInput {
-  socketPath: string
-  bootstrapTokenFile: string
-  sessionId: string
-}
-
-/** Read only bounded private fixture configuration; the runtime owns token validation. */
-export async function connectedInput(directory: string, name: string): Promise<ConnectedInput & Record<string, unknown>> {
-  const path = join(directory, name)
-  const info = await lstat(path)
-  requireThat(info.isFile() && !info.isSymbolicLink() && info.size <= 16 * 1024, "invalid connected probe configuration file")
-  const input: unknown = JSON.parse(await readFile(path, "utf8"))
-  requireThat(typeof input === "object" && input !== null, "invalid connected probe configuration")
-  const value = input as Record<string, unknown>
-  requireThat(typeof value.socketPath === "string" && isAbsolute(value.socketPath)
-    && typeof value.bootstrapTokenFile === "string" && isAbsolute(value.bootstrapTokenFile)
-    && typeof value.sessionId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value.sessionId), "invalid connected probe authority")
-  return value as ConnectedInput & Record<string, unknown>
-}
 
 /** The normal authenticated runtime consumes every command, read and SSE event. */
 export async function connectedApp(input: ConnectedInput, observeCommand: (command: ClientCommand) => void = () => {}, closeHttpRequests = false, observeEvent: (event: EngineEvent) => void = () => {}) {
@@ -67,12 +46,13 @@ async function bindConnectedApp(native: Awaited<ReturnType<typeof createMemoryRe
     try { await runtime.stop() } finally { app.destroy() }
     throw error
   }
+  let runtimeFailed = false
   let runtimeFailure: unknown
-  const running = runtime.start().catch(error => { runtimeFailure = error })
+  const running = runtime.start().catch(error => { runtimeFailed = true; runtimeFailure = error })
   const until = async (label: string, predicate: () => boolean, timeoutMs = 10_000) => {
     const deadline = performance.now() + timeoutMs
     while (!predicate()) {
-      if (runtimeFailure !== undefined) throw runtimeFailure
+      if (runtimeFailed) throw runtimeFailure
       requireThat(performance.now() < deadline, `connected probe waiting for ${label}; connection=${app.state.connection.phase}`)
       await Bun.sleep(1)
       await native.setup.renderOnce()
@@ -84,6 +64,7 @@ async function bindConnectedApp(native: Awaited<ReturnType<typeof createMemoryRe
     const errors: unknown[] = []
     try { await runtime.stop() } catch (error) { errors.push(error) }
     try { await running } catch (error) { errors.push(error) }
+    if (runtimeFailed) errors.push(runtimeFailure)
     try { app.destroy() } catch (error) { errors.push(error) }
     try { native.setup.renderer.destroy() } catch (error) { errors.push(error) }
     const deadline = performance.now() + 10_000

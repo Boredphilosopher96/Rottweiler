@@ -1,20 +1,32 @@
-import { writeFile } from "node:fs/promises"
-import { isAbsolute, join } from "node:path"
 import type { ClientCommand } from "../protocol"
-import { connectedApp, connectedInput, requireThat } from "./connected-app"
+import { connectedApp, requireThat } from "./connected-app"
+import { nativeRichInput } from "./connected-input"
+import { finishNativeRichProbe } from "./native-rich-report"
 
 /** A real SDK process and journal supply these surfaces through the normal client runtime. */
 export async function runNativeRichProbe(directory: string): Promise<void> {
-  const input = await connectedInput(directory, "native-rich-input.json")
-  requireThat(typeof input.impairmentSocketPath === "string" && isAbsolute(input.impairmentSocketPath), "missing owned impairment authority")
-  const impairmentSocket = input.impairmentSocketPath
   const actions: Extract<ClientCommand, { type: "invoke_ui_action" }>[] = []
-  const client = await connectedApp(input, command => {
-    if (command.type === "invoke_ui_action") {
-      requireThat(actions.length < 2, "unexpected additional native rich action")
-      actions.push(command)
-    }
-  }, true)
+  let input: Awaited<ReturnType<typeof nativeRichInput>>
+  try { input = await nativeRichInput(directory) }
+  catch (error) {
+    return finishNativeRichProbe(directory, { actions }, error, {
+      releaseRelay: async () => {}, closeClient: async () => {}, finalEvidence: () => ({}),
+    })
+  }
+  const impairmentSocket = input.impairmentSocketPath
+  let client: Awaited<ReturnType<typeof connectedApp>>
+  try {
+    client = await connectedApp(input, command => {
+      if (command.type === "invoke_ui_action") {
+        requireThat(actions.length < 2, "unexpected additional native rich action")
+        actions.push(command)
+      }
+    }, true)
+  } catch (error) {
+    return finishNativeRichProbe(directory, { actions }, error, {
+      releaseRelay: async () => {}, closeClient: async () => {}, finalEvidence: () => ({}),
+    })
+  }
   const { app, setup, until } = client
   const observations: Record<string, unknown> = {}
   const control = async (path: string, body?: object) => {
@@ -40,7 +52,7 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
     requireThat(actions[count - 1]?.request.action_id === "advance", "wrong native action")
     setup.mockInput.pressEscape(); await until("closed action surface", () => !app.outputViewer.visible)
   }
-  let failure: string | null = null
+  let failure: unknown
   try {
     await until("authenticated native driver", client.ready)
     app.composer.value = "/rich-workflow start"; await app.composer.submit()
@@ -110,12 +122,11 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
     await until("actual disconnect retires native contribution", () => app.state.connection.phase !== "connected" && nodes.every(node => node.isDestroyed))
     requireThat(app.outputViewer.actions.options.length === 0, "disconnected native contribution retained action authority")
     observations.relay = await control("status")
-  } catch (error) { failure = error instanceof Error ? error.message : String(error) }
-  finally {
-    try { await control("release") } finally { await client.close() }
-  }
-  await writeFile(join(directory, "native-rich.json"), JSON.stringify({ schemaVersion: 1, pid: process.pid,
-    ...observations, actions, terminal: client.terminal.snapshot, finalAllocationBytes: client.runtime.allocations.usage.bytes,
-    failure, passed: failure === null }) + "\n", { mode: 0o600 })
-  requireThat(failure === null, failure ?? "native rich probe failed")
+  } catch (error) { failure = error }
+  await finishNativeRichProbe(directory, { ...observations, actions }, failure, {
+    releaseRelay: async () => { await control("release") },
+    closeClient: client.close,
+    finalEvidence: () => ({ terminal: client.terminal.snapshot,
+      finalAllocationBytes: client.runtime.allocations.usage.bytes }),
+  })
 }
