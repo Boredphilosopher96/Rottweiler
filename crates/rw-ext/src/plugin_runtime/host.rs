@@ -135,10 +135,16 @@ impl PluginHost {
         let (profile, continuation_provenance) =
             verify_approved_launch(store, config, origin, approved_roots, &expected_manifest)
                 .await?;
-        if activation.is_cancelled() {
+        if activation.cancellation().is_cancelled() {
             return Err(PluginHostError::Rpc(rpc_error(
                 "cancelled",
                 "plugin activation cancelled before launch",
+            )));
+        }
+        if tokio::time::Instant::now() >= activation.deadline() {
+            return Err(PluginHostError::Rpc(rpc_error(
+                "timeout",
+                "plugin readiness deadline elapsed before launch",
             )));
         }
         let child = launcher
@@ -371,6 +377,18 @@ async fn initialize_approved(
     expected_manifest: &PluginManifest,
     activation: &crate::PluginActivation,
 ) -> Result<PluginManifest, PluginRpcError> {
+    if activation.cancellation().is_cancelled() {
+        return Err(rpc_error(
+            "cancelled",
+            "plugin activation cancelled before initialization",
+        ));
+    }
+    if tokio::time::Instant::now() >= activation.deadline() {
+        return Err(rpc_error(
+            "timeout",
+            "plugin readiness deadline elapsed before initialization",
+        ));
+    }
     let initialize = serde_json::to_value(InitializeParams {
         host: rw_plugin_protocol::PLUGIN_HOST_ID.to_owned(),
         protocol: expected_manifest.protocol,
@@ -380,17 +398,21 @@ async fn initialize_approved(
     .map_err(|error| rpc_error("invalid_request", &error.to_string()))?;
     let started = std::time::Instant::now();
     tracing::debug!(target: "rw_performance", stage = "plugin.initialize", phase = "begin", plugin = %expected_manifest.name);
-    let result = tokio::time::timeout_at(
-        activation.deadline(),
-        client.request_cancellable(METHOD_INITIALIZE, initialize, activation.cancellation()),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        Err(rpc_error(
+    let request =
+        client.request_cancellable(METHOD_INITIALIZE, initialize, activation.cancellation());
+    tokio::pin!(request);
+    let result = tokio::select! {
+        biased;
+        () = activation.cancellation().cancelled() => Err(rpc_error(
+            "cancelled",
+            "plugin activation cancelled during initialization",
+        )),
+        () = tokio::time::sleep_until(activation.deadline()) => Err(rpc_error(
             "timeout",
             "plugin readiness deadline elapsed during initialization",
-        ))
-    });
+        )),
+        result = &mut request => result,
+    };
     tracing::debug!(target: "rw_performance", stage = "plugin.initialize", plugin = %expected_manifest.name,
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = result.is_ok(), "plugin activation stage finished");
     result.and_then(|value| {

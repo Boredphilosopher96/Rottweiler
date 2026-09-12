@@ -12,6 +12,7 @@ use rw_ext::{
 };
 use rw_tools::CancellationToken;
 use std::{
+    future::Future,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -175,7 +176,8 @@ impl Generation {
             return Ok(());
         }
         let lease = self.recipe.budget.admit()?;
-        let deadline = deadline.min(Instant::now() + ACTIVATION_DEADLINE);
+        let started = Instant::now();
+        let deadline = deadline.min(started + ACTIVATION_DEADLINE);
         self.resources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -186,7 +188,7 @@ impl Generation {
             armed: true,
         };
         drop(phase);
-        spawn_owned(owner.activate(deadline));
+        spawn_owned(owner.activate(deadline, started));
         Ok(())
     }
 
@@ -250,39 +252,77 @@ struct OperationOwner {
     generation: Arc<Generation>,
     armed: bool,
 }
-impl OperationOwner {
-    async fn activate(mut self, deadline: Instant) {
-        let generation = Arc::clone(&self.generation);
-        let activation = recipe::activate(&generation, deadline);
-        tokio::pin!(activation);
-        let result = std::panic::AssertUnwindSafe(async {
-            tokio::select! {
-                biased;
-                result = &mut activation => result,
-                () = generation.cancellation.cancelled() => activation.await,
-                () = tokio::time::sleep_until(deadline) => {
-                    generation.cancellation.cancel();
-                    activation.await
-                }
+
+enum ActivationOutcome<T> {
+    Completed(T),
+    Revoked {
+        completed: T,
+        request: PluginRpcError,
+    },
+}
+
+async fn await_activation<T>(
+    cancellation: &CancellationToken,
+    deadline: Instant,
+    activation: impl Future<Output = T>,
+) -> ActivationOutcome<T> {
+    tokio::pin!(activation);
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(deadline) => {
+            cancellation.cancel();
+            ActivationOutcome::Revoked {
+                completed: activation.await,
+                request: timed_out(),
             }
+        }
+        () = cancellation.cancelled() => ActivationOutcome::Revoked {
+            completed: activation.await,
+            request: cancelled(),
+        },
+        completed = &mut activation => ActivationOutcome::Completed(completed),
+    }
+}
+
+impl OperationOwner {
+    async fn activate(mut self, deadline: Instant, started: Instant) {
+        let generation = Arc::clone(&self.generation);
+        let result = std::panic::AssertUnwindSafe(async {
+            await_activation(
+                &generation.cancellation,
+                deadline,
+                recipe::activate(&generation, deadline),
+            )
+            .await
         })
         .catch_unwind()
         .await;
-        let result = result.unwrap_or_else(|_| {
+        let outcome = result.unwrap_or_else(|_| {
             let failure = unsettled("plugin activation panicked");
             generation
                 .resources
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .failure = Some(failure.clone());
-            Err(failure)
+            ActivationOutcome::Completed(Err(failure))
         });
-        if let Ok(host) = result.as_ref() {
+        let (result, mut request) = match outcome {
+            ActivationOutcome::Completed(result) => (result, None),
+            ActivationOutcome::Revoked { completed, request } => (completed, Some(request)),
+        };
+        if request.is_none()
+            && let Ok(host) = result.as_ref()
+        {
             let mut phase = generation
                 .phase
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !generation.cancellation.is_cancelled() {
+            if Instant::now() >= deadline {
+                generation.cancellation.cancel();
+                request = Some(timed_out());
+            } else if generation.cancellation.is_cancelled() {
+                request = Some(cancelled());
+            } else {
                 generation
                     .resources
                     .lock()
@@ -290,12 +330,13 @@ impl OperationOwner {
                     .publish();
                 *phase = Phase::Ready(Arc::clone(host));
                 self.armed = false;
-                tracing::debug!(plugin = %generation.recipe.config.name, elapsed_ms = (Instant::now() - (deadline - ACTIVATION_DEADLINE)).as_secs_f64() * 1000.0, "plugin activation ready");
+                tracing::debug!(plugin = %generation.recipe.config.name, elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "plugin activation ready");
                 generation.changed.notify_waiters();
                 return;
             }
         }
-        self.retire(result.err().unwrap_or_else(cancelled)).await;
+        self.retire(request.unwrap_or_else(|| result.err().unwrap_or_else(cancelled)))
+            .await;
     }
 
     async fn retire(mut self, request: PluginRpcError) {
@@ -342,6 +383,9 @@ fn error(code: &str, message: &str) -> PluginRpcError {
 }
 fn cancelled() -> PluginRpcError {
     error("cancelled", "plugin generation is closed")
+}
+fn timed_out() -> PluginRpcError {
+    error("timeout", "plugin activation deadline expired")
 }
 pub(super) fn unsettled(message: &str) -> PluginRpcError {
     error("effects_unsettled", message)

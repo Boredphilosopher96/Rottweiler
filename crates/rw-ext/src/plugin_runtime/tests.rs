@@ -139,6 +139,7 @@ struct FakeProcess {
     settlement_blocked: AtomicBool,
     settlement_release: tokio::sync::Notify,
     initialize_received: tokio::sync::Notify,
+    initialize_requests: AtomicUsize,
     retirement_started: tokio::sync::Notify,
     retirement_credit: StdMutex<Option<tokio::sync::OwnedSemaphorePermit>>,
 }
@@ -419,6 +420,7 @@ impl PluginLauncher for MemoryLauncher {
                 line.clear();
                 match frame {
                     RpcFrame::Request(request) if request.method == METHOD_INITIALIZE => {
+                        process.initialize_requests.fetch_add(1, Ordering::AcqRel);
                         process.initialize_received.notify_one();
                         if hang_method.as_deref() == Some(METHOD_INITIALIZE) {
                             continue;

@@ -672,10 +672,10 @@ async fn execute_selected(
         };
         let outcome = invoked
             .and_then(|directive| apply_directive(registration.class(), &mut result, directive));
-        if let Err(error) = outcome {
-            if record_failure(registration, &mut result, error)? {
-                return Ok(result);
-            }
+        if let Err(error) = outcome
+            && record_failure(registration, &mut result, error)?
+        {
+            return Ok(result);
         }
         if matches!(result.status, HookDispatchStatus::Blocked { .. }) {
             if let HookDispatchStatus::Blocked { hook_id, .. } = &mut result.status {

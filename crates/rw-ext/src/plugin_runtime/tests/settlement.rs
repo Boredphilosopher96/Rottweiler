@@ -1,5 +1,99 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+enum InitializationBoundary {
+    Deadline,
+    Cancellation,
+}
+
+struct InitializationBoundaryLauncher {
+    manifest: PluginManifest,
+    process: Arc<FakeProcess>,
+    boundary: InitializationBoundary,
+}
+
+#[async_trait]
+impl PluginLauncher for InitializationBoundaryLauncher {
+    async fn launch(
+        &self,
+        config: &PluginProcessConfig,
+        profile: &PluginSandboxProfile,
+        activation: &crate::PluginActivation,
+    ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+        let launched = MemoryLauncher {
+            manifest: self.manifest.clone(),
+            process: Arc::clone(&self.process),
+            push: None,
+            hang_method: None,
+        }
+        .launch(config, profile, activation)
+        .await?;
+        match self.boundary {
+            InitializationBoundary::Deadline => {
+                tokio::time::advance(Duration::from_secs(1)).await;
+            }
+            InitializationBoundary::Cancellation => activation.cancellation().cancel(),
+        }
+        Ok(launched)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_or_cancelled_activation_cannot_enqueue_initialization() {
+    for (boundary, expected_code) in [
+        (InitializationBoundary::Deadline, "timeout"),
+        (InitializationBoundary::Cancellation, "cancelled"),
+    ] {
+        let root = TempDir::new().expect("tempdir");
+        let config = shell_config(&root)
+            .with_allowed_domains(["example.com"])
+            .expect("domains");
+        let expected = manifest();
+        let approvals = MemoryApproval::default();
+        approve_plugin_launch(
+            &approvals,
+            &expected,
+            &config,
+            "project:initialization-boundary",
+        )
+        .expect("approve");
+        let process = Arc::new(FakeProcess::default());
+        let cancellation = CancellationToken::default();
+        let activation = crate::PluginActivation::until(
+            cancellation,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        let result = PluginHost::launch_approved(
+            &InitializationBoundaryLauncher {
+                manifest: expected.clone(),
+                process: Arc::clone(&process),
+                boundary,
+            },
+            Arc::new(approvals),
+            &config,
+            "project:initialization-boundary",
+            &[root.path().to_path_buf()],
+            expected,
+            Arc::new(DenyPushHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+            &activation,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PluginHostError::Rpc(ref error)) if error.code == expected_code)
+        );
+        assert_eq!(
+            process.initialize_requests.load(Ordering::Acquire),
+            0,
+            "revoked initialization reached the transport"
+        );
+        assert!(
+            process.waited.load(Ordering::Acquire) > 0,
+            "accepted child was not physically retired"
+        );
+    }
+}
+
 #[tokio::test]
 async fn ordinary_request_cancellation_settles_parent_and_child_effects() {
     let root = TempDir::new().expect("tempdir");

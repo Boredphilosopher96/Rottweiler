@@ -135,6 +135,33 @@ impl Fixture {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn expired_deadline_rejects_an_immediately_ready_activation_result() {
+    let cancellation = CancellationToken::default();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let outcome = await_activation(&cancellation, deadline, std::future::ready("ready")).await;
+    let ActivationOutcome::Revoked { completed, request } = outcome else {
+        panic!("expired activation result was accepted");
+    };
+    assert_eq!(completed, "ready");
+    assert_eq!(request.code, "timeout");
+    assert!(cancellation.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_rejects_an_immediately_ready_activation_result() {
+    let cancellation = CancellationToken::default();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    cancellation.cancel();
+    let outcome = await_activation(&cancellation, deadline, std::future::ready("ready")).await;
+    let ActivationOutcome::Revoked { completed, request } = outcome else {
+        panic!("cancelled activation result was accepted");
+    };
+    assert_eq!(completed, "ready");
+    assert_eq!(request.code, "cancelled");
+}
+
 #[tokio::test]
 async fn metadata_and_closed_dormant_generation_start_no_resources() {
     let fixture = Fixture::new();
