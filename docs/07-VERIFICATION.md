@@ -449,7 +449,7 @@ eight-hour process.
 measures the named production path. Empty or stub benchmarks cannot satisfy a
 budget, and an activated budget remains part of the global gate.
 
-The production-composition prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh ENGINE_EXECUTABLE MCP_FIXTURE_EXECUTABLE`. It consumes two explicitly prepared executables and performs no compilation. Prepare the MCP fixture with `scripts/cargo-release.sh build --locked --release -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture` in the worktree's reusable target before conditioning or measuring the host. Its test-support features remain outside the production engine. The gate runs the
+The production-composition prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh CANDIDATE_DIRECTORY MCP_FIXTURE_RECEIPT`. It consumes a verified native candidate and an immutable fixture receipt, and performs no compilation. Prepare the fixture before conditioning or measurement with `python3 scripts/prepare-m8-fixture.py --candidate CANDIDATE_DIRECTORY --output FIXTURE_BUNDLE_DIRECTORY --target-dir CARGO_TARGET_DIRECTORY`; pass the emitted receipt to the gate. The preparer selects the executable from its exact Cargo invocation and binds its source, compiler, native profile, and hash to the candidate. Its test-support features remain outside the production engine. The gate runs the
 release `rw` binary with an exact persisted project extension inventory trust record and MCP
 approval ledger, discovers three project-configured stdio servers, starts each
 through the production sandbox launcher, loads their real catalogs, composes
