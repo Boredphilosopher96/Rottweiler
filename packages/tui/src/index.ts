@@ -70,6 +70,13 @@ async function main(): Promise<void> {
     await runReviewRecycleProbe(reviewProbeDirectory, mode, view)
     return
   }
+  const nativeRichDirectory = process.env.ROTTWEILER_CLIENT_NATIVE_RICH_DIRECTORY
+  if (nativeRichDirectory !== undefined) {
+    if (!nativeRichDirectory) throw new Error("native rich probe requires a private directory")
+    const { runNativeRichProbe } = await import("./diagnostics/native-rich")
+    await runNativeRichProbe(nativeRichDirectory)
+    return
+  }
   const richProbeDirectory = process.env.ROTTWEILER_CLIENT_RICH_PROBE_DIRECTORY
   if (richProbeDirectory !== undefined) {
     if (!richProbeDirectory) throw new Error("rich contribution probe requires a private directory")
