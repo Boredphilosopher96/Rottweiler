@@ -1,5 +1,9 @@
 import re
 import json
+import os
+import subprocess
+import tempfile
+import tomllib
 import yaml
 import unittest
 from pathlib import Path
@@ -19,6 +23,80 @@ def workflow_job(workflow: str, name: str) -> str:
 
 
 class CiHardeningContractTests(unittest.TestCase):
+    def test_wsl_doctor_acceptance_is_offline_and_preserves_failed_reports(self) -> None:
+        acceptance = ROOT / "scripts/wsl-acceptance.sh"
+        healthy_report = {
+            "healthy": True,
+            "network_probes_requested": False,
+            "checks": [
+                {"id": "providers", "code": "provider_configured"},
+                {"id": "models.default", "code": "default_model_resolved"},
+                {"id": "provider.fixture.auth", "code": "credential_not_required"},
+                {
+                    "id": "provider.fixture.reachability",
+                    "code": "network_probe_not_requested",
+                },
+                {"id": "os", "details": {"wsl": "true"}},
+                {"id": "sandbox", "status": "pass"},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            fake_rw = temporary / "rw"
+            fake_rw.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$FAKE_DOCTOR_REPORT\"\n"
+                "exit \"${FAKE_DOCTOR_STATUS:-0}\"\n",
+                encoding="utf-8",
+            )
+            fake_rw.chmod(0o755)
+
+            def run_doctor(report: dict[str, object], status: int, name: str):
+                doctor_home = temporary / name
+                doctor_report = temporary / f"{name}.json"
+                environment = os.environ.copy()
+                environment["FAKE_DOCTOR_REPORT"] = json.dumps(report)
+                environment["FAKE_DOCTOR_STATUS"] = str(status)
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; run_doctor_acceptance "$2" "$3" "$4"',
+                        "wsl-doctor-test",
+                        str(acceptance),
+                        str(fake_rw),
+                        str(doctor_home),
+                        str(doctor_report),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                return result, doctor_home / ".rottweiler/config.toml"
+
+            success, config_path = run_doctor(healthy_report, 0, "healthy")
+            self.assertEqual(success.returncode, 0, success.stderr)
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            default_model = config["models"]["default"]
+            route = config["models"]["aliases"][default_model][0]
+            provider_name = route.split("/", 1)[0]
+            self.assertIn(provider_name, config["providers"])
+            self.assertEqual(
+                config["providers"][provider_name]["base_url"],
+                "http://127.0.0.1:9/v1/chat/completions",
+            )
+
+            failed_report = {"healthy": False, "checks": []}
+            failed, _ = run_doctor(failed_report, 23, "failed")
+            self.assertEqual(failed.returncode, 23)
+            self.assertIn(json.dumps(failed_report), failed.stderr)
+
+            unhealthy, _ = run_doctor(failed_report, 0, "unhealthy")
+            self.assertNotEqual(unhealthy.returncode, 0)
+            self.assertIn("WSL doctor report is unhealthy", unhealthy.stderr)
+            self.assertIn(json.dumps(failed_report), unhealthy.stderr)
+
     def test_external_actions_use_consistent_immutable_pins(self) -> None:
         pins: dict[str, str] = {}
         for workflow_path in sorted((ROOT / ".github/workflows").glob("*.yml")):
