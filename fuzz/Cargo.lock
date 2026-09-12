@@ -1281,7 +1281,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rw-context"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "rw-providers",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "rw-memory-derive"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "rw-operation-contract"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "schemars",
  "serde",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "rw-plugin-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "rw-operation-contract",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "rw-providers"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "rw-resources"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "rustix",
  "thiserror",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "rw-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "globset",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "rw-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "rw-memory-derive",
  "rw-operation-contract",

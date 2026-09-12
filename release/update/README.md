@@ -51,8 +51,10 @@ prerequisites to signing for the applicable release tier: the workflow does not
 offer a skip flag for missing evidence or infrastructure.
 
 Releases start from a pushed version tag, not from a merge to `main`. Prepare
-matching workspace, SDK and host package versions, and advance both channel
-specs from the deployed metadata version to exactly `N+1`. Verify the transition
+matching workspace, SDK and host package versions. Refresh both `Cargo.lock` and
+`fuzz/Cargo.lock`, then check both workspaces with `cargo metadata --locked
+--offline --format-version 1` (add `--manifest-path fuzz/Cargo.toml` for the fuzz
+workspace). Advance both channel specs from the deployed metadata version to exactly `N+1`. Verify the transition
 with `scripts/check-release-channel-advance.py` using the public stable and beta
 envelopes. After the release preparation passes CI and merges, push `vVERSION`
 at that exact commit. The Signed release workflow builds, qualifies, signs and

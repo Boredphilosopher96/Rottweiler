@@ -66,6 +66,8 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.dependencies]
+rw-memory-derive = { version = "0.1.5", path = "crates/rw-memory-derive" }
+rw-macos-bootstrap = { version = "0.1.5", path = "crates/rw-macos-bootstrap" }
 rw-resources = { version = "0.1.5", path = "crates/rw-resources" }
 redb = "=4.2.0"
 memchr = "2.8.3"
