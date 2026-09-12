@@ -5,6 +5,7 @@ import { TranscriptRenderable } from "../src/components/transcript"
 import { HistoryController } from "../src/history/controller"
 import { createInitialState } from "../src/state"
 import { createSyntaxStyle, kennelTheme } from "../src/theme"
+import { mixedHistoryPage } from "../src/diagnostics/memory-history"
 import { fixturePage } from "./fixtures/history"
 
 function visibleAnchor(transcript: TranscriptRenderable) {
@@ -58,6 +59,36 @@ test("visible source row and pixel offset survive page replacement and rewrappin
     await controller.seek(405n)
     await harness.flush()
     expect(visibleAnchor(transcript)).toEqual({ id: "405", offset: 0 })
+  } finally { controller.dispose(); transcript.destroy(); style.destroy(); harness.renderer.destroy() }
+})
+
+test("refresh before navigation layout preserves the pending source anchor", async () => {
+  const harness = await createTestRenderer({ width: 80, height: 20, useThread: false })
+  const style = createSyntaxStyle(kennelTheme)
+  const reader = {
+    page: async ({ sessionId: session }: SessionReadTarget, read: Parameters<typeof fixturePage>[1]) => (
+      { type: "ready" as const, page: mixedHistoryPage(session, read, 10_000, "20000") }
+    ),
+    content: async () => { throw new Error("unused") },
+  }
+  const controller = new HistoryController(reader, () => transcript.setHistory(controller.snapshot))
+  const transcript = new TranscriptRenderable(harness.renderer, kennelTheme, {
+    syntaxStyle: style, treeSitterClient: new MockTreeSitterClient({ autoResolveTimeout: 0 }),
+    onHistoryAnchor: anchor => controller.setAnchor(anchor),
+    onHistoryAround: item => controller.around(item),
+  })
+  transcript.update(createInitialState())
+  harness.renderer.root.add(transcript)
+  try {
+    await controller.open(directSessionRead("session"))
+    await harness.flush()
+    await transcript.revealHistorySource("400")
+    await harness.renderOnce()
+    expect(transcript.captureHistoryViewport()).toBeNull()
+    await controller.refresh()
+    await harness.flush()
+    expect(transcript.captureHistoryViewport()).toEqual({ following: false, anchor: { id: "400", offset: 0 } })
+    expect(visibleAnchor(transcript)).toEqual({ id: "400", offset: 0 })
   } finally { controller.dispose(); transcript.destroy(); style.destroy(); harness.renderer.destroy() }
 })
 

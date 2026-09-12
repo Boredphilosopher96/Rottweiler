@@ -452,7 +452,7 @@ export class TranscriptRenderable extends BoxRenderable {
       }
       const selected = history.selection !== null && history.selection !== this.#history?.selection
       const changed = this.#history?.page !== history.page || selected
-      const anchor = this.#requestedAnchor ?? this.#captureAnchor() ?? history.anchor
+      const anchor = this.#requestedAnchor ?? this.#pendingAnchor ?? this.#captureAnchor() ?? history.anchor
       this.#history = history
       // Physical window boundaries are not the logical end of history. A page
       // replacement must not re-enable OpenTUI's bottom stickiness while browsing.
