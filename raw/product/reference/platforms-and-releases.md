@@ -2,8 +2,8 @@
 
 | Target | Operating system | Signed archive |
 |---|---|---|
-| `darwin-arm64` | macOS (arm64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-darwin-arm64.tar.gz) |
-| `linux-x86_64` | Linux (x86_64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-linux-x86_64.tar.gz) |
+| `darwin-arm64` | macOS (arm64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.5-darwin-arm64.tar.gz) |
+| `linux-x86_64` | Linux (x86_64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.5-linux-x86_64.tar.gz) |
 
 The release contract understands additional build shapes, but only targets in
 the signed update specification are advertised as released platforms.

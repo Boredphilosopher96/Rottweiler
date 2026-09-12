@@ -30,7 +30,7 @@ installer inside the archive.
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
   --output rottweiler-install.sh \
-  https://github.com/Boredphilosopher96/Rottweiler/releases/download/v0.1.4/rottweiler-install.sh
+  https://github.com/Boredphilosopher96/Rottweiler/releases/download/v0.1.5/rottweiler-install.sh
 sh rottweiler-install.sh
 rw --version
 rw doctor

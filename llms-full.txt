@@ -552,7 +552,7 @@ installer inside the archive.
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
   --output rottweiler-install.sh \
-  https://github.com/Boredphilosopher96/Rottweiler/releases/download/v0.1.4/rottweiler-install.sh
+  https://github.com/Boredphilosopher96/Rottweiler/releases/download/v0.1.5/rottweiler-install.sh
 sh rottweiler-install.sh
 rw --version
 rw doctor
@@ -918,8 +918,8 @@ Source owners: contracts/release-contract.json, release/update/stable.spec.json
 
 | Target | Operating system | Signed archive |
 |---|---|---|
-| `darwin-arm64` | macOS (arm64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-darwin-arm64.tar.gz) |
-| `linux-x86_64` | Linux (x86_64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-linux-x86_64.tar.gz) |
+| `darwin-arm64` | macOS (arm64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.5-darwin-arm64.tar.gz) |
+| `linux-x86_64` | Linux (x86_64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.5-linux-x86_64.tar.gz) |
 
 The release contract understands additional build shapes, but only targets in
 the signed update specification are advertised as released platforms.
