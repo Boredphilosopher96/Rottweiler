@@ -4,39 +4,16 @@
 fn main() {
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use async_trait::async_trait;
     use rw_sandbox::{NetworkPolicy, SandboxPolicy, SandboxSupport};
     use rw_tools::{
         BashSandboxMode, CancellationToken, CommandExecutor, CommandRequest, CommandSafety,
-        CommandSafetyClassifier, TokioCommandExecutor, ToolError, ToolOutputChunk, ToolOutputSink,
-        maybe_run_sandbox_helper,
+        CommandSafetyClassifier, TokioCommandExecutor, maybe_run_sandbox_helper,
     };
     use rw_types::ToolOutputStream;
 
-    #[derive(Default)]
-    struct Capture(Mutex<Vec<ToolOutputChunk>>);
-
-    #[async_trait]
-    impl ToolOutputSink for Capture {
-        async fn emit(&self, chunk: ToolOutputChunk) -> Result<(), ToolError> {
-            self.0.lock().expect("capture lock").push(chunk);
-            Ok(())
-        }
-    }
-
-    impl Capture {
-        fn stream(&self, stream: &ToolOutputStream) -> String {
-            self.0
-                .lock()
-                .expect("capture lock")
-                .iter()
-                .filter(|chunk| &chunk.stream == stream)
-                .map(|chunk| chunk.content.as_str())
-                .collect()
-        }
-    }
+    use output::Capture;
 
     if maybe_run_sandbox_helper(std::env::args_os()).expect("sandbox helper dispatch") {
         unreachable!("sandbox helper replaces the process");
@@ -141,3 +118,35 @@ sys.exit(92)
 
 #[cfg(not(target_os = "linux"))]
 fn main() {}
+
+#[cfg(target_os = "linux")]
+mod output {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use rw_tools::{ToolError, ToolOutputChunk, ToolOutputSink};
+    use rw_types::ToolOutputStream;
+
+    #[derive(Default)]
+    pub(super) struct Capture(Mutex<Vec<ToolOutputChunk>>);
+
+    #[async_trait]
+    impl ToolOutputSink for Capture {
+        async fn emit(&self, chunk: ToolOutputChunk) -> Result<(), ToolError> {
+            self.0.lock().expect("capture lock").push(chunk);
+            Ok(())
+        }
+    }
+
+    impl Capture {
+        pub(super) fn stream(&self, stream: &ToolOutputStream) -> String {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .iter()
+                .filter(|chunk| &chunk.stream == stream)
+                .map(|chunk| chunk.content.as_str())
+                .collect()
+        }
+    }
+}
