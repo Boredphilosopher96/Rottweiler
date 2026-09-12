@@ -57,7 +57,14 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(darwin_suites["core"]["baseline_kind"], "measured")
         self.assertIn("30655148886", darwin_suites["core"]["provenance"])
         self.assertEqual(darwin_suites["soak"]["baseline_kind"], "bootstrap")
-        self.assertIn("bootstrap", darwin_suites["soak"]["provenance"])
+        for platform in document["platforms"]:
+            with self.subTest(platform=platform):
+                _, kind, _ = MODULE.baseline_suite(
+                    document, platform, "soak", require_measured=False
+                )
+                self.assertEqual(kind, "bootstrap")
+                with self.assertRaisesRegex(ValueError, "bootstrap-only"):
+                    MODULE.baseline_suite(document, platform, "soak", require_measured=True)
         self.assertEqual(linux_suites["core"]["baseline_kind"], "bootstrap")
         self.assertIn("30655148886", linux_suites["core"]["provenance"])
         self.assertEqual(linux_suites["soak"]["baseline_kind"], "bootstrap")

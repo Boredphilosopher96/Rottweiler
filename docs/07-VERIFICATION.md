@@ -21,6 +21,10 @@ after the incident action. It does not qualify the resulting source: the exact
 merged source must still complete every mandatory check. Do not use protection
 changes to deliver unfinished feature work.
 
+CI checks the production `rw-cli --bin rw` dependency graph separately from the
+isolated crate test graphs and the workspace all-features graph. Test-only
+dependency features must not supply APIs required by the shipped engine.
+
 ## 1. Deterministic replay (the foundation)
 
 Provider and configured-search recording files share a 64 MiB encoded ceiling.

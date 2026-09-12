@@ -311,7 +311,7 @@ pub(super) async fn run_turn(
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                status = super::provider_context::report_failure(error, &signals);
+                status = super::provider_context::report_failure(&error, &signals);
                 break;
             }
         };
@@ -392,7 +392,7 @@ pub(super) async fn run_turn(
                 {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        status = super::provider_context::report_failure(error, &signals);
+                        status = super::provider_context::report_failure(&error, &signals);
                         break;
                     }
                 };

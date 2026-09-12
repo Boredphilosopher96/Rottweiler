@@ -175,6 +175,8 @@ jobs:
         run: |
           python3 scripts/ci_evidence.py --gate core-test-graph --output ci-results/core-test-graph.json -- cargo check --locked -p rw-core --tests --all-features
           python3 scripts/ci_evidence.py --gate mcp-test-graph --output ci-results/mcp-test-graph.json -- cargo check --locked -p rw-mcp --tests --all-features
+      - name: Check the production dependency graph
+        run: python3 scripts/ci_evidence.py --gate production-graph --output ci-results/production-graph.json -- cargo check --locked -p rw-cli --bin rw
       - run: python3 scripts/ci_evidence.py --gate clippy --output ci-results/clippy.json -- cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Build native sandbox test prerequisite
         run: python3 scripts/ci_evidence.py --gate test-helper-build --output ci-results/test-helper-build.json -- python3 scripts/build-test-helper.py --github-env "$GITHUB_ENV"

@@ -6,7 +6,7 @@ use rmcp::{
     ErrorData as McpProtocolError,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ServerCapabilities, ServerInfo, Tool,
+        ServerCapabilities, ServerInfo, Tool, ToolsCapability,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -309,7 +309,9 @@ fn tool_error(message: &str) -> CallToolResponse {
 
 impl RottweilerMcpServer {
     fn get_info() -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.tools = Some(ToolsCapability::default());
+        ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("rottweiler", env!("CARGO_PKG_VERSION")))
             .with_instructions("Rottweiler coding-agent sessions and approved tools")
     }

@@ -344,28 +344,7 @@ async fn failed_hook_proof_never_finishes_tool_or_checkpoint() {
             .await
             .expect("admitted");
         hook.entered.notified().await;
-        let first_cause = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let cause = sink
-                    .events
-                    .lock()
-                    .expect("events")
-                    .iter()
-                    .find_map(|event| {
-                        if let PendingEvent::Error { message } = &event.kind {
-                            Some(message.clone())
-                        } else {
-                            None
-                        }
-                    });
-                if let Some(cause) = cause {
-                    break cause;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first physical failure is published");
+        let first_cause = first_recorded_error(&sink).await;
         let proof = tokio::time::timeout(Duration::from_secs(1), handle.close())
             .await
             .expect("bounded proof")
@@ -403,6 +382,31 @@ async fn failed_hook_proof_never_finishes_tool_or_checkpoint() {
             "unproven hook cannot publish tool or turn completion"
         );
     }
+}
+
+async fn first_recorded_error(sink: &RecordingSink) -> String {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let cause = sink
+                .events
+                .lock()
+                .expect("events")
+                .iter()
+                .find_map(|event| {
+                    if let PendingEvent::Error { message } = &event.kind {
+                        Some(message.clone())
+                    } else {
+                        None
+                    }
+                });
+            if let Some(cause) = cause {
+                break cause;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first physical failure is published")
 }
 
 struct ClosingJournal {

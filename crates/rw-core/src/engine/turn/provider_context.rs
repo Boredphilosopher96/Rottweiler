@@ -136,7 +136,7 @@ impl ProviderContext<'_> {
 /// Only an explicitly cancelled admission is an interrupt. In particular, a
 /// concurrent interrupt cannot hide a failed worker or missing effect proof.
 pub(super) fn report_failure(
-    error: AgentLoopError,
+    error: &AgentLoopError,
     signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> crate::engine::AgentTurnStatus {
     if matches!(error, AgentLoopError::Cancelled) {
@@ -159,7 +159,7 @@ mod tests {
     fn only_cancelled_admission_is_an_interrupt_without_error_publication() {
         let (signals, mut received) = mpsc::unbounded_channel();
         assert_eq!(
-            report_failure(AgentLoopError::Cancelled, &signals),
+            report_failure(&AgentLoopError::Cancelled, &signals),
             crate::engine::AgentTurnStatus::Interrupted
         );
         assert!(received.try_recv().is_err());
@@ -168,7 +168,7 @@ mod tests {
             AgentLoopError::InvalidConfiguration("resource admission queue is full".into()),
         ] {
             assert_eq!(
-                report_failure(error, &signals),
+                report_failure(&error, &signals),
                 crate::engine::AgentTurnStatus::Failed
             );
             assert!(received.try_recv().is_ok());
