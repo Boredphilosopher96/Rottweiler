@@ -12,7 +12,7 @@ test("native rich settlement retains the functional failure and attempts both cl
   try {
     let thrown: unknown
     try {
-      await finishNativeRichProbe(directory, { observation: "retained" }, first, {
+      await finishNativeRichProbe(directory, { observation: "retained" }, { status: "failed", failure: first }, {
         releaseRelay: async () => { calls.push("release"); throw new Error("relay stuck") },
         closeClient: async () => { calls.push("close"); throw new Error("runtime failed") },
         finalEvidence: () => ({ finalAllocationBytes: 9 }),
@@ -34,7 +34,7 @@ test("native rich cleanup failures fail an otherwise successful proof after repo
   const directory = await mkdtemp(join(tmpdir(), "rw-native-rich-cleanup-"))
   const calls: string[] = []
   try {
-    await expect(finishNativeRichProbe(directory, { observation: "complete" }, undefined, {
+    await expect(finishNativeRichProbe(directory, { observation: "complete" }, { status: "passed" }, {
       releaseRelay: async () => { calls.push("release") },
       closeClient: async () => { calls.push("close"); throw new AggregateError([
         new Error("fatal runtime start"), new Error("renderer cleanup failed"),
@@ -54,7 +54,7 @@ test("native rich report overflow publishes a bounded failure report", async () 
   const directory = await mkdtemp(join(tmpdir(), "rw-native-rich-overflow-"))
   try {
     await expect(finishNativeRichProbe(directory,
-      { observation: "x".repeat(MAX_NATIVE_RICH_REPORT_BYTES) }, undefined, {
+      { observation: "x".repeat(MAX_NATIVE_RICH_REPORT_BYTES) }, { status: "passed" }, {
         releaseRelay: async () => {},
         closeClient: async () => {},
         finalEvidence: () => ({ finalAllocationBytes: 0 }),
@@ -66,6 +66,39 @@ test("native rich report overflow publishes a bounded failure report", async () 
       cleanupFailures: [],
       reportFailure: `native rich report exceeds ${MAX_NATIVE_RICH_REPORT_BYTES} bytes`,
       passed: false,
+    })
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test("thrown undefined is retained as a functional failure and cannot pass", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rw-native-rich-undefined-"))
+  const sentinel = Symbol("not thrown")
+  let thrown: unknown = sentinel
+  try {
+    try {
+      await finishNativeRichProbe(directory, {}, { status: "failed", failure: undefined }, {
+        releaseRelay: async () => {}, closeClient: async () => {}, finalEvidence: () => ({}),
+      })
+    } catch (error) { thrown = error }
+    expect(thrown).toBeUndefined()
+    expect(JSON.parse(await readFile(join(directory, "native-rich.json"), "utf8"))).toMatchObject({
+      failure: "undefined", cleanupFailures: [], passed: false,
+    })
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test("failed final evidence is reported after both cleanup owners run", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rw-native-rich-final-evidence-"))
+  const calls: string[] = []
+  try {
+    await expect(finishNativeRichProbe(directory, {}, { status: "passed" }, {
+      releaseRelay: async () => { calls.push("release") },
+      closeClient: async () => { calls.push("close") },
+      finalEvidence: () => { throw new Error("snapshot failed") },
+    })).rejects.toThrow("settlement failed")
+    expect(calls).toEqual(["release", "close"])
+    expect(JSON.parse(await readFile(join(directory, "native-rich.json"), "utf8"))).toMatchObject({
+      failure: null, cleanupFailures: [], reportFailure: "snapshot failed", passed: false,
     })
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

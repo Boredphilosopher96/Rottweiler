@@ -10,6 +10,14 @@ interface NativeRichOwners {
   readonly finalEvidence: () => Record<string, unknown>
 }
 
+export type NativeRichFunctionalOutcome =
+  | { readonly status: "passed" }
+  | { readonly status: "failed"; readonly failure: unknown }
+
+type Attempt<T> =
+  | { readonly status: "succeeded"; readonly value: T }
+  | { readonly status: "failed"; readonly failure: unknown }
+
 function utf8Prefix(value: string, maximumBytes: number): string {
   if (Buffer.byteLength(value) <= maximumBytes) return value
   let low = 0
@@ -37,7 +45,7 @@ function failureDetails(error: unknown): string[] {
 export async function finishNativeRichProbe(
   directory: string,
   evidence: Record<string, unknown>,
-  functionalFailure: unknown,
+  functional: NativeRichFunctionalOutcome,
   owners: NativeRichOwners,
 ): Promise<void> {
   const cleanupCauses: unknown[] = []
@@ -53,45 +61,51 @@ export async function finishNativeRichProbe(
     }
   }
 
-  let reportFailure: unknown
-  let finalEvidence: Record<string, unknown> = {}
-  try { finalEvidence = owners.finalEvidence() }
-  catch (error) { reportFailure = error }
-  const firstFailure = functionalFailure === undefined ? null : failureText(functionalFailure)
+  let finalEvidence: Attempt<Record<string, unknown>>
+  try { finalEvidence = { status: "succeeded", value: owners.finalEvidence() } }
+  catch (error) { finalEvidence = { status: "failed", failure: error } }
+  const firstFailure = functional.status === "failed" ? failureText(functional.failure) : null
+  const finalEvidenceFailure = finalEvidence.status === "failed" ? failureText(finalEvidence.failure) : null
   let report: Record<string, unknown> = {
     schemaVersion: 1,
     pid: process.pid,
     ...evidence,
-    ...finalEvidence,
+    ...(finalEvidence.status === "succeeded" ? finalEvidence.value : {}),
     failure: firstFailure,
     cleanupFailures,
-    passed: functionalFailure === undefined && cleanupCauses.length === 0 && reportFailure === undefined,
+    ...(finalEvidenceFailure === null ? {} : { reportFailure: finalEvidenceFailure }),
+    passed: functional.status === "passed" && cleanupCauses.length === 0
+      && finalEvidence.status === "succeeded",
   }
   let encoded: Buffer
+  let encoding: Attempt<void> = { status: "succeeded", value: undefined }
   try {
     encoded = Buffer.from(JSON.stringify(report) + "\n")
     if (encoded.byteLength > MAX_NATIVE_RICH_REPORT_BYTES) {
       throw new Error(`native rich report exceeds ${MAX_NATIVE_RICH_REPORT_BYTES} bytes`)
     }
   } catch (error) {
-    reportFailure ??= error
+    encoding = { status: "failed", failure: error }
     report = {
       schemaVersion: 1,
       pid: process.pid,
       failure: firstFailure,
       cleanupFailures,
-      reportFailure: failureText(reportFailure),
+      reportFailure: finalEvidenceFailure ?? failureText(error),
       passed: false,
     }
     encoded = Buffer.from(JSON.stringify(report) + "\n")
   }
 
-  let writeFailure: unknown
-  try { await writeFile(join(directory, "native-rich.json"), encoded, { mode: 0o600 }) }
-  catch (error) { writeFailure = error }
-  if (functionalFailure !== undefined) throw functionalFailure
+  let write: Attempt<void>
+  try {
+    await writeFile(join(directory, "native-rich.json"), encoded, { mode: 0o600 })
+    write = { status: "succeeded", value: undefined }
+  } catch (error) { write = { status: "failed", failure: error } }
+  if (functional.status === "failed") throw functional.failure
   const finalFailures = [...cleanupCauses]
-  if (reportFailure !== undefined) finalFailures.push(reportFailure)
-  if (writeFailure !== undefined) finalFailures.push(writeFailure)
+  if (finalEvidence.status === "failed") finalFailures.push(finalEvidence.failure)
+  if (encoding.status === "failed") finalFailures.push(encoding.failure)
+  if (write.status === "failed") finalFailures.push(write.failure)
   if (finalFailures.length > 0) throw new AggregateError(finalFailures, "native rich probe settlement failed")
 }

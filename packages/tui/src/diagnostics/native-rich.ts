@@ -1,7 +1,7 @@
 import type { ClientCommand } from "../protocol"
 import { connectedApp, requireThat } from "./connected-app"
 import { nativeRichInput } from "./connected-input"
-import { finishNativeRichProbe } from "./native-rich-report"
+import { finishNativeRichProbe, type NativeRichFunctionalOutcome } from "./native-rich-report"
 
 /** A real SDK process and journal supply these surfaces through the normal client runtime. */
 export async function runNativeRichProbe(directory: string): Promise<void> {
@@ -9,7 +9,7 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
   let input: Awaited<ReturnType<typeof nativeRichInput>>
   try { input = await nativeRichInput(directory) }
   catch (error) {
-    return finishNativeRichProbe(directory, { actions }, error, {
+    return finishNativeRichProbe(directory, { actions }, { status: "failed", failure: error }, {
       releaseRelay: async () => {}, closeClient: async () => {}, finalEvidence: () => ({}),
     })
   }
@@ -23,7 +23,7 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
       }
     }, true)
   } catch (error) {
-    return finishNativeRichProbe(directory, { actions }, error, {
+    return finishNativeRichProbe(directory, { actions }, { status: "failed", failure: error }, {
       releaseRelay: async () => {}, closeClient: async () => {}, finalEvidence: () => ({}),
     })
   }
@@ -52,7 +52,7 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
     requireThat(actions[count - 1]?.request.action_id === "advance", "wrong native action")
     setup.mockInput.pressEscape(); await until("closed action surface", () => !app.outputViewer.visible)
   }
-  let failure: unknown
+  let functional: NativeRichFunctionalOutcome = { status: "passed" }
   try {
     await until("authenticated native driver", client.ready)
     app.composer.value = "/rich-workflow start"; await app.composer.submit()
@@ -122,8 +122,8 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
     await until("actual disconnect retires native contribution", () => app.state.connection.phase !== "connected" && nodes.every(node => node.isDestroyed))
     requireThat(app.outputViewer.actions.options.length === 0, "disconnected native contribution retained action authority")
     observations.relay = await control("status")
-  } catch (error) { failure = error }
-  await finishNativeRichProbe(directory, { ...observations, actions }, failure, {
+  } catch (error) { functional = { status: "failed", failure: error } }
+  await finishNativeRichProbe(directory, { ...observations, actions }, functional, {
     releaseRelay: async () => { await control("release") },
     closeClient: client.close,
     finalEvidence: () => ({ terminal: client.terminal.snapshot,
