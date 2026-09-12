@@ -12,6 +12,7 @@ use super::*;
 mod command_receipts;
 mod fork;
 mod fork_admission;
+mod interactive;
 mod search;
 mod workspace;
 

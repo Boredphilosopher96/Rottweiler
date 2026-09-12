@@ -140,11 +140,34 @@ impl JournalCommits {
         actor: &SessionHandle,
         round: usize,
     ) {
+        self.measure_storage_pressure_inner(actor, round, MAX_BATCHES, std::future::ready(()))
+            .await;
+    }
+
+    pub(crate) async fn measure_storage_pressure_while(
+        self: &Arc<Self>,
+        actor: &SessionHandle,
+        round: usize,
+        while_saturated: impl std::future::Future<Output = ()>,
+    ) -> serde_json::Value {
+        // Leave admission for actual interactive sessions while four physical
+        // commit workers and eight waiting batches exercise storage pressure.
+        self.measure_storage_pressure_inner(actor, round, MAX_EXECUTING + 8, while_saturated)
+            .await
+    }
+
+    async fn measure_storage_pressure_inner(
+        self: &Arc<Self>,
+        actor: &SessionHandle,
+        round: usize,
+        count: usize,
+        while_saturated: impl std::future::Future<Output = ()>,
+    ) -> serde_json::Value {
         let root = Arc::new(tempfile::tempdir().expect("journal fixture"));
         let path = root.path().to_path_buf();
         let journals =
             rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-                (0..MAX_BATCHES)
+                (0..count)
                     .map(|index| {
                         SegmentedJournal::open(&path, &format!("load-{index}"))
                             .expect("open journal")
@@ -158,18 +181,20 @@ impl JournalCommits {
         let mut tasks = JoinSet::new();
         let started = Instant::now();
         submit(self, journals, &times, &stall, &root, &mut tasks);
-        assert!(
-            self.reserve(&plan("overflow")).is_err(),
-            "the next batch must be rejected"
-        );
-        await_saturation(self, &times).await;
+        if count == MAX_BATCHES {
+            assert!(
+                self.reserve(&plan("overflow")).is_err(),
+                "the next batch must be rejected"
+            );
+        }
+        await_saturation(self, &times, count).await;
         let mut observations = Observations::default();
         for _ in 0..16 {
             observations.sample(self, &times);
             observations.control(actor).await;
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
-        assert_eq!(observations.peak_queued, MAX_BATCHES - MAX_EXECUTING);
+        assert_eq!(observations.peak_queued, count - MAX_EXECUTING);
         assert!(
             times
                 .lock()
@@ -177,6 +202,16 @@ impl JournalCommits {
                 .iter()
                 .all(|time| time.durable.is_none())
         );
+        tokio::pin!(while_saturated);
+        loop {
+            observations.sample(self, &times);
+            tokio::select! {
+                () = &mut while_saturated => break,
+                () = tokio::time::sleep(Duration::from_millis(2)) => {
+                    assert!(started.elapsed() < DEADLINE, "joined client must release the finite storage barrier");
+                }
+            }
+        }
         stall.release();
         while !tasks.is_empty() {
             assert!(started.elapsed() < DEADLINE, "bounded load completion");
@@ -188,18 +223,22 @@ impl JournalCommits {
             }
         }
         let elapsed = started.elapsed();
-        tokio::time::timeout(DEADLINE, async {
-            while self.pending_jobs() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("all commit owners retired");
-        assert_eq!(self.batches.available_permits(), MAX_BATCHES);
-        assert_eq!(self.bytes.available_permits(), MAX_BYTES as usize);
+        if count == MAX_BATCHES {
+            tokio::time::timeout(DEADLINE, async {
+                while self.pending_jobs() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("all commit owners retired");
+            assert_eq!(self.batches.available_permits(), MAX_BATCHES);
+            assert_eq!(self.bytes.available_permits(), MAX_BYTES as usize);
+        }
+        // Joined clients may still own legitimate commits; only fixture jobs
+        // have joined here. Never label that as global admission retirement.
         let times = times.lock().expect("times").clone();
-        verify_reopened(root.path().to_path_buf()).await;
-        report(round, elapsed, &times, &observations);
+        verify_reopened(root.path().to_path_buf(), count).await;
+        report(round, elapsed, &times, &observations)
     }
 }
 
@@ -255,14 +294,14 @@ fn submit(
     }
 }
 
-async fn await_saturation(queue: &JournalCommits, times: &Mutex<Vec<Timing>>) {
+async fn await_saturation(queue: &JournalCommits, times: &Mutex<Vec<Timing>>, count: usize) {
     tokio::time::timeout(DEADLINE, async {
         loop {
             let ready = {
                 let times = times.lock().expect("times");
-                queue.pending_jobs() == MAX_BATCHES
+                queue.pending_jobs() >= count
                     && times.iter().filter(|time| time.executing.is_some()).count() == MAX_EXECUTING
-                    && times.iter().any(|time| time.native.is_some())
+                    && times.iter().filter(|time| time.native.is_some()).count() == MAX_EXECUTING
             };
             if ready {
                 break;
@@ -273,9 +312,9 @@ async fn await_saturation(queue: &JournalCommits, times: &Mutex<Vec<Timing>>) {
     .await
     .expect("actual owner and native worker saturated");
 }
-async fn verify_reopened(path: std::path::PathBuf) {
+async fn verify_reopened(path: std::path::PathBuf, count: usize) {
     rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
-        for index in 0..MAX_BATCHES {
+        for index in 0..count {
             let session = format!("load-{index}");
             let journal = SegmentedJournal::open(&path, &session).expect("reopen settled journal");
             let view = journal.read_view();
@@ -304,7 +343,12 @@ async fn verify_reopened(path: std::path::PathBuf) {
     .await
     .expect("reopen proof settled");
 }
-fn report(round: usize, elapsed: Duration, times: &[Timing], observed: &Observations) {
+fn report(
+    round: usize,
+    elapsed: Duration,
+    times: &[Timing],
+    observed: &Observations,
+) -> serde_json::Value {
     let queue_us = times
         .iter()
         .map(|time| {
@@ -333,19 +377,18 @@ fn report(round: usize, elapsed: Duration, times: &[Timing], observed: &Observat
                 .as_micros()
         })
         .collect::<Vec<_>>();
-    println!(
-        "journal_pressure {}",
-        serde_json::json!({
-            "schema_version": 1, "round": round, "batches": MAX_BATCHES, "events_per_batch": EVENTS,
-            "max_admitted_batches": MAX_BATCHES, "max_admitted_bytes": MAX_BYTES, "max_executing": MAX_EXECUTING,
-            "injected_storage_delay_us": DELAY.as_micros(), "elapsed_us": elapsed.as_micros(),
-            "events_per_second_including_injected_stall": f64::from(u32::try_from(MAX_BATCHES * EVENTS).expect("bounded event count")) / elapsed.as_secs_f64(),
-            "peak_admitted_batches": observed.peak_items, "peak_admitted_bytes": observed.peak_bytes,
-            "peak_admitted_not_executing_batches": observed.peak_queued,
-            "sampled_oldest_admitted_not_executing_us": observed.oldest_queued_us,
-            "admitted_to_executing_us": queue_us, "native_start_to_durable_us": durable_us,
-            "admitted_to_ack_us": ack_us, "independent_idle_interrupt_ack_us": observed.control_us,
-            "reopened_exact_sequence_and_payload": true, "all_admission_refunded": true
-        })
-    );
+    let result = serde_json::json!({
+        "schema_version": 1, "round": round, "batches": times.len(), "events_per_batch": EVENTS,
+        "max_admitted_batches": MAX_BATCHES, "max_admitted_bytes": MAX_BYTES, "max_executing": MAX_EXECUTING,
+        "injected_storage_delay_us": DELAY.as_micros(), "elapsed_us": elapsed.as_micros(),
+        "events_per_second_including_injected_stall": f64::from(u32::try_from(times.len() * EVENTS).expect("bounded event count")) / elapsed.as_secs_f64(),
+        "peak_admitted_batches": observed.peak_items, "peak_admitted_bytes": observed.peak_bytes,
+        "peak_admitted_not_executing_batches": observed.peak_queued,
+        "sampled_oldest_admitted_not_executing_us": observed.oldest_queued_us,
+        "admitted_to_executing_us": queue_us, "native_start_to_durable_us": durable_us,
+        "admitted_to_ack_us": ack_us, "independent_idle_interrupt_ack_us": observed.control_us,
+        "reopened_exact_sequence_and_payload": true, "all_admission_refunded": times.len() == MAX_BATCHES, "fixture_jobs_physically_retired": true
+    });
+    println!("journal_pressure {result}");
+    result
 }

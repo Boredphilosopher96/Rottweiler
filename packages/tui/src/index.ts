@@ -70,6 +70,13 @@ async function main(): Promise<void> {
     await runReviewRecycleProbe(reviewProbeDirectory, mode, view)
     return
   }
+  const joinedDirectory = process.env.ROTTWEILER_CLIENT_JOINED_DIRECTORY
+  if (joinedDirectory !== undefined) {
+    if (!joinedDirectory) throw new Error("joined probe requires a private directory")
+    const { runJoinedInteractive } = await import("./diagnostics/joined-interactive")
+    await runJoinedInteractive(joinedDirectory)
+    return
+  }
   const nativeRichDirectory = process.env.ROTTWEILER_CLIENT_NATIVE_RICH_DIRECTORY
   if (nativeRichDirectory !== undefined) {
     if (!nativeRichDirectory) throw new Error("native rich probe requires a private directory")
