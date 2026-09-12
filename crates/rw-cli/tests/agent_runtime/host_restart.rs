@@ -8,6 +8,43 @@ use std::os::unix::net::UnixStream;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const REPLY_LIMIT: usize = 128 * 1024;
 
+// Diagnostics never replace the first process failure or materialize an unbounded log.
+fn failure_diagnostic(path: &Path) -> String {
+    const LIMIT: usize = 64 * 1024;
+    let read = (|| {
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take((LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        Ok::<_, std::io::Error>(bytes)
+    })();
+    match read {
+        Ok(mut bytes) => {
+            let truncated = bytes.len() > LIMIT;
+            bytes.truncate(LIMIT);
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&bytes),
+                if truncated { " [truncated]" } else { "" }
+            )
+        }
+        Err(error) => format!("[diagnostic unavailable: {error}]"),
+    }
+}
+
+#[test]
+fn restart_diagnostics_keep_bounded_first_cause_and_survive_missing_logs() {
+    let root = tempdir().expect("diagnostic fixture");
+    let path = root.path().join("failure.log");
+    fs::write(&path, format!("first cause\n{}", "x".repeat(128 * 1024))).expect("diagnostic bytes");
+    let diagnostic = failure_diagnostic(&path);
+    assert!(diagnostic.starts_with("first cause\n"));
+    assert!(diagnostic.ends_with(" [truncated]"));
+    assert_eq!(diagnostic.len(), 64 * 1024 + " [truncated]".len());
+    fs::remove_file(&path).expect("remove diagnostic");
+    assert!(failure_diagnostic(&path).starts_with("[diagnostic unavailable:"));
+}
+
 #[derive(serde::Deserialize)]
 struct Credentials {
     client_id: ClientId,
@@ -112,7 +149,7 @@ impl NativeHost {
             assert!(
                 process.try_status()?.is_none(),
                 "engine exited before readiness: {}",
-                fs::read_to_string(root.join(format!("{phase}.log")))?
+                failure_diagnostic(&root.join(format!("{phase}.log")))
             );
             if socket.exists()
                 && let Ok(token) = fs::read_to_string(&token_file)

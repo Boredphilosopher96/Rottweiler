@@ -14,7 +14,7 @@ use rw_types::{
 };
 use std::{
     fs::{self, OpenOptions},
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -154,16 +154,82 @@ fn spawn(root: &Path, phase: &str) -> Result<BlockingProcess, Box<dyn std::error
     )?)
 }
 
-fn await_ready(child: &BlockingProcess, ready: impl Fn() -> bool) -> TestResult {
+fn failure_diagnostic(path: &Path) -> String {
+    const LIMIT: usize = 64 * 1024;
+    let read = (|| {
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take((LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        Ok::<_, std::io::Error>(bytes)
+    })();
+    match read {
+        Ok(mut bytes) => {
+            let truncated = bytes.len() > LIMIT;
+            bytes.truncate(LIMIT);
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&bytes),
+                if truncated { " [truncated]" } else { "" }
+            )
+        }
+        Err(error) => format!("[diagnostic unavailable: {error}]"),
+    }
+}
+
+fn await_ready(
+    child: &BlockingProcess,
+    diagnostics: &Path,
+    ready: impl Fn() -> bool,
+) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !ready() {
-        assert!(
-            child.try_status()?.is_none(),
-            "task runner exited before readiness"
-        );
-        assert!(Instant::now() < deadline, "task runner readiness timed out");
+    loop {
+        if let Some(status) = child.try_status()? {
+            return Err(format!(
+                "task runner exited before readiness ({status}): {}",
+                failure_diagnostic(diagnostics)
+            )
+            .into());
+        }
+        // A published marker cannot turn an already failed child into a live-runner proof.
+        if ready() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "task runner readiness timed out: {}",
+                failure_diagnostic(diagnostics)
+            )
+            .into());
+        }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn completed_child_cannot_pass_runner_readiness_from_an_existing_marker() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let diagnostics = root.path().join("initial.log");
+    fs::write(
+        &diagnostics,
+        format!("first runner failure\n{}", "x".repeat(128 * 1024)),
+    )?;
+    let mut child = BlockingProcess::spawn(Command::new("/bin/sh").args(["-c", "exit 7"]))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_status()?.is_none() {
+        assert!(Instant::now() < deadline, "exit fixture timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let result = await_ready(&child, &diagnostics, || true);
+    child.settle();
+    let error = result
+        .expect_err("existing marker cannot hide an exited child")
+        .to_string();
+    assert!(error.contains("first runner failure"));
+    assert!(error.contains("[truncated]"));
+    assert!(error.len() < 64 * 1024 + 256);
+    fs::remove_file(&diagnostics)?;
+    assert!(failure_diagnostic(&diagnostics).starts_with("[diagnostic unavailable:"));
     Ok(())
 }
 
@@ -200,7 +266,9 @@ fn parent_run(root: &Path) -> TestResult {
         "description = \"restart\"\n[[step]]\nid = \"plan\"\nagent = \"plan\"\n[[step]]\nid = \"build\"\nagent = \"general\"\nneeds = [\"plan\"]\n[[step]]\nid = \"review\"\nagent = \"explore\"\nneeds = [\"build\"]\n",
     )?;
     let mut first = spawn(root, "initial")?;
-    await_ready(&first, || root.join("effect-ready").exists())?;
+    await_ready(&first, &root.join("initial.log"), || {
+        root.join("effect-ready").exists()
+    })?;
     assert_eq!(fs::read_to_string(root.join("effects"))?, "plan\nbuild\n");
     first.settle(); // SIGKILL and joined group retirement, without runner destructors.
     let mut restarted = spawn(root, "restart")?;
@@ -216,7 +284,7 @@ fn parent_run(root: &Path) -> TestResult {
     assert!(
         status.success(),
         "restart failed: {}",
-        fs::read_to_string(root.join("restart.log"))?
+        failure_diagnostic(&root.join("restart.log"))
     );
     assert_eq!(fs::read_to_string(root.join("effects"))?, "plan\nbuild\n");
     Ok(())
