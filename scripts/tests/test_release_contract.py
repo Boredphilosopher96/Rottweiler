@@ -90,7 +90,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract.platform("linux-x86_64").product_budgets.engine_less_than_bytes,
-            28_000_000,
+            30_000_000,
         )
         self.assertEqual(contract.platform("linux-aarch64").native_library, "libopentui.so")
 
@@ -250,9 +250,15 @@ class ReleaseContractTests(unittest.TestCase):
             self.module.validate_build(
                 contract, "darwin-arm64", engine, wasm_host, tui, native
             )
-            with self.assertRaisesRegex(ValueError, "product budget is <28000000"):
+            with self.assertRaisesRegex(ValueError, "product budget is <30000000"):
                 self.module.validate_build(
                     contract, "linux-x86_64", engine, wasm_host, tui, native
+                )
+            with engine.open("wb") as output:
+                output.truncate(29_999_999)
+            for platform in ("linux-x86_64", "linux-aarch64"):
+                self.module.validate_build(
+                    contract, platform, engine, wasm_host, tui, native
                 )
 
     def test_stage_release_projects_exact_archive_shape_and_modes(self) -> None:

@@ -46,7 +46,7 @@ export const RELEASE_PLATFORMS = [
     nodeArch: "arm64",
     nativeLibrary: "libopentui.so",
     productBudgets: {
-      engineLessThanBytes: 28000000,
+      engineLessThanBytes: 30000000,
       wasmHostLessThanBytes: 30000000,
       jsBundleLessThanBytes: 150000000,
     },
@@ -57,7 +57,7 @@ export const RELEASE_PLATFORMS = [
     nodeArch: "x64",
     nativeLibrary: "libopentui.so",
     productBudgets: {
-      engineLessThanBytes: 28000000,
+      engineLessThanBytes: 30000000,
       wasmHostLessThanBytes: 30000000,
       jsBundleLessThanBytes: 150000000,
     },

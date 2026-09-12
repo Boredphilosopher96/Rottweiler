@@ -182,7 +182,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("from release_contract import load_contract", gate)
         self.assertIn("product_budgets.engine_less_than_bytes", gate)
         self.assertNotIn("40_000_000", gate)
-        self.assertNotIn("28_000_000", gate)
+        self.assertNotRegex(gate, r"binary_limit\s*=\s*[0-9][0-9_]*")
         self.assertLess(
             gate.index("evidence_temporary.replace(evidence)"),
             gate.index("if smoke and start_p50 >= 80"),

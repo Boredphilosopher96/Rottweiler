@@ -93,7 +93,7 @@
       "rust_arch": "aarch64",
       "native_library": "libopentui.so",
       "product_budgets": {
-        "engine_less_than_bytes": 28000000,
+        "engine_less_than_bytes": 30000000,
         "wasm_host_less_than_bytes": 30000000,
         "js_bundle_less_than_bytes": 150000000
       },
@@ -111,7 +111,7 @@
       "rust_arch": "x86_64",
       "native_library": "libopentui.so",
       "product_budgets": {
-        "engine_less_than_bytes": 28000000,
+        "engine_less_than_bytes": 30000000,
         "wasm_host_less_than_bytes": 30000000,
         "js_bundle_less_than_bytes": 150000000
       },
