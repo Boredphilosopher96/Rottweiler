@@ -294,9 +294,9 @@ fn enospc_at_blob_write_and_sync_cleans_staging_and_reconciles_quota() -> TestRe
         let fixture = Fixture::new(8)?;
         let store = fixture.store("session")?;
         let guard = install_disk_full_fault(fault);
-        let error = fixture
-            .capture(&store, 1, b"failure")
-            .expect_err("ENOSPC cannot publish a checkpoint");
+        let Err(error) = fixture.capture(&store, 1, b"failure") else {
+            panic!("ENOSPC cannot publish a checkpoint");
+        };
         assert!(matches!(
             error,
             CheckpointError::Io(ref error)
