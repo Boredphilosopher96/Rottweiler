@@ -62,6 +62,7 @@ impl PluginLauncher for FailSecondPluginLauncher {
         &self,
         config: &rw_ext::PluginProcessConfig,
         _profile: &rw_ext::PluginSandboxProfile,
+        _activation: &rw_ext::PluginActivation,
     ) -> std::result::Result<rw_ext::LaunchedPluginProcess, rw_ext::PluginLaunchError> {
         if self.launches.fetch_add(1, Ordering::AcqRel) == 1 {
             return Err(rw_ext::PluginLaunchError::Rejected(
@@ -103,13 +104,20 @@ impl PluginLauncher for FailSecondPluginLauncher {
                             .expect("response write");
                     }
                     rw_plugin_protocol::RpcFrame::Request(request)
-                        if request.method == rw_plugin_protocol::METHOD_SHUTDOWN =>
+                        if request.method == rw_plugin_protocol::METHOD_SHUTDOWN
+                            || request.method == rw_plugin_protocol::METHOD_HOOK_INVOKE =>
                     {
                         let response =
                             rw_plugin_protocol::RpcFrame::Success(rw_plugin_protocol::RpcSuccess {
                                 jsonrpc: rw_plugin_protocol::JSON_RPC_VERSION.to_owned(),
                                 id: request.id,
-                                result: Value::Null,
+                                result: if request.method == rw_plugin_protocol::METHOD_HOOK_INVOKE
+                                {
+                                    serde_json::to_value(rw_ext::HookDirective::Continue {})
+                                        .expect("hook directive")
+                                } else {
+                                    Value::Null
+                                },
                             });
                         output
                             .write_all(

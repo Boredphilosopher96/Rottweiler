@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
-const PROOF_DEADLINE: Duration = Duration::from_secs(5);
+const PROOF_DEADLINE: Duration = rw_ext::PLUGIN_ACTIVATION_SETTLEMENT_TIMEOUT;
 
 #[derive(Clone)]
 enum Phase {
@@ -79,19 +79,22 @@ impl Drop for ActivationWaiter {
 
 #[async_trait]
 impl PluginEndpoint for DormantPluginEndpoint {
+    fn is_ready(&self) -> bool {
+        matches!(self.generation.snapshot(), Phase::Ready(_))
+    }
     fn metadata(&self) -> &PluginEndpointMetadata {
         &self.generation.recipe.metadata
     }
 
     async fn connect(
         &self,
-        cancellation: &CancellationToken,
+        activation: &rw_ext::PluginActivation,
     ) -> Result<PluginConnection, PluginRpcError> {
-        if cancellation.is_cancelled() {
+        if activation.is_cancelled() {
             return Err(cancelled());
         }
         let _waiter_slot = self.generation.recipe.budget.waiter()?;
-        self.generation.begin_activation()?;
+        self.generation.begin_activation(activation.deadline())?;
         let mut waiter = ActivationWaiter {
             generation: Arc::clone(&self.generation),
             armed: true,
@@ -110,7 +113,7 @@ impl PluginEndpoint for DormantPluginEndpoint {
                     waiter.armed = false;
                     return Err(proof.err().unwrap_or(request));
                 }
-                Phase::Starting { deadline } => deadline,
+                Phase::Starting { deadline } => deadline.min(activation.deadline()),
                 Phase::Closing => {
                     let proof = self.generation.wait_closed().await;
                     waiter.armed = false;
@@ -120,7 +123,7 @@ impl PluginEndpoint for DormantPluginEndpoint {
             };
             tokio::select! {
                 biased;
-                () = cancellation.cancelled() => {
+                () = activation.cancellation().cancelled() => {
                     self.generation.begin_close();
                     let proof = self.generation.wait_closed().await;
                     waiter.armed = false;
@@ -163,7 +166,7 @@ impl Generation {
             .clone()
     }
 
-    fn begin_activation(self: &Arc<Self>) -> Result<(), PluginRpcError> {
+    fn begin_activation(self: &Arc<Self>, deadline: Instant) -> Result<(), PluginRpcError> {
         let mut phase = self
             .phase
             .lock()
@@ -172,7 +175,7 @@ impl Generation {
             return Ok(());
         }
         let lease = self.recipe.budget.admit()?;
-        let deadline = Instant::now() + ACTIVATION_DEADLINE;
+        let deadline = deadline.min(Instant::now() + ACTIVATION_DEADLINE);
         self.resources
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

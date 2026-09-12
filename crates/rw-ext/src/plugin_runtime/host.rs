@@ -90,7 +90,7 @@ impl PluginHost {
         expected_manifest: PluginManifest,
         push_handler: Arc<dyn PushHandler>,
         redactor: Arc<dyn PluginBoundaryRedactor>,
-        cancellation: &CancellationToken,
+        activation: &crate::PluginActivation,
     ) -> Result<Self, PluginHostError> {
         Self::launch_approved_with_http(
             launcher,
@@ -102,7 +102,7 @@ impl PluginHost {
             push_handler,
             Arc::new(DenyPluginProviderHttpHandler),
             redactor,
-            cancellation,
+            activation,
         )
         .await
     }
@@ -130,19 +130,19 @@ impl PluginHost {
         push_handler: Arc<dyn PushHandler>,
         provider_http: Arc<dyn PluginProviderHttpHandler>,
         redactor: Arc<dyn PluginBoundaryRedactor>,
-        cancellation: &CancellationToken,
+        activation: &crate::PluginActivation,
     ) -> Result<Self, PluginHostError> {
         let (profile, continuation_provenance) =
             verify_approved_launch(store, config, origin, approved_roots, &expected_manifest)
                 .await?;
-        if cancellation.is_cancelled() {
+        if activation.is_cancelled() {
             return Err(PluginHostError::Rpc(rpc_error(
                 "cancelled",
                 "plugin activation cancelled before launch",
             )));
         }
         let child = launcher
-            .launch(config, &profile)
+            .launch(config, &profile, activation)
             .await
             .map_err(|error| redact_launch_error(error, redactor.as_ref()))?;
         if child.executable_identity != *config.executable_identity() {
@@ -164,25 +164,7 @@ impl PluginHost {
             redactor,
             DEFAULT_REQUEST_TIMEOUT,
         );
-        let initialize = serde_json::to_value(InitializeParams {
-            host: rw_plugin_protocol::PLUGIN_HOST_ID.to_owned(),
-            protocol: expected_manifest.protocol,
-            max_frame_bytes: MAX_FRAME_BYTES,
-            capabilities: vec!["provider-models".to_owned(), "provider-http".to_owned()],
-        })
-        .map_err(|error| PluginHostError::Rpc(rpc_error("invalid_request", &error.to_string())))?;
-        let started = std::time::Instant::now();
-        tracing::debug!(target: "rw_performance", stage = "plugin.initialize", phase = "begin", plugin = %expected_manifest.name);
-        let result = client
-            .request_cancellable(METHOD_INITIALIZE, initialize, cancellation)
-            .await;
-        tracing::debug!(target: "rw_performance", stage = "plugin.initialize", plugin = %expected_manifest.name,
-            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-            succeeded = result.is_ok(), "plugin activation stage finished");
-        let initialized: PluginManifest = match result.and_then(|value| {
-            serde_json::from_value(value)
-                .map_err(|error| rpc_error("invalid_manifest", &error.to_string()))
-        }) {
+        let initialized = match initialize_approved(&client, &expected_manifest, activation).await {
             Ok(manifest) => manifest,
             Err(error) => {
                 settle_failed_initialization(&client).await?;
@@ -279,6 +261,7 @@ pub(crate) async fn probe_plugin_manifest(
                 approved_roots: roots,
                 allowed_domains: Vec::new(),
             },
+            &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await?;
     if child.executable_identity != *config.executable_identity() {
@@ -381,6 +364,39 @@ fn prepare_approved_launch(
         .map_err(|error| PluginHostError::Protocol(error.to_string()))?;
     let provenance = rw_providers::ContinuationProvenance::bind(&[identity.as_bytes(), &roots]);
     Ok((profile, provenance))
+}
+
+async fn initialize_approved(
+    client: &JsonRpcPluginClient,
+    expected_manifest: &PluginManifest,
+    activation: &crate::PluginActivation,
+) -> Result<PluginManifest, PluginRpcError> {
+    let initialize = serde_json::to_value(InitializeParams {
+        host: rw_plugin_protocol::PLUGIN_HOST_ID.to_owned(),
+        protocol: expected_manifest.protocol,
+        max_frame_bytes: MAX_FRAME_BYTES,
+        capabilities: vec!["provider-models".to_owned(), "provider-http".to_owned()],
+    })
+    .map_err(|error| rpc_error("invalid_request", &error.to_string()))?;
+    let started = std::time::Instant::now();
+    tracing::debug!(target: "rw_performance", stage = "plugin.initialize", phase = "begin", plugin = %expected_manifest.name);
+    let result = tokio::time::timeout_at(
+        activation.deadline(),
+        client.request_cancellable(METHOD_INITIALIZE, initialize, activation.cancellation()),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(rpc_error(
+            "timeout",
+            "plugin readiness deadline elapsed during initialization",
+        ))
+    });
+    tracing::debug!(target: "rw_performance", stage = "plugin.initialize", plugin = %expected_manifest.name,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = result.is_ok(), "plugin activation stage finished");
+    result.and_then(|value| {
+        serde_json::from_value(value)
+            .map_err(|error| rpc_error("invalid_manifest", &error.to_string()))
+    })
 }
 
 async fn verify_approved_launch(

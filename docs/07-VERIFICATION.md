@@ -756,6 +756,17 @@ runtime `payloads`/`payload_tests` fixtures; they do not compile native artifact
 inside a measurement window.
 
 
+### Native hook readiness
+
+Native hook readiness is exercised with a paused clock through the real dormant
+generation and RPC initialization owner: a six-second delayed launch precedes the
+unchanged five-second callback allowance. Dispatcher oracles separately cover
+transformed tool selection, multiple cold generations sharing one absolute
+readiness deadline, aggregate callback exhaustion, ready handlers after readiness
+expiry, and caller-drop custody until effect retirement. These deterministic
+oracles do not claim a measured cold operating-system startup percentile. The
+native headless Ask workflow retains its actual executable and approval path.
+
 ### Native Linux code generation
 
 `scripts/native_profile.py` owns native release optimization and Rust flags;

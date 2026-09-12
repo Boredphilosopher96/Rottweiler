@@ -1009,6 +1009,13 @@ impl RpcHookHandler {
 
 #[async_trait]
 impl HookHandler for RpcHookHandler {
+    fn readiness(&self) -> Option<&dyn crate::HookReadiness> {
+        if self.endpoint.is_ready() {
+            None
+        } else {
+            Some(self)
+        }
+    }
     async fn settle_effects(&self) -> std::result::Result<(), crate::HookError> {
         self.endpoint
             .settle_effects()
@@ -1019,7 +1026,9 @@ impl HookHandler for RpcHookHandler {
         let hook = invocation.event();
         let connection = self
             .endpoint
-            .connect(invocation.cancellation())
+            .connect(&crate::PluginActivation::new(
+                invocation.cancellation().clone(),
+            ))
             .await
             .map_err(|error| HookError::new(error.code, error.message))?;
         connection
@@ -1051,6 +1060,17 @@ impl HookHandler for RpcHookHandler {
             })?;
         serde_json::from_value::<HookDirective>(result)
             .map_err(|error| HookError::new("invalid_response", error.to_string()))
+    }
+}
+
+#[async_trait]
+impl crate::HookReadiness for RpcHookHandler {
+    async fn ready(&self, activation: &crate::PluginActivation) -> Result<(), HookError> {
+        self.endpoint
+            .connect(activation)
+            .await
+            .map(|_| ())
+            .map_err(|error| HookError::new(error.code, error.message))
     }
 }
 

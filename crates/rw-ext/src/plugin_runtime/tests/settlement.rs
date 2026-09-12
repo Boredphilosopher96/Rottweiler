@@ -157,7 +157,7 @@ async fn approved_handshake_registers_custom_tool_and_reaps_on_shutdown() {
             manifest.clone(),
             Arc::new(DenyPushHandler),
             Arc::new(NoopPluginBoundaryRedactor),
-            &rw_tools::CancellationToken::default(),
+            &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await
         .expect("launch"),
@@ -211,7 +211,7 @@ async fn dropping_launched_host_kills_process_without_explicit_shutdown() {
         manifest,
         Arc::new(DenyPushHandler),
         Arc::new(NoopPluginBoundaryRedactor),
-        &rw_tools::CancellationToken::default(),
+        &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
     )
     .await
     .expect("launch");
@@ -250,7 +250,7 @@ async fn shutdown_uses_effect_proof_instead_of_kill_attempt_outcome() {
             manifest,
             Arc::new(DenyPushHandler),
             Arc::new(NoopPluginBoundaryRedactor),
-            &rw_tools::CancellationToken::default(),
+            &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await
         .expect("launch");
@@ -777,7 +777,7 @@ async fn cancelled_launch_keeps_blocking_approval_owner_without_blocking_callbac
             manifest(),
             Arc::new(DenyPushHandler),
             Arc::new(NoopPluginBoundaryRedactor),
-            &rw_tools::CancellationToken::default(),
+            &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await
     });
@@ -846,7 +846,7 @@ async fn initialization_cancellation_and_caller_loss_keep_admission_until_retire
                     manifest,
                     Arc::new(DenyPushHandler),
                     Arc::new(NoopPluginBoundaryRedactor),
-                    &cancellation,
+                    &crate::PluginActivation::new(cancellation.clone()),
                 )
                 .await
             }
@@ -945,7 +945,7 @@ async fn failed_initialization_joins_admitted_host_callback_before_returning() {
                 expected,
                 push,
                 Arc::new(NoopPluginBoundaryRedactor),
-                &CancellationToken::default(),
+                &crate::PluginActivation::new(CancellationToken::default()),
             )
             .await
         }

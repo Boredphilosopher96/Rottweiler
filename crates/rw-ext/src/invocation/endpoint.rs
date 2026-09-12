@@ -34,18 +34,21 @@ impl ManagedEndpoint {
 }
 #[async_trait]
 impl PluginEndpoint for ManagedEndpoint {
+    fn is_ready(&self) -> bool {
+        self.inner.is_ready()
+    }
     fn metadata(&self) -> &PluginEndpointMetadata {
         self.inner.metadata()
     }
     async fn connect(
         &self,
-        cancellation: &CancellationToken,
+        activation: &crate::PluginActivation,
     ) -> Result<PluginConnection, PluginRpcError> {
         let gate = upgrade(&self.gate)?;
         let lease = gate.admit(self.generation)?;
         let connection = tokio::select! {
             ()=lease.cancellation.cancelled()=>Err(error("cancelled","extension generation is retiring")),
-            result=self.inner.connect(cancellation)=>result,
+            result=self.inner.connect(activation)=>result,
         }?;
         let client = wrap_client(
             self.gate.clone(),

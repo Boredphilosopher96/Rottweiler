@@ -195,8 +195,11 @@ impl PluginLauncher for TrackingDirectLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        activation: &crate::PluginActivation,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
-        let launched = TestDirectLauncher.launch(config, profile).await?;
+        let launched = TestDirectLauncher
+            .launch(config, profile, activation)
+            .await?;
         *self.0.lock().expect("tracking launcher") = Some(Arc::clone(&launched.process));
         Ok(launched)
     }
@@ -395,6 +398,7 @@ impl PluginLauncher for MemoryLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        _activation: &crate::PluginActivation,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
         config
             .validate_executable_identity()
@@ -519,6 +523,7 @@ async fn mutating_child_client(root: &TempDir, timeout: Duration) -> Arc<JsonRpc
                 approved_roots: vec![root.path().to_path_buf()],
                 allowed_domains: Vec::new(),
             },
+            &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await
         .expect("fixture process");
@@ -703,7 +708,7 @@ async fn approved_fixture_host_with_http(
             push,
             provider_http,
             redactor,
-            &rw_tools::CancellationToken::default(),
+            &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await
         .expect("launch approved fixture"),

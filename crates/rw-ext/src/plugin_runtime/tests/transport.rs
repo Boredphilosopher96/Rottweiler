@@ -358,7 +358,7 @@ async fn undeclared_push_kills_and_prevents_handshake() {
         manifest,
         Arc::new(DenyPushHandler),
         Arc::new(NoopPluginBoundaryRedactor),
-        &rw_tools::CancellationToken::default(),
+        &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
     )
     .await;
     assert!(result.is_err());
@@ -485,7 +485,7 @@ async fn plugin_originated_undeclared_push_is_killed_and_reaped() {
         manifest,
         Arc::new(DenyPushHandler),
         Arc::new(NoopPluginBoundaryRedactor),
-        &rw_tools::CancellationToken::default(),
+        &crate::PluginActivation::new(rw_tools::CancellationToken::default()),
     )
     .await;
     if let Ok(host) = &host_result {

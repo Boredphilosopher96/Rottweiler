@@ -19,6 +19,7 @@ pub use rw_types::hook_contract::{
     HookClass, HookDirective, HookEvent, HookFailurePolicy, HookInput, HookPermissionDecision,
     HookTransform,
 };
+mod readiness;
 mod settlement;
 use settlement::HookRuntime;
 
@@ -230,11 +231,23 @@ impl HookError {
 /// Common handler interface used by built-ins and extensions.
 #[async_trait]
 pub trait HookHandler: Send + Sync {
+    /// A lazy native generation may require owned readiness before callbacks.
+    /// Built-ins, shell hooks and WASM execute entirely within their phase.
+    fn readiness(&self) -> Option<&dyn HookReadiness> {
+        None
+    }
+
     async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError>;
 
     /// Waits for every effect that can outlive the cancellable invocation future.
     /// The dispatcher drops that future on cancellation before requesting this proof.
     async fn settle_effects(&self) -> Result<(), HookError>;
+}
+
+/// Native setup only: no hook payload or invocation capability is available here.
+#[async_trait]
+pub trait HookReadiness: Send + Sync {
+    async fn ready(&self, activation: &crate::PluginActivation) -> Result<(), HookError>;
 }
 
 /// One recorded handler failure.
@@ -576,7 +589,7 @@ impl HookDispatcher {
         effect: Option<HookEffect>,
     ) -> Result<HookDispatchResult, HookError> {
         let event = input.event();
-        let mut result = HookDispatchResult {
+        let result = HookDispatchResult {
             input,
             permission: None,
             status: HookDispatchStatus::Completed,
@@ -585,69 +598,124 @@ impl HookDispatcher {
         let Some(hooks) = self.hooks.get(&event) else {
             return Ok(result);
         };
-        let budget = hooks
+        if !hooks
             .iter()
-            .filter(|hook| effect.is_none_or(|effect| effect == hook.registration.effect()))
-            .map(|hook| hook.registration.timeout())
-            .max()
-            .unwrap_or(HOOK_PHASE_TIMEOUT);
-        let deadline = Instant::now() + budget;
-        let settlement_deadline = deadline + HOOK_SETTLEMENT_TIMEOUT;
-        let mut input_checked = false;
-        for registered in hooks {
-            let registration = &registered.registration;
-            if effect.is_some_and(|effect| effect != registration.effect())
-                || result
-                    .input
-                    .tool_name()
-                    .is_some_and(|name| !registration.applies_to_tool(name))
-            {
-                continue;
-            }
-            if !input_checked {
-                check_size(&result.input)?;
-                input_checked = true;
-            }
-            let invoked = if Instant::now() >= deadline {
-                Err(HookError::new(
-                    "phase_timeout",
-                    "aggregate hook phase deadline elapsed",
-                ))
+            .any(|hook| selected(hook, &result.input, effect))
+        {
+            return Ok(result);
+        }
+        check_size(&result.input)?;
+        let started = std::time::Instant::now();
+        let mut readiness_elapsed = Duration::ZERO;
+        let result = execute_selected(hooks, result, effect, &mut readiness_elapsed).await;
+        tracing::debug!(target: "rw_performance", stage = "hook.execution", event = ?event,
+            elapsed_ms = started.elapsed().saturating_sub(readiness_elapsed).as_secs_f64() * 1000.0, readiness_ms = readiness_elapsed.as_secs_f64() * 1000.0, end_to_end_ms = started.elapsed().as_secs_f64() * 1000.0, succeeded = result.as_ref().is_ok_and(HookDispatchResult::completed));
+        result
+    }
+}
+
+#[tracing::instrument(
+    target = "rw_performance",
+    level = "trace",
+    name = "hook.dispatch",
+    skip_all
+)]
+async fn execute_selected(
+    hooks: &[RegisteredHook],
+    mut result: HookDispatchResult,
+    effect: Option<HookEffect>,
+    readiness_elapsed: &mut Duration,
+) -> Result<HookDispatchResult, HookError> {
+    let budget = hooks
+        .iter()
+        .filter(|hook| effect.is_none_or(|effect| effect == hook.registration.effect()))
+        .map(|hook| hook.registration.timeout())
+        .max()
+        .unwrap_or(HOOK_PHASE_TIMEOUT);
+    let mut deadline = Instant::now() + budget;
+    let readiness_deadline = Instant::now() + crate::PLUGIN_ACTIVATION_TIMEOUT;
+    for registered in hooks {
+        let registration = &registered.registration;
+        if !selected(registered, &result.input, effect) {
+            continue;
+        }
+        let invoked = if Instant::now() >= deadline {
+            Err(HookError::new(
+                "phase_timeout",
+                "aggregate hook phase deadline elapsed",
+            ))
+        } else {
+            let prepared = if registered.handler.readiness().is_some() {
+                let pause = Instant::now();
+                let measured = std::time::Instant::now();
+                let prepared = readiness::prepare_one(registered, readiness_deadline).await;
+                // Only owned readiness pauses execution. Earlier callbacks,
+                // directive validation and every dispatch gap remain charged.
+                deadline += pause.elapsed();
+                *readiness_elapsed += measured.elapsed();
+                prepared
             } else {
-                invoke_registered_hook(registered, &result.input, deadline, settlement_deadline)
-                    .await
+                Ok(())
             };
-            let outcome = invoked.and_then(|directive| {
-                apply_directive(registration.class(), &mut result, directive)
-            });
-            if let Err(error) = outcome {
-                if error.code() == "effects_unsettled" {
-                    return Err(error);
+            match prepared {
+                Ok(()) => {
+                    invoke_registered_hook(
+                        registered,
+                        &result.input,
+                        deadline,
+                        deadline + HOOK_SETTLEMENT_TIMEOUT,
+                    )
+                    .await
                 }
-                let policy = registration.failure_policy();
-                let failed_closed =
-                    policy == HookFailurePolicy::FailClosed || error.code() == "phase_timeout";
-                result.failures.push(HookFailure {
-                    hook_id: registration.id.clone(),
-                    policy,
-                    error,
-                });
-                if failed_closed {
-                    result.status = HookDispatchStatus::FailedClosed {
-                        hook_id: registration.id.clone(),
-                    };
-                    return Ok(result);
-                }
+                Err(error) => Err(error),
             }
-            if matches!(result.status, HookDispatchStatus::Blocked { .. }) {
-                if let HookDispatchStatus::Blocked { hook_id, .. } = &mut result.status {
-                    hook_id.clone_from(&registration.id);
-                }
+        };
+        let outcome = invoked
+            .and_then(|directive| apply_directive(registration.class(), &mut result, directive));
+        if let Err(error) = outcome {
+            if record_failure(registration, &mut result, error)? {
                 return Ok(result);
             }
         }
-        Ok(result)
+        if matches!(result.status, HookDispatchStatus::Blocked { .. }) {
+            if let HookDispatchStatus::Blocked { hook_id, .. } = &mut result.status {
+                hook_id.clone_from(&registration.id);
+            }
+            return Ok(result);
+        }
     }
+    Ok(result)
+}
+
+fn selected(hook: &RegisteredHook, input: &HookInput, effect: Option<HookEffect>) -> bool {
+    effect.is_none_or(|effect| effect == hook.registration.effect())
+        && input
+            .tool_name()
+            .is_none_or(|name| hook.registration.applies_to_tool(name))
+}
+
+fn record_failure(
+    registration: &HookRegistration,
+    result: &mut HookDispatchResult,
+    error: HookError,
+) -> Result<bool, HookError> {
+    if error.code() == "effects_unsettled" {
+        return Err(error);
+    }
+    let policy = registration.failure_policy();
+    let failed_closed = policy == HookFailurePolicy::FailClosed
+        || matches!(error.code(), "phase_timeout" | "readiness_timeout");
+    result.failures.push(HookFailure {
+        hook_id: registration.id.clone(),
+        policy,
+        error,
+    });
+    if failed_closed {
+        result.status = HookDispatchStatus::FailedClosed {
+            hook_id: registration.id.clone(),
+        };
+    }
+    Ok(failed_closed)
 }
 
 fn apply_directive(

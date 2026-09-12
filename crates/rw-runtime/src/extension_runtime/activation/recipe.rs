@@ -112,7 +112,7 @@ pub(super) async fn activate(
         recipe.push_handler.clone(),
         provider_http,
         redactor,
-        &generation.cancellation,
+        &rw_ext::PluginActivation::until(generation.cancellation.clone(), deadline),
     )
     .await;
     let host = match result {

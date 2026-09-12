@@ -44,7 +44,13 @@ fn controller() {
         .process_group(0)
         .spawn()
         .expect("helper");
-    let mut control = rendezvous.accept(child.id()).expect("verified connection");
+    let mut control = rendezvous
+        .accept(
+            child.id(),
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &|| false,
+        )
+        .expect("verified connection");
     if std::env::var_os("RW_LIFELINE_NO_GRANT").is_some() {
         drop(control);
         let output = child.wait_with_output().expect("ungranted helper retires");
@@ -162,7 +168,13 @@ fn normal_child_exit_preserves_nonzero_status() {
         .spawn()
         .expect("helper");
     let mut owner = Controller(child);
-    let mut control = rendezvous.accept(owner.0.id()).expect("connection");
+    let mut control = rendezvous
+        .accept(
+            owner.0.id(),
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &|| false,
+        )
+        .expect("connection");
     control.grant().expect("grant");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

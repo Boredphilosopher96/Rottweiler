@@ -41,10 +41,16 @@ impl Endpoint {
 }
 #[async_trait]
 impl PluginEndpoint for Endpoint {
+    fn is_ready(&self) -> bool {
+        false
+    }
     fn metadata(&self) -> &PluginEndpointMetadata {
         &self.metadata
     }
-    async fn connect(&self, _: &CancellationToken) -> Result<PluginConnection, PluginRpcError> {
+    async fn connect(
+        &self,
+        _: &crate::PluginActivation,
+    ) -> Result<PluginConnection, PluginRpcError> {
         Err(super::error("approval_required", "fixture remains dormant"))
     }
     async fn settle_effects(&self) -> Result<(), PluginRpcError> {
@@ -130,7 +136,7 @@ async fn dropped_waiter_keeps_retirement_owned_and_cached_clients_cannot_cross_g
     let prepared = exclusive.prepare(&raw(&fresh)).expect("fresh generation");
     assert!(
         prepared.endpoints().expect("inert bindings")[0]
-            .connect(&CancellationToken::default())
+            .connect(&crate::PluginActivation::new(CancellationToken::default()))
             .await
             .err()
             .expect("candidate paused")

@@ -2,7 +2,10 @@
 use super::{PluginProcessError, error};
 
 pub(super) enum ProcessControl {
-    Lifeline(rw_tools::PluginLifeline),
+    Lifeline {
+        control: rw_tools::PluginLifeline,
+        activation: rw_ext::PluginActivation,
+    },
     // Lower-level handoff tests deliberately inject direct child handles.
     #[cfg(test)]
     TestGroup,
@@ -10,21 +13,32 @@ pub(super) enum ProcessControl {
 impl ProcessControl {
     pub(super) fn grant(&mut self) -> Result<(), PluginProcessError> {
         match self {
-            Self::Lifeline(control) => control.grant().map_err(|cause| error(&cause.to_string())),
+            Self::Lifeline {
+                control,
+                activation,
+            } => {
+                if activation.is_cancelled() {
+                    control.stop().map_err(|cause| error(&cause.to_string()))?;
+                    return Err(error("plugin activation expired before launch grant"));
+                }
+                control.grant().map_err(|cause| error(&cause.to_string()))
+            }
             #[cfg(test)]
             Self::TestGroup => Ok(()),
         }
     }
     pub(super) fn stop(&self) -> Result<(), PluginProcessError> {
         match self {
-            Self::Lifeline(control) => control.stop().map_err(|cause| error(&cause.to_string())),
+            Self::Lifeline { control, .. } => {
+                control.stop().map_err(|cause| error(&cause.to_string()))
+            }
             #[cfg(test)]
             Self::TestGroup => Ok(()),
         }
     }
     pub(super) fn verify(&mut self) -> Result<(), PluginProcessError> {
         match self {
-            Self::Lifeline(control) => control
+            Self::Lifeline { control, .. } => control
                 .verify_settlement()
                 .map_err(|cause| error(&cause.to_string())),
             #[cfg(test)]
@@ -33,7 +47,7 @@ impl ProcessControl {
     }
     pub(super) fn direct(&self) -> bool {
         match self {
-            Self::Lifeline(_) => false,
+            Self::Lifeline { .. } => false,
             #[cfg(test)]
             Self::TestGroup => true,
         }

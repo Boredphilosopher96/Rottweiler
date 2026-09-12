@@ -84,13 +84,24 @@ impl PluginLauncher for SandboxedPluginLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        activation: &rw_ext::PluginActivation,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
+        if activation.is_cancelled() {
+            return Err(PluginLaunchError::Rejected(error(
+                "plugin activation expired before process admission",
+            )));
+        }
         let waiting = std::time::Instant::now();
         tracing::debug!(target: "rw_performance", stage = "plugin.process_admission", phase = "queued");
         let admission = rw_resources::acquire_units(
             rw_resources::ResourceClass::Process,
             PLUGIN_PROCESS_UNITS,
-            std::future::pending(),
+            async {
+                tokio::select! {
+                    () = activation.cancellation().cancelled() => {},
+                    () = tokio::time::sleep_until(activation.deadline()) => {},
+                }
+            },
         )
         .await
         .map_err(|failure| PluginLaunchError::Rejected(error(&failure.to_string())))?;
@@ -101,9 +112,17 @@ impl PluginLauncher for SandboxedPluginLauncher {
         let scratch = self.scratch.clone();
         let helper = self.helper.clone();
         let images = Arc::clone(&self.images);
+        let activation = activation.clone();
         handoff_in_worker(config.clone(), helper.clone(), admission, move || {
-            spawn_sandboxed_plugin(&owned_config, &profile, &scratch, &helper, &images)
-                .map_err(PluginLaunchError::Rejected)
+            spawn_sandboxed_plugin(
+                &owned_config,
+                &profile,
+                &scratch,
+                &helper,
+                &images,
+                &activation,
+            )
+            .map_err(PluginLaunchError::Rejected)
         })
         .await
     }
@@ -194,10 +213,14 @@ fn spawn_sandboxed_plugin(
     scratch: &Path,
     helper: &rw_tools::SandboxHelper,
     images: &rw_tools::ApprovedExecutableImages,
+    activation: &rw_ext::PluginActivation,
 ) -> Result<SpawnedPlugin, PluginProcessError> {
+    if activation.is_cancelled() {
+        return Err(error("plugin activation expired before executable capture"));
+    }
     let roots = approved_write_roots(config, profile, scratch)?;
     let bytes = Arc::new(LaunchBytes::capture(config, profile, images)?);
-    spawn_pinned_plugin(config, profile, scratch, helper, bytes, &roots)
+    spawn_pinned_plugin(config, profile, scratch, helper, bytes, &roots, activation)
 }
 
 fn spawn_pinned_plugin(
@@ -207,6 +230,7 @@ fn spawn_pinned_plugin(
     helper: &rw_tools::SandboxHelper,
     bytes: Arc<LaunchBytes>,
     roots: &[PathBuf],
+    activation: &rw_ext::PluginActivation,
 ) -> Result<SpawnedPlugin, PluginProcessError> {
     let started = std::time::Instant::now();
     bytes.validate_write_roots(roots)?;
@@ -249,13 +273,21 @@ fn spawn_pinned_plugin(
     tracing::debug!(target: "rw_performance", stage = "plugin.native_spawn", phase = "begin");
     // The aggregate verify_and_spawn completion is emitted only after the
     // physical supervisor owns the child, so tracing cannot strand raw effects.
+    if activation.is_cancelled() {
+        return Err(error("plugin activation expired before supervisor spawn"));
+    }
     let mut child = command.spawn().map_err(|error| process_error(&error))?;
     let pid = child
         .id()
         .ok_or_else(|| error("missing plugin supervisor pid"))?;
     tracing::debug!(target: "rw_performance", stage = "plugin.native_spawn", phase = "spawn_returned", pid);
-    let control = match rendezvous.accept(pid) {
-        Ok(stream) => ProcessControl::Lifeline(stream),
+    let control = match rendezvous.accept(pid, activation.deadline().into_std(), &|| {
+        activation.is_cancelled()
+    }) {
+        Ok(stream) => ProcessControl::Lifeline {
+            control: stream,
+            activation: activation.clone(),
+        },
         Err(cause) => return Err(rejected_helper::retire(&mut child, pid, &cause)),
     };
     #[cfg(target_os = "linux")]
@@ -718,7 +750,11 @@ mod tests {
         };
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let child = runtime
-            .block_on(launcher.launch(&config, &profile))
+            .block_on(launcher.launch(
+                &config,
+                &profile,
+                &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
+            ))
             .expect("intrinsic execution reads are host-owned");
         runtime
             .block_on(child.process.wait())
@@ -739,7 +775,11 @@ mod tests {
         };
         assert!(
             runtime
-                .block_on(launcher.launch(&config, &profile))
+                .block_on(launcher.launch(
+                    &config,
+                    &profile,
+                    &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default())
+                ))
                 .is_err()
         );
 
@@ -761,7 +801,11 @@ mod tests {
             allowed_domains: vec!["api.example.com".to_owned()],
         };
         let child = runtime
-            .block_on(launcher.launch(&config, &profile))
+            .block_on(launcher.launch(
+                &config,
+                &profile,
+                &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
+            ))
             .expect("public-domain launch");
         runtime
             .block_on(child.process.wait())
@@ -872,7 +916,7 @@ mod tests {
             Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
                 rw_providers::FixtureRedactor::default(),
             )),
-            &rw_tools::CancellationToken::default(),
+            &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await
         .expect("production sandbox launch")
@@ -992,7 +1036,7 @@ mod tests {
             Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
                 rw_providers::FixtureRedactor::default(),
             )),
-            &rw_tools::CancellationToken::default(),
+            &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
         )
         .await
         .expect("production no-reads host");

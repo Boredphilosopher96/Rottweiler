@@ -24,8 +24,9 @@ impl PluginLauncher for HeldNativeLaunch {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        activation: &rw_ext::PluginActivation,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
-        let mut launched = self.inner.launch(config, profile).await?;
+        let mut launched = self.inner.launch(config, profile, activation).await?;
         *self.process.lock().expect("native process owner") = Some(Arc::clone(&launched.process));
         let mut ready = String::new();
         launched
@@ -95,8 +96,11 @@ async fn aborted_first_use_waits_for_real_sandboxed_process_handoff_and_reap() {
         launcher: Some(launcher.clone()),
     }));
     let connection = Arc::clone(&endpoint);
-    let mut waiter =
-        tokio::spawn(async move { connection.connect(&CancellationToken::default()).await });
+    let mut waiter = tokio::spawn(async move {
+        connection
+            .connect(&rw_ext::PluginActivation::new(CancellationToken::default()))
+            .await
+    });
     tokio::time::timeout(Duration::from_secs(10), async {
         tokio::select! {
             () = launcher.admitted.notified() => {},

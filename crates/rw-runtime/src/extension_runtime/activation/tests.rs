@@ -23,6 +23,7 @@ impl PluginLauncher for DelayedLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        activation: &rw_ext::PluginActivation,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
         self.admitted.notify_one();
         self.release
@@ -30,7 +31,7 @@ impl PluginLauncher for DelayedLauncher {
             .await
             .expect("launch release")
             .forget();
-        let result = self.inner.launch(config, profile).await;
+        let result = self.inner.launch(config, profile, activation).await;
         self.returned.fetch_add(1, Ordering::AcqRel);
         result
     }
@@ -51,6 +52,13 @@ impl Fixture {
         Self::with_approval(budget, ActivationApproval::Configured)
     }
     fn with_approval(budget: Arc<PluginRuntimeBudget>, approval: ActivationApproval) -> Self {
+        Self::configured(budget, approval, false)
+    }
+    fn configured(
+        budget: Arc<PluginRuntimeBudget>,
+        approval: ActivationApproval,
+        hook: bool,
+    ) -> Self {
         let root = tempfile::tempdir().expect("root");
         #[cfg(unix)]
         {
@@ -58,7 +66,22 @@ impl Fixture {
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
                 .expect("private root");
         }
-        let (config, manifest) = rollback_plugin(root.path(), "lazy");
+        let (config, mut manifest) = rollback_plugin(root.path(), "lazy");
+        if hook {
+            manifest
+                .capabilities
+                .hooks
+                .push(rw_plugin_protocol::PluginHookCapability {
+                    name: rw_ext::HookEvent::UserPromptSubmit,
+                    class: rw_ext::HookClass::Policy,
+                    failure_policy: rw_ext::HookFailurePolicy::FailClosed,
+                });
+            std::fs::write(
+                &config.manifest_path,
+                serde_json::to_vec(&manifest).expect("hook manifest"),
+            )
+            .expect("manifest file");
+        }
         if matches!(approval, ActivationApproval::Configured) {
             let store = PrivatePluginApprovalStore::open(root.path()).expect("approval store");
             rw_ext::approve_plugin_launch(
@@ -104,7 +127,11 @@ impl Fixture {
     }
     fn connect(&self) -> tokio::task::JoinHandle<Result<PluginConnection, PluginRpcError>> {
         let endpoint = Arc::clone(&self.endpoint);
-        tokio::spawn(async move { endpoint.connect(&CancellationToken::default()).await })
+        tokio::spawn(async move {
+            endpoint
+                .connect(&rw_ext::PluginActivation::new(CancellationToken::default()))
+                .await
+        })
     }
 }
 
@@ -130,7 +157,7 @@ async fn metadata_and_closed_dormant_generation_start_no_resources() {
     assert!(
         fixture
             .endpoint
-            .connect(&CancellationToken::default())
+            .connect(&rw_ext::PluginActivation::new(CancellationToken::default()))
             .await
             .is_err()
     );
@@ -153,7 +180,7 @@ async fn concurrent_first_calls_share_one_owned_launch() {
     assert!(
         fixture
             .endpoint
-            .connect(&CancellationToken::default())
+            .connect(&rw_ext::PluginActivation::new(CancellationToken::default()))
             .await
             .is_err()
     );
@@ -341,7 +368,7 @@ async fn exhausted_waiter_admission_does_not_close_an_inert_generation() {
         .collect::<Vec<_>>();
     let result = fixture
         .endpoint
-        .connect(&CancellationToken::default())
+        .connect(&rw_ext::PluginActivation::new(CancellationToken::default()))
         .await;
     assert_eq!(result.err().expect("busy").code, "busy");
     assert!(matches!(
@@ -462,3 +489,48 @@ async fn rejected_activation_does_not_close_another_ready_generation() {
 
 #[path = "launch_authority_tests.rs"]
 mod launch_authority;
+
+#[tokio::test(start_paused = true)]
+async fn selected_rpc_hook_waits_for_cold_generation_before_starting_callback_clock() {
+    let fixture = Fixture::configured(
+        Arc::new(PluginRuntimeBudget::default()),
+        ActivationApproval::Configured,
+        true,
+    );
+    let mut dispatcher = rw_ext::HookDispatcher::new();
+    dispatcher
+        .register(
+            rw_ext::HookRegistration::new(
+                "lazy-policy",
+                rw_ext::HookEvent::UserPromptSubmit,
+                rw_ext::HookClass::Policy,
+            ),
+            rw_ext::RpcHookHandler::new(fixture.endpoint.clone()),
+        )
+        .expect("hook registration");
+    assert_eq!(fixture.launcher.returned.load(Ordering::Acquire), 0);
+    let dispatch = tokio::spawn(async move {
+        dispatcher
+            .dispatch(rw_ext::HookInput::UserPromptSubmit(
+                rw_types::hook_contract::HookPromptInput {
+                    content: "actual cold generation".to_owned(),
+                },
+            ))
+            .await
+    });
+    fixture.launcher.admitted.notified().await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(
+        !dispatch.is_finished(),
+        "cold readiness must not spend the callback allowance"
+    );
+    fixture.launcher.release.add_permits(1);
+    let result = dispatch
+        .await
+        .expect("dispatch task")
+        .expect("effect proof");
+    assert!(result.completed(), "{result:?}");
+    assert_eq!(fixture.launcher.returned.load(Ordering::Acquire), 1);
+    fixture.endpoint.close().await.expect("physical close");
+    assert!(fixture.process.waited.load(Ordering::Acquire) > 0);
+}

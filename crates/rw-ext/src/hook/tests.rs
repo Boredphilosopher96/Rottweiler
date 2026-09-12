@@ -457,3 +457,5 @@ async fn closed_hook_admission_retains_the_original_cleanup_failure() {
     }
     assert!(dispatcher.dispatch(prompt("late")).await.is_err());
 }
+
+mod readiness;

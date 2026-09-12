@@ -69,6 +69,7 @@ impl PluginLauncher for Launcher {
         &self,
         config: &PluginProcessConfig,
         _: &PluginSandboxProfile,
+        _activation: &rw_ext::PluginActivation,
     ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
         use std::os::unix::process::CommandExt as _;
         let mut command = tokio::process::Command::new(config.executable());
@@ -261,6 +262,7 @@ impl PluginLauncher for PanickingLauncher {
         &self,
         _: &PluginProcessConfig,
         _: &PluginSandboxProfile,
+        _activation: &rw_ext::PluginActivation,
     ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
         panic!("seeded panic after preparation admission");
     }
@@ -372,8 +374,9 @@ impl PluginLauncher for FailedProofLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        activation: &rw_ext::PluginActivation,
     ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
-        let mut child = self.0.launch(config, profile).await?;
+        let mut child = self.0.launch(config, profile, activation).await?;
         child.process = Arc::new(UnprovenProcess(child.process));
         Ok(child)
     }
@@ -438,6 +441,7 @@ impl PluginLauncher for RejectedLauncher {
         &self,
         _: &PluginProcessConfig,
         _: &PluginSandboxProfile,
+        _activation: &rw_ext::PluginActivation,
     ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
         Err(PluginLaunchError::Rejected(process_error(
             "seeded pre-spawn rejection",

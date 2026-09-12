@@ -72,7 +72,7 @@ impl Tool for RpcToolAdapter {
     async fn execute(&self, _context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         let connection = self
             .endpoint
-            .connect(&_context.cancellation)
+            .connect(&crate::PluginActivation::new(_context.cancellation.clone()))
             .await
             .map_err(|error| ToolError::Output(error.to_string()))?;
         connection
@@ -160,7 +160,7 @@ where
         let result = async {
             let connection = self
                 .endpoint
-                .connect(&CancellationToken::default())
+                .connect(&crate::PluginActivation::new(CancellationToken::default()))
                 .await
                 .map_err(|error| CommandExecutionError::new(error.code, error.message))?;
             connection
@@ -418,7 +418,7 @@ impl Provider for RpcProviderAdapter {
     ) -> Result<Option<rw_providers::ContinuationProvenance>, ProviderError> {
         let connection = self
             .endpoint
-            .connect(&CancellationToken::default())
+            .connect(&crate::PluginActivation::new(CancellationToken::default()))
             .await
             .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
         Ok(Some(connection.continuation_provenance().clone()))
@@ -465,7 +465,7 @@ impl Provider for RpcProviderAdapter {
         }
         let connection = self
             .endpoint
-            .connect(&CancellationToken::default())
+            .connect(&crate::PluginActivation::new(CancellationToken::default()))
             .await
             .map_err(|error| provider_rpc_error(&error))?;
         connection
@@ -511,7 +511,7 @@ impl Provider for RpcProviderAdapter {
         let alias = format!("{}{}", self.alias_prefix, request.model);
         let connection = self
             .endpoint
-            .connect(&CancellationToken::default())
+            .connect(&crate::PluginActivation::new(CancellationToken::default()))
             .await
             .map_err(|error| provider_rpc_error(&error))?;
         connection
@@ -588,7 +588,10 @@ impl PluginEventRouter {
         notice
             .validate()
             .map_err(|message| rpc_error("invalid_event", message))?;
-        let connection = self.endpoint.connect(cancellation).await?;
+        let connection = self
+            .endpoint
+            .connect(&crate::PluginActivation::new(cancellation.clone()))
+            .await?;
         connection
             .enforcer()
             .check_event(notice.event)

@@ -6,7 +6,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use rw_plugin_protocol::{PluginManifest, PluginToolCapability};
-use rw_tools::CancellationToken;
 
 use crate::{CapabilityEnforcer, PluginHost, PluginRpcClient, PluginRpcError};
 
@@ -115,12 +114,15 @@ impl PluginConnection {
 /// must report its local cleanup outcome. A failed generation cannot restart.
 #[async_trait]
 pub trait PluginEndpoint: Send + Sync {
+    /// Observes an initialized generation without starting work or granting access.
+    /// Callers must still connect to validate current generation authority.
+    fn is_ready(&self) -> bool;
     fn metadata(&self) -> &PluginEndpointMetadata;
 
     /// Obtains an initialized connection within the generation's fixed deadline.
     async fn connect(
         &self,
-        cancellation: &CancellationToken,
+        activation: &crate::PluginActivation,
     ) -> Result<PluginConnection, PluginRpcError>;
 
     /// Proves settlement for cancelled or dropped invocations and activation.
@@ -155,13 +157,16 @@ impl ReadyPluginEndpoint {
 
 #[async_trait]
 impl PluginEndpoint for ReadyPluginEndpoint {
+    fn is_ready(&self) -> bool {
+        !self.closed.load(Ordering::Acquire)
+    }
     fn metadata(&self) -> &PluginEndpointMetadata {
         &self.metadata
     }
 
     async fn connect(
         &self,
-        cancellation: &CancellationToken,
+        activation: &crate::PluginActivation,
     ) -> Result<PluginConnection, PluginRpcError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(PluginRpcError {
@@ -169,7 +174,7 @@ impl PluginEndpoint for ReadyPluginEndpoint {
                 message: "plugin endpoint is closed".to_owned(),
             });
         }
-        if cancellation.is_cancelled() {
+        if activation.is_cancelled() {
             return Err(PluginRpcError {
                 code: "cancelled".to_owned(),
                 message: "plugin connection was cancelled".to_owned(),
@@ -218,10 +223,16 @@ struct FixtureEndpoint {
 #[cfg(test)]
 #[async_trait]
 impl PluginEndpoint for FixtureEndpoint {
+    fn is_ready(&self) -> bool {
+        true
+    }
     fn metadata(&self) -> &PluginEndpointMetadata {
         &self.metadata
     }
-    async fn connect(&self, _: &CancellationToken) -> Result<PluginConnection, PluginRpcError> {
+    async fn connect(
+        &self,
+        _: &crate::PluginActivation,
+    ) -> Result<PluginConnection, PluginRpcError> {
         Ok(self.connection.clone())
     }
     async fn settle_effects(&self) -> Result<(), PluginRpcError> {

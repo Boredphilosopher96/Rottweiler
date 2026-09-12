@@ -73,7 +73,13 @@ pub(super) fn verify() {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("supervisor");
-    let control = rendezvous.accept(child.id()).expect("verified supervisor");
+    let control = rendezvous
+        .accept(
+            child.id(),
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &|| false,
+        )
+        .expect("verified supervisor");
     let input = child.stdin.take();
     let mut fixture = Fixture {
         helper: child,

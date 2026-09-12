@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use rw_core::ui::UiRegistry;
 use rw_ext::{PluginConnection, PluginEndpoint, PluginEndpointMetadata, PluginRpcError};
 use rw_plugin_protocol::{PluginCapabilities, PluginCommandCapability, PluginManifest};
-use rw_tools::CancellationToken;
 use rw_types::extension_ui::{
     UiAction, UiActionRequest, UiActionTarget, UiContribution, UiField, UiProjectedField,
     UiSelectorStep,
@@ -21,10 +20,16 @@ struct Endpoint {
 }
 #[async_trait]
 impl PluginEndpoint for Endpoint {
+    fn is_ready(&self) -> bool {
+        false
+    }
     fn metadata(&self) -> &PluginEndpointMetadata {
         &self.metadata
     }
-    async fn connect(&self, _: &CancellationToken) -> Result<PluginConnection, PluginRpcError> {
+    async fn connect(
+        &self,
+        _: &rw_ext::PluginActivation,
+    ) -> Result<PluginConnection, PluginRpcError> {
         self.connections.fetch_add(1, Ordering::SeqCst);
         Err(PluginRpcError {
             code: "fixture".into(),

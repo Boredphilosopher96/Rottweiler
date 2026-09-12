@@ -17,8 +17,9 @@ impl PluginLauncher for RecordingLauncher {
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        activation: &rw_ext::PluginActivation,
     ) -> std::result::Result<LaunchedPluginProcess, PluginLaunchError> {
-        let child = self.inner.launch(config, profile).await?;
+        let child = self.inner.launch(config, profile, activation).await?;
         self.processes
             .lock()
             .expect("processes")

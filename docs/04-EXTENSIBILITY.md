@@ -191,7 +191,20 @@ participate in synchronous phases; asynchronous event handlers use the RPC tier.
 A phase admits at most 128 hooks. It has one aggregate execution deadline equal
 to its largest declared invocation timeout, with a five-second default and a
 ten-minute ceiling. Handler count cannot multiply that budget. Native RPC hooks
-use five seconds. A separate two-second allowance bounds settlement. Timeout,
+use five seconds. First-use native readiness has one absolute thirty-second
+activation deadline shared by the generations actually selected during dispatch.
+Selection uses the current transformed input; unrelated plugins remain dormant.
+Only owned readiness intervals pause the execution clock. Previous callbacks,
+directive validation, and dispatch gaps remain charged, and no handler restarts
+the execution allowance. Ready generations skip readiness even after its deadline.
+Approval verification, immutable snapshot capture, operating-system execution,
+authenticated supervisor hello, and protocol initialization share the activation
+deadline and cancellation authority. A late hello cannot grant execution. Readiness
+cancellation retains its generation owner through the existing five-second
+activation settlement proof. Trace fields report readiness, execution, and total
+phase latency separately; readiness remains visible in end-to-end latency.
+
+A separate two-second allowance bounds callback settlement. Timeout,
 cancellation, panic, and caller drop retain the invocation's admission permit
 through effect settlement. A failed or unproven settlement closes admission and
 fails the operation regardless of its declared failure policy. Killing a process

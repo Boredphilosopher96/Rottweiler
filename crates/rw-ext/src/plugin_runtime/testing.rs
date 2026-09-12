@@ -64,6 +64,7 @@ impl PluginLauncher for TestDirectLauncher {
         &self,
         config: &PluginProcessConfig,
         _profile: &PluginSandboxProfile,
+        _activation: &crate::PluginActivation,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError> {
         use std::os::unix::process::CommandExt;
         config

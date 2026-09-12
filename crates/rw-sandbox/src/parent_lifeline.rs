@@ -18,7 +18,6 @@ use std::{
 pub(crate) const ENTRY: &str = "--rw-supervise-plugin";
 const HELLO: &[u8; 8] = b"RWPLIFE1";
 const WAIT: Duration = Duration::from_millis(5);
-const HANDSHAKE: Duration = Duration::from_secs(5);
 
 /// Private, bounded rendezvous outside the sandbox's writable directories.
 /// The plugin cannot inherit its descriptors or keep its parent's lifeline open.
@@ -79,14 +78,17 @@ impl PluginRendezvous {
     /// that grant cannot start the effect process.
     /// # Errors
     /// Rejects a missing, malformed, or late supervisor handshake.
-    pub fn accept(self, pid: u32) -> io::Result<PluginLifeline> {
-        let deadline = Instant::now() + HANDSHAKE;
+    pub fn accept(
+        self,
+        pid: u32,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<PluginLifeline> {
         let mut stream = loop {
+            check_readiness(deadline, cancelled)?;
             match self.listener.accept() {
                 Ok((stream, _)) => break stream,
-                Err(error)
-                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-                {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(WAIT);
                 }
                 Err(error) => return Err(error),
@@ -104,18 +106,47 @@ impl PluginRendezvous {
         if u32::try_from(actual_pid).ok() != Some(pid) {
             return Err(io::Error::other("unexpected plugin supervisor peer"));
         }
-        stream.set_read_timeout(Some(
-            deadline.saturating_duration_since(Instant::now()).max(WAIT),
-        ))?;
-        stream.set_write_timeout(Some(WAIT))?;
+        stream.set_nonblocking(true)?;
         let mut hello = [0; 12];
-        stream.read_exact(&mut hello)?;
+        let mut used = 0;
+        while used < hello.len() {
+            check_readiness(deadline, cancelled)?;
+            match stream.read(&mut hello[used..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "supervisor hello ended",
+                    ));
+                }
+                Ok(count) => used += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(WAIT);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         if &hello[..8] != HELLO || hello[8..] != pid.to_be_bytes() {
             return Err(io::Error::other("invalid plugin supervisor identity"));
         }
         std::fs::remove_file(self.directory.path().join("owner.sock"))?;
         PluginLifeline::new(stream)
     }
+}
+
+fn check_readiness(deadline: Instant, cancelled: &dyn Fn() -> bool) -> io::Result<()> {
+    if cancelled() {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "plugin readiness cancelled",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "plugin readiness deadline elapsed",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn run(args: &[OsString]) -> io::Result<std::convert::Infallible> {
@@ -244,5 +275,57 @@ mod tests {
             !path.exists(),
             "dropping owner removes the socket namespace"
         );
+    }
+    #[test]
+    fn partial_authenticated_hello_observes_cancellation_and_removes_namespace() {
+        let owner = PluginRendezvous::bind().expect("rendezvous");
+        let path = owner.directory.path().to_owned();
+        let mut peer = UnixStream::connect(path.join("owner.sock")).expect("peer");
+        peer.write_all(&HELLO[..1]).expect("partial hello");
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let outcome = owner.accept(
+            std::process::id(),
+            Instant::now() + Duration::from_secs(30),
+            &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2,
+        );
+        assert!(matches!(outcome, Err(error) if error.kind() == io::ErrorKind::Interrupted));
+        assert!(!path.exists());
+        // No grant can cross a failed readiness boundary.
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).expect("closed ungranted peer"), 0);
+    }
+
+    #[test]
+    fn expired_readiness_rejects_even_an_already_queued_complete_hello() {
+        let owner = PluginRendezvous::bind().expect("rendezvous");
+        let path = owner.directory.path().to_owned();
+        let mut peer = UnixStream::connect(path.join("owner.sock")).expect("peer");
+        peer.write_all(HELLO).expect("hello");
+        peer.write_all(&std::process::id().to_be_bytes())
+            .expect("identity");
+        let outcome = owner.accept(std::process::id(), Instant::now(), &|| false);
+        assert!(matches!(outcome, Err(error) if error.kind() == io::ErrorKind::TimedOut));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn authenticated_hello_uses_caller_deadline_and_never_grants_implicitly() {
+        let owner = PluginRendezvous::bind().expect("rendezvous");
+        let path = owner.directory.path().to_owned();
+        let mut peer = UnixStream::connect(path.join("owner.sock")).expect("peer");
+        peer.write_all(HELLO).expect("hello");
+        peer.write_all(&std::process::id().to_be_bytes())
+            .expect("identity");
+        let control = owner
+            .accept(
+                std::process::id(),
+                Instant::now() + Duration::from_secs(30),
+                &|| false,
+            )
+            .expect("authenticated hello");
+        assert!(!path.exists());
+        drop(control);
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).expect("ungranted EOF"), 0);
     }
 }

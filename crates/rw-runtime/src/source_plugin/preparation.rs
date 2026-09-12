@@ -195,6 +195,7 @@ impl SourcePreparations {
                     approved_roots: Vec::new(),
                     allowed_domains: Vec::new(),
                 },
+                &rw_ext::PluginActivation::until(cancellation.clone(), deadline),
             )
             .await
         {

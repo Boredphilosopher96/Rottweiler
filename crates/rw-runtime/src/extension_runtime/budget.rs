@@ -19,7 +19,7 @@ const MAX_STARTING: usize = 32;
 const PARALLEL_STARTS: usize = 2;
 const MAX_RESIDENT_PROCESSES: usize = 32;
 const MAX_HTTP_OPERATIONS: usize = 8;
-pub(super) const ACTIVATION_DEADLINE: Duration = Duration::from_secs(30);
+pub(super) const ACTIVATION_DEADLINE: Duration = rw_ext::PLUGIN_ACTIVATION_TIMEOUT;
 
 /// Shared by every configured plugin generation in one application host.
 /// Construction starts no workers and allocates no filesystem resources.

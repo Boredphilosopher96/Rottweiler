@@ -111,6 +111,7 @@ async fn postcapture_executable_and_code_replacement_cannot_change_sandbox_execu
         &helper,
         bytes,
         &[scratch.path().to_path_buf()],
+        &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
     )
     .expect("spawn exact pinned bytes");
     let mut launched = attach_supervisor(
@@ -183,6 +184,7 @@ async fn dropped_handoff_keeps_code_until_physical_retirement() {
         &helper,
         bytes,
         &[scratch.path().to_path_buf()],
+        &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
     )
     .expect("spawn");
     let mut launched = attach_supervisor(
@@ -244,6 +246,7 @@ async fn unpolled_handoff_retains_then_retires_the_complete_physical_owner() {
         &helper,
         bytes,
         &[scratch.path().to_path_buf()],
+        &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
     )
     .expect("spawn");
     let pending = attach_supervisor(
@@ -327,6 +330,7 @@ async fn assert_lifeline_retirement(kill_supervisor: bool) {
         &helper,
         bytes,
         &[scratch.path().to_path_buf()],
+        &rw_ext::PluginActivation::new(rw_tools::CancellationToken::default()),
     )
     .expect("supervised spawn");
     let pid = child.id().expect("supervisor pid");

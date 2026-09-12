@@ -13,10 +13,16 @@ struct DormantFixture {
 }
 #[async_trait]
 impl PluginEndpoint for DormantFixture {
+    fn is_ready(&self) -> bool {
+        false
+    }
     fn metadata(&self) -> &PluginEndpointMetadata {
         &self.metadata
     }
-    async fn connect(&self, _: &CancellationToken) -> Result<PluginConnection, PluginRpcError> {
+    async fn connect(
+        &self,
+        _: &crate::PluginActivation,
+    ) -> Result<PluginConnection, PluginRpcError> {
         self.connections.fetch_add(1, Ordering::AcqRel);
         Err(PluginRpcError {
             code: "approval_required".to_owned(),

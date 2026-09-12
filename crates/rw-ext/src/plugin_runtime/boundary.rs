@@ -168,11 +168,14 @@ pub trait PluginLauncher: Send + Sync {
     /// group, and enforce every absent profile effect at syscall level. Manifest probes may read
     /// only their runtime/entrypoint; approved launches may read/write/network only when the
     /// corresponding helper above permits it. Network must traverse the policy proxy and exact
-    /// public-domain allowlist.
+    /// public-domain allowlist. The activation context is one absolute readiness
+    /// deadline, including supervisor authentication. Cancellation or expiry must
+    /// prevent a new launch grant and retain any accepted physical work until settled.
     async fn launch(
         &self,
         config: &PluginProcessConfig,
         profile: &PluginSandboxProfile,
+        activation: &crate::PluginActivation,
     ) -> Result<LaunchedPluginProcess, PluginLaunchError>;
 }
 
