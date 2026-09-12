@@ -330,10 +330,11 @@ class CiHardeningContractTests(unittest.TestCase):
         for group in document["multi-ecosystem-groups"].values():
             self.assertEqual(group["schedule"]["interval"], "weekly")
             self.assertEqual(group["schedule"]["day"], "monday")
+            self.assertEqual(group["open-pull-requests-limit"], "1")
         for entry in updates:
             expected_group = "automation-dependencies" if entry["package-ecosystem"] == "github-actions" else "application-dependencies"
             self.assertEqual(entry["multi-ecosystem-group"], expected_group)
-            self.assertEqual(entry["open-pull-requests-limit"], "1")
+            self.assertNotIn("open-pull-requests-limit", entry)
         self.assertNotIn("version-update:semver-major", configuration)
 
     def test_javascript_dependencies_do_not_use_version_specific_patches(
