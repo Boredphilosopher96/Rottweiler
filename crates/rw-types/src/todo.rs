@@ -146,8 +146,27 @@ mod read_contract_tests {
     #![allow(clippy::expect_used)]
     use super::{TodoReadResult, TodoReadSnapshot};
     use ts_rs::TS;
+
     #[test]
     fn prefixes_are_required_nullable_keys_in_rust_schema_and_typescript() {
+        let null_prefix = serde_json::json!({"through":null,"snapshot":{"items":[]}});
+        assert_eq!(
+            serde_json::to_value(
+                serde_json::from_value::<TodoReadSnapshot>(null_prefix.clone())
+                    .expect("explicit null prefix")
+            )
+            .expect("encode explicit null prefix"),
+            null_prefix
+        );
+        let present_prefix = serde_json::json!({"through":"7","snapshot":{"items":[]}});
+        assert_eq!(
+            serde_json::to_value(
+                serde_json::from_value::<TodoReadSnapshot>(present_prefix.clone())
+                    .expect("present prefix")
+            )
+            .expect("encode present prefix"),
+            present_prefix
+        );
         assert!(
             serde_json::from_value::<TodoReadSnapshot>(
                 serde_json::json!({"snapshot":{"items":[]}})
@@ -173,7 +192,11 @@ mod read_contract_tests {
                 .expect("required")
                 .contains(&serde_json::json!("through"))
         );
-        assert!(!TodoReadSnapshot::decl(&ts_rs::Config::default()).contains("through?"));
-        assert!(!TodoReadResult::decl(&ts_rs::Config::default()).contains("target?"));
+        let snapshot_ts = TodoReadSnapshot::decl(&ts_rs::Config::default());
+        assert!(snapshot_ts.contains("through: SequenceId | null"));
+        assert!(!snapshot_ts.contains("through?"));
+        let result_ts = TodoReadResult::decl(&ts_rs::Config::default());
+        assert!(result_ts.contains("target: SequenceId | null"));
+        assert!(!result_ts.contains("target?"));
     }
 }

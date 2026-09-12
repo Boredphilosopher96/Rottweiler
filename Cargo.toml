@@ -104,7 +104,8 @@ tar = "0.4.44"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+# Strict Serde tests and generated-contract checks own attributes that ts-rs cannot interpret.
+ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-json-impl"] }
 url = "2.5"
 wasmtime = { version = "47.0.4", default-features = false, features = ["async", "component-model-async", "cranelift", "pulley", "runtime", "std"] }
 
