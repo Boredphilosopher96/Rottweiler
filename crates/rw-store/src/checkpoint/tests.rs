@@ -146,6 +146,64 @@ fn capture_reads_fixed_chunks_and_cleans_up_partial_failure()
     Ok(())
 }
 
+#[test]
+fn cancellation_during_capture_cleans_partial_staging_before_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct Source {
+        reads: usize,
+        cancellation: crate::checkpoint::CheckpointCancellation,
+    }
+    impl std::io::Read for Source {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            buffer.fill(b'x');
+            if self.reads == 2 {
+                self.cancellation.cancel();
+            }
+            Ok(buffer.len())
+        }
+    }
+
+    let root = tempdir()?;
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = open_store(&root.path().join("storage"), &workspace)?;
+    let mut operation = crate::checkpoint::CheckpointOperation::default();
+    let mut source = Source {
+        reads: 0,
+        cancellation: operation.cancellation(),
+    };
+    assert!(matches!(
+        capture_reader(&store, &mut source, None, &mut operation),
+        Err(super::CheckpointError::Cancelled)
+    ));
+    assert_eq!(source.reads, 2, "one chunk was written before cancellation");
+    assert_eq!(
+        fs::read_dir(
+            store
+                .blobs
+                .directory()
+                .parent()
+                .ok_or("blob root")?
+                .join("staging")
+        )?
+        .count(),
+        0
+    );
+
+    let recovered = capture_reader(
+        &store,
+        &mut b"recovered".as_slice(),
+        None,
+        &mut crate::checkpoint::CheckpointOperation::default(),
+    )?;
+    assert!(matches!(
+        recovered,
+        CheckpointFileState::Present { bytes: 9, .. }
+    ));
+    Ok(())
+}
+
 fn rewind(
     store: &CheckpointStore,
     session_id: &str,
@@ -650,6 +708,49 @@ fn opaque_git_baseline_restores_tracked_marks_unknown_and_removes_new() {
     );
     assert!(!workspace.join("created.txt").exists());
     assert!(report.unrestorable.contains_key("unknown.txt"));
+}
+
+#[test]
+fn opaque_git_dirty_file_above_capture_limit_is_refused_before_command_admission() {
+    let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap_or_else(|error| panic!("workspace must create: {error}"));
+    git(&workspace, &["init", "-q"]);
+    let tracked = workspace.join("tracked.bin");
+    fs::write(&tracked, b"committed")
+        .unwrap_or_else(|error| panic!("tracked fixture must write: {error}"));
+    git(&workspace, &["add", "tracked.bin"]);
+    git(
+        &workspace,
+        &[
+            "-c",
+            "user.name=Rottweiler Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    );
+    OpenOptions::new()
+        .write(true)
+        .open(&tracked)
+        .unwrap_or_else(|error| panic!("dirty fixture must open: {error}"))
+        .set_len(super::MAX_CAPTURE_FILE_BYTES + 1)
+        .unwrap_or_else(|error| panic!("dirty fixture must grow: {error}"));
+    let store = open_store(&root.path().join("store"), &workspace)
+        .unwrap_or_else(|error| panic!("store must open: {error}"));
+
+    assert!(matches!(
+        store.begin_opaque_mutation(
+            "oversized",
+            1,
+            &mut crate::checkpoint::CheckpointOperation::default()
+        ),
+        Err(super::CheckpointError::CaptureFileLimit)
+    ));
+    assert!(!store.pending_path("oversized", 1).exists());
+    assert!(!store.manifest_path("oversized", 1).exists());
 }
 
 #[cfg(unix)]

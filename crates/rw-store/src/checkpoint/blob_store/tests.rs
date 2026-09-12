@@ -281,6 +281,54 @@ fn abandoned_staging_credit_is_released_only_after_exclusive_reconciliation() ->
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn enospc_at_blob_write_and_sync_cleans_staging_and_reconciles_quota() -> TestResult {
+    use super::write::{BlobDiskFullFault, install_disk_full_fault};
+
+    for fault in [
+        BlobDiskFullFault::WriteAfter(0),
+        BlobDiskFullFault::WriteAfter(3),
+        BlobDiskFullFault::Sync,
+    ] {
+        let fixture = Fixture::new(8)?;
+        let store = fixture.store("session")?;
+        let guard = install_disk_full_fault(fault);
+        let error = fixture
+            .capture(&store, 1, b"failure")
+            .expect_err("ENOSPC cannot publish a checkpoint");
+        assert!(matches!(
+            error,
+            CheckpointError::Io(ref error)
+                if error.raw_os_error() == Some(rustix::io::Errno::NOSPC.raw_os_error())
+        ));
+        assert!(!store.manifest_path("session", 1).exists());
+        let (used, staged, dirty): (i64, i64, bool) =
+            Connection::open(fixture.blobs.root.join("quota.sqlite"))?.query_row(
+                "SELECT used_bytes,staged,dirty FROM quota WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        assert_eq!(
+            (used, staged, dirty),
+            (0, super::sql_integer(MAX_CAPTURE_FILE_BYTES)?, true)
+        );
+        assert_eq!(fs::read_dir(fixture.blobs.root.join("staging"))?.count(), 0);
+        drop(guard);
+
+        fixture.capture(&store, 2, b"recovery")?;
+        let (used, staged, dirty): (i64, i64, bool) =
+            Connection::open(fixture.blobs.root.join("quota.sqlite"))?.query_row(
+                "SELECT used_bytes,staged,dirty FROM quota WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        assert_eq!((used, staged, dirty), (8, 0, false));
+        assert_eq!(fs::read_dir(fixture.blobs.root.join("staging"))?.count(), 0);
+    }
+    Ok(())
+}
+
 #[test]
 fn read_open_never_erases_an_active_writers_unpublished_manifest() -> TestResult {
     let fixture = Fixture::new(8)?;

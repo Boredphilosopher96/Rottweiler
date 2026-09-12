@@ -4,8 +4,74 @@ use super::{
 use crate::checkpoint::{CAPTURE_CHUNK_BYTES, CheckpointFileState};
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, Read, Write},
 };
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy)]
+pub(super) enum BlobDiskFullFault {
+    WriteAfter(usize),
+    Sync,
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static DISK_FULL_FAULT: std::cell::Cell<Option<BlobDiskFullFault>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(all(test, unix))]
+pub(super) struct BlobDiskFullFaultGuard;
+
+#[cfg(all(test, unix))]
+impl Drop for BlobDiskFullFaultGuard {
+    fn drop(&mut self) {
+        DISK_FULL_FAULT.with(|fault| fault.set(None));
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn install_disk_full_fault(fault: BlobDiskFullFault) -> BlobDiskFullFaultGuard {
+    DISK_FULL_FAULT.with(|installed| {
+        assert!(installed.get().is_none(), "blob fault already installed");
+        installed.set(Some(fault));
+    });
+    BlobDiskFullFaultGuard
+}
+
+fn write_temporary(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(all(test, unix))]
+    if let Some(count) = DISK_FULL_FAULT.with(|fault| match fault.get() {
+        Some(BlobDiskFullFault::WriteAfter(count)) => {
+            fault.set(None);
+            Some(count)
+        }
+        Some(BlobDiskFullFault::Sync) | None => None,
+    }) {
+        file.write_all(&bytes[..bytes.len().min(count)])?;
+        return Err(io::Error::from_raw_os_error(
+            rustix::io::Errno::NOSPC.raw_os_error(),
+        ));
+    }
+    file.write_all(bytes)
+}
+
+fn sync_temporary(file: &File) -> io::Result<()> {
+    #[cfg(all(test, unix))]
+    if DISK_FULL_FAULT.with(|fault| match fault.get() {
+        Some(BlobDiskFullFault::Sync) => {
+            fault.set(None);
+            true
+        }
+        Some(BlobDiskFullFault::WriteAfter(_)) | None => false,
+    }) {
+        return Err(io::Error::from_raw_os_error(
+            rustix::io::Errno::NOSPC.raw_os_error(),
+        ));
+    }
+    file.sync_all()
+}
 
 impl BlobWriteGuard<'_> {
     pub(in crate::checkpoint) fn capture(
@@ -38,7 +104,7 @@ impl BlobWriteGuard<'_> {
             }
             operation.capture(count)?;
             hash.update(&chunk[..count]);
-            temporary.write_all(&chunk[..count])?;
+            write_temporary(temporary.as_file_mut(), &chunk[..count])?;
         }
         let digest = hash.finalize().to_hex().to_string();
         let directory = self.owner.directory().join(&digest[..2]);
@@ -55,7 +121,7 @@ impl BlobWriteGuard<'_> {
             self.admit(bytes, operation)?;
             fs::create_dir_all(&directory)?;
             File::open(self.owner.directory())?.sync_all()?;
-            temporary.as_file().sync_all()?;
+            sync_temporary(temporary.as_file())?;
             temporary
                 .persist_noclobber(&path)
                 .map_err(|error| error.error)?;
