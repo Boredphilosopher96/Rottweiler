@@ -60,18 +60,25 @@ class NativeProcessTests(unittest.IsolatedAsyncioTestCase):
         path.parent.mkdir(parents=True)
         records = [
             {"type": "tool_call_started", "name": "rich_artifact", "invocation_id": "actual"},
-            {"type": "tool_call_finished", "invocation_id": "actual", "is_error": False},
+            {"type": "tool_call_finished", "invocation_id": "actual", "is_error": False, "meta": {"sequence_id": "7"}},
             *[{"type": "extension_state_committed", "plugin_id": "rich-workflow", "transaction": {
                 "mutations": [{"action": "set", "key": "advances", "value": value}]}} for value in (0, 1, 2)],
         ]
         def write():
             path.write_text("".join(json.dumps({"event": record}) + "\n" for record in records))
         write()
-        self.assertEqual(module.canonical_proof(self.root)["advances"], [0, 1, 2])
+        source = {"sequence": "7", "selector": {"type": "tool_output"}}
+        receipts = [{"source": source, "offset": offset, "held": held, "delivered": not held}
+                    for offset, held in ((0, True), (0, False), (65536, False))]
+        self.assertEqual(module.canonical_proof(self.root, receipts)["delivered_page_offsets"], [0, 65536])
+        with self.assertRaisesRegex(ValueError, "canonical completion"):
+            module.canonical_proof(self.root, [{**record, "source": {**source, "sequence": "8"}} for record in receipts])
+        with self.assertRaisesRegex(ValueError, "two delivered pages"):
+            module.canonical_proof(self.root, [{**record, "offset": 0} for record in receipts])
         records[1]["invocation_id"] = "wrong"
         write()
         with self.assertRaisesRegex(ValueError, "successful rich artifact"):
-            module.canonical_proof(self.root)
+            module.canonical_proof(self.root, receipts)
 
 
 if __name__ == "__main__":

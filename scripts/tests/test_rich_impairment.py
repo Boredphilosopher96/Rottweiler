@@ -111,6 +111,17 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await reader.read(), b"")
         self.assertEqual(self.received, [])
 
+    async def test_unheld_artifact_pages_record_exact_sources_and_offsets(self):
+        request = self.arm()
+        self.relay.armed = False
+        for offset in (0, 65536):
+            request["read"]["offset"] = offset
+            reader, _, _ = await self.connect(request)
+            self.assertTrue((await reader.read()).endswith(self.payload))
+        self.assertEqual([record["offset"] for record in self.relay.receipts], [0, 65536])
+        self.assertTrue(all(record["delivered"] and not record["held"] for record in self.relay.receipts))
+        self.assertTrue(all(record["sha256"] == hashlib.sha256(self.payload).hexdigest() for record in self.relay.receipts))
+
     async def test_control_disconnect_drops_real_connection_without_fabricated_reply(self):
         reader, _, _ = await self.connect(self.arm())
         await self.until(lambda: self.relay.held == 1)

@@ -78,7 +78,7 @@ async def ready(engine, socket: Path, token_file: Path):
     raise TimeoutError("native engine health deadline elapsed")
 
 
-def canonical_proof(home: Path):
+def canonical_proof(home: Path, receipts: list):
     path = home / "sessions/rich-native/journal/active.jsonl"
     with path.open("rb") as stream:
         raw = stream.read(MAX_REPORT + 1)
@@ -102,8 +102,16 @@ def canonical_proof(home: Path):
               if mutation.get("action") == "set" and mutation.get("key") == "advances"]
     if values != [0, 1, 2]:
         raise ValueError("native SDK actions did not commit their exact canonical state changes")
+    source = {"sequence": tools[0]["meta"]["sequence_id"], "selector": {"type": "tool_output"}}
+    if not 3 <= len(receipts) <= 8 or any(record["source"] != source for record in receipts):
+        raise ValueError("artifact wire receipts do not resolve to the canonical completion")
+    delivered = [record for record in receipts if record["delivered"]]
+    offsets = sorted({record["offset"] for record in delivered})
+    if len(offsets) < 2 or offsets[0] != 0 or not any(record["held"] and not record["delivered"] for record in receipts):
+        raise ValueError("artifact receipts lack cancelled ownership and two delivered pages")
     return {"journal_sha256": native_candidate.hash_file(path), "journal_bytes": len(raw),
-            "events": len(events), "tool_completions": len(tools), "advances": values}
+            "events": len(events), "tool_completions": len(tools), "advances": values, "artifact_source": source,
+            "delivered_page_offsets": offsets, "invocation_id": tools[0]["invocation_id"]}
 
 
 async def run(candidate: Path, receipt: Path, output: Path):
@@ -165,7 +173,7 @@ async def run(candidate: Path, receipt: Path, output: Path):
         if observed.get("passed") is not True or observed.get("finalAllocationBytes") != 0:
             raise ValueError("compiled native rich UI did not prove retirement")
         result["ui"] = observed
-        result["canonical"] = canonical_proof(home)
+        result["canonical"] = canonical_proof(home, relay.receipts)
     except BaseException as error:
         result["errors"].append(f"{type(error).__name__}: {error}")
     finally:

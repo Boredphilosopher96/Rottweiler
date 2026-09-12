@@ -142,10 +142,11 @@ class ImpairmentRelay:
             read = request.get("read") if isinstance(request, dict) else None
             source = read.get("source") if isinstance(read, dict) else None
             selector = source.get("selector") if isinstance(source, dict) else None
-            selected = (self.armed and isinstance(request, dict)
+            artifact = (isinstance(request, dict)
                         and request.get("type") == "read_transcript_content"
                         and isinstance(selector, dict) and selector.get("type") == "tool_output")
-            if selected and (len(json.dumps(source).encode()) > 1024
+            selected = self.armed and artifact
+            if artifact and (len(json.dumps(source).encode()) > 1024
                              or type(read.get("offset")) is not int or read["offset"] < 0):
                 raise ValueError("relay receipt source exceeds bound")
             if selected:
@@ -156,8 +157,8 @@ class ImpairmentRelay:
             remote.write(body)
             await remote.drain()
             del body, raw
-            if selected:
-                await self.until_disconnect(reader, self.hold_response(incoming, writer, request))
+            if artifact:
+                await self.until_disconnect(reader, self.artifact_response(incoming, writer, request, hold=selected))
             else:
                 await self.until_disconnect(reader, self.forward(incoming, writer))
         except (ValueError, RecursionError, OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
@@ -190,7 +191,7 @@ class ImpairmentRelay:
             writer.write(block)
             await writer.drain()
 
-    async def hold_response(self, incoming, writer, request):
+    async def artifact_response(self, incoming, writer, request, *, hold):
         raw, fields = await header(incoming)
         if "transfer-encoding" in fields or "content-length" not in fields:
             raise ValueError("held engine response requires bounded explicit framing")
@@ -199,13 +200,14 @@ class ImpairmentRelay:
             raise ValueError("held engine response exceeds receipt/byte bounds")
         body = await asyncio.wait_for(incoming.readexactly(count), 5)
         record = {"source": request["read"]["source"], "offset": request["read"]["offset"],
-                  "bytes": count, "sha256": hashlib.sha256(body).hexdigest(), "delivered": False}
+                  "bytes": count, "sha256": hashlib.sha256(body).hexdigest(), "held": hold, "delivered": False}
         self.receipts.append(record)
         self.held += 1
         self.held_bytes += count + len(raw)
         self.peak = max(self.peak, self.held_bytes)
         try:
-            await asyncio.wait_for(self.release.wait(), HOLD_SECONDS)
+            if hold:
+                await asyncio.wait_for(self.release.wait(), HOLD_SECONDS)
             if not self.offline and not writer.is_closing():
                 writer.write(raw)
                 writer.write(body)
