@@ -39,6 +39,10 @@ async function main(): Promise<void> {
     process.env.ROTTWEILER_SUPERVISOR_PID ?? "",
     10,
   )
+  // Only the launcher knows who owns the engine: closing this client shuts the
+  // engine down only when it is the client's own (not detached, pre-existing,
+  // or supervised remotely by `rw --remote`).
+  const closesHost = process.env.ROTTWEILER_TUI_CLOSES_HOST === "1"
   const recycleStatePath = process.env.ROTTWEILER_TUI_RECYCLE_STATE_FILE
   let supervisorDeathTimer: ReturnType<typeof setInterval> | undefined
   if (Number.isSafeInteger(expectedSupervisorPid) && expectedSupervisorPid > 1) {
@@ -390,7 +394,7 @@ async function main(): Promise<void> {
       queueMicrotask(() => {
         void (async () => {
           const runtime = runtimeForShutdown ?? (await runtimeWithin(runtimeBootstrap, 250))
-          await runtime?.shutdownHost()
+          if (closesHost) await runtime?.shutdownHost()
           await runtime?.stop()
           renderer.destroy()
         })()

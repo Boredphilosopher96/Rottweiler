@@ -112,10 +112,18 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
       await other
       requireThat(await pendingSend === false, "fixture mutation rejection was lost")
       requireThat(app.composer.value.startsWith(`draft ${cycle} `), "failed mutation lost draft")
-      const commandUsage = fixture.client.commandUsage
-      requireThat((allocations.usage.domains.decoding ?? 0) === 0 && commandUsage.reads.bytes === 0
-        && commandUsage.controls.normal === 0 && commandUsage.controls.urgent === 0
-        && commandUsage.watches === (familyEnabled ? 1 : 0), "settled foreground transport retained allocation")
+      // The family-controls watch is a long poll that re-arms after each reply,
+      // and settlement callbacks run after the awaited promises resolve, so
+      // sample the steady state rather than one instant; a leak never settles.
+      const settled = () => {
+        const commandUsage = fixture.client.commandUsage
+        return (allocations.usage.domains.decoding ?? 0) === 0 && commandUsage.reads.bytes === 0
+          && commandUsage.controls.normal === 0 && commandUsage.controls.urgent === 0
+          && commandUsage.watches === (familyEnabled ? 1 : 0)
+      }
+      try { await until(settled) } catch {
+        requireThat(false, `settled foreground transport retained allocation: ${JSON.stringify({ cycle, familyEnabled, decoding: allocations.usage.domains.decoding ?? 0, commandUsage: fixture.client.commandUsage })}`)
+      }
 
       const prior = app.state
       const pressure = allocations.reserve("live", Math.min(allocations.limits.live - (allocations.usage.domains.live ?? 0), allocations.normalCapacity - allocations.usage.bytes))

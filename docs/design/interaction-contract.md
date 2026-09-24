@@ -114,7 +114,7 @@ of the parent's active stream; children retain session ownership until settled.
 Shutdown interrupts work, settles sessions and owned processes, then exits. The
 client and supervisor allow the engine's 30-second cleanup proof deadline plus
 transport grace. SIGINT, SIGTERM, and SIGHUP request the same cooperative close.
-Detach remains explicit. A timeout must not be presented as proven cleanup.
+Detach remains explicit. Only the engine's owner closes it: the launcher tells the client whether it owns the engine, so a detached or pre-existing engine outlives the client, and `rw --remote` itself shuts down a remote engine it started, allowing the same cleanup deadline. A timeout must not be presented as proven cleanup.
 
 ## Acceptance
 

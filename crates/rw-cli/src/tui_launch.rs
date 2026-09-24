@@ -26,6 +26,10 @@ pub(super) struct TuiLaunch<'a> {
     pub keybindings: Option<&'a str>,
     pub theme: &'a str,
     pub replay: bool,
+    /// Whether closing this client should shut the engine down. Only the
+    /// launcher knows engine ownership: a detached, pre-existing, or
+    /// remotely supervised engine must outlive the client.
+    pub closes_host: bool,
 }
 
 impl TuiLaunch<'_> {
@@ -63,6 +67,10 @@ impl TuiLaunch<'_> {
                 if self.replay { "1" } else { "0" }.into(),
             ),
             ("ROTTWEILER_TUI_THEME".into(), self.theme.into()),
+            (
+                "ROTTWEILER_TUI_CLOSES_HOST".into(),
+                if self.closes_host { "1" } else { "0" }.into(),
+            ),
         ]);
         if let Some(value) = self.keybindings {
             env.insert("ROTTWEILER_TUI_KEYBINDINGS".into(), value.into());

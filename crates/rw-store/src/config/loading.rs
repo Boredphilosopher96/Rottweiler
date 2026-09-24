@@ -26,6 +26,17 @@ impl ConfigLoader {
         Self::from_captured_environment(environment, &project_root)
     }
 
+    /// Like [`Self::from_environment`], but for an explicit project root, for
+    /// hosts whose workspace is not the process working directory (for
+    /// example an engine started over SSH from the remote user's home).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no absolute user configuration root is set.
+    pub fn from_environment_for_project(project_root: &Path) -> Result<Self, ConfigError> {
+        Self::from_captured_environment(env::vars().collect(), project_root)
+    }
+
     pub(super) fn from_captured_environment(
         environment: BTreeMap<String, String>,
         project_root: &Path,

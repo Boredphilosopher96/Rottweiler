@@ -47,6 +47,10 @@ def route_request(body: dict) -> tuple[str, object]:
                     if message.get("role") == "user"
                     for command in commands if command in json.dumps(message.get("content"))), None)
     returned = {message.get("tool_call_id") for message in messages if message.get("role") == "tool"}
+    latest_user = next((message for message in reversed(messages) if message.get("role") == "user"), None)
+    if latest_user is not None and "<child-agent-result" in json.dumps(latest_user.get("content")):
+        # Finished background children wake the idle parent with their results.
+        return "text", "NATIVE_PARENT_WOKE"
     if current == EDIT:
         if "journey-edit" not in returned:
             return "tools", [tool("journey-edit", "edit", {"path": "journey.txt", "old": "before", "new": "after"})]
@@ -58,7 +62,8 @@ def route_request(body: dict) -> tuple[str, object]:
     if current == CHILDREN:
         if not {"journey-child-1", "journey-child-2"} <= returned:
             calls = [tool(f"journey-child-{index}", "spawn_agent", {
-                "action": "start", "task": task, "agent": "explore", "isolation": "shared",
+                "action": "spawn", "task": task, "agent": "explore", "isolation": "shared",
+                "background": True,
             }) for index, task in enumerate(CHILD_TASKS, 1)]
             for index, call in enumerate(calls):
                 call["index"] = index
@@ -215,7 +220,7 @@ class Journey:
 
     def approve(self, call_id):
         self.wait(lambda: self.event("tool_approval_needed", tool_call_id=call_id), "approval_" + call_id)
-        self.visible("Allow once", "visible_approval_" + call_id)
+        self.visible("y  Yes", "visible_approval_" + call_id)
         if call_id == "journey-test":
             self.visible("printf", "test_command_review")
         os.write(self.process.fd, b"y")
@@ -267,6 +272,7 @@ class Journey:
         self.wait(lambda: len([event for event in self.events() if event.get("type") == "subagent_finished"]) == 2, "children_finished")
         if any(event.get("result", {}).get("status") != "completed" for event in self.events() if event.get("type") == "subagent_finished"):
             raise RuntimeError("a background child failed")
+        self.visible("NATIVE_PARENT_WOKE", "parent_woke_for_child_results")
         self.enter(OBSERVE)
         self.visible("NATIVE_PARENT_READ_CHILD_RESULTS", "parent_observes_results")
         self.enter("/compact")

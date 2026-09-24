@@ -828,6 +828,7 @@ fn tui_spec(config: &SupervisorConfig, last_seen: Option<SequenceId>) -> ChildSp
         keybindings: config.tui_keybindings.as_deref(),
         theme: &config.tui_theme,
         replay: false,
+        closes_host: !config.detach,
     }
     .spec(last_seen)
 }

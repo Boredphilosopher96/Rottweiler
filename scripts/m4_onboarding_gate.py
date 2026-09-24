@@ -115,7 +115,7 @@ def onboarding_gate(rw: Path, root: Path, isolated_env) -> None:
                 enter(origin + "/v1/chat/completions")
                 screen("Authentication", "onboarding_authentication")
                 os.write(process.fd, b"\x1b[B" + TERMINAL_SUBMIT)
-                screen("Initial model ID", "onboarding_model_id")
+                screen("Initial model", "onboarding_model_id")
                 enter()
                 screen("Save provider and connect", "onboarding_review")
                 enter()

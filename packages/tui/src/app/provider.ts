@@ -194,7 +194,7 @@ export class ProviderUiController {
           { id: "provider-setup.api-key", label: "API key", description: "Stored through the secure credential channel", value: "api_key" },
           { id: "provider-setup.no-auth", label: "No authentication", description: "Allowed only for a local loopback endpoint", value: "none" },
         ], item => model({ provider, adapter, endpoint, auth: item.value }))
-      })
+      }, "reject", `Full inference endpoint URL, including its path, for example ${adapter === "chat" ? "https://gateway.example/v1/chat/completions" : "https://gateway.example/v1/responses"}.`)
     }
     prompt("CONNECT › Provider name", "my-gateway", 128, value => {
       const provider = value.trim()

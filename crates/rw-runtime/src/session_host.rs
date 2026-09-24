@@ -217,8 +217,13 @@ impl RuntimeHostOptions {
         provider_mode: HostedProviderMode,
         wait_for_execution_lease: bool,
     ) -> Result<Self, HostError> {
-        let loader = ConfigLoader::from_environment()
-            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        // Project configuration belongs to the served workspace, not to the
+        // directory the engine happened to be started from.
+        let loader = match allowed_workspaces.first() {
+            Some(workspace) => ConfigLoader::from_environment_for_project(workspace),
+            None => ConfigLoader::from_environment(),
+        }
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
         let credentials_path = loader.credentials_path().clone();
         let storage_root = credentials_path
             .parent()

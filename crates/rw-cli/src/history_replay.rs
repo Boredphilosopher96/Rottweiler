@@ -344,6 +344,7 @@ async fn run_history_session(
         keybindings: keybindings.as_deref(),
         theme: "",
         replay: true,
+        closes_host: false,
     });
     let mut server_finished = false;
     let result = tokio::select! {

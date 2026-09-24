@@ -1007,9 +1007,13 @@ def ssh_loopback_gate(
         descriptor, remote_engine_pid = wait_for_detached_remote(session_id)
         # Confirm idle exit without relying on the interval between PTY writes.
         os.write(remote.fd, b"\x03\x03")
-        exit_code = os.waitstatus_to_exitcode(wait_for_pty_exit(remote, 8))
+        teardown = bytearray()
+        exit_code = os.waitstatus_to_exitcode(wait_for_pty_exit(remote, 8, teardown))
         if exit_code != 0:
-            raise RuntimeError(f"double idle Ctrl-C remote close exited with {exit_code}")
+            raise RuntimeError(
+                f"double idle Ctrl-C remote close exited with {exit_code}; "
+                f"teardown tail={bytes(teardown)[-1024:]!r}"
+            )
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if not process_exists(remote_engine_pid) and not descriptor.parent.exists():
@@ -1153,7 +1157,7 @@ def wait_for_detached_remote(
     raise RuntimeError(f"detached remote runtime did not appear for {session_id}")
 
 
-def cleanup_detached_remote(session_id: str, cause: BaseException | None) -> None:
+def cleanup_detached_remote(session_id: str, cause: BaseException | None = None) -> None:
     """Refuses to hide a leaked remote engine, while keeping the failure that
     caused the abnormal close as the reported root cause."""
     try:

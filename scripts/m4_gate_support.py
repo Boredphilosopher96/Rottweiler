@@ -598,8 +598,17 @@ def read_until_all(
         f"screen={screen.text.replace(SHELL_SECRET_VALUE, '[REDACTED]')[-4000:] if screen is not None else None!r}"
     )
 
-def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
-    """Drain terminal teardown output while waiting for a PTY child to exit."""
+TEARDOWN_TAIL_BYTES = 4096
+
+
+def wait_for_pty_exit(
+    process: PtyProcess, timeout: float, tail: bytearray | None = None
+) -> int:
+    """Drain terminal teardown output while waiting for a PTY child to exit.
+
+    When `tail` is given it keeps the last teardown bytes, so a failing exit
+    can report what the process printed instead of only its status.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = process.exit_status()
@@ -610,7 +619,10 @@ def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
         )
         if ready:
             with contextlib.suppress(OSError):
-                os.read(process.fd, 65536)
+                chunk = os.read(process.fd, 65536)
+                if tail is not None:
+                    tail.extend(chunk)
+                    del tail[:-TEARDOWN_TAIL_BYTES]
     raise TimeoutError(f"PTY process {process.pid} did not exit within {timeout} seconds")
 
 def stop_pty(process: PtyProcess) -> None:
