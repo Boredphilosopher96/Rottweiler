@@ -16,7 +16,7 @@ symbols = ["SessionId::validate", "RequestId::is_valid", "MAX_REQUEST_ID_BYTES",
 [[owner]]
 id = "interactive-navigation-contract"
 path = "crates/rw-types/src/client_navigation.rs"
-symbols = ["INTERACTIVE_COMMANDS"]
+symbols = ["COMMAND_CATALOG", "COMMAND_SECTIONS"]
 
 [[owner]]
 id = "session-action-availability-contract"
@@ -235,7 +235,7 @@ symbols = ["RuntimeSessionExtensionController", "DevelopmentExtensionState"]
 [[owner]]
 id = "tui-session-actions"
 path = "packages/tui/src/session-commands.ts"
-symbols = ["parseSessionAction"]
+symbols = ["resolveSlashInput"]
 
 [[generator]]
 id = "release-contract-rust"
