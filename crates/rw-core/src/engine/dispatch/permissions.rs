@@ -64,6 +64,7 @@ pub(in crate::engine) fn permission_state(
     };
     let effective_rules = collect_rules("effective", &snapshot.rules);
     let session_rules = collect_rules("session", &snapshot.session_rules);
+    let project_rules = collect_rules("project", &snapshot.project_rules);
     let remembered = permissions.approval_snapshot();
     let mut approvals = Vec::new();
     for (scope, rows) in [
@@ -97,9 +98,9 @@ pub(in crate::engine) fn permission_state(
         default: snapshot.default,
         runtime_mode: snapshot.runtime_mode.map(permission_mode_descriptor),
         effective_rules,
-        // Project configuration cannot grant permission authority. Remembered
-        // project approvals are represented separately above.
-        project_rules: Vec::new(),
+        // Repository configuration never grants authority; these rows are the
+        // user-reviewed rules saved for this project in private user storage.
+        project_rules,
         session_rules,
         approvals,
         truncated,
@@ -112,8 +113,11 @@ pub(super) fn apply_permission_command(
 ) -> Result<PermissionStateDescriptor, String> {
     match command {
         ClientCommand::ListPermissions { .. } => {}
-        ClientCommand::AddSessionPermissionRule {
-            pattern, action, ..
+        ClientCommand::AddPermissionRule {
+            scope,
+            pattern,
+            action,
+            ..
         } => {
             if pattern.is_empty()
                 || pattern.len() > MAX_PERMISSION_PATTERN_BYTES
@@ -121,23 +125,34 @@ pub(super) fn apply_permission_command(
             {
                 return Err("permission rule is empty or exceeds its safety limit".to_owned());
             }
-            permissions.add_session_rule(PermissionRule {
+            let rule = PermissionRule {
                 pattern: pattern.clone(),
                 action: *action,
-            })?;
+            };
+            match scope {
+                PermissionApprovalScope::Session => permissions.add_session_rule(rule)?,
+                PermissionApprovalScope::Project => permissions.add_project_rule(rule)?,
+            }
         }
-        ClientCommand::RemoveSessionPermissionRule { rule_id, .. } => {
+        ClientCommand::RemovePermissionRule { rule_id, .. } => {
             if rule_id.is_empty() || rule_id.len() > MAX_PERMISSION_ID_BYTES {
                 return Err("permission rule id is invalid".to_owned());
             }
             let snapshot = permissions.snapshot();
-            let pattern = snapshot
-                .session_rules
-                .iter()
-                .find(|rule| permission_rule_id("session", rule) == *rule_id)
-                .map(|rule| rule.pattern.clone())
-                .ok_or_else(|| "permission rule is no longer present".to_owned())?;
-            if !permissions.remove_session_rule(&pattern) {
+            let find = |scope: &str, rules: &[PermissionRule]| {
+                rules
+                    .iter()
+                    .find(|rule| permission_rule_id(scope, rule) == *rule_id)
+                    .map(|rule| rule.pattern.clone())
+            };
+            let removed = if let Some(pattern) = find("session", &snapshot.session_rules) {
+                permissions.remove_session_rule(&pattern)
+            } else if let Some(pattern) = find("project", &snapshot.project_rules) {
+                permissions.remove_project_rule(&pattern)?
+            } else {
+                false
+            };
+            if !removed {
                 return Err("permission rule is no longer present".to_owned());
             }
         }

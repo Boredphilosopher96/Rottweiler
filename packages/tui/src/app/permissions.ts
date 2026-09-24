@@ -6,6 +6,7 @@ import {
   type PermissionApprovalScope,
   type PermissionDecision,
   type PermissionModeDescriptor,
+  type PermissionRuleDescriptor,
 } from "../protocol"
 import { type RottweilerState, type ToolProjection } from "../state"
 import { commandPreview } from "../render"
@@ -58,7 +59,7 @@ export class PermissionUiController {
 
   /**
    * "Always allow" for a waiting approval: choose between remembering this
-   * exact invocation for the project and a reviewed session pattern. Both
+   * exact invocation for the project and a reviewed project pattern. Both
    * choices also allow the waiting invocation; Esc returns to the prompt.
    */
   openAlwaysAllowReview(tool: ToolProjection): void {
@@ -91,12 +92,12 @@ export class PermissionUiController {
         value: "exact" as const,
       }] : []),
       {
-        id: "always.pattern", label: `Anything matching ${pattern}…`, hint: "this session", primary: "review",
+        id: "always.pattern", label: `Anything matching ${pattern}…`, hint: "this project", primary: "review",
         description: "Review the pattern before saving · runs now",
         detail: [
           pattern,
           "",
-          "Allows future calls that match this pattern for the rest of this session. You can edit it before saving.",
+          "Allows future calls that match this pattern in this project, now and in later sessions. You can edit it before saving, and remove it any time in /permissions.",
           "Every part of a compound shell command must match on its own. Network access, unsandboxed execution, and deny rules are still checked separately.",
         ].join("\n"),
         value: "pattern" as const,
@@ -135,11 +136,11 @@ export class PermissionUiController {
     this.#host.pickerController.openTextPrompt({
       title: `PERMISSIONS › ${permissionRuleActionLabel(action)}`,
       placeholder: "tool(glob), e.g. bash(cargo test*)",
-      detail: "Applies to this session only. Name a tool and an argument glob, e.g. bash(cargo test*) or edit(src/**).",
+      detail: "Saved for this project in your private Rottweiler data, never in the repository. Name a tool and an argument glob, e.g. bash(cargo test*) or edit(src/**). Remove it any time in /permissions.",
       ...(review === undefined ? {} : { initial: review.initial }),
       onSubmit: (pattern) => {
         if (!scope?.active) return
-        this.#host.requests.command({ type: "add_session_permission_rule", pattern, action })
+        this.#host.requests.command({ type: "add_permission_rule", scope: "project", pattern, action })
         if (review === undefined) this.#host.closePicker()
         else review.onSaved()
       },
@@ -260,29 +261,33 @@ export class PermissionUiController {
       description: `${source} · read-only`, detail: `${rule.pattern}\n\n${permissionActionLabel(rule.action)} · ${source}\nEdit the configuration file to change this rule.`,
       primary: null, value: { kind: "info" },
     })
-    const sessionRules = permissions.session_rules.map((rule) => ({
+    const removableRule = (rule: PermissionRuleDescriptor, scope: "project" | "session") => ({
       id: `permissions.remove.${rule.id}`, label: permissionPatternLabel(rule.pattern),
       hint: permissionActionLabel(rule.action).toLocaleLowerCase(),
-      description: "This session · ctrl+d removes it",
-      detail: `${rule.pattern}\n\n${permissionActionLabel(rule.action)} · this session only`,
+      description: `${scope === "project" ? "This project" : "This session"} · ctrl+d removes it`,
+      detail: `${rule.pattern}\n\n${permissionActionLabel(rule.action)} · ${scope === "project" ? "saved for this project" : "this session only"}`,
       primary: null, value: { kind: "remove", ruleId: rule.id } as const,
-    }))
+    })
+    const projectRules = permissions.project_rules.map(rule => removableRule(rule, "project"))
+    const sessionRules = permissions.session_rules.map(rule => removableRule(rule, "session"))
     const approvals = permissions.approvals.map((approval) => ({
       id: `permissions.revoke.${approval.id}`, label: approval.tool_name,
       hint: approval.scope === "project" ? "remembered · project" : "remembered · session",
       description: `${approval.scope === "project" ? "This project" : "This session"} · ctrl+d revokes it`,
       primary: null, value: { kind: "revoke", approvalId: approval.id, scope: approval.scope } as const,
     }))
-    const configured = [
-      ...permissions.effective_rules.map(rule => readOnly(`permissions.effective.${rule.id}`, rule, "trusted configuration")),
-      ...permissions.project_rules.map(rule => readOnly(`permissions.project.${rule.id}`, rule, "project configuration")),
-    ]
+    const projectApprovals = approvals.filter(item => item.value.scope === "project")
+    const sessionApprovals = approvals.filter(item => item.value.scope === "session")
+    const configured = permissions.effective_rules.map(rule => readOnly(`permissions.effective.${rule.id}`, rule, "trusted configuration"))
     const items: PickerItem<PermissionPickerAction>[] = [
       section("policy", "Approval policy"),
       ...this.#permissionModeItems(),
-      ...(sessionRules.length + approvals.length === 0 ? [] : [section("session", "This session")]),
+      ...(projectRules.length + projectApprovals.length === 0 ? [] : [section("project", "This project")]),
+      ...projectRules,
+      ...projectApprovals,
+      ...(sessionRules.length + sessionApprovals.length === 0 ? [] : [section("session", "This session")]),
       ...sessionRules,
-      ...approvals,
+      ...sessionApprovals,
       ...(configured.length === 0 ? [] : [section("configured", "Configured rules")]),
       ...configured,
       section("workspace", "Workspace"),
@@ -308,7 +313,7 @@ export class PermissionUiController {
         { stroke: "ctrl+d", label: "remove", available: removable, run: item => {
           const action = item?.value
           if (action?.kind === "remove") {
-            this.#host.requests.command({ type: "remove_session_permission_rule", ruleId: action.ruleId })
+            this.#host.requests.command({ type: "remove_permission_rule", ruleId: action.ruleId })
           } else if (action?.kind === "revoke") {
             this.#host.requests.command({ type: "revoke_permission_approval", approvalId: action.approvalId, scope: action.scope })
           }

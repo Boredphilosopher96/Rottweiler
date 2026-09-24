@@ -93,6 +93,7 @@ pub struct PermissionSnapshot {
     pub runtime_mode: Option<PermissionModeDescriptor>,
     pub rules: Vec<PermissionRule>,
     pub session_rules: Vec<PermissionRule>,
+    pub project_rules: Vec<PermissionRule>,
     pub session_approvals: usize,
     pub project_approvals: usize,
 }
@@ -145,6 +146,7 @@ pub struct PermissionGate {
     memory: Arc<RwLock<PermissionMemory>>,
     session_rules: Arc<RwLock<Vec<PermissionRule>>>,
     project_store: Option<Arc<ProjectApprovalStore>>,
+    project_rules: Option<Arc<ProjectRuleStore>>,
     command_safety: Arc<CommandSafetyClassifier>,
 }
 
@@ -177,15 +179,19 @@ impl PermissionGate {
             memory: Arc::new(RwLock::new(PermissionMemory::default())),
             session_rules: Arc::new(RwLock::new(Vec::new())),
             project_store: None,
+            project_rules: None,
             command_safety: Arc::new(CommandSafetyClassifier::default()),
         }
     }
 
-    /// Enables durable exact-invocation approvals. Unsafe or malformed files
-    /// fail closed by loading no approvals; writes remain atomic and private.
+    /// Enables durable exact-invocation approvals and reviewed project rules,
+    /// both kept in private user storage beside `path`. Unsafe or malformed
+    /// files fail closed by loading nothing; writes remain atomic and private.
     #[must_use]
     pub fn with_project_approval_file(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
+        self.project_rules =
+            project_rules_path(&path).map(|rules| shared_project_rule_store(&rules));
         self.project_store = Some(shared_project_store(&path));
         self
     }
@@ -199,6 +205,7 @@ impl PermissionGate {
             memory: Arc::new(RwLock::new(PermissionMemory::default())),
             session_rules: Arc::new(RwLock::new(Vec::new())),
             project_store: None,
+            project_rules: None,
             command_safety: Arc::new(CommandSafetyClassifier::default()),
         }
     }
@@ -245,6 +252,10 @@ impl PermissionGate {
         };
         let default = runtime_mode.map_or(base_default, permission_mode_default);
         let session_rules = lock_read(&self.session_rules).clone();
+        let project_rules = self
+            .project_rules
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.refresh());
         let memory = lock_read(&self.memory);
         let project_approvals = self
             .project_store
@@ -263,6 +274,7 @@ impl PermissionGate {
             runtime_mode,
             rules,
             session_rules,
+            project_rules,
             session_approvals: memory.session_allows.len(),
             project_approvals,
         }
@@ -403,6 +415,7 @@ impl PermissionGate {
             })),
             session_rules: Arc::clone(&self.session_rules),
             project_store: self.project_store.clone(),
+            project_rules: self.project_rules.clone(),
             command_safety: Arc::clone(&self.command_safety),
         })
     }
@@ -436,6 +449,7 @@ impl PermissionGate {
             memory: Arc::clone(&self.memory),
             session_rules: Arc::clone(&self.session_rules),
             project_store: self.project_store.clone(),
+            project_rules: self.project_rules.clone(),
             command_safety: Arc::clone(&self.command_safety),
         })
     }
@@ -502,6 +516,39 @@ impl PermissionGate {
         rules.retain(|existing| existing.pattern != rule.pattern);
         rules.push(rule);
         Ok(())
+    }
+
+    /// Adds or replaces one reviewed rule that persists for this workspace in
+    /// private user storage. Precedence matches session rules: an explicit
+    /// deny anywhere still wins.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rule is malformed, durable project storage is
+    /// not configured, the per-project bound is reached, or the write fails.
+    pub fn add_project_rule(&self, rule: PermissionRule) -> Result<(), String> {
+        self.project_rules
+            .as_ref()
+            .ok_or_else(|| "this session cannot save project rules".to_owned())?
+            .add(rule)
+    }
+
+    /// Removes a durable project rule with the exact normalized pattern.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable storage is unavailable or the write fails.
+    pub fn remove_project_rule(&self, pattern: &str) -> Result<bool, String> {
+        self.project_rules
+            .as_ref()
+            .ok_or_else(|| "this session cannot save project rules".to_owned())?
+            .remove(pattern)
+    }
+
+    fn durable_project_rules(&self) -> Vec<PermissionRule> {
+        self.project_rules
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.refresh())
     }
 
     /// Removes a session-scoped rule with the exact normalized pattern.
@@ -794,6 +841,7 @@ impl PermissionGate {
         match &self.policy {
             PermissionPolicy::Configured(config) => {
                 let mut effective = config.clone();
+                effective.rules.extend(self.durable_project_rules());
                 effective
                     .rules
                     .extend(lock_read(&self.session_rules).iter().cloned());
@@ -842,7 +890,8 @@ impl PermissionGate {
                     PermissionModeDescriptor::AutoSafe => PermissionDecision::Deny,
                     PermissionModeDescriptor::Yolo => PermissionDecision::Allow,
                 };
-                let rules = lock_read(&self.session_rules).clone();
+                let mut rules = self.durable_project_rules();
+                rules.extend(lock_read(&self.session_rules).iter().cloned());
                 if unsandboxed {
                     let policy = PermissionConfig { default, rules };
                     let configured = rule_decision(&policy, request, behavior);
@@ -1083,7 +1132,9 @@ use rules::{
     canonical_json, is_assignment, rule_decision, unsandboxed_rule_decision, validate_rule,
 };
 
+mod project_rules;
 mod project_store;
+use project_rules::{ProjectRuleStore, project_rules_path, shared_project_rule_store};
 use project_store::{ProjectApprovalStore, hex, shared_project_store};
 
 #[cfg(test)]

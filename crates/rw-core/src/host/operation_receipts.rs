@@ -75,8 +75,8 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::RemoveMcpServer { .. }
         | ClientCommand::ApproveMcpServer { .. }
         | ClientCommand::SetMcpServerEnabled { .. }
-        | ClientCommand::AddSessionPermissionRule { .. }
-        | ClientCommand::RemoveSessionPermissionRule { .. }
+        | ClientCommand::AddPermissionRule { .. }
+        | ClientCommand::RemovePermissionRule { .. }
         | ClientCommand::RemoveQueuedMessage { .. }
         | ClientCommand::ClearQueuedMessages { .. }
         | ClientCommand::RenameSession { .. }

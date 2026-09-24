@@ -73,7 +73,7 @@ for (const kind of ["question", "approval"] as const) {
       await flush()
       const action = emitted.find(command => command.type === "resolve_child_control")
       expect(action).toMatchObject({ session_id: "root", target, expected_revision: "7", response: { type: kind } })
-      expect(emitted.some(command => ["answer_question", "approve_tool", "user_shell_started", "add_session_permission_rule"].includes(command.type))).toBe(false)
+      expect(emitted.some(command => ["answer_question", "approve_tool", "user_shell_started", "add_permission_rule"].includes(command.type))).toBe(false)
       expect(app.interactionPanel.visible).toBe(false)
       expect(Object.keys(app.state.questions)).toHaveLength(0)
       // A new host may begin at a lower live revision after reconnect.

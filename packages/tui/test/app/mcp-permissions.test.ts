@@ -365,7 +365,7 @@ describe("Rottweiler mcp-permissions", () => {
       permissions: {
         default: "ask",
         effective_rules: [{ id: "effective:one", pattern: "bash(rm *)", action: "deny" }],
-        project_rules: [],
+        project_rules: [{ id: "project:one", pattern: "bash(cargo build*)", action: "allow" }],
         session_rules: [{ id: "session:one", pattern: "bash(cargo test*)", action: "ask" }],
         approvals: [{
           id: "session:opaque-approval",
@@ -387,7 +387,7 @@ describe("Rottweiler mcp-permissions", () => {
     ])
     expect(options(app.picker).slice(0, 4).map((option) => option.name)).toEqual(["Ask", "Auto", "Off", "Default"])
     expect(app.picker.selectedItem).toMatchObject({ label: "Default", marker: "●" })
-    expect(app.picker.sectionLabels).toEqual(["Approval policy", "This session", "Configured rules", "Workspace"])
+    expect(app.picker.sectionLabels).toEqual(["Approval policy", "This project", "This session", "Configured rules", "Workspace"])
     expect((app.picker.mode === "status")).toBeFalse()
     expect((app.picker.mode === "list")).toBeTrue()
     const permissionCopy = options(app.picker)
@@ -404,8 +404,19 @@ describe("Rottweiler mcp-permissions", () => {
     expect(app.picker.footer.plainText).toBe("ctrl+n new rule · ctrl+d remove · esc close")
     setup.mockInput.pressKey("d", { ctrl: true })
     expect(emitted).toContainEqual(expect.objectContaining({
-      type: "remove_session_permission_rule",
+      type: "remove_permission_rule",
       rule_id: "session:one",
+    }))
+
+    const projectRuleIndex = options(app.picker).findIndex(
+      (option) => option.value === "permissions.remove.project:one",
+    )
+    select(app.picker, projectRuleIndex)
+    expect(app.picker.selectedItem).toMatchObject({ description: "This project · ctrl+d removes it" })
+    setup.mockInput.pressKey("d", { ctrl: true })
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "remove_permission_rule",
+      rule_id: "project:one",
     }))
 
     const revokeIndex = options(app.picker).findIndex(

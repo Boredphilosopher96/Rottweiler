@@ -63,7 +63,7 @@ describe("preference interaction ownership", () => {
       expect(emitted).toHaveLength(before)
       const current = prompts.at(-1)!
       current.onSubmit(feature === "budget" ? "25" : "bash(cargo test*)")
-      expect(emitted.at(-1)).toMatchObject({ type: feature === "budget" ? "set_setting" : "add_session_permission_rule", session_id: "second" })
+      expect(emitted.at(-1)).toMatchObject({ type: feature === "budget" ? "set_setting" : "add_permission_rule", session_id: "second" })
       open()
       const destroyed = prompts.at(-1)!
       app.destroy()

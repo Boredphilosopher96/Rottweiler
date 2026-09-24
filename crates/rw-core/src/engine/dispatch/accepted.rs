@@ -50,8 +50,8 @@ pub(super) async fn apply_accepted(
     } = context;
     match command {
         ClientCommand::ListPermissions { .. }
-        | ClientCommand::AddSessionPermissionRule { .. }
-        | ClientCommand::RemoveSessionPermissionRule { .. }
+        | ClientCommand::AddPermissionRule { .. }
+        | ClientCommand::RemovePermissionRule { .. }
         | ClientCommand::RemoveQueuedMessage { .. }
         | ClientCommand::ClearQueuedMessages { .. }
         | ClientCommand::ExportSession { .. }

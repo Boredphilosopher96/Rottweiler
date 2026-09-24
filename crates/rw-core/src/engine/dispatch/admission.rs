@@ -898,8 +898,8 @@ pub(super) async fn dispatch_protocol(
     if matches!(
         &command,
         ClientCommand::ListPermissions { .. }
-            | ClientCommand::AddSessionPermissionRule { .. }
-            | ClientCommand::RemoveSessionPermissionRule { .. }
+            | ClientCommand::AddPermissionRule { .. }
+            | ClientCommand::RemovePermissionRule { .. }
             | ClientCommand::RevokePermissionApproval { .. }
     ) {
         let mutating = !matches!(&command, ClientCommand::ListPermissions { .. });

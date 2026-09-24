@@ -280,14 +280,14 @@ describe("approvals components", () => {
     await setup.renderOnce()
     expect(app.picker.screenTitle).toBe("PERMISSIONS › Always allow matching tools")
     expect(app.picker.input.value).toBe("bash(cargo *)")
-    expect(statusText(app.picker)).toContain("Applies to this session only")
+    expect(statusText(app.picker)).toContain("Saved for this project")
     expect(commands).toEqual([])
     app.picker.input.value = ""
     await setup.mockInput.typeText("bash(cargo test*)")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     expect(commands).toEqual([
-      expect.objectContaining({ type: "add_session_permission_rule", pattern: "bash(cargo test*)", action: "allow" }),
+      expect.objectContaining({ type: "add_permission_rule", scope: "project", pattern: "bash(cargo test*)", action: "allow" }),
       expect.objectContaining({ type: "approve_tool", tool_call_id: "escape-hatch", decision: "allow_once" }),
     ])
   })

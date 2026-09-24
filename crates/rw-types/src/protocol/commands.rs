@@ -321,13 +321,17 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
-    AddSessionPermissionRule {
+    /// Adds a reviewed `tool(glob)` rule for this session only, or durably for
+    /// this project in private user storage.
+    AddPermissionRule {
         meta: CommandMeta,
         session_id: SessionId,
+        scope: PermissionApprovalScope,
         pattern: String,
         action: PermissionDecision,
     },
-    RemoveSessionPermissionRule {
+    /// Removes a session or project rule by the id `list_permissions` reported.
+    RemovePermissionRule {
         meta: CommandMeta,
         session_id: SessionId,
         rule_id: String,
@@ -505,8 +509,8 @@ impl ClientCommand {
             | Self::ApproveMcpServer { meta, .. }
             | Self::SetMcpServerEnabled { meta, .. }
             | Self::ListPermissions { meta, .. }
-            | Self::AddSessionPermissionRule { meta, .. }
-            | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::AddPermissionRule { meta, .. }
+            | Self::RemovePermissionRule { meta, .. }
             | Self::RemoveQueuedMessage { meta, .. }
             | Self::ClearQueuedMessages { meta, .. }
             | Self::RenameSession { meta, .. }
@@ -596,8 +600,8 @@ impl ClientCommand {
             | Self::ApproveMcpServer { session_id, .. }
             | Self::SetMcpServerEnabled { session_id, .. }
             | Self::ListPermissions { session_id, .. }
-            | Self::AddSessionPermissionRule { session_id, .. }
-            | Self::RemoveSessionPermissionRule { session_id, .. }
+            | Self::AddPermissionRule { session_id, .. }
+            | Self::RemovePermissionRule { session_id, .. }
             | Self::RemoveQueuedMessage { session_id, .. }
             | Self::ClearQueuedMessages { session_id, .. }
             | Self::RenameSession { session_id, .. }
@@ -678,8 +682,8 @@ impl ClientCommand {
             | Self::ApproveMcpServer { meta, .. }
             | Self::SetMcpServerEnabled { meta, .. }
             | Self::ListPermissions { meta, .. }
-            | Self::AddSessionPermissionRule { meta, .. }
-            | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::AddPermissionRule { meta, .. }
+            | Self::RemovePermissionRule { meta, .. }
             | Self::RemoveQueuedMessage { meta, .. }
             | Self::ClearQueuedMessages { meta, .. }
             | Self::RenameSession { meta, .. }

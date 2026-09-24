@@ -527,9 +527,10 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
 
     assert!(matches!(
         handle
-            .dispatch(ClientCommand::AddSessionPermissionRule {
+            .dispatch(ClientCommand::AddPermissionRule {
                 meta: protocol_meta("observer", "observer-add"),
                 session_id: session_id.clone(),
+                scope: PermissionApprovalScope::Session,
                 pattern: "write(**)".to_owned(),
                 action: PermissionDecision::Allow,
             })
@@ -541,9 +542,10 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
 
     assert_eq!(
         handle
-            .dispatch(ClientCommand::AddSessionPermissionRule {
+            .dispatch(ClientCommand::AddPermissionRule {
                 meta: protocol_meta("driver", "driver-add"),
                 session_id: session_id.clone(),
+                scope: PermissionApprovalScope::Session,
                 pattern: "write(**)".to_owned(),
                 action: PermissionDecision::Allow,
             })
@@ -559,7 +561,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
         .expect("typed added row");
     assert_eq!(
         handle
-            .dispatch(ClientCommand::RemoveSessionPermissionRule {
+            .dispatch(ClientCommand::RemovePermissionRule {
                 meta: protocol_meta("driver", "driver-remove"),
                 session_id: session_id.clone(),
                 rule_id: added_rule.id.clone(),

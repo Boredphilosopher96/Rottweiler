@@ -297,17 +297,22 @@ pub(super) fn render_permission_snapshot(
             )
         }));
     }
-    if snapshot.session_rules.is_empty() {
-        lines.push("Session rules: none".to_owned());
-    } else {
-        lines.push("Session rules:".to_owned());
-        lines.extend(snapshot.session_rules.iter().map(|rule| {
-            format!(
-                "- {} · {}",
-                permission_decision_label(rule.action),
-                rule.pattern
-            )
-        }));
+    for (title, rules) in [
+        ("Project rules", &snapshot.project_rules),
+        ("Session rules", &snapshot.session_rules),
+    ] {
+        if rules.is_empty() {
+            lines.push(format!("{title}: none"));
+        } else {
+            lines.push(format!("{title}:"));
+            lines.extend(rules.iter().map(|rule| {
+                format!(
+                    "- {} · {}",
+                    permission_decision_label(rule.action),
+                    rule.pattern
+                )
+            }));
+        }
     }
     lines.push(format!(
         "Remembered approvals: {} for this session, {} for this project",

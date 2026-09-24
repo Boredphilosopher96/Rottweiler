@@ -607,7 +607,7 @@ provider?: string | null, } | { "type": "compact", meta: CommandMeta, session_id
 /**
  * Stable client-generated identity retained until the correlated fork completes.
  */
-operation_id: string, } | { "type": "rewind", meta: CommandMeta, session_id: SessionId, target: RewindTarget, } | { "type": "take_driver", meta: CommandMeta, session_id: SessionId, } | { "type": "user_shell_started", meta: CommandMeta, session_id: SessionId, command: string, } | { "type": "user_shell_ended", meta: CommandMeta, session_id: SessionId, shell_id: ShellId, status: number, captured_output?: string | null, } | { "type": "attach_development_plugin", meta: CommandMeta, session_id: SessionId, source: string, } | { "type": "detach_development_plugin", meta: CommandMeta, session_id: SessionId, } | { "type": "pin_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "evict_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "get_context", meta: CommandMeta, session_id: SessionId, } | { "type": "get_cost", meta: CommandMeta, session_id: SessionId, } | { "type": "get_session_review", meta: CommandMeta, session_id: SessionId, } | { "type": "review_file", meta: CommandMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, current_hash: string, } | { "type": "dump_prompt", meta: CommandMeta, session_id: SessionId, turn_id?: TurnId | null, } | { "type": "list_sessions", meta: CommandMeta, } | { "type": "search_sessions", meta: CommandMeta, query: string, limit: number, } | { "type": "list_commands", meta: CommandMeta, session_id: SessionId, } | { "type": "list_modes", meta: CommandMeta, session_id: SessionId, } | { "type": "list_models", meta: CommandMeta, session_id?: SessionId, refresh: boolean, } | { "type": "list_settings", meta: CommandMeta, session_id: SessionId, } | { "type": "list_extensions", meta: CommandMeta, session_id: SessionId, } | { "type": "set_setting", meta: CommandMeta, session_id: SessionId, key: string, value: string, } | { "type": "list_mcp_servers", meta: CommandMeta, session_id: SessionId, } | { "type": "list_runtime_services", meta: CommandMeta, session_id: SessionId, } | { "type": "add_mcp_http_server", meta: CommandMeta, session_id: SessionId, name: string, endpoint: string, } | { "type": "add_mcp_stdio_server", meta: CommandMeta, session_id: SessionId, name: string, executable: string, args: Array<string>, environment: Array<McpEnvironmentEntry>, } | { "type": "remove_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "review_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "approve_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, fingerprint: string, } | { "type": "set_mcp_server_enabled", meta: CommandMeta, session_id: SessionId, name: string, enabled: boolean, } | { "type": "list_permissions", meta: CommandMeta, session_id: SessionId, } | { "type": "add_session_permission_rule", meta: CommandMeta, session_id: SessionId, pattern: string, action: PermissionDecision, } | { "type": "remove_session_permission_rule", meta: CommandMeta, session_id: SessionId, rule_id: string, } | { "type": "remove_queued_message", meta: CommandMeta, session_id: SessionId, position: string, } | { "type": "clear_queued_messages", meta: CommandMeta, session_id: SessionId, } | { "type": "rename_session", meta: CommandMeta, session_id: SessionId, title: string, } | { "type": "export_session", meta: CommandMeta, session_id: SessionId, format: TranscriptFormat, output_path: string, force: boolean, } | { "type": "revoke_permission_approval", meta: CommandMeta, session_id: SessionId, approval_id: string, scope: PermissionApprovalScope, } | { "type": "begin_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "configure_compatible_provider", meta: CommandMeta, session_id: SessionId, configuration: CompatibleProviderSetup, } | { "type": "configure_builtin_provider", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "complete_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "cancel_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "search_workspace_files", meta: CommandMeta, session_id: SessionId, query: string, limit: number, } | { "type": "preview_workspace_file", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "get_workspace_status", meta: CommandMeta, session_id: SessionId, } | { "type": "get_workspace_diff", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "list_subagents", meta: CommandMeta, session_id: SessionId, } | { "type": "continue_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, content: string, } | { "type": "interrupt_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "close_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "background_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "shutdown_host", meta: CommandMeta, };
+operation_id: string, } | { "type": "rewind", meta: CommandMeta, session_id: SessionId, target: RewindTarget, } | { "type": "take_driver", meta: CommandMeta, session_id: SessionId, } | { "type": "user_shell_started", meta: CommandMeta, session_id: SessionId, command: string, } | { "type": "user_shell_ended", meta: CommandMeta, session_id: SessionId, shell_id: ShellId, status: number, captured_output?: string | null, } | { "type": "attach_development_plugin", meta: CommandMeta, session_id: SessionId, source: string, } | { "type": "detach_development_plugin", meta: CommandMeta, session_id: SessionId, } | { "type": "pin_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "evict_context", meta: CommandMeta, session_id: SessionId, item_id: ContextItemId, } | { "type": "get_context", meta: CommandMeta, session_id: SessionId, } | { "type": "get_cost", meta: CommandMeta, session_id: SessionId, } | { "type": "get_session_review", meta: CommandMeta, session_id: SessionId, } | { "type": "review_file", meta: CommandMeta, session_id: SessionId, path: string, decision: ReviewFileDecision, current_hash: string, } | { "type": "dump_prompt", meta: CommandMeta, session_id: SessionId, turn_id?: TurnId | null, } | { "type": "list_sessions", meta: CommandMeta, } | { "type": "search_sessions", meta: CommandMeta, query: string, limit: number, } | { "type": "list_commands", meta: CommandMeta, session_id: SessionId, } | { "type": "list_modes", meta: CommandMeta, session_id: SessionId, } | { "type": "list_models", meta: CommandMeta, session_id?: SessionId, refresh: boolean, } | { "type": "list_settings", meta: CommandMeta, session_id: SessionId, } | { "type": "list_extensions", meta: CommandMeta, session_id: SessionId, } | { "type": "set_setting", meta: CommandMeta, session_id: SessionId, key: string, value: string, } | { "type": "list_mcp_servers", meta: CommandMeta, session_id: SessionId, } | { "type": "list_runtime_services", meta: CommandMeta, session_id: SessionId, } | { "type": "add_mcp_http_server", meta: CommandMeta, session_id: SessionId, name: string, endpoint: string, } | { "type": "add_mcp_stdio_server", meta: CommandMeta, session_id: SessionId, name: string, executable: string, args: Array<string>, environment: Array<McpEnvironmentEntry>, } | { "type": "remove_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "review_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, } | { "type": "approve_mcp_server", meta: CommandMeta, session_id: SessionId, name: string, fingerprint: string, } | { "type": "set_mcp_server_enabled", meta: CommandMeta, session_id: SessionId, name: string, enabled: boolean, } | { "type": "list_permissions", meta: CommandMeta, session_id: SessionId, } | { "type": "add_permission_rule", meta: CommandMeta, session_id: SessionId, scope: PermissionApprovalScope, pattern: string, action: PermissionDecision, } | { "type": "remove_permission_rule", meta: CommandMeta, session_id: SessionId, rule_id: string, } | { "type": "remove_queued_message", meta: CommandMeta, session_id: SessionId, position: string, } | { "type": "clear_queued_messages", meta: CommandMeta, session_id: SessionId, } | { "type": "rename_session", meta: CommandMeta, session_id: SessionId, title: string, } | { "type": "export_session", meta: CommandMeta, session_id: SessionId, format: TranscriptFormat, output_path: string, force: boolean, } | { "type": "revoke_permission_approval", meta: CommandMeta, session_id: SessionId, approval_id: string, scope: PermissionApprovalScope, } | { "type": "begin_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "configure_compatible_provider", meta: CommandMeta, session_id: SessionId, configuration: CompatibleProviderSetup, } | { "type": "configure_builtin_provider", meta: CommandMeta, session_id: SessionId, provider: string, } | { "type": "complete_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "cancel_provider_auth", meta: CommandMeta, session_id: SessionId, provider: string, attempt_id: ProviderAuthAttemptId, } | { "type": "search_workspace_files", meta: CommandMeta, session_id: SessionId, query: string, limit: number, } | { "type": "preview_workspace_file", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "get_workspace_status", meta: CommandMeta, session_id: SessionId, } | { "type": "get_workspace_diff", meta: CommandMeta, session_id: SessionId, path: string, max_bytes: number, } | { "type": "list_subagents", meta: CommandMeta, session_id: SessionId, } | { "type": "continue_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, content: string, } | { "type": "interrupt_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "close_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "background_subagent", meta: CommandMeta, session_id: SessionId, subagent_id: SubagentId, } | { "type": "shutdown_host", meta: CommandMeta, };
 
 export type TranscriptFormat = "markdown" | "html" | "json";
 
@@ -869,7 +869,7 @@ export const ENGINE_EVENT_DELIVERY = {
 export const CLIENT_COMMAND_EXECUTION = {
   add_mcp_http_server: "control",
   add_mcp_stdio_server: "control",
-  add_session_permission_rule: "control",
+  add_permission_rule: "control",
   answer_question: "control",
   approve_mcp_server: "control",
   approve_plan: "control",
@@ -925,8 +925,8 @@ export const CLIENT_COMMAND_EXECUTION = {
   read_transcript_content: "read",
   read_transcript_tail: "read",
   remove_mcp_server: "control",
+  remove_permission_rule: "control",
   remove_queued_message: "control",
-  remove_session_permission_rule: "control",
   rename_session: "control",
   resolve_child_control: "control",
   resolve_child_read_scope: "read",
@@ -951,7 +951,7 @@ export const CLIENT_COMMAND_EXECUTION = {
 export const CLIENT_COMMAND_LANE = {
   add_mcp_http_server: "normal",
   add_mcp_stdio_server: "normal",
-  add_session_permission_rule: "normal",
+  add_permission_rule: "normal",
   answer_question: "urgent",
   approve_mcp_server: "normal",
   approve_plan: "urgent",
@@ -1007,8 +1007,8 @@ export const CLIENT_COMMAND_LANE = {
   read_transcript_content: "normal",
   read_transcript_tail: "normal",
   remove_mcp_server: "normal",
+  remove_permission_rule: "normal",
   remove_queued_message: "normal",
-  remove_session_permission_rule: "normal",
   rename_session: "normal",
   resolve_child_control: "urgent",
   resolve_child_read_scope: "normal",
@@ -1033,7 +1033,7 @@ export const CLIENT_COMMAND_LANE = {
 export const CLIENT_COMMAND_READ_WATCH = {
   add_mcp_http_server: false,
   add_mcp_stdio_server: false,
-  add_session_permission_rule: false,
+  add_permission_rule: false,
   answer_question: false,
   approve_mcp_server: false,
   approve_plan: false,
@@ -1089,8 +1089,8 @@ export const CLIENT_COMMAND_READ_WATCH = {
   read_transcript_content: false,
   read_transcript_tail: false,
   remove_mcp_server: false,
+  remove_permission_rule: false,
   remove_queued_message: false,
-  remove_session_permission_rule: false,
   rename_session: false,
   resolve_child_control: false,
   resolve_child_read_scope: false,
