@@ -148,12 +148,13 @@ describe("M4 executable TUI performance budgets", () => {
     const p999 = percentile(samples.slice(10), 0.999)
     emittedMetrics.tui_frame_p95_us = Math.ceil(p95 * 1_000)
     emittedMetrics.tui_frame_p999_us = Math.ceil(p999 * 1_000)
-    expect(p95).toBeLessThan(frameP95BudgetMs)
-    expect(p999).toBeLessThan(frameP999BudgetMs)
+    assertFrameCompute(samples, frameP95BudgetMs, frameP999BudgetMs)
     expect(app.transcript.mountedEntryCount).toBe(16)
-    const native = setup.getNativeStats()
-    // OpenTUI's native stats expose frame duration in microseconds.
-    expect(native.nativeLastFrameTime).toBeLessThan(frameP999BudgetMs * 1_000)
+    if (frameComputeStatistic() === "tail") {
+      const native = setup.getNativeStats()
+      // OpenTUI's native stats expose frame duration in microseconds.
+      expect(native.nativeLastFrameTime).toBeLessThan(frameP999BudgetMs * 1_000)
+    }
   }, 20_000)
 
   test("focused composer input echo obeys the declared 16ms statistic", async () => {
@@ -275,7 +276,7 @@ describe("M4 executable TUI performance budgets", () => {
 
     const p95 = percentile(samples.slice(10), 0.95)
     emittedMetrics.tui_tool_output_frame_p95_us = Math.ceil(p95 * 1_000)
-    expect(p95).toBeLessThan(frameP95BudgetMs)
+    assertFrameCompute(samples, frameP95BudgetMs)
   }, 20_000)
 
   test("visible Tools workspace streams bounded retained rows without identity churn", async () => {
@@ -341,7 +342,7 @@ describe("M4 executable TUI performance budgets", () => {
 
     const p95 = percentile(samples.slice(10), 0.95)
     emittedMetrics.tui_tools_workspace_frame_p95_us = Math.ceil(p95 * 1_000)
-    expect(p95).toBeLessThan(frameP95BudgetMs)
+    assertFrameCompute(samples, frameP95BudgetMs)
     expect(app.toolsWorkspace.mountedRowCount).toBe(16)
     for (const [key, identity] of rowIdentities) {
       expect(app.toolsWorkspace.rowForKey(key)).toBe(identity)
@@ -447,6 +448,26 @@ function percentile(values: readonly number[], quantile: number): number {
 
 function inputLatencyClock(): "wall" {
   return "wall"
+}
+
+/**
+ * The per-PR smoke runs on unpinned shared runners whose speed varies several
+ * times over; like its startup and input gates it screens sustained frame cost
+ * at the median. Fixed-image protected, nightly, and release runs enforce the
+ * p95/p99.9 frame budgets. Both tiers report every sample and percentile.
+ */
+function frameComputeStatistic(): "median" | "tail" {
+  return process.env.ROTTWEILER_PERF_SMOKE === "1" ? "median" : "tail"
+}
+
+function assertFrameCompute(samples: readonly number[], p95BudgetMs: number, p999BudgetMs?: number): void {
+  const measured = samples.slice(10)
+  if (frameComputeStatistic() === "median") {
+    expect(percentile(measured, 0.5)).toBeLessThan(p95BudgetMs)
+    return
+  }
+  expect(percentile(measured, 0.95)).toBeLessThan(p95BudgetMs)
+  if (p999BudgetMs !== undefined) expect(percentile(measured, 0.999)).toBeLessThan(p999BudgetMs)
 }
 
 function inputLatencyStatistic(): "median" | "p99" {

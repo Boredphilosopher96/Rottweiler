@@ -373,6 +373,10 @@ the engine owner settles.
 
 The required pull-request and `main` TUI smoke measures input dispatch through
 native frame capture with wall time, requiring every trial's median below 16ms.
+Its frame-compute fixtures (streaming, tool-output bursts, Tools workspace)
+likewise screen the median process-CPU frame cost against the platform p95
+budget; the p95 and p99.9 frame budgets are enforced by the protected, nightly,
+and release runs on fixed images. Every tier reports each sample and percentile.
 Input reports retain every wall/CPU sample and the selected statistic.
 The same-process UDS transport harness uses wall-clock median below 2ms for
 shared-runner smoke and wall-clock p99 below 2ms for controlled qualification.
