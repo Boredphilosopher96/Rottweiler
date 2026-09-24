@@ -22,14 +22,20 @@ use tokio::sync::mpsc;
 /// Child progress bypasses this gate because it is display-only and absent
 /// from the parent log.
 pub(in crate::engine) struct OrderedSubagentCoordinator {
-    pub(super) positions: BTreeMap<usize, usize>,
-    pub(super) multi_producer_calls: BTreeSet<usize>,
+    calls: Mutex<SubagentCalls>,
     pub(super) next_spawn: AtomicUsize,
     pub(super) allowed_finish: AtomicUsize,
     pub(super) spawned: Notify,
     pub(super) finished: Notify,
     pub(super) signals: mpsc::UnboundedSender<TurnSignal>,
     progress_memory: rw_tools::ChildProgressBudget,
+}
+
+/// Subagent-capable calls, registered in call-index order as each is prepared.
+#[derive(Default)]
+struct SubagentCalls {
+    positions: BTreeMap<usize, usize>,
+    multi_producer_calls: BTreeSet<usize>,
 }
 
 impl OrderedSubagentCoordinator {
@@ -45,25 +51,40 @@ impl OrderedSubagentCoordinator {
         calls: impl IntoIterator<Item = (usize, bool)>,
         signals: mpsc::UnboundedSender<TurnSignal>,
     ) -> Self {
-        let calls = calls.into_iter().collect::<Vec<_>>();
-        Self {
-            positions: calls
-                .iter()
-                .map(|(index, _)| *index)
-                .enumerate()
-                .map(|(position, index)| (index, position))
-                .collect(),
-            multi_producer_calls: calls
-                .into_iter()
-                .filter_map(|(index, multi)| multi.then_some(index))
-                .collect(),
+        let coordinator = Self {
+            calls: Mutex::new(SubagentCalls::default()),
             next_spawn: AtomicUsize::new(0),
             allowed_finish: AtomicUsize::new(0),
             spawned: Notify::new(),
             finished: Notify::new(),
             signals,
             progress_memory: rw_tools::ChildProgressBudget::default(),
+        };
+        for (index, multiple) in calls {
+            coordinator.register(index, multiple);
         }
+        coordinator
+    }
+
+    /// Registers a prepared subagent call. Calls are prepared in index order,
+    /// and every call registers before it launches or advances the sequence.
+    pub(in crate::engine) fn register(&self, index: usize, multiple: bool) {
+        let mut calls = self.calls();
+        let position = calls.positions.len();
+        calls.positions.entry(index).or_insert(position);
+        if multiple {
+            calls.multi_producer_calls.insert(index);
+        }
+    }
+
+    fn calls(&self) -> std::sync::MutexGuard<'_, SubagentCalls> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn multiple(&self, index: usize) -> bool {
+        self.calls().multi_producer_calls.contains(&index)
     }
 
     pub(super) async fn wait_for(&self, counter: &AtomicUsize, notify: &Notify, position: usize) {
@@ -79,13 +100,13 @@ impl OrderedSubagentCoordinator {
     }
 
     pub(super) fn position(&self, index: usize) -> Result<usize, ToolError> {
-        self.positions.get(&index).copied().ok_or_else(|| {
+        self.calls().positions.get(&index).copied().ok_or_else(|| {
             ToolError::Output("subagent lifecycle came from an unregistered tool call".to_owned())
         })
     }
 
     pub(in crate::engine) fn advance_after_tool(&self, index: usize) {
-        let Some(position) = self.positions.get(&index).copied() else {
+        let Some(position) = self.calls().positions.get(&index).copied() else {
             return;
         };
         if self.next_spawn.load(Ordering::Acquire) == position {
@@ -121,7 +142,7 @@ impl SubagentEventSink for ActorSubagentEventSink {
     }
     async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
         let position = self.coordinator.position(self.index)?;
-        let multiple = self.coordinator.multi_producer_calls.contains(&self.index);
+        let multiple = self.coordinator.multiple(self.index);
         let (kind, spawned) = match event {
             SubagentLifecycleEvent::Spawned {
                 subagent_id,

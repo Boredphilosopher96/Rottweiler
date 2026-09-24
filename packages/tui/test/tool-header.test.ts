@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test"
 import { SyntaxStyle } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
-import { ToolBlockRenderable } from "../src/components/transcript/blocks"
+import { ToolBlockRenderable, toolRowPreview } from "../src/components/transcript/blocks"
 import { TranscriptRowRenderable } from "../src/components/transcript/row"
 import { toolHeaderContent, toolSummary } from "../src/render/tool-header"
 import { transcriptToolRow, liveToolRow } from "../src/render/tool-row"
@@ -121,4 +121,17 @@ test("durations appear only above one second and failures state the outcome", ()
   })
   expect(toolSummary(liveToolRow(failed)).detail).toBe("tests failed")
   expect(header(failed)).toContain("✗")
+})
+
+test("a completed call stops its clock and shows its outcome before the ordered result", () => {
+  const started = 1_000
+  const header = (tool: ToolProjection) => toolHeaderContent(liveToolRow(tool), 90, kennelTheme, started + 60_000)
+    .chunks.map(chunk => chunk.text).join("")
+  const timing = { kind: "closed", startedAtMs: started, finishedAtMs: started + 1_700 } as const
+  const read = live("read", { path: "calc.py" }, "", { status: "completed", isError: false, display: null, timing })
+  expect(header(read).trimEnd()).toEndWith("✓ 1.7s")
+  expect(header(read)).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/)
+  expect(toolRowPreview(liveToolRow(read)).content).not.toContain("Running…")
+  const failed = live("bash", { command: "python test_calc.py" }, "", { status: "completed", isError: true, display: null, timing })
+  expect(header(failed).trimEnd()).toEndWith("✗ 1.7s")
 })

@@ -21,11 +21,29 @@ use rw_tools::SubagentLifecycleMode;
 use rw_tools::ToolContext;
 use rw_types::SessionMode;
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub(super) use super::doom_loop::DoomLoopGuard;
 
+type Preparation<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = (PreparedToolCall, super::tool_admission::PendingToolBudget),
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Runs one provider tool batch.
+///
+/// Calls are prepared (hooks, approval) one at a time in call order, and each
+/// prepared call launches as soon as the scheduling rules allow, so an approval
+/// prompt for a later call never holds back earlier calls that need none. No
+/// preparation starts while a mutation executes, so previews and pre-tool hooks
+/// observe a settled workspace. Durable results are committed in call order;
+/// each execution also reports its end immediately as a transient event.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tracing::instrument(target = "rw_performance", level = "trace", name = "tool.batch", skip_all, fields(session_id = config.session_id.0.as_str(), turn, calls = calls.calls.len()))]
 pub(super) async fn execute_tool_calls(
@@ -42,46 +60,16 @@ pub(super) async fn execute_tool_calls(
     let mut failure = None;
     let retained =
         super::tool_result_budget::ToolResultBudget::new(config, calls.calls.len()).await?;
-    let super::tool_admission::AdmittedToolBatch { calls, mut budget } = calls;
+    let super::tool_admission::AdmittedToolBatch { calls, budget } = calls;
     let mut profiles =
         super::tool_result_closure::ResultProfiles::new(calls.iter().map(|(call, _)| call))?;
-    let mut prepared = Vec::with_capacity(calls.len());
-    for (call, displayed) in calls {
-        let mut preparation = prepare_tool_call(
-            turn,
-            call,
-            config,
-            approver,
-            cancellation,
-            signals,
-            context,
-            mode,
-            &mut budget,
-            displayed,
-        )
-        .await;
-        if let PreparedToolCall::Complete(execution) = &mut preparation {
-            retained.admit_execution(execution);
-        }
-        prepared.push(preparation);
-    }
     let coordinator = Arc::new(OrderedOutputCoordinator::new(
         turn,
         signals.clone(),
         Arc::clone(&config.secret_redactor),
     ));
-    let subagent_indices = prepared.iter().filter_map(|call| {
-        let PreparedToolCall::Execute { call, .. } = call else {
-            return None;
-        };
-        match config.tools.subagent_lifecycle_mode(&call.name) {
-            Some(SubagentLifecycleMode::Single) => Some((call.index, false)),
-            Some(SubagentLifecycleMode::MultipleOrdered) => Some((call.index, true)),
-            Some(SubagentLifecycleMode::None) | None => None,
-        }
-    });
     let subagents = Arc::new(OrderedSubagentCoordinator::new_with_multi(
-        subagent_indices,
+        std::iter::empty(),
         signals.clone(),
     ));
     let execution_runtime = ToolExecutionRuntime {
@@ -96,9 +84,12 @@ pub(super) async fn execute_tool_calls(
         tools: Arc::clone(&config.tools),
         session_id: config.session_id.clone(),
     };
-    let total = prepared.len();
+    let total = calls.len();
     let mut ordered = Vec::with_capacity(total);
-    let mut prepared = prepared.into_iter().peekable();
+    let mut unprepared = calls.into_iter();
+    let mut budget = Some(budget);
+    let mut preparing: Option<Preparation<'_>> = None;
+    let mut ready = VecDeque::new();
     let mut running = futures_util::stream::FuturesUnordered::new();
     let mut completed = BTreeMap::new();
     let mut next = 0;
@@ -109,7 +100,7 @@ pub(super) async fn execute_tool_calls(
         // Refilling solely by active task count would retain an unbounded tail
         // while the first call waits or produces output.
         while !mutation_running && launched - next < MAX_TOOL_EXECUTION_WINDOW {
-            let Some(front) = prepared.peek() else {
+            let Some(front) = ready.front() else {
                 break;
             };
             let mutation = matches!(
@@ -122,7 +113,7 @@ pub(super) async fn execute_tool_calls(
             if mutation && launched != next {
                 break;
             }
-            let Some(call) = prepared.next() else {
+            let Some(call) = ready.pop_front() else {
                 break;
             };
             let index = launched;
@@ -146,7 +137,16 @@ pub(super) async fn execute_tool_calls(
                     let cancellation = cancellation.clone();
                     let runtime = execution_runtime.clone();
                     let task = tasks.spawn(Arc::clone(config), cancellation.clone(), async move {
-                        execute_prepared_tool(call, context, cancellation, runtime).await
+                        let signals = runtime.signals.clone();
+                        let (execution, ran) =
+                            execute_prepared_tool(call, context, cancellation, runtime).await;
+                        let _ = signals.send(TurnSignal::ToolExecutionFinished {
+                            turn,
+                            id: execution.call.id.clone(),
+                            invocation_id: execution.call.invocation_id.clone(),
+                            is_error: execution.is_error || execution.unsettled,
+                        });
+                        (execution, ran)
                     });
                     running.push(async move {
                         let execution = async {
@@ -166,10 +166,80 @@ pub(super) async fn execute_tool_calls(
                 }
             }
         }
-        let Some((mut execution, was_mutation)) = completed.remove(&next) else {
-            if let Some((index, execution, mutation)) = running.next().await {
-                completed.insert(index, (execution, mutation));
+        // Prepare ahead only within the ordered window, and never while a
+        // mutation may be changing the workspace a preview or hook observes.
+        if preparing.is_none()
+            && !mutation_running
+            && launched + ready.len() - next < MAX_TOOL_EXECUTION_WINDOW
+            && let Some((call, displayed)) = unprepared.next()
+            && let Some(mut owned) = budget.take()
+        {
+            preparing = Some(Box::pin(async move {
+                let prepared = prepare_tool_call(
+                    turn,
+                    call,
+                    config,
+                    approver,
+                    cancellation,
+                    signals,
+                    context,
+                    mode,
+                    &mut owned,
+                    displayed,
+                )
+                .await;
+                (prepared, owned)
+            }));
+        }
+        if !completed.contains_key(&next) {
+            tokio::select! {
+                biased;
+                Some((index, execution, mutation)) = running.next(), if !running.is_empty() => {
+                    completed.insert(index, (execution, mutation));
+                }
+                (mut prepared, owned) = async {
+                    match preparing.as_mut() {
+                        Some(preparation) => preparation.await,
+                        None => std::future::pending().await,
+                    }
+                }, if preparing.is_some() => {
+                    preparing = None;
+                    budget = Some(owned);
+                    match &mut prepared {
+                        PreparedToolCall::Complete(execution) => {
+                            retained.admit_execution(execution);
+                            let _ = signals.send(TurnSignal::ToolExecutionFinished {
+                                turn,
+                                id: execution.call.id.clone(),
+                                invocation_id: execution.call.invocation_id.clone(),
+                                is_error: execution.is_error || execution.unsettled,
+                            });
+                        }
+                        PreparedToolCall::Execute { call, .. } => {
+                            match config.tools.subagent_lifecycle_mode(&call.name) {
+                                Some(SubagentLifecycleMode::Single) => {
+                                    subagents.register(call.index, false);
+                                }
+                                Some(SubagentLifecycleMode::MultipleOrdered) => {
+                                    subagents.register(call.index, true);
+                                }
+                                Some(SubagentLifecycleMode::None) | None => {}
+                            }
+                        }
+                    }
+                    ready.push_back(prepared);
+                }
+                else => {
+                    failure.get_or_insert(crate::engine::AgentLoopError::ToolContext(
+                        "tool batch scheduling stalled without runnable work".to_owned(),
+                    ));
+                    cancellation.cancel();
+                    break;
+                }
             }
+            continue;
+        }
+        let Some((mut execution, was_mutation)) = completed.remove(&next) else {
             continue;
         };
         if was_mutation {

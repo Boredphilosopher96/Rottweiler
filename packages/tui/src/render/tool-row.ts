@@ -167,7 +167,7 @@ function transcriptDiff(preview: TranscriptToolContent["diff"], fallbackPath: st
 /** Elapsed milliseconds, or null when the row has no trustworthy start time. */
 export function toolDurationMs(row: ToolRow, nowMs: number): number | null {
   if (row.startedAtMs === null) return null
-  const end = row.status === "finished" ? row.finishedAtMs : nowMs
+  const end = row.status === "finished" || row.status === "completed" ? row.finishedAtMs : nowMs
   return end === null ? null : Math.max(0, end - row.startedAtMs)
 }
 

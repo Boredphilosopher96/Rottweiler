@@ -827,6 +827,20 @@ function applyKnownEvent(
       }
     case "tool_progress":
       return state
+    case "tool_execution_finished": {
+      if (activeSessionId !== null && event.session_id !== activeSessionId) return state
+      const existing = state.tools[event.invocation_id]
+      if (existing === undefined || existing.status === "finished" || existing.toolCallId !== event.tool_call_id || existing.turnId !== event.turn_id) return state
+      return {
+        ...state,
+        tools: updateTool(state.tools, event.invocation_id, {
+          ...existing,
+          status: "completed",
+          isError: event.is_error,
+          timing: closeActivityTiming(existing.timing, event.finished_at),
+        }),
+      }
+    }
     case "tool_call_started": {
       const tool: ToolProjection = {
         toolCallId: event.tool_call_id,
@@ -957,7 +971,8 @@ function applyKnownEvent(
         source: { sequence: event.meta.sequence_id, selector: { type: "tool_output" } },
         isError: event.is_error,
         callIndex: event.call_index,
-        timing: closeActivityTiming(existing?.timing, event.meta.emitted_at),
+        // A live completion already stopped the clock when execution ended.
+        timing: existing?.timing.kind === "closed" ? existing.timing : closeActivityTiming(existing?.timing, event.meta.emitted_at),
       }
       const tools = retainRecentTools(state.tools, event.invocation_id, tool)
       return {

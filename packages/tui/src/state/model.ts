@@ -132,7 +132,11 @@ export interface TurnProjection {
   readonly timing: ActivityTimingProjection
 }
 
-export type ToolStatus = "running" | "awaiting_approval" | "finished"
+/**
+ * `completed`: execution ended (outcome and duration known) but the durable
+ * result, which parallel batches commit in call order, has not arrived yet.
+ */
+export type ToolStatus = "running" | "awaiting_approval" | "completed" | "finished"
 
 export interface ToolProjection {
   /** Provider correlation is absent from source-backed running previews until a lifecycle/control payload supplies it. */

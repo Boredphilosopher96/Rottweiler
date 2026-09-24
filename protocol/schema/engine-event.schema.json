@@ -1989,6 +1989,44 @@
       ]
     },
     {
+      "description": "Transient: this invocation's execution ended. Parallel results are\njournaled in call order, so the durable `ToolCallFinished` carrying the\noutput can follow later; clients use this to stop the row's clock.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/ToolInvocationId"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "finished_at": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_execution_finished"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "session_id",
+        "turn_id",
+        "tool_call_id",
+        "invocation_id",
+        "is_error",
+        "finished_at"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {

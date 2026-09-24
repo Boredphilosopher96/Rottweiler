@@ -150,6 +150,27 @@ pub(in crate::engine) async fn handle_turn_signal(
                 });
             }
         }
+        TurnSignal::ToolExecutionFinished {
+            turn,
+            id,
+            invocation_id,
+            is_error,
+        } => {
+            if state.running.as_ref().map(|running| running.id) != Some(turn) {
+                return Ok(());
+            }
+            let _ = events.send(RoutedEvent {
+                target: state.control.driver().clone(),
+                event: EngineEvent::ToolExecutionFinished {
+                    session_id: state.session_id.clone(),
+                    turn_id: wire_turn_id(turn),
+                    tool_call_id: ToolCallId(id),
+                    invocation_id,
+                    is_error,
+                    finished_at: state.event_clock.emitted_at(),
+                },
+            });
+        }
         TurnSignal::SubagentProgress(slot) => {
             let Some(admitted) = slot.take() else {
                 return Ok(());
@@ -532,6 +553,13 @@ pub(in crate::engine) enum TurnSignal {
         source: SequenceId,
     },
     ToolProgress(Arc<ProgressSlot>),
+    /// Display-only: an invocation's execution ended before its ordered durable result.
+    ToolExecutionFinished {
+        turn: u64,
+        id: String,
+        invocation_id: rw_types::ToolInvocationId,
+        is_error: bool,
+    },
     CompactionProgress(CompactionProgress),
     Approval {
         request: PermissionRequest,

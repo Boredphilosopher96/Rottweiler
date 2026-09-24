@@ -2,7 +2,8 @@ import { ToolOutputReader } from "../../src/state/output-reader"
 import { describe, expect, test } from "bun:test"
 import {
   createInitialState,
-  MAX_RETAINED_TOOL_PROJECTIONS
+  MAX_RETAINED_TOOL_PROJECTIONS,
+  reduceRottweilerState,
 } from "../../src/state"
 import { isWireEngineEvent } from "../../src/transport"
 import { meta, metaAt, reduce } from "./fixtures"
@@ -282,6 +283,46 @@ describe("state tools", () => {
     state = reduce(state, { type: "tool_progress", session_id: "session-state", turn_id: "1", tool_call_id: "reused", invocation_id: "first", progress: { message: "late" } })
     expect(state.lastSequence).toBe(cursor)
     expect(state.tools.second).toBe(second)
+  })
+
+  test("live execution completion settles a row before its ordered durable result", () => {
+    const started = (id: string, index: number) => ({
+      type: "tool_call_started" as const, meta: metaAt(String(index + 1), "2026-01-01T12:00:00.000Z"),
+      turn_id: "7", tool_call_id: id, invocation_id: id, name: "read", args: { path: `${id}.py` }, call_index: index,
+    })
+    let state = reduce(createInitialState(), { type: "turn_started", meta: meta("0"), turn_id: "7" })
+    state = reduce(state, started("slow", 0))
+    state = reduce(state, started("fast", 1))
+    const completion = {
+      type: "tool_execution_finished" as const, session_id: "session-state", turn_id: "7",
+      tool_call_id: "fast", invocation_id: "fast", is_error: false, finished_at: "2026-01-01T12:00:01.500Z",
+    }
+    expect(isWireEngineEvent(completion)).toBe(true)
+    const cursor = state.lastSequence
+    state = reduce(state, completion)
+    expect(state.lastSequence).toBe(cursor)
+    expect(state.tools.fast?.status).toBe("completed")
+    expect(state.tools.fast?.isError).toBe(false)
+    expect(state.tools.fast?.timing).toEqual({ kind: "closed", startedAtMs: Date.parse("2026-01-01T12:00:00.000Z"), finishedAtMs: Date.parse("2026-01-01T12:00:01.500Z") })
+    expect(state.tools.slow?.status).toBe("running")
+    // Mismatched identity, another session, or an unknown invocation changes nothing.
+    const before = state.tools
+    for (const event of [
+      { ...completion, invocation_id: "slow", tool_call_id: "other" },
+      { ...completion, invocation_id: "slow", turn_id: "8" },
+      { ...completion, invocation_id: "missing", tool_call_id: "missing" },
+    ]) state = reduce(state, event)
+    expect(state.tools).toBe(before)
+    expect(reduceRottweilerState(state, { type: "engine_event", event: { ...completion, invocation_id: "slow", tool_call_id: "slow" } }, "other-session").tools).toBe(state.tools)
+    state = reduce(state, { type: "tool_call_finished", payloads: [], presentation: null, meta: metaAt("3", "2026-01-01T12:00:09.000Z"), turn_id: "7", tool_call_id: "slow", invocation_id: "slow", output: { type: "text", text: "slow" }, is_error: false, call_index: 0 })
+    state = reduce(state, { type: "tool_call_finished", payloads: [], presentation: null, meta: metaAt("4", "2026-01-01T12:00:09.000Z"), turn_id: "7", tool_call_id: "fast", invocation_id: "fast", output: { type: "text", text: "fast" }, is_error: false, call_index: 1 })
+    expect(state.tools.fast?.status).toBe("finished")
+    expect(state.tools.fast?.display?.details).toBe("fast")
+    expect(state.tools.fast?.timing).toEqual({ kind: "closed", startedAtMs: Date.parse("2026-01-01T12:00:00.000Z"), finishedAtMs: Date.parse("2026-01-01T12:00:01.500Z") })
+    // A late live completion never reopens or rewrites a durable result.
+    const settled = state.tools
+    state = reduce(state, { ...completion, is_error: true })
+    expect(state.tools).toBe(settled)
   })
 
   test("progress wire validation enforces plain Unicode text and count relationships", () => {

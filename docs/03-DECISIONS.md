@@ -235,7 +235,7 @@ The TUI may initiate provider-neutral OAuth or device-flow interactions through 
 
 `/permissions mode default|strict|auto-safe|yolo` applies a session-local overlay for an ordinary local interactive driver. `yolo` suppresses `ask` outcomes but does not override explicit denies, mode restrictions, malformed-input checks, or sandbox boundaries. A launch-fixed headless or remote-strict policy cannot be weakened by a client command.
 
-The built-in no-prompt shell list is intentionally narrow and implemented as hardened execution plans, not string matching: audited absolute binaries, sanitized environments, read-only sandboxing, and command-specific argument validation for `cat`, `ls`, an installed audited `bat`, `git status`, and `git diff`. Compound or ambiguous shell syntax falls back to the ordinary prompt path.
+The built-in no-prompt shell list is intentionally narrow and implemented as hardened execution plans, not string matching: audited absolute binaries, sanitized environments, read-only sandboxing, and command-specific argument validation for `cat`, `ls`, an installed audited `bat`, searches, and read-only Git forms (history, blame, grep, listing, and config reads). A `&&`/`||`/`;` compound is safe only when every segment is; pipes, redirection, and ambiguous shell syntax fall back to the ordinary prompt path.
 
 **Rationale.** Repeated prompts for observation and bookkeeping train users to approve dialogs without reading them and make agent loops unusable. Mutation-focused prompts preserve a meaningful decision point while capability-derived isolation and explicit policy continue to provide the actual security boundary.
 

@@ -32,6 +32,7 @@ pub enum EngineEventDelivery {
 /// Non-durable event tags that still belong to a live session stream.
 pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
     "tool_progress",
+    "tool_execution_finished",
     "subagent_progress",
     "compaction_attempt_started",
     "compaction_text_delta",
@@ -476,6 +477,17 @@ pub enum EngineEvent {
         invocation_id: ToolInvocationId,
         progress: rw_operation_contract::ToolProgress,
     },
+    /// Transient: this invocation's execution ended. Parallel results are
+    /// journaled in call order, so the durable `ToolCallFinished` carrying the
+    /// output can follow later; clients use this to stop the row's clock.
+    ToolExecutionFinished {
+        session_id: SessionId,
+        turn_id: TurnId,
+        tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
+        is_error: bool,
+        finished_at: String,
+    },
     ToolCallStarted {
         meta: EventMeta,
         turn_id: TurnId,
@@ -877,6 +889,7 @@ impl EngineEvent {
             | Self::ThinkingDelta { .. }
             | Self::CitationDelta { .. }
             | Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::ToolCallStarted { .. }
             | Self::ToolApprovalResolved { .. }
             | Self::ToolApprovalNeeded { .. }
@@ -921,6 +934,7 @@ impl EngineEvent {
     pub fn delivery(&self) -> EngineEventDelivery {
         match self {
             Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::SubagentProgress { .. }
             | Self::CompactionAttemptStarted { .. }
             | Self::CompactionTextDelta { .. }
@@ -953,6 +967,7 @@ impl EngineEvent {
             | Self::SessionChildrenReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
@@ -1071,6 +1086,7 @@ impl EngineEvent {
             | Self::SessionChildrenReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }

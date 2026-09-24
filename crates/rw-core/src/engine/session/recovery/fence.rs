@@ -44,6 +44,7 @@ pub(in crate::engine) fn reject_signal(signal: TurnSignal, state: &mut ActorStat
         | TurnSignal::SubagentProgress(_)
         | TurnSignal::WakeForChildResult { .. }
         | TurnSignal::ToolProgress(_)
+        | TurnSignal::ToolExecutionFinished { .. }
         | TurnSignal::CompactionProgress(_)
         | TurnSignal::Complete(_)
         | TurnSignal::InitializationComplete { .. }

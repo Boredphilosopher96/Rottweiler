@@ -461,7 +461,7 @@ export function toolOutputContent(tool: ToolProjection, live: ToolOutputText | n
   }
   const activity = tool.status === "awaiting_approval" ? "Awaiting approval…"
     : tool.status === "running" ? "Running…"
-      : output === "" ? "Completed with no output." : ""
+      : output === "" && tool.status === "finished" ? "Completed with no output." : ""
   return [rationaleLine(tool.rationale), output, activity].filter(Boolean).join("\n")
 }
 
@@ -473,8 +473,10 @@ export function toolOutputPreview(tool: ToolProjection): { readonly content: str
   const output = isBash ? view.labeledWindow : view.plainWindow
   const hasOutput = isBash || view.hasOutput
   const prefix = [rationaleLine(tool.rationale), !isBash && hasOutput ? "Live output" : ""].filter(Boolean)
-  const lineCount = prefix.length + (hasOutput ? output.lineCount : 0) + 1
-  const lines = [...prefix, ...(hasOutput ? output.lines : []), tool.status === "awaiting_approval" ? "Awaiting approval…" : "Running…"]
+  // A completed call keeps its live output until the ordered durable result replaces it.
+  const activity = tool.status === "awaiting_approval" ? ["Awaiting approval…"] : tool.status === "running" ? ["Running…"] : []
+  const lineCount = prefix.length + (hasOutput ? output.lineCount : 0) + activity.length
+  const lines = [...prefix, ...(hasOutput ? output.lines : []), ...activity]
   if (lineCount <= MAX_PREVIEW_LINES) return { content: lines.join("\n"), hiddenLines: 0, markerFirst: false }
   const retained = lines.slice(-Math.max(1, MAX_PREVIEW_LINES - 1))
   return { content: retained.join("\n"), hiddenLines: lineCount - retained.length, markerFirst: true }

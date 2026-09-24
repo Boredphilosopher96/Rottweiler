@@ -1,4 +1,6 @@
+mod git;
 mod search;
+pub(super) use git::{hardened_git_subcommand, safe_git_arguments};
 pub(super) use search::{audited_rg, safe_search_arguments};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -68,8 +70,8 @@ impl CommandSafetyClassifier {
 /// Classifies a canonical shell command for the built-in no-prompt safe-list.
 ///
 /// This list is intentionally small.  Shell interpolation and control syntax
-/// are rejected before tokenization, and only the real `git status` built-in
-/// (with ordinary option/path arguments) is accepted.  A user may extend the
+/// are rejected before tokenization; each `&&`/`||`/`;` segment must be an
+/// audited read-only command, such as a read-only `git` form (see `git.rs`).  A user may extend the
 /// safe-list through user-scoped permission configuration; project content
 /// never calls this function with additional rules.
 #[must_use]
@@ -82,11 +84,9 @@ pub(super) fn built_in_safe_segment(command: &str) -> bool {
         return false;
     };
     match argv.first().map(String::as_str) {
-        Some("git") if audited_system_git().is_some() => match argv.get(1).map(String::as_str) {
-            Some("status") => safe_git_status_arguments(&argv[2..]),
-            Some("diff") => safe_git_diff_arguments(&argv[2..]),
-            _ => false,
-        },
+        Some("git") if audited_system_git().is_some() => argv
+            .get(1)
+            .is_some_and(|subcommand| safe_git_arguments(subcommand, &argv[2..])),
         Some("cat") => audited_system_read_command("cat").is_some(),
         Some("ls") => audited_system_read_command("ls").is_some(),
         Some(name @ ("grep" | "find")) => {
@@ -183,55 +183,6 @@ fn canonical_segment(segment: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" "),
     )
-}
-
-pub(super) fn safe_git_status_arguments(arguments: &[String]) -> bool {
-    let mut pathspecs = false;
-    for argument in arguments {
-        if pathspecs {
-            continue;
-        }
-        if argument == "--" {
-            pathspecs = true;
-            continue;
-        }
-        if !matches!(
-            argument.as_str(),
-            "--short"
-                | "-s"
-                | "--branch"
-                | "-b"
-                | "--show-stash"
-                | "--porcelain"
-                | "--porcelain=v1"
-                | "--porcelain=v2"
-                | "--untracked-files=no"
-                | "--untracked-files=normal"
-                | "--untracked-files=all"
-                | "-uno"
-                | "-unormal"
-                | "-uall"
-                | "--ignored=no"
-                | "--ignored=matching"
-                | "--ignored=traditional"
-                | "--renames"
-                | "--no-renames"
-                | "--ahead-behind"
-                | "--no-ahead-behind"
-        ) {
-            return false;
-        }
-    }
-    true
-}
-
-pub(super) fn safe_git_diff_arguments(arguments: &[String]) -> bool {
-    !arguments.iter().any(|argument| {
-        matches!(
-            argument.as_str(),
-            "--ext-diff" | "--textconv" | "--no-index" | "--output"
-        ) || argument.starts_with("--output=")
-    })
 }
 
 pub(super) fn audited_system_read_command(name: &str) -> Option<&'static PathBuf> {

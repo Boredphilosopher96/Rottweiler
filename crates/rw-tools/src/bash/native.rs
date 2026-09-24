@@ -18,8 +18,8 @@ use super::{BashSandboxMode, CommandExecutor, CommandOutcome, CommandRequest, Co
 
 use super::safety::{
     CommandSafety, CommandSafetyClassifier, audited_bat, audited_rg, audited_system_git,
-    audited_system_read_command, built_in_safe_segment, classify_safe_command, safe_bat_arguments,
-    safe_command_segments, safe_git_diff_arguments, safe_git_status_arguments,
+    audited_system_read_command, built_in_safe_segment, classify_safe_command,
+    hardened_git_subcommand, safe_bat_arguments, safe_command_segments, safe_git_arguments,
     safe_search_arguments,
 };
 
@@ -805,34 +805,26 @@ pub(super) fn hardened_git_argv(command: &str) -> Option<Vec<String>> {
     supplied.remove(0);
     let subcommand = supplied.first()?.clone();
     let arguments = supplied.split_off(1);
-    if (subcommand == "status" && !safe_git_status_arguments(&arguments))
-        || (subcommand == "diff" && !safe_git_diff_arguments(&arguments))
-        || !matches!(subcommand.as_str(), "status" | "diff")
-    {
+    if !safe_git_arguments(&subcommand, &arguments) {
         return None;
     }
-    let mut argv = vec![
-        git.to_string_lossy().into_owned(),
-        "-c".to_owned(),
-        "core.fsmonitor=false".to_owned(),
-        "-c".to_owned(),
-        "core.untrackedCache=false".to_owned(),
-        "-c".to_owned(),
-        "core.hooksPath=/dev/null".to_owned(),
-        "-c".to_owned(),
-        "core.attributesFile=/dev/null".to_owned(),
-        "-c".to_owned(),
-        "diff.external=".to_owned(),
-        "-c".to_owned(),
-        "pager.status=false".to_owned(),
-        "-c".to_owned(),
-        "pager.diff=false".to_owned(),
-        subcommand.clone(),
-    ];
-    if subcommand == "diff" {
-        argv.extend(["--no-ext-diff".to_owned(), "--no-textconv".to_owned()]);
+    let mut argv = vec![git.to_string_lossy().into_owned()];
+    for setting in [
+        "core.fsmonitor=false",
+        "core.untrackedCache=false",
+        "core.hooksPath=/dev/null",
+        "core.attributesFile=/dev/null",
+        "diff.external=",
+        "log.showSignature=false",
+        "gpg.program=false",
+        "gpg.openpgp.program=false",
+        "gpg.x509.program=false",
+        "gpg.ssh.program=false",
+    ] {
+        argv.extend(["-c".to_owned(), setting.to_owned()]);
     }
-    argv.extend(arguments);
+    argv.extend(["-c".to_owned(), format!("pager.{subcommand}=false")]);
+    argv.extend(hardened_git_subcommand(&subcommand, arguments));
     Some(argv)
 }
 
@@ -848,6 +840,7 @@ pub(super) fn sanitize_safe_command_environment(command: &mut Command, _request:
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat");
