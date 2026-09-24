@@ -984,6 +984,7 @@ def ssh_loopback_gate(
         ],
     )
     remote_closed_normally = False
+    remote_failure: BaseException | None = None
     try:
         remote_ready = read_until(remote, DRIVER_READY_MARKER, timeout=20)
         if FIRST_PAINT_MARKER not in remote_ready:
@@ -1024,12 +1025,15 @@ def ssh_loopback_gate(
             "M4 SSH lifecycle: double idle Ctrl-C stopped the local TUI, tunnel, "
             "remote engine, and owned remote runtime directory"
         )
+    except BaseException as error:
+        remote_failure = error
+        raise
     finally:
         if not remote_closed_normally:
             terminate_process_tree(remote)
         stop_pty(remote)
         if not remote_closed_normally:
-            cleanup_detached_remote(session_id)
+            cleanup_detached_remote(session_id, remote_failure)
 
     term_session_id = "m4-ssh-loopback-sigterm-gate"
     terminated = spawn_pty(
@@ -1047,6 +1051,7 @@ def ssh_loopback_gate(
         ],
     )
     term_closed_normally = False
+    term_failure: BaseException | None = None
     try:
         term_ready = read_until(terminated, DRIVER_READY_MARKER, timeout=20)
         if FIRST_PAINT_MARKER not in term_ready:
@@ -1071,12 +1076,15 @@ def ssh_loopback_gate(
             "M4 SSH lifecycle: SIGTERM unwound the local TUI, tunnel, owned remote "
             "engine, and runtime directory"
         )
+    except BaseException as error:
+        term_failure = error
+        raise
     finally:
         if not term_closed_normally:
             terminate_process_tree(terminated)
         stop_pty(terminated)
         if not term_closed_normally:
-            cleanup_detached_remote(term_session_id)
+            cleanup_detached_remote(term_session_id, term_failure)
 
 
 def require_visible_markers(captured: bytes) -> None:
@@ -1145,16 +1153,19 @@ def wait_for_detached_remote(
     raise RuntimeError(f"detached remote runtime did not appear for {session_id}")
 
 
-def cleanup_detached_remote(session_id: str) -> None:
+def cleanup_detached_remote(session_id: str, cause: BaseException | None) -> None:
+    """Refuses to hide a leaked remote engine, while keeping the failure that
+    caused the abnormal close as the reported root cause."""
     try:
         descriptor, pid = wait_for_detached_remote(session_id, timeout=0.1)
     except RuntimeError:
         return
     if process_exists(pid):
+        reason = "" if cause is None else f" after {type(cause).__name__}: {cause}"
         raise UnsettledScope(
-            f"UNSETTLED detached remote runtime: pid={pid} descriptor={descriptor}; "
+            f"UNSETTLED detached remote runtime{reason}: pid={pid} descriptor={descriptor}; "
             "preserving descriptor for identity-qualified cleanup"
-        )
+        ) from cause
 
 
 def parse_args() -> argparse.Namespace:

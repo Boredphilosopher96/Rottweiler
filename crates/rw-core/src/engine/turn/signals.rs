@@ -421,6 +421,8 @@ pub(in crate::engine) async fn handle_turn_signal(
             let completed_successfully = outcome.status == AgentTurnStatus::Completed;
             if outcome.status == AgentTurnStatus::Interrupted {
                 state.child_results.cancel();
+            } else {
+                state.child_results.turn_ended();
             }
             state.control.finish(outcome.turn);
             state.running = None;

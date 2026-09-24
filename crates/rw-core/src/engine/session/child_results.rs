@@ -14,6 +14,10 @@ const MAX_TRACKED: usize = crate::engine::recovery::MAX_UNDELIVERED_CHILD_RESULT
 pub(in crate::engine) struct ChildResultWake {
     undelivered: BTreeSet<SequenceId>,
     requested: bool,
+    /// A wake turn is running; `progressed` records whether it delivered any
+    /// result, which is what allows another wake for the remainder.
+    waking: bool,
+    progressed: bool,
 }
 
 impl ChildResultWake {
@@ -27,7 +31,9 @@ impl ChildResultWake {
 
     /// A provider call committed the result at `source`.
     pub(in crate::engine) fn delivered(&mut self, source: SequenceId) {
-        self.undelivered.remove(&source);
+        if self.undelivered.remove(&source) && self.waking {
+            self.progressed = true;
+        }
     }
 
     /// A background child finished with nobody waiting on its result.
@@ -40,17 +46,33 @@ impl ChildResultWake {
     /// The user stopped the parent; later completions may wake it again.
     pub(in crate::engine) fn cancel(&mut self) {
         self.requested = false;
+        self.waking = false;
+        self.progressed = false;
     }
 
     /// Consumes a pending wake when undelivered results remain. The started
-    /// turn owns delivery, so a failed turn never retriggers itself.
+    /// turn owns delivery of as many results as one provider call accepts.
     pub(in crate::engine) fn take(&mut self) -> bool {
         let wake = self.requested && !self.undelivered.is_empty();
         self.requested = false;
         if wake {
-            self.undelivered.clear();
+            self.waking = true;
+            self.progressed = false;
         }
         wake
+    }
+
+    /// A turn ended without interruption. A wake turn that delivered at least
+    /// one result wakes again for any that did not fit, so every finished
+    /// child reaches the parent; a wake turn that delivered nothing never
+    /// retriggers itself.
+    pub(in crate::engine) fn turn_ended(&mut self) {
+        if std::mem::take(&mut self.waking)
+            && std::mem::take(&mut self.progressed)
+            && !self.undelivered.is_empty()
+        {
+            self.requested = true;
+        }
     }
 }
 
@@ -71,9 +93,34 @@ mod tests {
         assert!(wake.take());
         assert!(!wake.take(), "the started turn owns delivery");
 
+        wake.turn_ended();
+        assert!(
+            !wake.take(),
+            "a wake turn that delivered nothing never retriggers"
+        );
+
         wake.finished(SequenceId(9));
         wake.request(SequenceId(9));
         wake.cancel();
         assert!(!wake.take(), "an interrupt clears the pending wake");
+    }
+
+    #[test]
+    fn wakes_again_until_every_result_beyond_one_batch_is_delivered() {
+        let mut wake = ChildResultWake::default();
+        for source in 1..=10 {
+            wake.finished(SequenceId(source));
+            wake.request(SequenceId(source));
+        }
+        assert!(wake.take());
+        for source in 1..=8 {
+            wake.delivered(SequenceId(source));
+        }
+        wake.turn_ended();
+        assert!(wake.take(), "two results did not fit the first wake turn");
+        wake.delivered(SequenceId(9));
+        wake.delivered(SequenceId(10));
+        wake.turn_ended();
+        assert!(!wake.take(), "nothing remains to deliver");
     }
 }

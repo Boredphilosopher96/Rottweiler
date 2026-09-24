@@ -57,9 +57,16 @@ Either way it receives the `SKILL.md` instructions, the skill's directory, and a
 list of bundled files, which it opens on demand. Large bundles never prevent a
 skill from loading.
 
-`allowed-tools` limits the tools available while your `/<name>` invocation runs.
-Claude Code tool names such as `Read`, `AskUserQuestion`, or `Bash(git status:*)`
-are translated; names Rottweiler does not have are ignored.
+`allowed-tools` pre-approves tools while your `/<name>` invocation runs, the
+same meaning it has in Claude Code: matching calls run without an approval
+prompt. It does **not** restrict the skill. Every other tool stays available
+and follows your normal approval policy, so a skill can still ask to edit
+files, run commands, or reach the network. Only list tools you are comfortable
+running unprompted, and prefer narrow patterns such as `Bash(git status:*)` over
+a bare `Bash`. Deny rules, Discuss and Plan read-only modes, sandbox bypass, and
+network access are still checked separately. Claude Code tool names such as
+`Read` or `AskUserQuestion` are translated; names Rottweiler does not have are
+ignored.
 
 In the TUI, `/skills` lists every discovered skill, command, and agent with its
 source and load status. `rw doctor` lists every skill, command, or agent that

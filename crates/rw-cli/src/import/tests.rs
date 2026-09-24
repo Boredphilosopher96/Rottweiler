@@ -3,6 +3,30 @@ use super::*;
 use tempfile::tempdir;
 
 #[test]
+fn claude_import_into_the_same_project_reads_skills_and_commands_in_place() {
+    let project = tempdir().expect("project");
+    fs::create_dir_all(project.path().join(".claude/commands")).expect("commands");
+    fs::write(project.path().join(".claude/commands/test.md"), "run $0").expect("command");
+    let report = run(&ImportOptions {
+        source: ImportSource::Claude,
+        source_root: project.path().to_path_buf(),
+        target_root: project.path().to_path_buf(),
+        dry_run: false,
+    })
+    .expect("apply");
+    assert!(report.items.iter().any(|item| {
+        item.target == ".claude/commands" && item.status == ImportStatus::DiscoveredInPlace
+    }));
+    assert!(!project.path().join(".agents/commands").exists());
+    let user = tempdir().expect("user home");
+    let catalog = rw_ext::ExtensionCatalog::discover(
+        &rw_ext::ExtensionDiscoveryConfig::new(project.path(), user.path())
+            .with_project_trusted(true),
+    );
+    assert!(catalog.command("test").is_some());
+}
+
+#[test]
 fn claude_import_is_dry_run_apply_idempotent_and_secret_free() {
     let source = tempdir().expect("source");
     let target = tempdir().expect("target");
@@ -38,10 +62,12 @@ fn claude_import_is_dry_run_apply_idempotent_and_secret_free() {
     apply.dry_run = false;
     run(&apply).expect("apply");
     run(&apply).expect("idempotent");
-    assert!(!apply.target_root.join(".agents/commands").exists());
-    assert!(run(&apply).expect("report").items.iter().any(|item| {
-        item.target == ".claude/commands" && item.status == ImportStatus::DiscoveredInPlace
-    }));
+    // A different target project does not see the source's `.claude`, so its
+    // commands are converted and copied.
+    let command =
+        fs::read_to_string(apply.target_root.join(".agents/commands/test.md")).expect("command");
+    assert!(command.contains("description: Imported command test"));
+    assert!(command.ends_with("run $1 then $2"));
     assert_eq!(
         fs::read_to_string(apply.target_root.join(".agents/memory/notes.md")).expect("memory"),
         "remember"
@@ -64,13 +90,8 @@ fn claude_import_is_dry_run_apply_idempotent_and_secret_free() {
         &rw_ext::ExtensionDiscoveryConfig::new(&apply.target_root, user.path())
             .with_project_trusted(true),
     );
-    assert!(catalog.command("test").is_none());
+    assert!(catalog.command("test").is_some());
     assert_eq!(catalog.shell_hooks().len(), 1);
-    let in_place = rw_ext::ExtensionCatalog::discover(
-        &rw_ext::ExtensionDiscoveryConfig::new(source.path(), user.path())
-            .with_project_trusted(true),
-    );
-    assert!(in_place.command("test").is_some());
     let executable = rw_runtime::executable_config::discover_executable_configs(
         user.path(),
         &apply.target_root,

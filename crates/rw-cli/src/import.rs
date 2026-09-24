@@ -74,7 +74,10 @@ pub(crate) fn run(options: &ImportOptions) -> Result<ImportReport> {
     let mut writes = Vec::new();
     let mut diagnostics = Vec::new();
     match options.source {
-        ImportSource::Claude => import_claude(&source, &mut writes, &mut diagnostics)?,
+        ImportSource::Claude => {
+            let in_place = claude_extensions_discovered_in_place(options);
+            import_claude(&source, in_place, &mut writes, &mut diagnostics)?;
+        }
         ImportSource::Opencode => import_opencode(&source, &mut writes, &mut diagnostics)?,
         ImportSource::Pi => import_pi(&source, &mut writes, &mut diagnostics)?,
     }
@@ -191,25 +194,63 @@ fn rollback_created_targets(created: &[CreatedTarget]) {
     }
 }
 
+/// Whether extension discovery already reads the source's Claude skills and
+/// commands for the target: the source is the target project itself, or the
+/// user's own Claude directory (`~` or `~/.claude`), which every project reads.
+fn claude_extensions_discovered_in_place(options: &ImportOptions) -> bool {
+    let canonical = |path: &Path| fs::canonicalize(path).ok();
+    let Some(source) = canonical(&options.source_root) else {
+        return false;
+    };
+    if canonical(&options.target_root).is_some_and(|target| target == source) {
+        return true;
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .is_some_and(|home| {
+            [home.clone(), home.join(".claude")]
+                .iter()
+                .filter_map(|root| canonical(root))
+                .any(|root| root == source)
+        })
+}
+
 fn import_claude(
     source: &SourceTree,
+    extensions_in_place: bool,
     writes: &mut Vec<PlannedWrite>,
     diagnostics: &mut Vec<ImportItem>,
 ) -> Result<()> {
     if let Some(bytes) = source.first_file(&["CLAUDE.md", ".claude/CLAUDE.md"])? {
         writes.push(write("instructions", "AGENTS.md", bytes));
     }
-    // Skills and commands are discovered in place from `.claude/skills` and
-    // `.claude/commands`; copying them would create stale duplicates.
-    for path in [".claude/skills", ".claude/commands"] {
-        if source.kind(path).map_or(true, |kind| kind.is_some()) {
-            diagnostics.push(item(
-                "discovered",
-                path,
-                ImportStatus::DiscoveredInPlace,
-                "loaded in place by extension discovery; nothing to import",
-            ));
+    if extensions_in_place {
+        // Discovery reads these directly; copying would create stale duplicates.
+        for path in [".claude/skills", ".claude/commands"] {
+            if source.kind(path).map_or(true, |kind| kind.is_some()) {
+                diagnostics.push(item(
+                    "discovered",
+                    path,
+                    ImportStatus::DiscoveredInPlace,
+                    "loaded in place by extension discovery; nothing to import",
+                ));
+            }
         }
+    } else {
+        copy_markdown_dir(
+            source,
+            &[".claude/commands", "commands"],
+            ".agents/commands",
+            true,
+            writes,
+        )?;
+        copy_tree(
+            source,
+            &[".claude/skills", "skills"],
+            ".agents/skills",
+            writes,
+        )?;
     }
     copy_markdown_dir(
         source,
