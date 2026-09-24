@@ -503,6 +503,14 @@ jobs:
           path: ${{ runner.temp }}/native-candidate.noindex
       - name: Verify and prepare native candidate
         run: python3 scripts/native_candidate.py prepare "$RUNNER_TEMP/native-candidate.noindex"
+      - name: Prepare Linux sandbox namespace prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends iproute2 util-linux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          timeout 10s unshare --user --map-root-user --mount --net --pid --fork /bin/true
+          echo "ROTTWEILER_REQUIRE_LINUX_SANDBOX=1" >> "$GITHUB_ENV"
       - name: Exercise onboarding, replay, shell ownership, and active shutdown
         run: python3 scripts/ci_evidence.py --delegated --gate ux-acceptance --output ci-results/ux.json -- crates/rw-cli/tests/m4_release_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
       - name: Retain UX evidence

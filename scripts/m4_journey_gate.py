@@ -256,9 +256,11 @@ class Journey:
             raise RuntimeError("approved edit did not change actual workspace file")
         self.approve("journey-test")
         self.visible("NATIVE_EDIT_AND_TEST_DONE", "edit_and_test_done")
-        if not any(event.get("type") == "tool_call_finished" and event.get("tool_call_id") == "journey-test"
-                   and "NATIVE_TEST_OK" in json.dumps(event) for event in self.events()):
-            raise RuntimeError("native test command did not produce its successful result")
+        finished = [event for event in self.events()
+                    if event.get("type") == "tool_call_finished" and event.get("tool_call_id") == "journey-test"]
+        if not any("NATIVE_TEST_OK" in json.dumps(event) for event in finished):
+            output = json.dumps([event.get("output") for event in finished])[:1024]
+            raise RuntimeError(f"native test command did not produce its successful result: {output}")
         self.enter(INTERRUPT)
         self.visible("NATIVE_INTERRUPT_ACTIVE", "interrupt_active")
         os.write(self.process.fd, b"\x03")

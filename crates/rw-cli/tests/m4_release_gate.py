@@ -785,7 +785,10 @@ def shell_handover_gate(
         # sanitized PATH may resolve python3 to an unconfigured platform shim.
         command = f"!{shlex.quote(sys.executable)} {shlex.quote(str(child_script))}"
         os.write(process.fd, command.encode())
-        read_until(process, b"m4-shell-child.py", timeout=3, screen=screen)
+        # Interpreter and temporary paths vary in length, so the composer may
+        # wrap the echoed command anywhere; match it with wraps joined.
+        read_until_all(process, (), timeout=3, screen=screen,
+                       wrapped_markers=(str(child_script),))
         os.write(process.fd, TERMINAL_SUBMIT)
         read_until(process, SHELL_READY_MARKER.encode(), timeout=8, screen=screen)
 

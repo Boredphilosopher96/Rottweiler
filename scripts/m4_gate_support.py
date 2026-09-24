@@ -551,14 +551,24 @@ def read_until(
 ) -> bytes:
     return read_until_all(process, (marker,), timeout, phase=phase, screen=screen)
 
+BOX_DRAWING = "│╭╮╰╯─┃┏┓┗┛━"
+
+
+def unwrapped_screen_text(text: str) -> str:
+    """Rendered text with box borders removed and soft-wrapped lines joined,
+    so a long input that the composer wraps can still be matched."""
+    return "".join(line.strip().strip(BOX_DRAWING).strip() for line in text.splitlines())
+
+
 def read_until_all(
     process: PtyProcess, markers: tuple[bytes, ...], timeout: float = 5.0,
     *, phase: str = "render", screen: TerminalScreen | None = None,
-    rendered_markers: tuple[str, ...] = (),
+    rendered_markers: tuple[str, ...] = (), wrapped_markers: tuple[str, ...] = (),
 ) -> bytes:
-    if (not markers and not rendered_markers) or any(not marker for marker in (*markers, *rendered_markers)):
+    rendered = (*rendered_markers, *wrapped_markers)
+    if (not markers and not rendered) or any(not marker for marker in (*markers, *rendered)):
         raise ValueError("PTY markers must be non-empty")
-    if rendered_markers and screen is None:
+    if rendered and screen is None:
         raise ValueError("rendered markers require a retained terminal screen")
     deadline = time.monotonic() + timeout
     captured = bytearray()
@@ -577,7 +587,8 @@ def read_until_all(
         if screen is not None:
             screen.feed(chunk)
         if (all(marker in captured for marker in markers)
-                and all(marker in screen.text for marker in rendered_markers)):
+                and all(marker in screen.text for marker in rendered_markers)
+                and all(marker in unwrapped_screen_text(screen.text) for marker in wrapped_markers)):
             return bytes(captured)
         if len(captured) > 4 * 1024 * 1024:
             del captured[: len(captured) - 2 * 1024 * 1024]

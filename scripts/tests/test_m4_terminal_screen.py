@@ -85,6 +85,20 @@ class TerminalScreenTests(unittest.TestCase):
         screen.feed(b"\x1b[" + b"1;" * 1000 + b"m\r?")
         self.assertEqual(screen.text, "?bcF\n")
 
+    def test_wrapped_composer_input_matches_with_borders_and_wraps_removed(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from m4_gate_support import unwrapped_screen_text
+
+        rendered = (
+            " ╭─ Shell ──────────────╮\n"
+            " │ !/opt/python3 /tmp/rw4-x/workspace/m4-shell-   │\n"
+            " │ child.py                │\n"
+            " ╰──────────────────────╯"
+        )
+        self.assertNotIn("/tmp/rw4-x/workspace/m4-shell-child.py", rendered)
+        self.assertIn("/tmp/rw4-x/workspace/m4-shell-child.py", unwrapped_screen_text(rendered))
+
 
 if __name__ == "__main__":
     unittest.main()
