@@ -37,7 +37,7 @@ describe("TUI visual evidence", () => {
     const ansi = await Bun.file(join(directory, "conversation.ansi")).text()
     const visible = ansi.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
     expect(visible).toContain("reasoning")
-    expect(visible).toContain("edit  core/cursor.rs")
+    expect(visible).toContain("Edit core/cursor.rs")
   }, PROOF_DEADLINE_MS)
 
   for (const scenario of ["theme-browser", "settings-browser", "mcp-browser", "session-review"]) {

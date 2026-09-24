@@ -70,7 +70,7 @@ async fn missing_model_rejects_prompt_without_history_and_keeps_help_available()
             .await
             .expect("prompt response");
         assert!(matches!(outcome, CommandOutcome::Rejected { error }
-        if error.code == "no_model_selected" && error.message.contains("/models")));
+        if error.code == "no_model_selected" && error.message.contains("/model ")));
         let after = handle.dump_prompt(None).await.expect("unchanged history");
         assert_eq!(after.turns, before.turns);
         let help = handle

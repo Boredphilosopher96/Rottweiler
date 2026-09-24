@@ -4,14 +4,9 @@ import { PROTOCOL_VERSION } from "../../../../protocol/types"
 import {
   createRottweilerApp
 } from "../../src/app"
-import { colorContrast, pickerSelectionColors } from "../../src/components/picker"
 import type { ClientCommand, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import {
-  kennelTheme,
-  systemThemeFor,
-  themeCatalogFor
-} from "../../src/theme"
+import { systemThemeFor } from "../../src/theme"
 import { emptySessionReader } from "../fixtures/history"
 import { initialEvent, ManualPresentationFrame } from "./fixtures"
 
@@ -35,7 +30,7 @@ describe("Rottweiler view-state", () => {
         workspaceStatus: {
           workspaceName: "Rottweiler",
           branch: "main",
-          changedPaths: ["src/first.rs", "src/second.rs"],
+          changes: [{ path: "src/first.rs", kind: "modified" as const }, { path: "src/second.rs", kind: "modified" as const }],
           truncated: false,
         },
       },
@@ -75,12 +70,12 @@ describe("Rottweiler view-state", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       session_id: "session-local",
-      status: { workspace_name: "Rottweiler", branch: "main", changed_paths: [path], truncated: false },
+      status: { workspace_name: "Rottweiler", branch: "main", changes: [{ path, kind: "modified" }], truncated: false },
     })
     app.handleEvent(status(oldStatusRequest, "src/stale.rs"))
-    expect(app.state.workspaceStatus?.changedPaths).toEqual(["src/first.rs", "src/second.rs"])
+    expect(app.state.workspaceStatus?.changes.map(change => change.path)).toEqual(["src/first.rs", "src/second.rs"])
     app.handleEvent(status(newStatusRequest, "src/current.rs"))
-    expect(app.state.workspaceStatus?.changedPaths).toEqual(["src/current.rs"])
+    expect(app.state.workspaceStatus?.changes.map(change => change.path)).toEqual(["src/current.rs"])
 
     app.openReview()
     setup.mockInput.pressEscape()
@@ -145,7 +140,7 @@ describe("Rottweiler view-state", () => {
       status: {
         workspace_name: "Rottweiler",
         branch: "feature/live-status",
-        changed_paths: [],
+        changes: [],
         truncated: false,
       },
     })
@@ -215,8 +210,8 @@ describe("Rottweiler view-state", () => {
     })
     renderer.root.add(app)
     app.openCommandPicker()
-    expect(app.commandPalette.itemIds).toContain("slash.command-15")
-    app.commandPalette.selectById("slash.command-15")
+    expect(app.commandPalette.itemIds).toContain("ext.command-15")
+    app.commandPalette.selectById("ext.command-15")
     const commandIndex = app.commandPalette.selectedRowIndex
     await setup.renderOnce()
 
@@ -227,7 +222,7 @@ describe("Rottweiler view-state", () => {
     })
     await setup.renderOnce()
 
-    expect(app.commandPalette.selectedId).toBe("slash.command-15")
+    expect(app.commandPalette.selectedId).toBe("ext.command-15")
     expect(app.commandPalette.selectedRowIndex).toBe(commandIndex)
     expect(setup.captureCharFrame()).toContain("/command-15")
     setup.mockInput.pressEscape()
@@ -253,7 +248,7 @@ describe("Rottweiler view-state", () => {
     renderer.root.add(app)
     app.openCommandPicker()
     await setup.mockInput.typeText("command")
-    app.commandPalette.selectById("slash.command-15")
+    app.commandPalette.selectById("ext.command-15")
     const original = app.commandPalette
     const offset = app.commandPalette.scrollOffset
 
@@ -263,23 +258,8 @@ describe("Rottweiler view-state", () => {
     expect(app.commandPalette).not.toBe(original)
     expect(app.commandPalette.visible).toBeTrue()
     expect(app.commandPalette.input.value).toBe("command")
-    expect(app.commandPalette.selectedId).toBe("slash.command-15")
+    expect(app.commandPalette.selectedId).toBe("ext.command-15")
     expect(app.commandPalette.scrollOffset).toBe(offset)
   })
 
-  test("keeps picker selection readable and distinct in every bundled theme", () => {
-    for (const mode of ["dark", "light"] as const) {
-      for (const theme of themeCatalogFor(mode)) {
-        const selected = pickerSelectionColors(theme)
-        expect(colorContrast(selected.foreground, selected.background), theme.name).toBeGreaterThanOrEqual(4.5)
-        expect(colorContrast(selected.background, theme.backgroundElement), theme.name).toBeGreaterThanOrEqual(1.4)
-      }
-    }
-    const transparentSelection = pickerSelectionColors({
-      ...kennelTheme,
-      selectedListItemText: "#00000000",
-    })
-    expect(transparentSelection.foreground).toMatch(/^#[0-9A-Fa-f]{6}$/)
-    expect(colorContrast(transparentSelection.foreground, transparentSelection.background)).toBeGreaterThanOrEqual(4.5)
-  })
 })

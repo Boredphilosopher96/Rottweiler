@@ -28,6 +28,7 @@ fn descriptor(id: &str) -> SessionDescriptor {
         model: rw_types::ModelAlias("test".into()),
         driver_client_id: Some(ClientId("mcp-driver".into())),
         shell_active: false,
+        activity: None,
     }
 }
 

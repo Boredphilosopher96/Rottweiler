@@ -8,6 +8,7 @@ impl SubagentOrchestrator {
         &self,
         parent: &SessionId,
     ) -> Result<(), OrchestrationError> {
+        self.drain_queue(parent).await;
         let children = {
             let sessions = self
                 .inner

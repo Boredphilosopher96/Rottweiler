@@ -1,3 +1,4 @@
+import { enterSelectedAgent } from "../fixtures/agents"
 import { expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
@@ -46,7 +47,7 @@ for (const kind of ["question", "approval"] as const) {
         else app.composer.value = "parent draft"
         app.setState({ ...app.state, connection: { ...app.state.connection, phase: "connected" } })
         if (generation === 0) {
-          await Bun.sleep(0); app.openSubagentPicker(); app.picker.select.selectCurrent()
+          await Bun.sleep(0); app.openSubagentPicker(); enterSelectedAgent(app)
         }
         if (generation === 2) {
           for (let tick = 0; tick < 4; tick++) { await setup.renderOnce(); await Bun.sleep(0); app.applyPendingRecycleScroll() }
@@ -60,14 +61,14 @@ for (const kind of ["question", "approval"] as const) {
         await waitForHistory(setup, () => { app.applyPendingRecycleScroll(); return app.recycleState() !== null })
         if (generation === 0) {
           app.composer.value = "unfinished child answer"
-          if (kind === "approval") app.interactionPanel.select.setSelectedIndex(2)
+          if (kind === "approval") app.interactionPanel.select.setSelectedIndex(1)
           saved = app.recycleState()
           expect(saved?.child).toEqual({ type: "live", target })
           expect(saved?.parentComposer?.content).toBe("parent draft")
         } else {
           await waitForHistory(setup, () => { app.applyPendingRecycleScroll(); return app.composer.value === "unfinished child answer" })
           if (kind === "approval") {
-            expect(app.interactionPanel.select.getSelectedOption()?.value).toBe("allow_project")
+            expect(app.interactionPanel.select.getSelectedOption()?.value).toBe("deny")
             app.interactionPanel.select.selectCurrent()
           } else expect(await app.composer.submit()).toBe(true)
           await Bun.sleep(0)

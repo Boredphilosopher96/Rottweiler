@@ -29,6 +29,7 @@ pub mod transcript_index;
 
 pub use accounting::{
     AccountingLedger, AccountingTotals, TurnAccountingEntry, UtcDayKey, UtcTimestamp,
+    totals::SessionSpend,
 };
 pub use error::SessionStoreError;
 pub use event_log::{SessionEventLog, garbage_collect_empty_sessions};

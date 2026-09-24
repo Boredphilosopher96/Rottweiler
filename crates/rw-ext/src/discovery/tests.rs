@@ -15,7 +15,7 @@ fn write(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write fixture");
 }
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn trusted_discovery_follows_adr_014_and_is_sorted() {
@@ -96,17 +96,17 @@ fn trusted_discovery_follows_adr_014_and_is_sorted() {
 }
 
 #[test]
-fn skills_also_use_first_match_by_declared_name() {
+fn skills_use_first_match_by_directory_name() {
     let fixture = TempDir::new().expect("fixture");
     let project = fixture.path().join("project");
     let home = fixture.path().join("home");
     write(
-        &project.join(".agents/skills/project-dir/SKILL.md"),
+        &project.join(".agents/skills/shared-skill/SKILL.md"),
         "---\nname: shared-skill\ndescription: project\n---\nproject body",
     );
     write(
-        &home.join(".agents/skills/user-dir/SKILL.md"),
-        "---\nname: shared-skill\ndescription: user\n---\nuser body",
+        &home.join(".agents/skills/shared-skill/SKILL.md"),
+        "---\nname: other-declared-name\ndescription: user\n---\nuser body",
     );
 
     let trusted = ExtensionCatalog::discover(
@@ -356,26 +356,28 @@ fn skill_metadata_body_and_resources_are_lazy() {
         skill.load_instructions().expect("instructions"),
         "Release instructions."
     );
-    let resources = skill.resources().expect("resources");
+    let listing = skill.bundle_listing(super::SKILL_BUNDLE_LISTING_LIMIT);
     assert_eq!(
-        resources
-            .iter()
-            .map(super::SkillResource::relative_path)
-            .collect::<Vec<_>>(),
+        listing.files,
         vec![
-            Path::new("references/policy.md"),
-            Path::new("scripts/check.sh")
+            PathBuf::from("references/policy.md"),
+            PathBuf::from("scripts/check.sh")
         ]
     );
+    assert!(!listing.truncated);
     assert_eq!(
-        resources[0].load().expect("load resource").bytes(),
-        b"policy"
+        skill
+            .read_bundled_file("references/policy.md")
+            .expect("bundled file"),
+        "policy"
     );
+    assert!(skill.read_bundled_file("../escape").is_err());
+    assert!(skill.read_bundled_file("/etc/passwd").is_err());
 }
 
 #[cfg(unix)]
 #[test]
-fn skill_resource_load_fails_closed_after_directory_symlink_swap() {
+fn skill_bundled_file_read_refuses_directory_symlink_swap() {
     use std::os::unix::fs::symlink;
 
     let fixture = TempDir::new().expect("fixture");
@@ -391,19 +393,25 @@ fn skill_resource_load_fails_closed_after_directory_symlink_swap() {
     write(&outside.join("policy.md"), "swapped policy");
 
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
-    let resource = catalog
-        .skill("release")
-        .expect("skill")
-        .resources()
-        .expect("resources")
-        .into_iter()
-        .find(|resource| resource.relative_path() == Path::new("references/policy.md"))
-        .expect("policy resource");
+    let skill = catalog.skill("release").expect("skill");
     fs::rename(root.join("references"), root.join("references.original"))
         .expect("move original directory");
     symlink(&outside, root.join("references")).expect("swap directory symlink");
 
-    assert!(resource.load().is_err());
+    assert!(skill.read_bundled_file("references/policy.md").is_err());
+    let listing = skill.bundle_listing(super::SKILL_BUNDLE_LISTING_LIMIT);
+    assert!(
+        listing
+            .skipped
+            .iter()
+            .any(|entry| entry.relative_path == Path::new("references")
+                && entry.reason == super::SkippedBundleReason::SymbolicLink)
+    );
+    assert!(
+        listing
+            .files
+            .contains(&PathBuf::from("references.original/policy.md"))
+    );
 }
 
 fn assert_single_diagnostic(
@@ -450,7 +458,6 @@ fn invalid_frontmatter_isolated_to_one_artifact() {
     let cases = [
         "---\n name: bad\ndescription: bad\n---\nbody",
         "---\nname bad\ndescription: bad\n---\nbody",
-        "---\nName: bad\ndescription: bad\n---\nbody",
         "---\nname: bad\ndescription: first\ndescription: duplicate\n---\nbody",
         "---\nname: bad\ndescription: bad\nallowed-tools:\n  -\n---\nbody",
     ];
@@ -481,11 +488,8 @@ fn invalid_name_isolated_to_one_artifact() {
     let fixture = TempDir::new().expect("fixture");
     let project = fixture.path().join("project");
     let home = fixture.path().join("home");
-    let path = home.join(".agents/skills/bad/SKILL.md");
-    write(
-        &path,
-        "---\nname: Not Portable\ndescription: bad\n---\nbody",
-    );
+    let path = home.join(".agents/skills/Not Portable/SKILL.md");
+    write(&path, "---\ndescription: bad\n---\nbody");
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
     assert_single_diagnostic(
         &catalog,
@@ -740,9 +744,14 @@ fn symlinks_in_skills_and_commands_keep_valid_siblings() {
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
     assert!(catalog.skill("good").is_some());
     assert!(catalog.command("good").is_some());
-    assert!(catalog.skill("linked").is_none());
+    let linked = catalog.skill("linked").expect("user skill link resolves");
+    assert_eq!(
+        linked.root(),
+        fs::canonicalize(&outside_skill).expect("canonical target")
+    );
+    assert_eq!(linked.origin().path(), root.join("skills/linked/SKILL.md"));
     assert!(catalog.command("linked").is_none());
-    assert_eq!(catalog.diagnostics().len(), 2);
+    assert_eq!(catalog.diagnostics().len(), 1);
 }
 
 #[test]
@@ -805,8 +814,8 @@ fn lower_precedence_valid_skill_wins_after_malformed_shadow() {
     let fixture = TempDir::new().expect("fixture");
     let project = fixture.path().join("project");
     let home = fixture.path().join("home");
-    let malformed = project.join(".agents/skills/project/SKILL.md");
-    let fallback = home.join(".agents/skills/user/SKILL.md");
+    let malformed = project.join(".agents/skills/shared/SKILL.md");
+    let fallback = home.join(".agents/skills/shared/SKILL.md");
     write(&malformed, "---\nname: shared\n---\nbody");
     write(
         &fallback,
@@ -849,7 +858,7 @@ fn malformed_active_frontmatter_and_unclosed_shell_are_rejected() {
     let home = fixture.path().join("home");
     write(
         &home.join(".agents/commands/missing.md"),
-        "---\nmodel: fast\n---\nbody",
+        "---\nmodel: fast\n---\n\n",
     );
     let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
     assert!(catalog.command("missing").is_none());

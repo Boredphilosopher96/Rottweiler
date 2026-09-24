@@ -7,6 +7,7 @@ import {
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptySessionReader, sessionReaderFor, waitForHistory, commandItem } from "../fixtures/history"
+import { readyCatalog } from "../fixtures/catalog"
 
 describe("Rottweiler composer-commands", () => {
   let renderer: TestRenderer | undefined
@@ -15,47 +16,96 @@ describe("Rottweiler composer-commands", () => {
     renderer = undefined
   })
 
-  test("slash and Ctrl+P open the same command palette without consuming attachments", async () => {
+  test("slash completes inline while Ctrl+P toggles the same catalog as a full palette", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
     app.composer.addAttachment({ name: "notes.txt", media_type: "text/plain", data: { type: "text", content: "Keep me" } })
     await setup.mockInput.typeText("/")
-    expect(app.commandPalette.visible).toBeTrue()
-    expect(app.composer.value).toBe("")
-    expect(app.composer.attachments).toHaveLength(1)
-    const slashIds = app.commandPalette.itemIds
-    app.closePicker()
-    setup.mockInput.pressKey("p", { ctrl: true })
-    expect(app.commandPalette.itemIds).toEqual(slashIds)
-    expect(app.composer.attachments).toHaveLength(1)
-    app.closePicker()
-    await setup.mockInput.pasteBracketedText("/compact preserve the API")
+    expect(app.slashPopup.visible).toBeTrue()
     expect(app.commandPalette.visible).toBeFalse()
-    expect(app.composer.value).toBe("/compact preserve the API")
+    expect(app.composer.value).toBe("/")
+    expect(app.composer.attachments).toHaveLength(1)
+    const slashIds = [...app.slashPopup.itemIds].sort()
+    setup.mockInput.pressKey("p", { ctrl: true })
+    expect(app.commandPalette.visible).toBeTrue()
+    expect(app.slashPopup.visible).toBeFalse()
+    expect([...app.commandPalette.itemIds].sort()).toEqual(slashIds)
+    setup.mockInput.pressKey("p", { ctrl: true })
+    expect(app.commandPalette.visible).toBeFalse()
+    expect(app.composer.attachments).toHaveLength(1)
   })
 
-  test("positions the shared slash palette across the primary surface on reopen", async () => {
+  test("keeps typed arguments in the composer and runs the command with them", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const ready = readyCatalog(() => app)
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      initialState: { ...createInitialState(), connection: { phase: "connected", attempt: 0, error: null, gap: null } },
+      onCommand(command) {
+        emitted.push(command)
+        return ready(command)
+      },
+    })
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/")
+    await Bun.sleep(0)
+    await setup.mockInput.typeText("comp")
+    expect(app.slashPopup.selectedId).toBe("cmd.compact")
+    setup.mockInput.pressTab()
+    expect(app.composer.value).toBe("/compact ")
+    expect(app.slashPopup.model?.kind).toBe("arguments")
+    await setup.mockInput.typeText("keep the API notes")
+    expect(app.composer.value).toBe("/compact keep the API notes")
+    expect(app.slashPopup.visible).toBeTrue()
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(emitted).toContainEqual(expect.objectContaining({ type: "send_message", content: "/compact keep the API notes" }))
+    expect(app.slashPopup.visible).toBeFalse()
+
+    await setup.mockInput.pasteBracketedText("/add-dir ../docs")
+    expect(app.slashPopup.model?.kind).toBe("arguments")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({ type: "send_message", content: "/dirs ../docs" }))
+  })
+
+  test("Esc closes the slash popup keeping the text, and a second Esc clears it", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
-    // Exercise the real first-input path before OpenTUI has completed a prior frame.
-    await setup.mockInput.typeText("/")
-    const firstConfiguredTop = app.commandPalette.top
-    expect(firstConfiguredTop).toBeGreaterThanOrEqual(0)
-    await setup.renderOnce()
-    const first = { y: app.commandPalette.y, height: app.commandPalette.height }
-    expect(first.y + first.height).toBeLessThanOrEqual(app.composer.y)
+    await setup.mockInput.typeText("/mo")
+    expect(app.slashPopup.visible).toBeTrue()
+    setup.mockInput.pressEscape()
+    await waitForHistory(setup, () => !app.slashPopup.visible)
+    expect(app.composer.value).toBe("/mo")
+    setup.mockInput.pressEscape()
+    await waitForHistory(setup, () => app.composer.value === "")
+    await setup.mockInput.typeText("/mo")
+    expect(app.slashPopup.visible).toBeTrue()
+    await setup.mockInput.typeText("d")
+    expect(app.slashPopup.itemIds.slice(0, 2)).toEqual(["cmd.model", "cmd.mode"])
+  })
 
-    app.closePicker()
-    app.composer.value = ""
+  test("positions the slash popup directly above the composer", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
+    renderer.root.add(app)
+
     await setup.mockInput.typeText("/")
     await setup.renderOnce()
-    expect({ y: app.commandPalette.y, height: app.commandPalette.height }).toEqual(first)
-    expect(app.commandPalette.y + app.commandPalette.height).toBeLessThanOrEqual(app.composer.y)
+    expect(app.slashPopup.y + app.slashPopup.height).toBe(app.composer.y)
+    expect(app.slashPopup.y).toBeGreaterThanOrEqual(0)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("/new")
+    expect(frame).toContain("Ctrl+N")
   })
 
   test("keeps the composer pasteable while recovery rejects a submit and accepts its retry", async () => {
@@ -102,7 +152,7 @@ describe("Rottweiler composer-commands", () => {
     expect(app.composer.value).toBe("")
   })
 
-  test("filters the shared slash palette as the query changes", async () => {
+  test("ranks slash completion by name, alias, and extension", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
@@ -110,33 +160,31 @@ describe("Rottweiler composer-commands", () => {
       initialState: {
         ...createInitialState(),
         commands: [
-          { name: "help", description: "List available commands", usage: "/help" },
-          { name: "status", description: "Show session status", usage: "/status" },
+          { name: "help", description: "List available commands", usage: "/help", source: "builtin" },
+          { name: "status", description: "Show session status", usage: "/status", source: "project" },
         ],
       },
     })
     renderer.root.add(app)
 
-    await setup.mockInput.typeText("/")
-    expect(app.commandPalette.visible).toBeTrue()
-    await setup.mockInput.typeText("sta")
-    expect(app.commandPalette.selectedId).toBe("status.show")
-    app.closePicker()
+    await setup.mockInput.typeText("/sta")
+    expect(app.slashPopup.selectedId).toBe("ext.status")
     app.composer.value = ""
-    await setup.mockInput.typeText("/")
-    await setup.mockInput.typeText("pro")
-    expect(app.commandPalette.itemIds).toContain("provider.list")
+    await setup.mockInput.typeText("/pro")
+    expect(app.slashPopup.selectedId).toBe("cmd.model")
+    app.composer.value = ""
+    await setup.mockInput.typeText("/help")
+    expect(app.slashPopup.itemIds.filter((id) => id.endsWith(".help"))).toEqual(["cmd.help"])
   })
 
-  test("exposes /theme and opens the live theme picker from slash autocomplete", async () => {
+  test("runs /theme from slash completion", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
-    await setup.mockInput.typeText("/")
-    await setup.mockInput.typeText("theme")
-    expect(app.commandPalette.selectedId).toBe("theme.list")
+    await setup.mockInput.typeText("/theme")
+    expect(app.slashPopup.selectedId).toBe("cmd.theme")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
 
@@ -146,7 +194,7 @@ describe("Rottweiler composer-commands", () => {
     expect(app.themeBrowser.itemIds).toContain("theme:opencode")
   })
 
-  test("executes a selected no-argument slash command on Enter and renders its result", async () => {
+  test("executes a selected no-argument extension command on Enter and renders its result", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
@@ -156,7 +204,7 @@ describe("Rottweiler composer-commands", () => {
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
-        commands: [{ name: "status", description: "Show session status", usage: "/status" }],
+        commands: [{ name: "status", description: "Show session status", usage: "/status", source: "project" }],
       },
       onCommand(command) {
         emitted.push(command)
@@ -165,9 +213,8 @@ describe("Rottweiler composer-commands", () => {
     })
     renderer.root.add(app)
 
-    await setup.mockInput.typeText("/")
-    await setup.mockInput.typeText("sta")
-    expect(app.commandPalette.selectedId).toBe("status.show")
+    await setup.mockInput.typeText("/sta")
+    expect(app.slashPopup.selectedId).toBe("ext.status")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
 
@@ -175,7 +222,7 @@ describe("Rottweiler composer-commands", () => {
       type: "send_message",
       content: "/status",
     }))
-    expect(app.picker.visible).toBeFalse()
+    expect(app.slashPopup.visible).toBeFalse()
     expect(app.composer.value).toBe("")
 
     items.push(commandItem(1, "status", "actor idle · queue empty"))
@@ -268,7 +315,7 @@ describe("Rottweiler composer-commands", () => {
     expect(app.banner.plainText).not.toContain("attempt")
     expect(app.banner.plainText).not.toContain("disconnected")
     expect(app.statusLine.plainText).toContain("EXECUTE")
-    expect(app.statusLine.plainText).toContain("model not selected · Alt+M")
+    expect(app.statusLine.plainText).toContain("loading models · Alt+M")
     expect(app.statusLine.plainText).not.toContain("ctx")
     expect(app.statusLine.plainText).not.toContain("cache")
     expect(app.statusLine.plainText).not.toContain("git")
@@ -323,10 +370,9 @@ describe("Rottweiler composer-commands", () => {
     })
     renderer.root.add(app)
 
-    await setup.mockInput.typeText("/")
-    await setup.mockInput.typeText("exit")
-    expect(app.commandPalette.selectedId).toBe("app.exit")
-    expect(app.commandPalette.itemIds).not.toContain("slash.quit")
+    await setup.mockInput.typeText("/exit")
+    expect(app.slashPopup.selectedId).toBe("cmd.exit")
+    expect(app.slashPopup.itemIds).not.toContain("cmd.quit")
     emitted.length = 0
     setup.mockInput.pressEnter()
     await Bun.sleep(0)

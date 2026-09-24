@@ -595,7 +595,7 @@ export const contractFixture = {
       "capabilities": [
         "execute"
       ],
-      "rationale": "runs a local command",
+      "rationale": "Not in the safe command list",
       "diff": null
     },
     {
@@ -1092,7 +1092,13 @@ export const contractFixture = {
         "workspace_name": "workspace",
         "model": "fast",
         "driver_client_id": "client-fixture",
-        "shell_active": false
+        "shell_active": false,
+        "activity": {
+          "updated_unix_ms": "1767225600000",
+          "turn_count": "3",
+          "first_prompt": "Fork the plan before refactoring",
+          "cost_micros_usd": "12500"
+        }
       },
       "at_turn": "turn-fixture"
     },
@@ -1113,7 +1119,13 @@ export const contractFixture = {
             "workspace_name": "workspace",
             "model": "fast",
             "driver_client_id": "client-fixture",
-            "shell_active": false
+            "shell_active": false,
+            "activity": {
+              "updated_unix_ms": "1767225600000",
+              "turn_count": "3",
+              "first_prompt": "Fork the plan before refactoring",
+              "cost_micros_usd": "12500"
+            }
           },
           "match": null
         }

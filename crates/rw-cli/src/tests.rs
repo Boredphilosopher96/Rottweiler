@@ -26,7 +26,7 @@ fn recent_session_text_labels_dates_turns_and_ids_without_fake_cost() {
         id: "session-fixture".to_owned(),
         title: "Investigate startup".to_owned(),
         updated_unix_ms: 1_776_508_645_000,
-        cost_micros: 0,
+        first_prompt: None,
         turn_count: 3,
     }];
 

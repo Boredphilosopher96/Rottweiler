@@ -1,20 +1,21 @@
 use rw_tools::presentation::{BuiltinToolPresentation, fields};
 
-pub(super) static RESULT: BuiltinToolPresentation =
-    BuiltinToolPresentation::new("spawn_agent", "Child task result", || {
+pub(super) static STATUS: BuiltinToolPresentation =
+    BuiltinToolPresentation::new("spawn_agent", "Child agent", || {
         vec![
-            fields::text("child", "Child", &["subagent_id"]),
+            fields::text("child", "Child", &["id"]),
             fields::badge("status", "Status", &["status"]),
-            fields::text("summary", "Summary", &["final_text"]),
-            fields::list("files", "Changed files", &["touched_files"]),
         ]
     });
+pub(super) static WAIT: BuiltinToolPresentation =
+    BuiltinToolPresentation::new("spawn_agent", "Child agents", || {
+        vec![fields::list("children", "Children", &["children"])]
+    });
 pub(super) static CONTROL: BuiltinToolPresentation =
-    BuiltinToolPresentation::new("spawn_agent", "Child task control", || {
+    BuiltinToolPresentation::new("spawn_agent", "Child agent control", || {
         vec![
-            fields::text("child", "Child", &["subagent_id"]),
+            fields::text("child", "Child", &["id"]),
             fields::badge("action", "Action", &["action"]),
-            fields::badge("completed", "Completed", &["completed"]),
         ]
     });
 
@@ -22,8 +23,8 @@ pub(super) static CONTROL: BuiltinToolPresentation =
 mod tests {
     use super::*;
     #[test]
-    fn source_plans_cover_child_results_and_control_outcomes() {
-        for declaration in [&RESULT, &CONTROL] {
+    fn source_plans_cover_child_status_and_control_outcomes() {
+        for declaration in [&STATUS, &WAIT, &CONTROL] {
             declaration.plan().unwrap_or_else(|error| panic!("{error}"));
         }
     }

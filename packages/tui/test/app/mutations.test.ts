@@ -6,7 +6,21 @@ import {
 } from "../../src/app"
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
-import { emptySessionReader } from "../fixtures/history"
+import { conversationItem, emptySessionReader, sessionReaderFor, waitForHistory } from "../fixtures/history"
+import { options, select } from "../picker-screen"
+
+type TestSetup = Awaited<ReturnType<typeof createTestRenderer>>
+
+/** Fork is a timeline action: pick the turn, then "Fork from here". */
+async function forkAt(app: ReturnType<typeof createRottweilerApp>, setup: TestSetup, turn: string): Promise<void> {
+  app.openTimelinePicker()
+  await waitForHistory(setup, () => options(app.picker).some((option) => option.value === `timeline.turn.${turn}`))
+  select(app.picker, options(app.picker).findIndex((option) => option.value === `timeline.turn.${turn}`))
+  app.picker.activateSelected()
+  select(app.picker, options(app.picker).findIndex((option) => option.value === "timeline.action.fork"))
+  app.picker.activateSelected()
+  await Bun.sleep(0)
+}
 
 describe("Rottweiler mutations", () => {
   let renderer: TestRenderer | undefined
@@ -108,12 +122,12 @@ describe("Rottweiler mutations", () => {
     expect(app.statusLine.plainText).toContain("gpt-5.6-sol")
   })
 
-  test("routes /review and /fork through typed protocol commands", async () => {
+  test("routes /review and timeline forks through typed protocol commands", async () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
+      sessionReader: sessionReaderFor([conversationItem(42, "user", "hello")]),
       sessionId: "session-actions",
       requestId: () => `request-${commands.length + 1}`,
       onCommand(command) {
@@ -125,29 +139,8 @@ describe("Rottweiler mutations", () => {
 
     app.composer.value = "/review"
     expect(await app.composer.submit()).toBeTrue()
-    app.composer.value = "/fork "
-    expect(await app.composer.submit()).toBeTrue()
-    app.handleEvent({
-      type: "session_forked",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "fork-client",
-        request_id: "request-2",
-        emitted_at: "2026-01-01T00:00:00Z",
-      },
-      parent_session_id: "session-actions",
-      child: { title: "Fixture",
-        session_id: "session-actions-first-child",
-        workspace_name: "Rottweiler fork",
-        model: "fast",
-        driver_client_id: null,
-        shell_active: false,
-      },
-      at_turn: "0",
-    })
-    app.composer.value = "/fork 42"
-    expect(await app.composer.submit()).toBeTrue()
-    expect(commands.filter((command) => command.type !== "list_commands")).toEqual([
+    await forkAt(app, setup, "42")
+    expect(commands.filter((command) => command.type === "get_session_review" || command.type === "fork")).toEqual([
       expect.objectContaining({
         type: "get_session_review",
         session_id: "session-actions",
@@ -155,25 +148,13 @@ describe("Rottweiler mutations", () => {
       expect.objectContaining({
         type: "fork",
         session_id: "session-actions",
-        at_turn: null,
-      }),
-      expect.objectContaining({
-        type: "fork",
-        session_id: "session-actions",
         at_turn: "42",
       }),
     ])
-
-    app.composer.value = "/fork not-a-turn extra"
-    expect(await app.composer.submit()).toBeFalse()
-    expect(commands.filter((command) => command.type !== "list_commands")).toHaveLength(3)
-    expect(app.state.errors.at(-1)).toMatchObject({
-      code: "invalid_command_arguments",
-      message: "usage: /fork [turn] where turn is a decimal u64",
-    })
     app.composer.value = "/review extra"
     expect(await app.composer.submit()).toBeFalse()
-    expect(commands.filter((command) => command.type !== "list_commands")).toHaveLength(3)
+    expect(commands.some((command) => command.type === "send_message")).toBeFalse()
+    expect(commands.filter((command) => command.type === "get_session_review")).toHaveLength(1)
     expect(app.state.errors.at(-1)?.message).toBe("usage: /review")
   })
 
@@ -182,7 +163,7 @@ describe("Rottweiler mutations", () => {
     renderer = setup.renderer
     const transitions: string[] = []
     const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
+      sessionReader: sessionReaderFor([conversationItem(42, "user", "hello")]),
       sessionId: "session-parent",
       requestId: () => "fork-request",
       onCommand: () => ({ type: "accepted" }),
@@ -191,8 +172,7 @@ describe("Rottweiler mutations", () => {
       },
     })
     renderer.root.add(app)
-    app.composer.value = "/fork 42"
-    expect(await app.composer.submit()).toBeTrue()
+    await forkAt(app, setup, "42")
     app.handleEvent({
       type: "session_forked",
       meta: {
@@ -222,6 +202,7 @@ describe("Rottweiler mutations", () => {
         model: "fast",
         driverClientId: null,
         shellActive: false,
+        activity: null,
       },
       atTurn: "42",
     })
@@ -249,13 +230,13 @@ describe("Rottweiler mutations", () => {
     expect(transitions).toEqual(["session-child"])
   })
 
-  test("clears the fork draft when completion arrives before the POST returns", async () => {
+  test("transitions when fork completion arrives before the POST returns", async () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
     const transitions: string[] = []
     let app!: ReturnType<typeof createRottweilerApp>
     app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
+      sessionReader: sessionReaderFor([conversationItem(4, "user", "hello")]),
       sessionId: "fork-parent",
       requestId: () => "fork-race-request",
       async onCommand(command) {
@@ -286,10 +267,7 @@ describe("Rottweiler mutations", () => {
       },
     })
     renderer.root.add(app)
-    app.composer.value = "/fork 4"
-
-    expect(await app.composer.submit()).toBeTrue()
-    expect(app.composer.value).toBe("")
+    await forkAt(app, setup, "4")
     expect(transitions).toEqual(["fork-child"])
   })
 

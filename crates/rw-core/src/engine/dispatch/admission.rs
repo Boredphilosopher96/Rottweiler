@@ -289,7 +289,7 @@ pub(super) async fn dispatch_protocol(
         {
             let outcome = protocol_rejection(
                 "no_model_selected",
-                "Choose a model with /models before sending a message. Connect a provider with /providers if needed.",
+                "Choose a model with /model before sending a message. Connect a provider from the same screen if needed.",
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
@@ -456,7 +456,10 @@ pub(super) async fn dispatch_protocol(
         {
             let outcome = protocol_rejection(
                 "shell_start_rejected",
-                "a non-empty foreground shell may start only while the session is idle",
+                idle_refusal(
+                    "a non-empty foreground shell may start only while the session is idle",
+                    config.tools.session_activity(&state.session_id),
+                ),
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
@@ -486,7 +489,10 @@ pub(super) async fn dispatch_protocol(
         {
             let outcome = protocol_rejection(
                 "session_not_idle",
-                "session review requires an idle session",
+                idle_refusal(
+                    "session review requires an idle session",
+                    config.tools.session_activity(&state.session_id),
+                ),
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
@@ -902,7 +908,10 @@ pub(super) async fn dispatch_protocol(
                 || state.active_shell.is_some()
                 || config.tools.session_activity(&state.session_id).is_some())
         {
-            Err("permission mutations require an idle session".to_owned())
+            Err(idle_refusal(
+                "permission mutations require an idle session",
+                config.tools.session_activity(&state.session_id),
+            ))
         } else {
             apply_permission_command(&command, &config.permissions)
         };
@@ -1244,4 +1253,12 @@ pub(super) async fn dispatch_protocol(
     )
     .await;
     true
+}
+
+/// Names the session-owned work that keeps the session from being idle.
+fn idle_refusal(base: &str, activity: Option<rw_tools::SessionActivity>) -> String {
+    match activity {
+        Some(activity) => format!("{base}: {}; {}", activity.holder(), activity.remedy()),
+        None => base.to_owned(),
+    }
 }

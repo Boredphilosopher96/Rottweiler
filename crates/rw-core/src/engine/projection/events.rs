@@ -259,11 +259,13 @@ pub(in crate::engine) fn recovered_pending_event(
             name,
             args,
             capabilities,
+            rationale,
             diff,
             ..
         } => PendingEvent::PermissionRequested {
             turn: parse_turn_id(turn_id)?,
             request: PermissionRequest {
+                prompt_reason: rationale.clone(),
                 id: tool_call_id.0.clone(),
                 invocation_id: invocation_id.clone(),
                 tool_name: name.clone(),
@@ -341,7 +343,6 @@ pub(in crate::engine) fn recovered_pending_event(
         },
         EngineEvent::ContextUsageUpdated {
             turn_id,
-            completion_sources,
             used_tokens,
             usable_tokens,
             reserved_tokens,
@@ -354,7 +355,6 @@ pub(in crate::engine) fn recovered_pending_event(
             correction_millionths,
             ..
         } => PendingEvent::ContextUsage {
-            completion_sources: completion_sources.clone(),
             turn: parse_turn_id(turn_id)?,
             used_tokens: *used_tokens,
             usable_tokens: *usable_tokens,

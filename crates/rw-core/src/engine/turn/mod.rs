@@ -1,5 +1,6 @@
 pub(in crate::engine) mod accounting;
 pub(in crate::engine) mod child_progress;
+mod child_results;
 mod command_tools;
 mod compaction;
 mod completion_hooks;

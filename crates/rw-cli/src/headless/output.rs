@@ -191,7 +191,7 @@ pub(super) enum PendingInteraction {
         tool_call_id: String,
         invocation_id: rw_types::ToolInvocationId,
         capabilities: Vec<ToolCapability>,
-        rationale: String,
+        rationale: Option<String>,
         binding: Option<ApprovalBinding>,
     },
 }
@@ -220,7 +220,10 @@ async fn display_next_interaction(
             capabilities,
             rationale,
             ..
-        }) => format!("allow {capabilities:?} ({rationale})? [y] once / [a] session / [p] project / [n] deny\n"),
+        }) => {
+            let reason = rationale.as_deref().map_or_else(String::new, |reason| format!(" ({reason})"));
+            format!("allow {capabilities:?}{reason}? [y] once / [a] session / [p] project / [n] deny\n")
+        }
         None => return Ok(true),
     };
     print_ordered(actor, interrupts, printer, interactions, message).await

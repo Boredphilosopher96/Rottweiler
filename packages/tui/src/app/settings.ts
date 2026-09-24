@@ -1,4 +1,4 @@
-import { FuzzyPickerRenderable, ListDetailRenderable } from "../components"
+import { PickerScreenRenderable, ListDetailRenderable } from "../components"
 import { PickerController } from "../picker-controller"
 import { ProjectionRequestBroker, type ProjectionKind } from "../projection-requests"
 import {
@@ -7,6 +7,15 @@ import {
   type SettingsCatalog,
 } from "../settings-browser"
 import { type RottweilerState } from "../state"
+
+const BUDGET_ROWS = [
+  { key: "budget.session_cost_cap_micros_usd", section: "Spend", label: "Session limit", description: "Maximum spend for this session" },
+  { key: "budget.daily_cost_cap_micros_usd", section: "Spend", label: "Daily limit", description: "Maximum spend per UTC day" },
+  { key: "budget.session_token_cap", section: "Subscription tokens", label: "Session tokens", description: "Maximum subscription tokens for this session" },
+  { key: "budget.daily_token_cap", section: "Subscription tokens", label: "Daily tokens", description: "Maximum subscription tokens per UTC day" },
+  { key: "budget.token_rate_alarm_per_minute", section: "Alerts", label: "Token rate alarm", description: "Alert when one minute of subscription usage reaches this value" },
+  { key: "budget.warn_at_percent", section: "Alerts", label: "Warn at", description: "Warn when a configured cap reaches this percentage" },
+] as const satisfies readonly { readonly key: BudgetSettingKey; readonly section: string; readonly label: string; readonly description: string }[]
 
 type BudgetSettingKey =
   | "budget.session_cost_cap_micros_usd"
@@ -17,7 +26,7 @@ type BudgetSettingKey =
   | "budget.warn_at_percent"
 interface SettingsUiHost {
   readonly state: RottweilerState
-  readonly picker: FuzzyPickerRenderable<unknown>
+  readonly picker: PickerScreenRenderable<unknown>
   readonly browser: ListDetailRenderable<SettingsBrowserAction>
   readonly pickerController: PickerController
   readonly requests: ProjectionRequestBroker
@@ -87,33 +96,22 @@ export class SettingsUiController {
   #openBudgetTextPrompt(key: BudgetSettingKey): void {
     this.#budgetSettingKey = key
     this.#host.pickerController.kind = "budgetInput"
-    const prompt = key === "budget.session_cost_cap_micros_usd"
-      ? "Session limit in USD, e.g. 12.50"
-      : key === "budget.daily_cost_cap_micros_usd"
-        ? "Daily limit in USD, e.g. 12.50"
-        : key === "budget.session_token_cap"
-          ? "Session token limit, e.g. 250000"
-          : key === "budget.daily_token_cap"
-            ? "Daily token limit, e.g. 1000000"
-            : key === "budget.token_rate_alarm_per_minute"
-              ? "Token rate alarm per minute, e.g. 100000"
-              : "Warning threshold as a percent, e.g. 70"
-    const placeholder = key === "budget.warn_at_percent"
-      ? "70"
-      : key.includes("token")
-        ? "250000"
-        : "12.50"
+    const example = key === "budget.warn_at_percent" ? "70" : key.includes("token") ? "250000" : "12.50"
+    const unit = key === "budget.warn_at_percent" ? "a percent" : key.includes("token") ? "whole tokens" : "USD, up to two decimals"
+    const row = BUDGET_ROWS.find(candidate => candidate.key === key)!
     const scope = this.#host.pickerController.interaction
     this.#host.pickerController.openTextPrompt({
-      title: prompt, placeholder: placeholder, onSubmit: (value) => {
+      title: `BUDGET LIMITS › ${row.label}`,
+      placeholder: example,
+      detail: `${row.description}.\nEnter ${unit}, e.g. ${example}.`,
+      onSubmit: (value) => {
         if (!scope?.active) return
-        const selectedKey = key
         this.#host.closePicker()
-        if (selectedKey !== null) {
-          this.#host.requests.command({ type: "set_setting", key: selectedKey, value })
-        }
-      }, maxBytes: 32, empty: "reject"
-    })
+        this.#host.requests.command({ type: "set_setting", key, value })
+      },
+      maxBytes: 32,
+      empty: "reject",
+    }, () => this.#openBudgetPresetPicker(key))
   }
 
   resize(width: number, height: number): void {
@@ -126,63 +124,34 @@ export class SettingsUiController {
   render(kind: "budgets" | "budgetPresets" | "settings" | "settingChoices"): void {
     switch (kind) {
       case "budgets": {
-        const rows = [
-          {
-            key: "budget.session_cost_cap_micros_usd",
-            label: "Session limit",
-            description: "Maximum spend for this session",
-          },
-          {
-            key: "budget.daily_cost_cap_micros_usd",
-            label: "Daily limit",
-            description: "Maximum spend per UTC day",
-          },
-          {
-            key: "budget.session_token_cap",
-            label: "Session tokens",
-            description: "Maximum subscription tokens for this session",
-          },
-          {
-            key: "budget.daily_token_cap",
-            label: "Daily tokens",
-            description: "Maximum subscription tokens per UTC day",
-          },
-          {
-            key: "budget.token_rate_alarm_per_minute",
-            label: "Token rate alarm",
-            description: "Alert when one minute of subscription usage reaches this value",
-          },
-          {
-            key: "budget.warn_at_percent",
-            label: "Warn at",
-            description: "Warn when a configured cap reaches this percentage",
-          },
-        ] as const
-        const settings = rows.map((row) => ({
+        const settings = BUDGET_ROWS.map((row) => ({
           ...row,
           setting: this.#host.state.settings.find((setting) => setting.key === row.key),
         }))
         if (settings.some(({ setting }) => setting === undefined)) {
           if (this.#host.requests.current("settings_pending") !== null) {
-            this.#host.pickerController.showLoading("Budget limits", "Loading budget limits")
+            this.#host.pickerController.showLoading("BUDGET LIMITS", "Loading budget limits")
           } else {
-            this.#host.pickerController.showStatus(
-              "Budget limits",
-              "Budget limits could not be loaded",
-              "Close and reopen this panel to retry.",
-            )
+            this.#host.pickerController.showStatus("BUDGET LIMITS", "Budget limits could not be loaded", "Close and reopen this screen to retry.")
           }
           break
         }
         this.#host.pickerController.show(
-          "Budget limits",
-          settings.map(({ key, label, description, setting }) => ({
-            id: `budget.setting.${key}`,
-            label: `${label} · ${setting?.value}`,
-            description: `${description} · ${setting?.provenance}${setting?.appliesImmediately ? " · live" : " · next session"}`,
-            value: key,
-          })),
+          "BUDGET LIMITS",
+          settings.flatMap(({ key, label, description, section, setting }, index) => [
+            ...(settings[index - 1]?.section === section ? [] : [{
+              id: `budget.section.${section}`, label: section, description: "", sectionHeader: true, value: key }]),
+            {
+              id: `budget.setting.${key}`,
+              label,
+              hint: setting!.value,
+              description,
+              detail: `${description}\n\ncurrent   ${setting!.value}\nsource    ${setting!.provenance}\napplies   ${setting!.appliesImmediately ? "immediately" : "next session"}`,
+              value: key,
+            },
+          ]),
           (item) => this.#openBudgetPresetPicker(item.value),
+          { primary: "change" },
         )
         break
       }
@@ -194,17 +163,8 @@ export class SettingsUiController {
         }
         const isWarning = key === "budget.warn_at_percent"
         const isToken = key.includes("token")
-        const title = key === "budget.session_cost_cap_micros_usd"
-          ? "Session limit"
-          : key === "budget.daily_cost_cap_micros_usd"
-            ? "Daily limit"
-            : key === "budget.session_token_cap"
-              ? "Session tokens"
-              : key === "budget.daily_token_cap"
-                ? "Daily tokens"
-                : key === "budget.token_rate_alarm_per_minute"
-                  ? "Token rate alarm"
-                  : "Warn at"
+        const title = BUDGET_ROWS.find(row => row.key === key)!.label
+        const current = this.#host.state.settings.find(setting => setting.key === key)?.value
         const presets = isWarning
           ? [
             { label: "50%", value: "50" },
@@ -232,7 +192,7 @@ export class SettingsUiController {
               { label: "Custom amount…", value: null },
             ]
         this.#host.pickerController.show(
-          title,
+          `BUDGET LIMITS › ${title}`,
           presets.map((preset) => ({
             id: `budget.preset.${key}.${preset.value ?? "custom"}`,
             label: preset.label,
@@ -247,6 +207,7 @@ export class SettingsUiController {
                 : preset.value === "unlimited"
                   ? `Remove the ${title.toLowerCase()} cap`
                   : `Set the ${title.toLowerCase()} to ${preset.label}`,
+            primary: preset.value === null ? "enter" : "set",
             value: preset.value,
           })),
           (item) => {
@@ -257,6 +218,7 @@ export class SettingsUiController {
             this.#host.closePicker()
             this.#host.requests.command({ type: "set_setting", key, value: item.value })
           },
+          { notice: current === undefined ? null : { message: `current ${current}`, tone: "muted" }, back: () => this.openBudgetPicker() },
         )
         break
       }
@@ -297,10 +259,6 @@ export class SettingsUiController {
           }, {
             onQuery: () => this.#host.pickerController.refresh(),
             onSelection: () => this.#host.pickerController.refresh(),
-            onRetry: () => {
-              this.#host.requests.command({ type: "list_settings" })
-              this.#host.pickerController.refresh()
-            },
           })
           this.#host.modalOpened()
         }
@@ -309,37 +267,33 @@ export class SettingsUiController {
       case "settingChoices": {
         const setting = this.#host.state.settings.find((candidate) => candidate.key === this.#settingChoiceKey)
         if (setting === undefined || setting.choices.length === 0) {
-          this.#host.pickerController.showStatus(
-            "Setting choices",
-            "No choices available",
-            "Close this panel and refresh settings.",
-          )
+          this.#host.pickerController.showStatus("SETTINGS", "No choices available", "Close this screen and reopen settings.")
           break
         }
+        const returnToSettings = () => {
+          this.#host.picker.close()
+          this.#settingChoiceKey = null
+          this.#host.pickerController.kind = "settings"
+          this.#host.browser.visible = true
+          this.#host.browser.input.focus()
+        }
         this.#host.pickerController.show(
-          setting.label,
+          `SETTINGS › ${setting.label}`,
           setting.choices.map((value) => ({
             id: value,
             label: value,
-            description: value === setting.value
-              ? `current · ${setting.provenance}`
-              : setting.provenance,
+            ...(value === setting.value ? { marker: "●", hint: "current" } : {}),
+            description: `${setting.key} · ${setting.provenance}`,
+            detail: `${setting.label}\n\ncurrent   ${setting.value}\nsource    ${setting.provenance}\napplies   ${setting.appliesImmediately ? "immediately" : "next session"}`,
             value,
           })),
           (item) => {
             const key = this.#settingChoiceKey
             if (key === null) return
-            this.#host.picker.close()
-            this.#settingChoiceKey = null
-            this.#host.pickerController.kind = "settings"
-            this.#host.browser.visible = true
-            this.#host.browser.input.focus()
-            this.#host.requests.command({
-              type: "set_setting",
-              key,
-              value: item.value,
-            })
+            returnToSettings()
+            this.#host.requests.command({ type: "set_setting", key, value: item.value })
           },
+          { primary: "set", selectedId: setting.value, back: returnToSettings },
         )
         break
       }

@@ -27,6 +27,7 @@ try {
   await waitFor("connection", () => app.state.connection.phase === "connected")
   await waitFor("approval panel", () => app.interactionPanel.visible)
   await setup.renderOnce()
+  const waitingStatus = app.statusLine.plainText.includes("approval · Write file")
   const waitingBanner = app.banner.plainText
   const enter = parseKeypress("\n", { useKittyKeyboard: true })
   if (enter === null) throw new Error("could not parse terminal line-feed")
@@ -34,6 +35,7 @@ try {
   await waitFor("completion", () => app.state.turns["turn-approval"]?.status === "completed")
   await setup.renderOnce()
   await writeFile(reportFile, JSON.stringify({
+    waitingStatus,
     waitingBanner,
     panelVisibleAfterCompletion: app.interactionPanel.visible,
     turnStatus: app.state.turns["turn-approval"]?.status ?? null,

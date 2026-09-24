@@ -31,7 +31,6 @@ use std::sync::Arc;
 pub(super) async fn apply(
     command_meta: CommandMeta,
     content: String,
-    observed_turn: u64,
     result: super::command_job::Execution,
     respond: super::command_job::CommandReply,
     context: DispatchContext<'_>,
@@ -110,13 +109,6 @@ pub(super) async fn apply(
                     {
                         let _ = respond.send(Err(error));
                         return;
-                    }
-                }
-                SessionCommandAction::Interrupt => {
-                    if let Some(running) = &state.running
-                        && running.id == observed_turn
-                    {
-                        running.cancellation.cancel();
                     }
                 }
                 SessionCommandAction::Rewind { to_turn } => {
@@ -326,13 +318,14 @@ pub(super) async fn apply(
                     }
                 }
                 SessionCommandAction::InitializeWorkspace { depth } => {
-                    if state.running.is_some()
-                        || state.initialization_running
-                        || config.tools.session_activity(&state.session_id).is_some()
+                    let activity = config.tools.session_activity(&state.session_id);
+                    if state.running.is_some() || state.initialization_running || activity.is_some()
                     {
-                        let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(
-                            "workspace initialization requires an idle session".to_owned(),
-                        )));
+                        let message = activity.map_or_else(
+                            || "workspace initialization requires an idle session".to_owned(),
+                            |activity| activity.blocked("workspace initialization"),
+                        );
+                        let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(message)));
                         return;
                     }
                     let call_id = format!(
@@ -357,7 +350,7 @@ pub(super) async fn apply(
                     content,
                     model_alias,
                     allowed_tools,
-                    permission_patterns,
+                    pre_approvals,
                     tool_calls,
                 } => {
                     if state.running.is_some() {
@@ -371,7 +364,7 @@ pub(super) async fn apply(
                         CommandTurnOverrides {
                             model_alias,
                             allowed_tools,
-                            permission_patterns,
+                            pre_approvals,
                             tool_calls,
                         },
                     ));

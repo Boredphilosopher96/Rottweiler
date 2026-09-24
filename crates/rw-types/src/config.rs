@@ -16,6 +16,9 @@ use ts_rs::TS;
 pub struct Config {
     /// Engine concurrency limits.
     pub engine: EngineConfig,
+    /// Child-agent orchestration behavior.
+    #[serde(default)]
+    pub agents: AgentsConfig,
     /// Provider-blind model role configuration.
     pub models: ModelConfig,
     /// Automatic/manual context compaction settings.
@@ -45,6 +48,24 @@ pub struct Config {
     /// Safe presentation preferences managed by the TUI or user config.
     #[serde(default)]
     pub ui: UiConfig,
+}
+
+/// Child-agent orchestration behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentsConfig {
+    /// Start a parent turn to receive a background child agent's result when the
+    /// child finishes while the parent is idle. When false, results wait for the
+    /// next turn.
+    pub wake_on_completion: bool,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            wake_on_completion: true,
+        }
+    }
 }
 
 /// User-facing presentation preferences.
@@ -810,6 +831,8 @@ impl Default for UpdateConfig {
 pub struct ConfigFile {
     /// Optional engine settings.
     pub engine: Option<EngineConfigFile>,
+    /// Optional child-agent settings.
+    pub agents: Option<AgentsConfigFile>,
     /// Optional model settings.
     pub models: Option<ModelConfigFile>,
     /// Optional compaction settings.
@@ -834,6 +857,13 @@ pub struct ConfigFile {
     pub updates: Option<UpdateConfigFile>,
     /// Optional presentation preferences.
     pub ui: Option<UiConfig>,
+}
+
+/// Partial child-agent configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsConfigFile {
+    pub wake_on_completion: Option<bool>,
 }
 
 /// Partial compaction configuration.

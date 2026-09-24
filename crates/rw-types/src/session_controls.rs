@@ -32,7 +32,11 @@ pub struct SessionApproval {
     pub name: String,
     pub args: Value,
     pub capabilities: Vec<ToolCapability>,
-    pub rationale: String,
+    /// Short user-facing reason for the prompt; `None` when the action
+    /// itself is the explanation.
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<String>")]
+    pub rationale: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     #[schemars(schema_with = "crate::schema::required_nullable::<UnifiedDiff>")]
     pub diff: Option<UnifiedDiff>,

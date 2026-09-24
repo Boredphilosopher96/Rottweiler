@@ -6,6 +6,7 @@ use crate::session_host::git::{
     run_bounded_git,
 };
 use crate::session_host::workspace::search_workspace;
+use std::collections::BTreeSet;
 
 #[cfg(unix)]
 #[tokio::test]
@@ -191,7 +192,19 @@ async fn workspace_status_reports_modified_and_untracked_but_not_ignored_paths()
 
     let status = read_workspace_status(&workspace, "workspace".to_owned()).expect("status");
     assert!(!status.truncated);
-    assert_eq!(status.changed_paths, ["tracked.rs", "untracked.rs"]);
+    assert_eq!(
+        status.changes,
+        [
+            rw_types::WorkspaceChange {
+                path: "tracked.rs".to_owned(),
+                kind: rw_types::WorkspaceChangeKind::Modified,
+            },
+            rw_types::WorkspaceChange {
+                path: "untracked.rs".to_owned(),
+                kind: rw_types::WorkspaceChangeKind::Untracked,
+            },
+        ]
+    );
     assert!(status.branch.is_some());
 
     fs::create_dir(workspace.join("nested")).expect("nested workspace");
@@ -291,12 +304,26 @@ async fn workspace_diff_covers_tracked_untracked_binary_ignored_and_truncated_fi
 #[cfg(unix)]
 #[tokio::test]
 async fn porcelain_parser_keeps_rename_destination_and_rejects_unsafe_paths() {
-    let (paths, truncated) = parse_git_status(
-        b"R  new.rs\0old.rs\0?? nested/untracked.rs\0?? ../escape\0?? partial.rs",
+    use rw_types::WorkspaceChangeKind as Kind;
+    let (changes, truncated) = parse_git_status(
+        b"R  new.rs\0old.rs\0?? nested/untracked.rs\0A  added.rs\0 D gone.rs\0UU both.rs\0 M edited.rs\0?? ../escape\0?? partial.rs",
         false,
     );
     assert!(truncated);
-    assert_eq!(paths, ["nested/untracked.rs", "new.rs"]);
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.path.as_str(), change.kind))
+            .collect::<Vec<_>>(),
+        [
+            ("added.rs", Kind::Added),
+            ("both.rs", Kind::Conflicted),
+            ("edited.rs", Kind::Modified),
+            ("gone.rs", Kind::Deleted),
+            ("nested/untracked.rs", Kind::Untracked),
+            ("new.rs", Kind::Renamed),
+        ]
+    );
 }
 
 #[cfg(unix)]

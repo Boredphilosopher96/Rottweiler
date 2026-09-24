@@ -6,6 +6,7 @@ import {
 } from "../../src/app"
 import type { ClientCommand } from "../../src/protocol"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select, statusText } from "../picker-screen"
 
 describe("Rottweiler mcp-permissions", () => {
   let renderer: TestRenderer | undefined
@@ -44,6 +45,7 @@ describe("Rottweiler mcp-permissions", () => {
     expect(app.mcpBrowser.itemIds).toEqual([
       "mcp.add.http",
       "mcp.add.stdio",
+      "mcp.panels",
     ])
     app.mcpBrowser.selectById("mcp.add.http")
     app.mcpBrowser.activateSelected()
@@ -87,17 +89,18 @@ describe("Rottweiler mcp-permissions", () => {
     expect(app.mcpBrowser.detail.plainText).toContain("Approval needed")
     expect(app.mcpBrowser.detail.plainText).not.toContain("approval_required")
     app.mcpBrowser.activateSelected()
-    expect(app.picker.title).toContain("MCP actions · docs.remote")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    expect(app.picker.screenTitle).toBe("MCP › docs.remote")
+    expect(app.picker.footer.plainText).toBe("⏎ run · esc back")
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "Enable",
       "Review fingerprint",
       "Remove",
     ])
-    const reviewIndex = app.picker.select.options.findIndex(
+    const reviewIndex = options(app.picker).findIndex(
       (option) => option.value === "mcp.review.docs.remote",
     )
-    app.picker.select.setSelectedIndex(reviewIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, reviewIndex)
+    app.picker.activateSelected()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "review_mcp_server",
       name: "docs.remote",
@@ -127,14 +130,14 @@ describe("Rottweiler mcp-permissions", () => {
         previously_approved: false,
       },
     })
-    const approveIndex = app.picker.select.options.findIndex(
+    const approveIndex = options(app.picker).findIndex(
       (option) => option.value === "mcp.approve.docs.remote",
     )
-    expect(app.picker.select.options[approveIndex]?.description).toContain(fingerprint)
-    expect(app.picker.select.options[approveIndex]?.description).toContain("Remote HTTPS")
-    expect(app.picker.select.options[approveIndex]?.description).not.toContain("streamable_http")
-    app.picker.select.setSelectedIndex(approveIndex)
-    app.picker.select.selectCurrent()
+    expect(options(app.picker)[approveIndex]?.description).toContain(fingerprint)
+    expect(options(app.picker)[approveIndex]?.description).toContain("Remote HTTPS")
+    expect(options(app.picker)[approveIndex]?.description).not.toContain("streamable_http")
+    select(app.picker, approveIndex)
+    app.picker.activateSelected()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "approve_mcp_server",
       name: "docs.remote",
@@ -164,11 +167,11 @@ describe("Rottweiler mcp-permissions", () => {
         prompt_count: 0,
       }],
     })
-    const enableIndex = app.picker.select.options.findIndex(
+    const enableIndex = options(app.picker).findIndex(
       (option) => option.value === "mcp.toggle.docs.remote",
     )
-    app.picker.select.setSelectedIndex(enableIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, enableIndex)
+    app.picker.activateSelected()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "set_mcp_server_enabled",
       name: "docs.remote",
@@ -198,26 +201,27 @@ describe("Rottweiler mcp-permissions", () => {
         prompt_count: 0,
       }],
     })
-    const connectIndex = app.picker.select.options.findIndex(
+    const connectIndex = options(app.picker).findIndex(
       (option) => option.value === "mcp.toggle.docs.remote",
     )
-    expect(app.picker.select.options[connectIndex]?.name).toBe("Enable")
-    app.picker.select.setSelectedIndex(connectIndex)
-    app.picker.select.selectCurrent()
+    expect(options(app.picker)[connectIndex]?.name).toBe("Enable")
+    select(app.picker, connectIndex)
+    app.picker.activateSelected()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "set_mcp_server_enabled",
       name: "docs.remote",
       enabled: true,
     }))
-    const removeIndex = app.picker.select.options.findIndex(
+    const removeIndex = options(app.picker).findIndex(
       (option) => option.value === "mcp.remove.docs.remote",
     )
-    app.picker.select.setSelectedIndex(removeIndex)
-    app.picker.select.selectCurrent()
-    expect((app.picker.title ?? "").trim()).toBe("Remove docs.remote? This deletes its configuration")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual(["Remove", "Cancel"])
-    app.picker.select.setSelectedIndex(0)
-    app.picker.select.selectCurrent()
+    select(app.picker, removeIndex)
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toBe("MCP › Remove docs.remote?")
+    expect(options(app.picker).map((option) => option.name)).toEqual(["Keep this server", "Remove"])
+    expect(app.picker.selectedItem?.label).toBe("Keep this server")
+    select(app.picker, 1)
+    app.picker.activateSelected()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "remove_mcp_server",
       name: "docs.remote",
@@ -253,18 +257,18 @@ describe("Rottweiler mcp-permissions", () => {
     })
     app.mcpBrowser.selectById("mcp.add.stdio")
     app.mcpBrowser.activateSelected()
-    expect((app.picker.title ?? "").trim()).toBe("Server name, e.g. docs")
+    expect((app.picker.screenTitle ?? "").trim()).toBe("Server name, e.g. docs")
     await setup.mockInput.typeText("docs")
     setup.mockInput.pressEnter()
-    expect((app.picker.title ?? "").trim()).toBe("Executable path, e.g. /usr/local/bin/docs-mcp")
+    expect((app.picker.screenTitle ?? "").trim()).toBe("Executable path, e.g. /usr/local/bin/docs-mcp")
     await setup.mockInput.typeText("/usr/local/bin/docs-mcp")
     setup.mockInput.pressEnter()
-    expect((app.picker.title ?? "").trim()).toBe(
+    expect((app.picker.screenTitle ?? "").trim()).toBe(
       "Arguments separated by spaces · quoting is not supported · leave empty for none",
     )
     await setup.mockInput.typeText("--stdio   docs")
     setup.mockInput.pressEnter()
-    expect((app.picker.title ?? "").trim()).toBe(
+    expect((app.picker.screenTitle ?? "").trim()).toBe(
       "Environment variable as KEY=VALUE · leave empty to finish",
     )
     await setup.mockInput.typeText("missing-separator")
@@ -272,13 +276,13 @@ describe("Rottweiler mcp-permissions", () => {
     expect(
       emitted.some((command) => command.type === "add_mcp_stdio_server"),
     ).toBeFalse()
-    expect((app.picker.title ?? "").trim()).toBe(
+    expect((app.picker.screenTitle ?? "").trim()).toBe(
       "Environment variable as KEY=VALUE · leave empty to finish",
     )
     const secret = "secret-canary=value"
     await setup.mockInput.typeText(`DOCS_TOKEN=${secret}`)
     setup.mockInput.pressEnter()
-    expect((app.picker.title ?? "").trim()).toBe(
+    expect((app.picker.screenTitle ?? "").trim()).toBe(
       "Environment variable as KEY=VALUE · leave empty to finish",
     )
     setup.mockInput.pressEnter()
@@ -290,7 +294,7 @@ describe("Rottweiler mcp-permissions", () => {
       args: ["--stdio", "docs"],
       environment: [{ key: "DOCS_TOKEN", value: secret }],
     }))
-    const visiblePickerCopy = app.picker.select.options
+    const visiblePickerCopy = options(app.picker)
       .flatMap((option) => [option.name, option.description])
       .join("\n")
     expect(visiblePickerCopy).not.toContain(secret)
@@ -341,9 +345,9 @@ describe("Rottweiler mcp-permissions", () => {
     if (listPermissions?.type !== "list_permissions") {
       throw new Error("missing permission list command")
     }
-    expect(app.picker.status.plainText).toContain("Loading permission rules")
-    expect(app.picker.select.visible).toBeFalse()
-    expect(app.picker.select.options).toHaveLength(0)
+    expect(statusText(app.picker)).toContain("Loading permission rules")
+    expect((app.picker.mode === "list")).toBeFalse()
+    expect(options(app.picker)).toHaveLength(0)
     setup.mockInput.pressEnter()
     await setup.mockInput.typeText("hidden input")
     await setup.mockInput.pasteBracketedText("hidden paste")
@@ -372,40 +376,43 @@ describe("Rottweiler mcp-permissions", () => {
         truncated: false,
       },
     })
-    expect(app.picker.select.options.map((option) => option.value)).toContain(
+    expect(options(app.picker).map((option) => option.value)).toContain(
       "permissions.effective.effective:one",
     )
-    expect(app.picker.select.options.slice(0, 4).map((option) => option.value)).toEqual([
+    expect(options(app.picker).slice(0, 4).map((option) => option.value)).toEqual([
       "permissions.mode.strict",
       "permissions.mode.auto-safe",
       "permissions.mode.yolo",
       "permissions.mode.default",
     ])
-    expect(app.picker.select.options.slice(0, 4).map((option) => option.name)).toEqual(["Ask", "Auto", "Off", "● Default"])
-    expect(app.picker.status.visible).toBeFalse()
-    expect(app.picker.select.visible).toBeTrue()
-    const permissionCopy = app.picker.select.options
+    expect(options(app.picker).slice(0, 4).map((option) => option.name)).toEqual(["Ask", "Auto", "Off", "Default"])
+    expect(app.picker.selectedItem).toMatchObject({ label: "Default", marker: "●" })
+    expect(app.picker.sectionLabels).toEqual(["Approval policy", "This session", "Configured rules", "Workspace"])
+    expect((app.picker.mode === "status")).toBeFalse()
+    expect((app.picker.mode === "list")).toBeTrue()
+    const permissionCopy = options(app.picker)
       .flatMap((option) => [option.name, option.description])
       .join("\n")
     expect(permissionCopy).not.toContain("Session-scoped")
     expect(permissionCopy).not.toContain("tool(argument")
     expect(permissionCopy).not.toContain("exact-invocation")
 
-    const removeIndex = app.picker.select.options.findIndex(
+    const removeIndex = options(app.picker).findIndex(
       (option) => option.value === "permissions.remove.session:one",
     )
-    app.picker.select.setSelectedIndex(removeIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, removeIndex)
+    expect(app.picker.footer.plainText).toBe("ctrl+n new rule · ctrl+d remove · esc close")
+    setup.mockInput.pressKey("d", { ctrl: true })
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "remove_session_permission_rule",
       rule_id: "session:one",
     }))
 
-    const revokeIndex = app.picker.select.options.findIndex(
+    const revokeIndex = options(app.picker).findIndex(
       (option) => option.value === "permissions.revoke.session:opaque-approval",
     )
-    app.picker.select.setSelectedIndex(revokeIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, revokeIndex)
+    setup.mockInput.pressKey("d", { ctrl: true })
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "revoke_permission_approval",
       approval_id: "session:opaque-approval",

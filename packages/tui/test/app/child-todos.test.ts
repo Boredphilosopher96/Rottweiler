@@ -1,3 +1,4 @@
+import { enterSelectedAgent } from "../fixtures/agents"
 import { retainedChildReader } from "../fixtures/family"
 import { expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
@@ -23,7 +24,7 @@ test("opening an idle child loads exact tasks and leaving retires a pending chil
     app.handleEvent({ type: "subagents_listed", meta: { ...command.meta, emitted_at: "2026-01-01T00:00:00Z" }, session_id: "parent",
       subagents: [{ subagent_id: "worker", child_session_id: "child", task: "Inspect internals", agent: "reviewer", model: "fast", isolation: "shared", activity: "idle" }],
     })
-    app.picker.select.selectCurrent()
+    enterSelectedAgent(app)
   }
   try {
     selectChild()

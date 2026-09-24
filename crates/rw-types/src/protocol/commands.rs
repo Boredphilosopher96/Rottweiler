@@ -261,6 +261,12 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    /// Read the session's declarative extension inventory: every discovered
+    /// skill, command, and agent with its source and load outcome.
+    ListExtensions {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     SetSetting {
         meta: CommandMeta,
         session_id: SessionId,
@@ -422,6 +428,14 @@ pub enum ClientCommand {
         session_id: SessionId,
         subagent_id: SubagentId,
     },
+    /// Moves a running child out of the parent's foreground. The tool call waiting
+    /// on it returns at once and the parent turn continues; the child's result is
+    /// delivered to the parent when it finishes, like any background child.
+    BackgroundSubagent {
+        meta: CommandMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+    },
     ShutdownHost {
         meta: CommandMeta,
     },
@@ -480,6 +494,7 @@ impl ClientCommand {
             | Self::ListModes { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
+            | Self::ListExtensions { meta, .. }
             | Self::SetSetting { meta, .. }
             | Self::ListMcpServers { meta, .. }
             | Self::ListRuntimeServices { meta, .. }
@@ -510,6 +525,7 @@ impl ClientCommand {
             | Self::ContinueSubagent { meta, .. }
             | Self::InterruptSubagent { meta, .. }
             | Self::CloseSubagent { meta, .. }
+            | Self::BackgroundSubagent { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -569,6 +585,7 @@ impl ClientCommand {
             | Self::ListCommands { session_id, .. }
             | Self::ListModes { session_id, .. }
             | Self::ListSettings { session_id, .. }
+            | Self::ListExtensions { session_id, .. }
             | Self::SetSetting { session_id, .. }
             | Self::ListMcpServers { session_id, .. }
             | Self::ListRuntimeServices { session_id, .. }
@@ -594,7 +611,8 @@ impl ClientCommand {
             | Self::ListSubagents { session_id, .. }
             | Self::ContinueSubagent { session_id, .. }
             | Self::InterruptSubagent { session_id, .. }
-            | Self::CloseSubagent { session_id, .. } => Some(session_id),
+            | Self::CloseSubagent { session_id, .. }
+            | Self::BackgroundSubagent { session_id, .. } => Some(session_id),
         }
     }
 
@@ -649,6 +667,7 @@ impl ClientCommand {
             | Self::ListModes { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
+            | Self::ListExtensions { meta, .. }
             | Self::SetSetting { meta, .. }
             | Self::ListMcpServers { meta, .. }
             | Self::ListRuntimeServices { meta, .. }
@@ -679,6 +698,7 @@ impl ClientCommand {
             | Self::ContinueSubagent { meta, .. }
             | Self::InterruptSubagent { meta, .. }
             | Self::CloseSubagent { meta, .. }
+            | Self::BackgroundSubagent { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -736,6 +756,7 @@ read_commands!(
     ListModes,
     ListModels,
     ListSettings,
+    ListExtensions,
     ListMcpServers,
     ListRuntimeServices,
     SearchWorkspaceFiles,
@@ -782,6 +803,7 @@ macro_rules! urgent_commands {
 urgent_commands!(
     Interrupt,
     InterruptSubagent,
+    BackgroundSubagent,
     CancelProviderAuth,
     ApproveTool,
     ApprovePlan,

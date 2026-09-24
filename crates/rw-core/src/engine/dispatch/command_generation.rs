@@ -38,11 +38,13 @@ impl PreparedChange {
     }
 }
 
-fn snapshot(config: &SessionActorConfig) -> SessionExtensionSnapshot {
+/// `model_alias` is the actor's selected model; the base configuration only
+/// retains the alias the session started with.
+fn snapshot(config: &SessionActorConfig, model_alias: &str) -> SessionExtensionSnapshot {
     SessionExtensionSnapshot {
         publication: RuntimePublication::Active,
         model: config.model.clone(),
-        model_alias: config.model_alias.clone(),
+        model_alias: model_alias.to_owned(),
         ui: config.ui.clone(),
         revision: config.workspace_generation,
         workspace_roots: Arc::from(
@@ -59,8 +61,9 @@ fn snapshot(config: &SessionActorConfig) -> SessionExtensionSnapshot {
 pub(super) async fn prepare_development(
     source: Option<&Path>,
     config: &SessionActorConfig,
+    model_alias: &str,
 ) -> Result<PreparedCommand, AgentLoopError> {
-    let current = snapshot(config);
+    let current = snapshot(config, model_alias);
     let extensions = if let Some(source) = source {
         config.extension_development.attach(source, current).await?
     } else {
@@ -84,6 +87,7 @@ pub(super) async fn prepare_output(
     mut output: SessionCommandOutput,
     config: &SessionActorConfig,
     next_turn: u64,
+    model_alias: &str,
 ) -> Result<PreparedCommand, AgentLoopError> {
     let SessionCommandAction::AddWorkspaceRoot { path } = &output.action else {
         return Ok(PreparedCommand {
@@ -91,7 +95,7 @@ pub(super) async fn prepare_output(
             change: PreparedChange::None,
         });
     };
-    let current = snapshot(config);
+    let current = snapshot(config, model_alias);
     let generation = config
         .workspace_roots
         .append_root(crate::WorkspaceRootRequest {
@@ -101,7 +105,7 @@ pub(super) async fn prepare_output(
             effective_from_turn: next_turn,
             permissions: config.permissions.clone(),
             model: config.model.clone(),
-            model_alias: &config.model_alias,
+            model_alias,
             mcp_policy: config.tools.mcp_tool_policy().clone(),
         })
         .await?;

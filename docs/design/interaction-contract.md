@@ -13,12 +13,20 @@ Discuss and Plan remain read-only even with approvals Off. Auto allows audited
 safe actions and workspace edits and asks about other actions; explicit denials
 remain denials. Headless launches cannot silently acquire interactive authority.
 
-Ctrl+P and slash discovery must expose the same actions, with a single entry for
-each action. Sections are Conversation, Models & agents, Context & usage,
-Workspace, Safety, and Settings & help. Provider connection is setup within model
-selection, not a second kind of model switch. Extension actions retain their
-source label. Unavailable actions remain visible with the reason and a recovery
-step. State and availability originate in the engine; clients own presentation.
+Ctrl+P and slash discovery project one engine-owned catalog, with a single entry
+for each action; aliases are search terms, not rows. Sections are Conversation,
+Models & agents, Context & usage, Workspace, Safety, and Settings & help, followed
+by Extensions. Provider connection is setup within model selection (`/model`), not
+a second kind of model switch. Extension actions retain their source label.
+Unavailable actions remain visible with the reason, sink within their section, and
+are never the initial selection. Conditional entries (queued messages, agents,
+errors) appear only when their state exists. `/` completes inline above the
+composer and keeps the typed text and arguments; Ctrl+P toggles the full palette.
+State and availability originate in the engine; clients own presentation. The
+catalog is `COMMAND_CATALOG` in `crates/rw-types/src/client_navigation.rs`;
+`/help` lists it with the effective keybindings, and `/skills` lists discovered
+skills, commands, and agents with their load status. Stopping work is a key
+(Ctrl+C, or Esc twice), not a catalog command.
 
 ## First session
 
@@ -33,8 +41,11 @@ provider preserves an existing selection.
 The first concrete model selection seeds the user default only when the user has
 not set one. Subsequent workspace choices stay local. Explicit launch selection,
 resumed session state, workspace preference, and configured default retain their
-existing precedence. Cached model lists are labeled. Unknown context limits are
-shown honestly; no estimate is presented as an authoritative model limit.
+existing precedence. Cached model lists are labeled. A model's context window resolves in one
+order for the picker, meters, and compaction, before and after its runtime is
+built: the provider-reported window (live or cached), then bundled model data.
+Unknown context limits are shown honestly; no estimate is presented as an
+authoritative model limit.
 
 A prompt without a usable model is rejected before a turn or message is appended,
 with a model-selection remedy. Recovery commands remain usable.
@@ -66,13 +77,31 @@ shared title, search, list, optional detail, and footer anatomy. The transcript
 must not bleed around modal navigation. Narrow screens collapse details without
 hiding required decisions. Footer hints reflect focus and current activity.
 
-Models group by provider and show availability and cached/live state. Agent views
-retain finished children, their results, and usage, and allow returning to the
-parent without stopping a child. Sessions resume directly; rename is a separate
-action. Context inspection selects items directly for pin/evict actions and shows
-warnings at 70% and 85%, with proactive compaction at 80% where compatible with
-the model's reserved output budget. Compaction completion reports reclaimed tokens
-and keeps its summary inspectable.
+Models group by provider and show availability and cached/live state. Sessions
+resume directly; rename is a separate action. Context inspection selects items
+directly for pin/evict actions and shows warnings at 70% and 85%, with proactive
+compaction at 80% where compatible with the model's reserved output budget.
+Compaction completion reports reclaimed tokens and keeps its summary inspectable.
+
+## Child agents
+
+Children run in the background by default; the parent keeps working and each
+final report reaches it exactly once. A child that finishes while the parent is
+idle wakes the parent (`agents.wake_on_completion`, default on). A child that
+cannot start because every concurrency slot is busy is shown as queued.
+
+While the session has children, an Agents strip above the composer lists them
+with their state. Ctrl+G or `/agents` opens the Agents screen, which retains
+finished children with their results and usage. Its per-child actions are View,
+Message, Stop, Background, and Close, offered only when they apply: Message for a
+child that is not running, Stop for a running one, Background for the child the
+parent is waiting on, Close for a retained child. Ctrl+B backgrounds that
+foreground child without opening the screen.
+
+Viewing a child overlays its transcript on the parent without tearing the parent
+view down or stopping either agent; Esc returns to the parent. The child view has
+no composer unless the child waits on a typed answer, so follow-up messages are
+sent only through the Agents screen's Message action.
 
 ## Engine and lifetime requirements
 

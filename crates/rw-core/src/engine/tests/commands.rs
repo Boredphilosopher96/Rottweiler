@@ -7,6 +7,8 @@ use crate::PermissionRequest;
 use crate::engine::MessageDisposition;
 use crate::engine::builtin_hook_dispatcher;
 use crate::engine::commands::FolderTrustOperation;
+use crate::engine::commands::SessionCommandAction;
+use crate::engine::commands::SessionCommandContext;
 use crate::engine::commands::builtin_command_registry;
 use crate::engine::mutation_checkpoints::MutationCheckpointOutcome;
 use crate::engine::pending_event::PendingEvent;
@@ -37,6 +39,7 @@ use rw_types::ClientCommand;
 use rw_types::ClientRole;
 use rw_types::CommandOutcome;
 use rw_types::EngineEvent;
+use rw_types::ModeId;
 use rw_types::ToolCapability;
 use rw_types::config::PermissionDecision;
 use serde_json::Value;
@@ -125,7 +128,7 @@ async fn initialization_acks_while_checkpoint_is_held_and_captures_every_generat
     let mut commands = builtin_command_registry().expect("built-ins");
     commands
         .register(
-            CommandDescriptor::new("deep-init", "fixture initialization"),
+            CommandDescriptor::new("init", "fixture initialization"),
             InitActionCommand(InitDepth::Deep),
         )
         .expect("init command");
@@ -146,7 +149,7 @@ async fn initialization_acks_while_checkpoint_is_held_and_captures_every_generat
     let mut events = handle.subscribe().expect("subscription");
     let (acknowledged, ()) = timeout(Duration::from_secs(5), async {
         tokio::join!(
-            handle.send_message("/deep-init"),
+            handle.send_message("/init"),
             checkpoints.begin_entered.notified()
         )
     })
@@ -161,7 +164,7 @@ async fn initialization_acks_while_checkpoint_is_held_and_captures_every_generat
     release.notify_one();
     let completed = next_matching(
         &mut events,
-        |kind| matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "deep-init"),
+        |kind| matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "init"),
     )
     .await;
     assert!(matches!(
@@ -329,12 +332,12 @@ async fn trust_slash_command_dispatches_status_grant_and_revoke_to_host_boundary
         .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     for (command, expected) in [
-        ("/trust", FolderTrustOperation::Status),
+        ("/permissions trust", FolderTrustOperation::Status),
         (
-            "/trust grant",
+            "/permissions trust grant",
             FolderTrustOperation::Grant { confirmation: None },
         ),
-        ("/trust revoke", FolderTrustOperation::Revoke),
+        ("/permissions trust revoke", FolderTrustOperation::Revoke),
     ] {
         assert_eq!(
             handle.send_message(command).await.expect("trust command"),
@@ -342,7 +345,7 @@ async fn trust_slash_command_dispatches_status_grant_and_revoke_to_host_boundary
         );
         let event = next_matching(
             &mut events,
-            |kind| matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "trust"),
+            |kind| matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions"),
         )
         .await;
         assert!(matches!(
@@ -392,7 +395,7 @@ async fn add_dir_commit_failure_aborts_generation_and_preserves_live_runtime() {
         .expect("actor");
     let mut events = handle.subscribe().expect("subscription");
     let failure = handle
-        .send_message(format!("/add-dir {}", added.display()))
+        .send_message(format!("/dirs {}", added.display()))
         .await
         .expect_err("generation commit failure");
     assert!(failure.to_string().contains("could not commit"));
@@ -439,7 +442,7 @@ async fn add_dir_commit_failure_aborts_generation_and_preserves_live_runtime() {
         .await
         .expect("failing actor");
     let failure = failing
-        .send_message(format!("/add-dir {}", added.display()))
+        .send_message(format!("/dirs {}", added.display()))
         .await
         .expect_err("durable event failure");
     let failure_bytes = format!("{failure:?}{failure}");
@@ -488,7 +491,7 @@ async fn add_dir_commit_refreshes_the_nonblocking_command_catalog() {
     );
 
     handle
-        .send_message(format!("/add-dir {}", added.display()))
+        .send_message(format!("/dirs {}", added.display()))
         .await
         .expect("add workspace root");
 
@@ -565,7 +568,7 @@ async fn live_plugin_reload_swaps_only_successful_generations_and_detach_restore
             .dispatch_durably(ClientCommand::SendMessage {
                 meta: protocol_meta("driver", "add-root-with-development-plugin"),
                 session_id: session_id.clone(),
-                content: format!("/add-dir {}", added.display()),
+                content: format!("/dirs {}", added.display()),
                 attachments: Vec::new(),
             })
             .await
@@ -613,6 +616,7 @@ async fn permissions_slash_command_edits_rules_and_revokes_opaque_approvals() {
             .with_project_approval_file(root.path().join("approvals.json")),
     );
     let approval_request = |id: &str, secret: &str| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: id.to_owned(),
         tool_name: "bash".to_owned(),
@@ -793,13 +797,73 @@ async fn permissions_slash_command_edits_rules_and_revokes_opaque_approvals() {
 }
 
 #[test]
-fn interactive_navigation_descriptors_share_the_builtin_registry() {
+fn core_catalog_entries_are_the_builtin_registry() {
+    use rw_types::client_navigation::{COMMAND_CATALOG, CommandRegistrar};
     let registry = builtin_command_registry().expect("built-ins");
-    for &(name, description, _) in rw_types::client_navigation::INTERACTIVE_COMMANDS {
+    let core = COMMAND_CATALOG
+        .iter()
+        .filter(|entry| entry.registrar == CommandRegistrar::Core)
+        .collect::<Vec<_>>();
+    assert_eq!(registry.descriptors().len(), core.len());
+    for entry in core {
         let descriptor = registry
-            .descriptors()
-            .find(|descriptor| descriptor.name() == name)
-            .expect("registered navigation");
-        assert_eq!(descriptor.description(), description);
+            .resolve(entry.name)
+            .expect("registered catalog entry");
+        assert_eq!(descriptor.description(), entry.description);
+        assert_eq!(
+            descriptor.argument_hint().unwrap_or_default(),
+            entry.argument_hint
+        );
+        for alias in entry.aliases {
+            assert!(
+                registry.resolve(alias).is_none(),
+                "{alias} is client-resolved"
+            );
+        }
     }
+    for removed in [
+        "goto",
+        "status",
+        "interrupt",
+        "plan",
+        "fork",
+        "trust",
+        "add-dir",
+        "cost",
+        "models",
+        "providers",
+    ] {
+        assert!(registry.resolve(removed).is_none(), "{removed}");
+    }
+}
+
+#[tokio::test]
+async fn screen_entries_refuse_headless_peers_and_engine_arguments_still_run() {
+    let registry = builtin_command_registry().expect("built-ins");
+    let mut context = SessionCommandContext::default();
+    for screen in ["/new", "/resume", "/model", "/agents", "/queue", "/dirs"] {
+        let error = registry
+            .dispatch_line(&mut context, screen)
+            .await
+            .expect_err("interactive client required");
+        assert!(
+            error.to_string().contains("interactive_client_required"),
+            "{screen}"
+        );
+    }
+    let usage = registry
+        .dispatch_line(&mut context, "/usage")
+        .await
+        .expect("usage");
+    assert_eq!(usage.action, SessionCommandAction::Cost);
+    let mode = registry
+        .dispatch_line(&mut context, "/mode plan")
+        .await
+        .expect("mode");
+    assert_eq!(
+        mode.action,
+        SessionCommandAction::SwitchMode {
+            mode: ModeId("plan".to_owned())
+        }
+    );
 }

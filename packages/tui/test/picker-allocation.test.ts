@@ -1,24 +1,28 @@
 import { createTestRenderer } from "@opentui/core/testing"
 import { expect, test } from "bun:test"
-import { FuzzyPickerRenderable, type PickerItem } from "../src/components"
+import { PickerScreenRenderable, type PickerItem } from "../src/components"
 import { ClientAllocationOwner } from "../src/client-allocation"
 import { PickerController } from "../src/picker-controller"
 import { kennelTheme } from "../src/theme"
+import { options } from "./picker-screen"
 
 async function fixture() {
   const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
-  const picker = new FuzzyPickerRenderable<unknown>(setup.renderer, kennelTheme)
+  const picker = new PickerScreenRenderable<unknown>(setup.renderer, kennelTheme)
   setup.renderer.root.add(picker)
   const allocations = new ClientAllocationOwner()
   const controller = new PickerController({ allocations, picker: () => picker,
-    terminalHeight: () => 24, statusHeight: () => 1, composerDockHeight: () => 4,
+    terminalWidth: () => 80, terminalHeight: () => 24, vim: () => false, statusHeight: () => 1, composerDockHeight: () => 4,
     focusComposer() {}, renderPicker() {}, withRefreshGuard: (_kind, action) => action(),
     onModalOpened() {}, onClosed() {},
   })
   controller.begin("agents")
   const callbacks: Array<(item: PickerItem<unknown>) => void> = []
-  const original = picker.refresh.bind(picker)
-  picker.refresh = (title, items, callback, compact) => { callbacks.push(callback); original(title, items, callback, compact) }
+  const original = picker.present.bind(picker)
+  picker.present = (screen, title, items, callback, options, anchored, query) => {
+    callbacks.push(callback)
+    original(screen, title, items, callback, options, anchored, query)
+  }
   return { setup, picker, allocations, controller, callbacks }
 }
 const item = (id: string, size = 4096) => ({ id, label: id, description: "", value: { source: "s".repeat(size) } })
@@ -53,7 +57,7 @@ test("picker refusal preserves the mounted revision and successful replacement r
     const before = f.allocations.usage.bytes
     const pressure = f.allocations.reserve("live", f.allocations.limits.live - before)
     expect(() => f.controller.show("Refused", [item("second")], () => {})).toThrow("admission")
-    expect(f.picker.select.options[0]?.name).toBe("first")
+    expect(options(f.picker)[0]?.name).toBe("first")
     expect(f.allocations.usage.bytes).toBe(before + pressure.bytes)
     f.callbacks[0]!(first)
     expect(selected).toBe("first")
@@ -76,7 +80,7 @@ test("a failed native picker replacement pins both revisions and rejects further
     f.controller.show("Children", [first], () => { selected = true })
     const before = f.allocations.usage.bytes
     const refresh = f.picker.refresh.bind(f.picker)
-    f.picker.refresh = (...args) => { refresh(...args); throw new Error("native replacement failed") }
+    f.picker.refresh = (presentation) => { refresh(presentation); throw new Error("native replacement failed") }
     expect(() => f.controller.show("Children", [item("second")], () => {})).toThrow("native replacement failed")
     expect(f.allocations.usage.bytes).toBeGreaterThan(before)
     f.callbacks[0]!(first)
@@ -85,7 +89,7 @@ test("a failed native picker replacement pins both revisions and rejects further
     expect(() => f.controller.show("Third", [item("third")], () => {})).toThrow("teardown")
     expect(f.allocations.usage.bytes).toBe(retained)
     f.controller.close()
-    expect(f.picker.select.options).toHaveLength(0)
+    expect(options(f.picker)).toHaveLength(0)
     expect(f.allocations.usage.bytes).toBe(0)
   } finally { f.controller.dispose(); f.setup.renderer.destroy() }
 })

@@ -148,7 +148,7 @@ export class ClientRestoreController {
       case "mcp": return this.host.ui.mcpBrowser
       case "settings": return this.host.ui.settingsBrowser
       case "themes": return this.host.ui.themeBrowser
-      default: return null
+      default: return this.host.pickerController.anchored ? null : this.host.ui.picker
     }
   }
 
@@ -168,7 +168,7 @@ export class ClientRestoreController {
     const history = this.host.ui.transcript.captureHistoryViewport()
     if (history === null) return null
     const surface = this.clientPickerSurface()
-    const selected = surface?.selectedId ?? this.host.ui.picker.select.getSelectedOption()?.value
+    const selected = (surface ?? this.host.ui.picker).selectedId
     return parseTuiRecycleState({
       schemaVersion: 5, review,
       child: this.host.children.captureRecycleTarget(),
@@ -191,7 +191,7 @@ export class ClientRestoreController {
       picker: kind === null ? null : {
         kind,
         anchored: this.host.pickerController.anchored,
-        query: surface?.input.value ?? (this.host.pickerController.anchored ? this.host.pickerController.query : this.host.ui.picker.input.value),
+        query: surface?.input.value ?? this.host.pickerController.query,
         selectedId: typeof selected === "string" ? selected : null,
         scrollOffset: surface?.scrollOffset ?? 0,
         modelProviderFilter: this.host.providers.modelProviderFilter,
@@ -245,7 +245,6 @@ export class ClientRestoreController {
       this.host.pickerController.begin(picker.kind === "commands" ? "palette" : picker.kind, picker.kind === "commands" ? false : picker.anchored, picker.query)
       const surface = this.clientPickerSurface()
       if (surface !== null) surface.input.value = picker.query
-      else this.host.ui.picker.input.value = picker.query
       this.host.themes.restorePreviewBase(picker.themeBeforePreview === null
         ? null : this.host.resolveTheme(themeByName(picker.themeBeforePreview) ?? kennelTheme))
       this.host.pickerController.refresh()
@@ -323,14 +322,6 @@ export class ClientRestoreController {
         if (state.picker.selectedId !== null) surface.selectById(state.picker.selectedId)
         pickerReady = state.picker.selectedId === null || surface.selectedId === state.picker.selectedId
         surface.restoreViewport(state.picker.scrollOffset)
-      } else {
-        const options = this.host.ui.picker.select.options
-        const revision = `${this.host.ui.picker.clientStateRevision}:${this.host.ui.picker.width}:${this.host.ui.picker.height}`
-        if (this.#pickerAttempt === revision) return
-        this.#pickerAttempt = revision
-        const index = options.findIndex((item) => item.value === state.picker?.selectedId)
-        if (index >= 0) this.host.ui.picker.select.setSelectedIndex(index)
-        pickerReady = state.picker.selectedId === null || index >= 0
       }
     }
     if (pickerReady) this.#retireSurface("picker")

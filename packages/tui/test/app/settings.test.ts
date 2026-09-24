@@ -9,6 +9,7 @@ import type { ClientCommand, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptySessionReader } from "../fixtures/history"
 import { visionCapableState } from "./fixtures"
+import { options, select, statusText } from "../picker-screen"
 
 describe("Rottweiler settings", () => {
   let renderer: TestRenderer | undefined
@@ -96,41 +97,35 @@ describe("Rottweiler settings", () => {
     renderer.root.add(app)
 
     app.openCommandPicker()
-    const paletteOptions = app.commandPalette.itemIds
-    const permissionsIndex = paletteOptions.indexOf("permissions.manage")
-    const budgetIndex = paletteOptions.indexOf("budget.manage")
-    expect(budgetIndex).toBeGreaterThanOrEqual(0)
-    expect(permissionsIndex).toBeGreaterThan(budgetIndex)
-    app.commandPalette.selectById("budget.manage")
-    expect(app.commandPalette.detail.plainText).toContain("Budget limits")
-    expect(app.commandPalette.detail.plainText).toContain("Set spend and subscription-token limits")
+    await setup.mockInput.typeText("budget")
+    expect(app.commandPalette.selectedId).toBe("cmd.usage")
+    expect(app.commandPalette.detail.plainText).toContain("Tokens, cost, and budget limits")
     app.commandPalette.activateSelected()
+    expect(app.picker.screenTitle).toContain("USAGE")
+    app.picker.selectById("usage.budget")
+    app.picker.activateSelected()
 
-    expect(app.picker.title).toContain("Budget limits")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
-      "Session limit · $12.50",
-      "Daily limit · Unlimited",
-      "Session tokens · 250,000 tokens",
-      "Daily tokens · 1,000,000 tokens",
-      "Token rate alarm · 100,000 tokens/min",
-      "Warn at · 80%",
+    expect(app.picker.screenTitle).toBe("BUDGET LIMITS")
+    expect(app.picker.sectionLabels).toEqual(["Spend", "Subscription tokens", "Alerts"])
+    expect(app.picker.items.map((item) => [item.label, item.hint])).toEqual([
+      ["Session limit", "$12.50"],
+      ["Daily limit", "Unlimited"],
+      ["Session tokens", "250,000 tokens"],
+      ["Daily tokens", "1,000,000 tokens"],
+      ["Token rate alarm", "100,000 tokens/min"],
+      ["Warn at", "80%"],
     ])
-    expect(app.picker.select.options.map((option) => option.description)).toEqual([
-      "Maximum spend for this session · user · next session",
-      "Maximum spend per UTC day · built-in · next session",
-      "Maximum subscription tokens for this session · user · next session",
-      "Maximum subscription tokens per UTC day · user · next session",
-      "Alert when one minute of subscription usage reaches this value · user · next session",
-      "Warn when a configured cap reaches this percentage · user · next session",
-    ])
+    expect(app.picker.items[1]?.detail).toContain("source    built-in")
+    expect(app.picker.items[0]?.detail).toContain("applies   next session")
 
-    const sessionIndex = app.picker.select.options.findIndex(
+    const sessionIndex = options(app.picker).findIndex(
       (option) => option.value === "budget.setting.budget.session_cost_cap_micros_usd",
     )
-    app.picker.select.setSelectedIndex(sessionIndex)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Session limit")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    select(app.picker, sessionIndex)
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toBe("BUDGET LIMITS › Session limit")
+    expect(app.picker.footer.plainText).toContain("esc back")
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "$5",
       "$10",
       "$20",
@@ -139,11 +134,11 @@ describe("Rottweiler settings", () => {
       "Unlimited",
       "Custom amount…",
     ])
-    const twentyIndex = app.picker.select.options.findIndex(
+    const twentyIndex = options(app.picker).findIndex(
       (option) => option.value === "budget.preset.budget.session_cost_cap_micros_usd.20",
     )
-    app.picker.select.setSelectedIndex(twentyIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, twentyIndex)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "set_setting",
@@ -152,23 +147,23 @@ describe("Rottweiler settings", () => {
     }))
 
     app.openBudgetPicker()
-    const warningIndex = app.picker.select.options.findIndex(
+    const warningIndex = options(app.picker).findIndex(
       (option) => option.value === "budget.setting.budget.warn_at_percent",
     )
-    app.picker.select.setSelectedIndex(warningIndex)
-    app.picker.select.selectCurrent()
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    select(app.picker, warningIndex)
+    app.picker.activateSelected()
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "50%",
       "75%",
       "80%",
       "90%",
       "Custom…",
     ])
-    const eightyIndex = app.picker.select.options.findIndex(
+    const eightyIndex = options(app.picker).findIndex(
       (option) => option.value === "budget.preset.budget.warn_at_percent.80",
     )
-    app.picker.select.setSelectedIndex(eightyIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, eightyIndex)
+    app.picker.activateSelected()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "set_setting",
       key: "budget.warn_at_percent",
@@ -176,34 +171,35 @@ describe("Rottweiler settings", () => {
     }))
 
     app.openBudgetPicker()
-    const customWarningIndex = app.picker.select.options.findIndex(
+    const customWarningIndex = options(app.picker).findIndex(
       (option) => option.value === "budget.setting.budget.warn_at_percent",
     )
-    app.picker.select.setSelectedIndex(customWarningIndex)
-    app.picker.select.selectCurrent()
-    const customWarningPreset = app.picker.select.options.findIndex(
+    select(app.picker, customWarningIndex)
+    app.picker.activateSelected()
+    const customWarningPreset = options(app.picker).findIndex(
       (option) => option.value === "budget.preset.budget.warn_at_percent.custom",
     )
-    app.picker.select.setSelectedIndex(customWarningPreset)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Warning threshold as a percent, e.g. 70")
+    select(app.picker, customWarningPreset)
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toBe("BUDGET LIMITS › Warn at")
+    expect(statusText(app.picker)).toContain("Enter a percent, e.g. 70")
     await setup.mockInput.typeText("0")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     expect(app.banner.plainText).toContain("warning threshold must be an integer from 1 through 100")
 
     app.openBudgetPicker()
-    const dailyIndex = app.picker.select.options.findIndex(
+    const dailyIndex = options(app.picker).findIndex(
       (option) => option.value === "budget.setting.budget.daily_cost_cap_micros_usd",
     )
-    app.picker.select.setSelectedIndex(dailyIndex)
-    app.picker.select.selectCurrent()
-    const customIndex = app.picker.select.options.findIndex(
+    select(app.picker, dailyIndex)
+    app.picker.activateSelected()
+    const customIndex = options(app.picker).findIndex(
       (option) => option.value === "budget.preset.budget.daily_cost_cap_micros_usd.custom",
     )
-    app.picker.select.setSelectedIndex(customIndex)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Daily limit in USD, e.g. 12.50")
+    select(app.picker, customIndex)
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toBe("BUDGET LIMITS › Daily limit")
     expect(app.picker.input.placeholder).toBe("12.50")
     await setup.mockInput.typeText("12.50")
     setup.mockInput.pressEnter()
@@ -244,9 +240,9 @@ describe("Rottweiler settings", () => {
     const olderRequest = emitted.findLast((command) => command.type === "list_settings")
     app.settingsBrowser.selectById("compaction.auto")
     app.settingsBrowser.activateSelected()
-    const disabled = app.picker.select.options.findIndex((option) => option.value === "false")
-    app.picker.select.setSelectedIndex(disabled)
-    app.picker.select.selectCurrent()
+    const disabled = options(app.picker).findIndex((option) => option.value === "false")
+    select(app.picker, disabled)
+    app.picker.activateSelected()
     const newerRequest = emitted.findLast((command) => command.type === "set_setting")
     expect(olderRequest?.type).toBe("list_settings")
     expect(newerRequest?.type).toBe("set_setting")
@@ -311,9 +307,9 @@ describe("Rottweiler settings", () => {
     app.settingsBrowser.selectById("compaction.auto")
     expect(app.settingsBrowser.activateSelected()).toBeTrue()
     expect(app.picker.visible).toBeTrue()
-    const disabled = app.picker.select.options.findIndex((option) => option.value === "false")
-    app.picker.select.setSelectedIndex(disabled)
-    app.picker.select.selectCurrent()
+    const disabled = options(app.picker).findIndex((option) => option.value === "false")
+    select(app.picker, disabled)
+    app.picker.activateSelected()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "set_setting",
       key: "compaction.auto",
@@ -387,15 +383,16 @@ describe("Rottweiler settings", () => {
     expect(app.settingsBrowser.itemIds).toContain("compaction.auto")
     expect(app.settingsBrowser.footer.plainText).toContain("settings unavailable")
     expect(listAttempts).toBe(1)
-    setup.mockInput.pressKey("r", { ctrl: true })
+    app.closePicker()
+    app.openSettingsPicker()
     await Bun.sleep(0)
     expect(listAttempts).toBe(2)
 
     app.settingsBrowser.selectById("compaction.auto")
     app.settingsBrowser.activateSelected()
-    const disabled = app.picker.select.options.findIndex((option) => option.value === "false")
-    app.picker.select.setSelectedIndex(disabled)
-    app.picker.select.selectCurrent()
+    const disabled = options(app.picker).findIndex((option) => option.value === "false")
+    select(app.picker, disabled)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(app.settingsBrowser.visible).toBeTrue()
     expect(app.settingsBrowser.detail.plainText).toContain("current    true")
@@ -492,15 +489,15 @@ describe("Rottweiler settings", () => {
       testRenderer.root.add(app)
       app.openCommandPicker()
       await Bun.sleep(0)
-      app.commandPalette.selectById("model.list")
+      app.commandPalette.selectById("cmd.model")
       expect(app.commandPalette.detail.plainText).toContain("Ctrl+K")
       expect(app.commandPalette.detail.plainText).not.toContain("Ctrl+M")
-      expect(app.statusLine.plainText).toContain("model not selected · Ctrl+K")
+      expect(app.statusLine.plainText).toContain("loading models · Ctrl+K")
     })
   })
 
   test("derives composer discovery hints and omits unbound actions", () => {
-    const setup = createTestRenderer({ width: 80, height: 18, useThread: false })
+    const setup = createTestRenderer({ width: 110, height: 18, useThread: false })
     return setup.then(({ renderer: testRenderer }) => {
       renderer = testRenderer
       const app = createRottweilerApp(testRenderer, {
@@ -547,31 +544,33 @@ describe("Rottweiler settings", () => {
     renderer.root.add(app)
     app.openPermissionModePicker()
 
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+    expect(options(app.picker).map((option) => option.value)).toEqual([
       "permissions.mode.strict",
       "permissions.mode.auto-safe",
       "permissions.mode.yolo",
       "permissions.mode.default",
     ])
-    expect(app.picker.select.options.find(
+    expect(options(app.picker).find(
       (option) => option.value === "permissions.mode.auto-safe",
-    )?.name).toBe("● Auto")
+    )?.name).toBe("Auto")
+    expect(app.picker.selectedItem).toMatchObject({ label: "Auto", marker: "●", hint: "current" })
 
-    const yoloIndex = app.picker.select.options.findIndex(
+    const yoloIndex = options(app.picker).findIndex(
       (option) => option.value === "permissions.mode.yolo",
     )
-    app.picker.select.setSelectedIndex(yoloIndex)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Run every tool without asking?")
+    select(app.picker, yoloIndex)
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toContain("Turn approvals off?")
+    expect(app.picker.selectedItem?.label).toBe("Keep the current policy")
     expect(emitted.some(
       (command) => command.type === "send_message" && command.content === "/permissions mode yolo",
     )).toBeFalse()
 
-    const confirmIndex = app.picker.select.options.findIndex(
+    const confirmIndex = options(app.picker).findIndex(
       (option) => option.value === "permissions.yolo.confirm",
     )
-    app.picker.select.setSelectedIndex(confirmIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, confirmIndex)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "send_message",

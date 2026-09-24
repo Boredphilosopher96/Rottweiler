@@ -14,6 +14,7 @@ import {
 import { createInitialState } from "../../src/state"
 import { kennelTheme } from "../../src/theme"
 import { emptySessionReader } from "../fixtures/history"
+import { options } from "../picker-screen"
 
 describe("sidebar components", () => {
   let renderer: TestRenderer | undefined
@@ -47,7 +48,7 @@ describe("sidebar components", () => {
       workspaceStatus: {
         workspaceName: "Rottweiler",
         branch: "main",
-        changedPaths: ["src/from-status.rs", "src/shared.rs"],
+        changes: [{ path: "src/from-status.rs", kind: "modified" as const }, { path: "src/shared.rs", kind: "modified" as const }],
         truncated: false,
       },
       review: {
@@ -131,7 +132,10 @@ describe("sidebar components", () => {
       workspaceStatus: {
         workspaceName: "Rottweiler",
         branch: "main",
-        changedPaths: ["src/changed.rs"],
+        changes: [
+          { path: "src/changed.rs", kind: "modified" as const },
+          { path: "__pycache__/calc.cpython-314.pyc", kind: "untracked" as const },
+        ],
         truncated: false,
       },
     })
@@ -140,6 +144,9 @@ describe("sidebar components", () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("CHANGED")
     expect(frame).toContain("src/changed.rs")
+    // Git's letters: untracked files are `?`, never presented as modified.
+    expect(panel.changedFiles.options.map(option => option.name))
+      .toEqual(["M src/changed.rs", "? __pycache__/calc.cpython-314.pyc"])
     expect(frame.indexOf("CHANGED")).toBeGreaterThan(frame.indexOf("service-4"))
   })
 
@@ -155,7 +162,7 @@ describe("sidebar components", () => {
         workspaceStatus: {
           workspaceName: "Rottweiler",
           branch: "main",
-          changedPaths: ["src/first.rs", "src/exact.rs"],
+          changes: [{ path: "src/first.rs", kind: "modified" as const }, { path: "src/exact.rs", kind: "modified" as const }],
           truncated: false,
         },
         review: {
@@ -235,6 +242,7 @@ describe("sidebar components", () => {
             model: "fast",
             driverClientId: null,
             shellActive: false,
+            activity: null,
           },
         ],
       },
@@ -249,10 +257,7 @@ describe("sidebar components", () => {
 
     expect(commands[0]).toMatchObject({ type: "list_sessions" })
     expect(commands.at(-1)).toMatchObject({ type: "search_sessions", query: "rott", limit: 100 })
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
-      "session-rottweiler",
-      "sessions.new",
-    ])
+    expect(options(app.picker).map((option) => option.value)).toEqual(["session-rottweiler"])
   })
 
   test("fuzzy matching is ordered and image fallback is capability gated", async () => {

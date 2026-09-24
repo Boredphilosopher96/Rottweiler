@@ -165,7 +165,9 @@ describe("Rottweiler layout", () => {
     const queryFailure = { category: "protocol" as const, code: "host_query_failure", message: "workspace status deadline exceeded", retryable: true }
     app.setState({ ...app.state, errors: [queryFailure] })
     await setup.renderOnce()
-    expect(app.banner.plainText).toContain("Waiting for approval")
+    // A deferred background query failure must not displace the approval dock.
+    expect(app.banner.plainText).not.toContain("workspace status deadline exceeded")
+    expect(app.interactionPanel.visible).toBeTrue()
     expect(app.state.errors).toContain(queryFailure)
     const pendingTool = app.state.tools.edit!
     app.setState({ ...app.state, tools: { edit: { ...pendingTool, status: "running" } } })
@@ -273,7 +275,7 @@ describe("Rottweiler layout", () => {
           workspaceStatus: {
             workspaceName: "Rottweiler",
             branch: "main",
-            changedPaths: ["src/exact.rs"],
+            changes: [{ path: "src/exact.rs", kind: "modified" as const }],
             truncated: false,
           },
           review: {
@@ -337,7 +339,7 @@ describe("Rottweiler layout", () => {
         workspaceStatus: {
           workspaceName: "Rottweiler",
           branch: "main",
-          changedPaths: ["src/worktree.rs"],
+          changes: [{ path: "src/worktree.rs", kind: "modified" as const }],
           truncated: false,
         },
         review: {

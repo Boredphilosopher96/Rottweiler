@@ -33,10 +33,18 @@ export interface InteractionCallbacks {
   readonly onPlanReview: (decision: PlanDecision) => void
 }
 
+/**
+ * `always_allow` opens the reviewed project/pattern scope screen;
+ * `auto_safe_mode` switches this session to Auto and allows the invocation.
+ */
 export type InteractionApprovalAction =
   | ApprovalDecision
-  | "review_permission_rule"
+  | "always_allow"
   | "auto_safe_mode"
+
+const APPROVAL_KEYS: Readonly<Record<string, InteractionApprovalAction>> = {
+  y: "allow_once", a: "allow_session", p: "always_allow", n: "deny",
+}
 
 export class InteractionPanelRenderable extends BoxRenderable {
   readonly prompt: TextRenderable
@@ -145,8 +153,12 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.select.onKeyDown = (key) => {
       if (this.select.focused && this.#activeTool !== null && !key.ctrl && !key.meta && !key.shift
         && !key.super && !key.option && !key.hyper) {
-        const action = ({ y: "allow_once", a: "allow_session", n: "deny" } as Record<string, string>)[key.name]
-        const index = this.select.options.findIndex(option => option.value === action)
+        const index = key.name in APPROVAL_KEYS
+          ? this.select.options.findIndex(option => option.value === APPROVAL_KEYS[key.name]
+            || (key.name === "a" && option.value === "auto_safe_mode")
+            || (key.name === "p" && option.value === "allow_project"))
+          : -1
+        const action = index >= 0 ? this.select.options[index]?.value : undefined
         if (action !== undefined && index >= 0) {
           this.select.setSelectedIndex(index)
           this.select.selectCurrent()
@@ -252,32 +264,22 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.visible = true
     this.select.visible = true
     const bash = bashApproval(tool)
-    this.title = bash?.unsandboxed === true ? " UNSANDBOXED approval required " : " Permission · y once / a session / n deny · Tab to message "
     const diff = readUnifiedDiff(tool.diff)
     const truncated = diff?.truncated === true
-    const subject = approvalSubject(tool, bash)
+    const request = approvalRequest(tool, bash)
+    this.title = ` ${request.question} `
+    this.borderColor = bash?.unsandboxed === true ? this.#theme.error : this.#theme.warning
+    const reason = tool.rationale?.trim() ?? ""
     this.prompt.content = [
-      subject.line,
-      ...(bash === null ? [] : [approvalCommand(bash.command)]),
-      ...(subject.available ? [] : [`arguments · ${formatToolArguments(tool.args)}`]),
+      ...request.details,
       ...(truncated
-        ? ["Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."]
-        : tool.rationale === null || tool.rationale.trim() === ""
-          ? []
-          : [tool.rationale]),
+        ? ["The change is too large to review here, so it cannot be approved."]
+        : reason === "" ? [] : [reason]),
     ].join("\n")
+    this.select.showDescription = false
     this.select.options = truncated
-      ? [{ name: "Deny", description: "A truncated change cannot be approved", value: "deny" }]
-      : [
-        { name: "Allow once", description: "Run only this invocation", value: "allow_once" },
-        { name: "Allow session", description: "Remember for this session", value: "allow_session" },
-        { name: "Allow project", description: "Remember this exact invocation in this project", value: "allow_project" },
-        ...(allowPermissionChanges ? [{ name: "Review a permission rule…", description: "Review an explicit session pattern", value: "review_permission_rule" }] : []),
-        ...(!allowPermissionChanges || permissionMode === "auto-safe" || permissionMode === "yolo"
-          ? []
-          : [{ name: "Stop asking for safe actions", description: "Use Auto approvals · ask for other actions", value: "auto_safe_mode" }]),
-        { name: "Deny", description: "Do not run the tool", value: "deny" },
-      ]
+      ? [{ name: "n  No", description: "", value: "deny" }]
+      : approvalOptions(tool, request, permissionMode, allowPermissionChanges)
     this.select.setSelectedIndex(Math.min(selected, Math.max(0, this.select.options.length - 1)))
     if (diff !== null) {
       if (this.#diff === null) {
@@ -326,6 +328,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.prompt.content = freeText
       ? `${prompt.prompt}\nType your answer below. Enter sends; Shift+Enter adds a line.`
       : prompt.prompt
+    this.select.showDescription = true
     this.select.options = questionOptions(prompt)
     this.select.visible = !freeText
     this.#layout(freeText ? 4 : 0)
@@ -358,6 +361,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     ].join("\n")
     this.planScroller.visible = true
     if (changed) this.planScroller.scrollTo(0)
+    this.select.showDescription = true
     this.select.options = [
       { name: "Approve plan", description: "Pin this artifact and enter Execute", value: "approve" },
       { name: "Reject plan", description: "Stay in Plan mode", value: "reject" },
@@ -379,7 +383,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
         selected === "allow_once" ||
           selected === "allow_session" ||
           selected === "allow_project" ||
-          selected === "review_permission_rule" ||
+          selected === "always_allow" ||
           selected === "auto_safe_mode"
           ? selected
           : "deny"
@@ -400,7 +404,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     if (localRow < 0 || localRow >= this.select.height) return null
     // SelectRenderable uses two rows per option when descriptions are visible.
     const scrollOffset = (this.select as unknown as { scrollOffset: number }).scrollOffset
-    const index = scrollOffset + Math.floor(localRow / 2)
+    const index = scrollOffset + Math.floor(localRow / (this.select.showDescription ? 2 : 1))
     return index >= 0 && index < this.select.options.length ? index : null
   }
 
@@ -432,9 +436,11 @@ export class InteractionPanelRenderable extends BoxRenderable {
       this.planScroller.height = Math.max(0, rows - 1 - selectRows)
       return
     }
-    const promptDesired = Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
+    const promptDesired = this.prompt.plainText === "" && this.#activeTool !== null
+      ? 0
+      : Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
     const selectDesired = this.select.visible
-      ? Math.min(8, Math.max(1, this.select.options.length * 2))
+      ? Math.min(8, Math.max(1, this.select.options.length * (this.select.showDescription ? 2 : 1)))
       : 0
     const diffDesired = this.#diff === null ? 0 : Math.min(8, Math.max(1,
       (this.#activeTool?.diff?.unified_diff ?? "").trimEnd().split("\n").filter(line =>
@@ -461,11 +467,13 @@ export class InteractionPanelRenderable extends BoxRenderable {
       return
     }
 
-    this.prompt.visible = true
     const hasSelect = this.select.visible
-    const promptBudget = hasSelect || this.#diff !== null
-      ? Math.max(1, Math.ceil(contentRows * 0.25))
-      : contentRows
+    this.prompt.visible = promptDesired > 0
+    const promptBudget = promptDesired === 0
+      ? 0
+      : hasSelect || this.#diff !== null
+        ? Math.max(1, Math.ceil(contentRows * 0.25))
+        : contentRows
     const promptRows = Math.min(promptDesired, promptBudget, contentRows)
     this.prompt.height = promptRows
     let remaining = contentRows - promptRows
@@ -500,35 +508,98 @@ function bashApproval(tool: ToolProjection): { readonly command: string; readonl
   return { command: args.command, unsandboxed: args.sandbox === "unsandboxed" }
 }
 
-function approvalSubject(
-  tool: ToolProjection,
-  bash: ReturnType<typeof bashApproval>,
-): { readonly line: string; readonly available: boolean } {
-  if (bash !== null) return { line: "Run terminal command", available: true }
-  const args =
-    tool.args !== null && typeof tool.args === "object" && !Array.isArray(tool.args)
-      ? tool.args as Record<string, unknown>
-      : null
-  const primary = ["path", "file_path", "filePath", "command", "pattern", "query"]
+interface ApprovalRequest {
+  /** The action as a plain question, e.g. "Run `cargo test`?" or "Edit calc.py?". */
+  readonly question: string
+  /** Lines shown under the question: a long command, or unrecognized arguments. */
+  readonly details: readonly string[]
+  /** Short name of what "don't ask again" remembers, or null when nothing useful is. */
+  readonly remembered: string | null
+  readonly fileMutation: boolean
+}
+
+const INLINE_COMMAND_CELLS = 60
+const REMEMBERED_COMMAND_CELLS = 32
+const FILE_MUTATION_TOOLS = new Set(["write", "edit", "multi_edit"])
+const TOOL_QUESTIONS: Readonly<Record<string, string>> = {
+  write: "Write", edit: "Edit", multi_edit: "Edit", read: "Read", ls: "List",
+  glob: "Find files matching", grep: "Search files for", webfetch: "Open", websearch: "Search the web for",
+}
+
+function approvalRequest(tool: ToolProjection, bash: ReturnType<typeof bashApproval>): ApprovalRequest {
+  if (bash !== null) {
+    const preview = commandPreview(bash.command)
+    const inline = !preview.includes("\n") && preview.length <= INLINE_COMMAND_CELLS
+    const where = bash.unsandboxed ? " outside the sandbox" : ""
+    return {
+      question: inline ? `Run \`${preview}\`${where}?` : `Run this command${where}?`,
+      details: inline ? [] : approvalCommand(preview),
+      remembered: inline && preview.length <= REMEMBERED_COMMAND_CELLS ? `\`${preview}\`` : "this command",
+      fileMutation: false,
+    }
+  }
+  const args = tool.args !== null && typeof tool.args === "object" && !Array.isArray(tool.args)
+    ? tool.args as Record<string, unknown>
+    : null
+  const primary = ["path", "file_path", "filePath", "url", "command", "pattern", "query"]
     .map((key) => args?.[key])
     .find((value): value is string => typeof value === "string" && value.trim() !== "")
     ?.trim()
-  const known = KNOWN_TOOL_DISPLAY_NAMES[tool.name]
-  if (known !== undefined) {
-    return { line: `${known}${primary === undefined ? "" : ` ${primary}`}`, available: true }
-  }
+  const verb = TOOL_QUESTIONS[tool.name]
+  const fileMutation = FILE_MUTATION_TOOLS.has(tool.name)
   if (primary !== undefined) {
-    return { line: `${toolDisplayName(tool.name)} ${primary}`, available: true }
+    const subject = verb !== undefined && (tool.name === "grep" || tool.name === "websearch") ? `"${primary}"` : primary
+    return {
+      question: verb === undefined ? `Use ${toolDisplayName(tool.name)} on ${subject}?` : `${verb} ${subject}?`,
+      details: [],
+      remembered: fileMutation ? null : `${toolDisplayName(tool.name).toLocaleLowerCase()} on ${subject}`,
+      fileMutation,
+    }
   }
-  return { line: toolDisplayName(tool.name), available: false }
+  const known = KNOWN_TOOL_DISPLAY_NAMES[tool.name] !== undefined
+  return {
+    question: `Use ${toolDisplayName(tool.name)}?`,
+    details: known ? [] : [formatToolArguments(tool.args)],
+    remembered: fileMutation ? null : "this exact call",
+    fileMutation,
+  }
 }
 
-function approvalCommand(command: string): string {
-  const visible = commandPreview(command).split("\n")
+/**
+ * At most four single-line choices, each with its key. "Always allow" opens a
+ * reviewed scope screen when rules may change; otherwise it remembers only
+ * this exact invocation for the project.
+ */
+function approvalOptions(
+  tool: ToolProjection,
+  request: ApprovalRequest,
+  permissionMode: PermissionModeDescriptor | null,
+  allowPermissionChanges: boolean,
+): { name: string; description: string; value: string }[] {
+  const autoCoversEdits = request.fileMutation && allowPermissionChanges
+    && permissionMode !== "auto-safe" && permissionMode !== "yolo"
+    && (tool.rationale === null || tool.rationale.trim() === "")
+  const session = autoCoversEdits
+    ? { name: "a  Yes, and allow workspace edits this session (Auto)", description: "", value: "auto_safe_mode" }
+    : request.remembered === null
+      ? null
+      : { name: `a  Yes, and don't ask again for ${request.remembered} this session`, description: "", value: "allow_session" }
+  const always = allowPermissionChanges
+    ? { name: "p  Always allow in this project…", description: "", value: "always_allow" }
+    : request.remembered === null
+      ? null
+      : { name: `p  Always allow ${request.remembered} in this project`, description: "", value: "allow_project" }
   return [
-    `$ ${visible[0] ?? ""}`,
-    ...visible.slice(1),
-  ].join("\n")
+    { name: "y  Yes", description: "", value: "allow_once" },
+    ...(session === null ? [] : [session]),
+    ...(always === null ? [] : [always]),
+    { name: "n  No, and tell the agent what to do differently", description: "", value: "deny" },
+  ]
+}
+
+function approvalCommand(preview: string): string[] {
+  const visible = preview.split("\n")
+  return [`$ ${visible[0] ?? ""}`, ...visible.slice(1)]
 }
 
 function questionOptions(question: Question) {

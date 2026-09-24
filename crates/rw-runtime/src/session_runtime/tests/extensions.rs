@@ -187,7 +187,7 @@ async fn custom_command_shadow_expansion_and_skill_selection_are_live() {
         content,
         model_alias,
         allowed_tools,
-        permission_patterns,
+        pre_approvals,
         tool_calls,
     } = review.action
     else {
@@ -198,8 +198,8 @@ async fn custom_command_shadow_expansion_and_skill_selection_are_live() {
     assert!(!content.contains("fn visible() {}"));
     assert!(content.contains("ROTTWEILER_COMMAND_TOOL"));
     assert_eq!(model_alias.as_deref(), Some("fast"));
-    assert_eq!(allowed_tools, Some(vec!["read".to_owned()]));
-    assert_eq!(permission_patterns, vec!["read(*)"]);
+    assert_eq!(allowed_tools, None, "allowed-tools never narrows the turn");
+    assert_eq!(pre_approvals, vec!["read(*)"]);
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(tool_calls[0].name, "read");
     assert_eq!(tool_calls[0].arguments["path"], "src/lib.rs");
@@ -212,8 +212,142 @@ async fn custom_command_shadow_expansion_and_skill_selection_are_live() {
         panic!("skill submits prompt")
     };
     assert!(content.contains("Release instructions"));
-    assert!(content.contains("resource policy"));
-    assert!(content.contains("Invocation arguments:\nv1"));
+    assert!(content.contains("- policy.md"));
+    assert!(!content.contains("resource policy"));
+    assert!(content.contains("## Invocation arguments\n\nv1"));
+}
+
+#[tokio::test]
+async fn claude_skill_artifacts_never_fail_command_composition() {
+    let fixture = tempdir().expect("fixture");
+    let project = fixture.path().join("project");
+    let home = fixture.path().join("home");
+    std::fs::create_dir_all(&project).expect("project");
+    let project = std::fs::canonicalize(project).expect("canonical project");
+    for (name, tools) in [
+        ("review", "  - Bash\n  - Read\n  - AskUserQuestion"),
+        (
+            "careful",
+            "  - NotebookEdit\n  - Bash(git status:*)\n  - Broken(",
+        ),
+    ] {
+        let skill = home.join(format!(".claude/skills/{name}/SKILL.md"));
+        std::fs::create_dir_all(skill.parent().expect("skill")).expect("skill directory");
+        std::fs::write(
+            &skill,
+            format!(
+                "---\nname: {name}\ndescription: |\n  {name} skill\n  (gstack)\nallowed-tools:\n{tools}\nhooks:\n  PreToolUse:\n    - matcher: Bash\n---\n{name} body"
+            ),
+        )
+        .expect("skill");
+    }
+    let catalog = Arc::new(ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(
+        &project, &home,
+    )));
+    assert!(
+        catalog.diagnostics().is_empty(),
+        "{:?}",
+        catalog.diagnostics()
+    );
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(ReadTool::new(ToolLimits::default())))
+        .expect("read tool");
+    crate::session_runtime::skill_library::register_skill_tool(&mut tools, &catalog)
+        .expect("skill tool");
+    let tools = Arc::new(tools);
+    let registry = compose_runtime_commands(
+        &catalog,
+        std::slice::from_ref(&project),
+        &fixture.path().join("state"),
+        &tools,
+    )
+    .expect("artifacts never fail composition");
+
+    let careful = registry
+        .dispatch_line(&mut SessionCommandContext::default(), "/careful")
+        .await
+        .expect("careful command");
+    let SessionCommandAction::SubmitPrompt {
+        content,
+        allowed_tools,
+        pre_approvals,
+        ..
+    } = careful.action
+    else {
+        panic!("skill submits prompt")
+    };
+    assert!(content.contains("careful body"));
+    assert_eq!(allowed_tools, None);
+    assert!(pre_approvals.is_empty());
+
+    // `/review` is a built-in command; the skill stays model-invocable.
+    let skill_tool = tools.resolve("skill").expect("skill tool registered");
+    let context = rw_tools::ToolContext::new(&project).expect("tool context");
+    let loaded = skill_tool
+        .execute(&context, serde_json::json!({"name": "review"}))
+        .await
+        .expect("skill tool loads review");
+    assert!(loaded.content.contains("# Skill: review"));
+    assert!(loaded.content.contains("review body"));
+
+    let inventory = crate::session_runtime::extension_inventory(&catalog, Some(&tools));
+    let review = inventory
+        .entries
+        .iter()
+        .find(|entry| entry.name.as_deref() == Some("review"))
+        .expect("review row");
+    assert_eq!(
+        review.status,
+        rw_types::ExtensionArtifactStatus::LoadedWithWarnings
+    );
+    assert!(
+        review
+            .notes
+            .iter()
+            .any(|note| note.contains("AskUserQuestion"))
+    );
+    assert!(
+        review
+            .notes
+            .iter()
+            .any(|note| note.contains("built-in /review"))
+    );
+    assert_eq!(review.location, ".claude");
+}
+
+#[test]
+fn skill_index_directs_the_model_to_the_skill_tool_and_counts_omissions() {
+    let fixture = tempdir().expect("fixture");
+    let project = fixture.path().join("project");
+    let home = fixture.path().join("home");
+    let description = "d".repeat(900);
+    for index in 0..100 {
+        let skill = home.join(format!(".agents/skills/skill-{index:03}/SKILL.md"));
+        std::fs::create_dir_all(skill.parent().expect("skill")).expect("skill directory");
+        std::fs::write(
+            &skill,
+            format!("---\ndescription: {description}\n---\nbody"),
+        )
+        .expect("skill");
+    }
+    let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+    assert_eq!(catalog.skills().len(), 100);
+    let index = skill_index_turn(
+        &catalog,
+        &crate::journal_service::JournalService::new(&home).expect("journal"),
+    )
+    .expect("index")
+    .expect("skill index");
+    let Block::Text { text } = &index.blocks[0] else {
+        panic!("skill index is text")
+    };
+    assert!(text.contains("call the `skill` tool"));
+    assert!(!text.contains("slash command"));
+    assert!(text.contains("more skills are not listed"));
+    let listed = text.matches("\"name\":").count();
+    assert!(listed < 100);
+    assert!(text.contains(&format!("{} more skills", 100 - listed)));
 }
 
 #[tokio::test]

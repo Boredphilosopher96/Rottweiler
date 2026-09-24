@@ -11,12 +11,10 @@ exports[`launch and retained error details at 110x32: launch 1`] = `
                                                                                                               
                                                                                                               
                                                                                                               
+                                                                                                              
   rottweiler                                                                                                  
-  Workspace · not loaded                                                                                      
-  Instructions · not loaded                                                                                   
-  MCP · not loaded                                                                                            
-  Skill commands · not loaded                                                                                 
-  Model · Choose a model · /models · /providers to connect                                                    
+  Rottweiler                                                                                                  
+  Loading models…                                                                                             
   Describe a task, or press / for commands.                                                                   
                                                                                                               
                                                                                                               
@@ -28,47 +26,49 @@ exports[`launch and retained error details at 110x32: launch 1`] = `
                                                                                                               
                                                                                                               
                                                                                                               
+                                                                                                              
+                                                                                                              
  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                                                         │ 
- │ Ctrl+P commands   Alt+M model   / @ !   Ctrl+E editor    ⏎  send                                         │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model · Ctrl+E editor                            │ 
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   model not selected · Alt+M                                                                        
+  EXECUTE   loading models · Alt+M                                                                            
 "
 `;
 
 exports[`launch and retained error details at 110x32 1`] = `
-"╭─ Error 1 · details ────────────────────────────────────────────────────────────────────────────────────────╮
-│                                                                                                            │
-│ type to filter…                                                                                            │
-│                                                                                                            │
-│  ▶ Back to recent errors                                                                                   │
-│    Retained for this session · no automatic retry                                                          │
-│    Something went wrong · Provider rejected the selected context length                                    │
-│    error · provider · provider_failed                                                                      │
-│    Requires attention                                                                                      │
-│    Review these details before continuing                                                                  │
-│    Provider rejected the selected context length                                                           │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-│                                                                                                            │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+" ERRORS › Error 1                                      │ Something went wrong · Provider rejected the         
+ Type to filter…                                       │ selected context length                              
+ ──────────────────────────────────────────────────────│ error                                                
+ › Something went wrong · Provider rejected the…  error│                                                      
+   Needs attention                                     │ provider · provider_failed                           
+ MESSAGE                                               │                                                      
+   Provider rejected the selected context length       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+                                                       │                                                      
+ esc back                                                                                                     
+                                                                                                              
  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                                                         │ 
- │ Ctrl+P commands   Alt+M model   / @ !   Ctrl+E editor    ⏎  send                                         │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model · Ctrl+E editor                            │ 
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   model not selected · Alt+M                                                                        
+  EXECUTE   loading models · Alt+M                                                                            
 "
 `;
 
@@ -79,12 +79,10 @@ exports[`launch and retained error details at 80x24: launch 1`] = `
                                                                                 
                                                                                 
                                                                                 
+                                                                                
   rottweiler                                                                    
-  Workspace · not loaded                                                        
-  Instructions · not loaded                                                     
-  MCP · not loaded                                                              
-  Skill commands · not loaded                                                   
-  Model · Choose a model · /models · /providers to connect                      
+  Rottweiler                                                                    
+  Loading models…                                                               
   Describe a task, or press / for commands.                                     
                                                                                 
                                                                                 
@@ -92,38 +90,40 @@ exports[`launch and retained error details at 80x24: launch 1`] = `
                                                                                 
                                                                                 
                                                                                 
+                                                                                
+                                                                                
  ╭────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                           │ 
- │ Ctrl+P commands   Alt+M model   / @ !   Ctrl+E editor    ⏎  send           │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model              │ 
  ╰────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   model not selected · Alt+M                                          
+  EXECUTE   loading models · Alt+M                                              
 "
 `;
 
 exports[`launch and retained error details at 80x24 1`] = `
-"╭─ Error 1 · details ──────────────────────────────────────────────────────────╮
-│                                                                              │
-│ type to filter…                                                              │
-│                                                                              │
-│  ▶ Back to recent errors                                                     │
-│    Retained for this session · no automatic retry                            │
-│    Something went wrong · Provider rejected the selected context length      │
-│    error · provider · provider_failed                                        │
-│    Requires attention                                                        │
-│    Review these details before continuing                                    │
-│    Provider rejected the selected context length                             │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────╯
+" ERRORS › Error 1                                                               
+ Type to filter…                                                                
+ ────────────────────────────────────────────────────────────────────────────── 
+ › Something went wrong · Provider rejected the selected context length   error 
+   Needs attention                                                              
+ MESSAGE                                                                        
+   Provider rejected the selected context length                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ provider · provider_failed                                                     
+ esc back                                                                       
+                                                                                
  ╭────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                           │ 
- │ Ctrl+P commands   Alt+M model   / @ !   Ctrl+E editor    ⏎  send           │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model              │ 
  ╰────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   model not selected · Alt+M                                          
+  EXECUTE   loading models · Alt+M                                              
 "
 `;

@@ -13,7 +13,6 @@ pub(super) async fn dispatch_message(
     command_meta: CommandMeta,
     content: String,
     attachments: Vec<Attachment>,
-    observed_turn: u64,
     respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
     context: DispatchContext<'_>,
 ) {
@@ -38,7 +37,6 @@ pub(super) async fn dispatch_message(
         super::command_job::start(
             command_meta,
             bound,
-            observed_turn,
             super::command_job::CommandReply::Direct(respond),
             DispatchContext {
                 state,

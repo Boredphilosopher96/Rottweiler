@@ -135,6 +135,7 @@ describe("state queries", () => {
         model: "fast",
         driverClientId: null,
         shellActive: false,
+        activity: null,
       },
     ])
     expect(state.sessionSearch).toEqual({ query: "rott", truncated: true, matches: [] })

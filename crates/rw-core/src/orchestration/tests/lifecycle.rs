@@ -110,7 +110,7 @@ async fn cancelled_worktree_lease_rebinds_and_accepts_follow_up() {
 }
 
 #[tokio::test]
-async fn children_overlap_and_concurrency_limit_fails_closed() {
+async fn children_beyond_the_concurrency_limit_queue_and_start_when_a_slot_frees() {
     let factory = Arc::new(FakeFactory::default());
     let orchestrator = orchestrator(SubagentLimits::default(), Arc::clone(&factory));
     let recorded = Arc::new(RecordingObserver::default());
@@ -118,35 +118,79 @@ async fn children_overlap_and_concurrency_limit_fails_closed() {
     let parent = SessionId("parent".to_owned());
     let mut handles = Vec::new();
     for _ in 0..4 {
-        handles.push(
-            orchestrator
-                .start(
-                    parent.clone(),
-                    request("delay:100"),
-                    Arc::clone(&observer),
-                    CancellationToken::default(),
-                )
-                .await
-                .expect("start"),
-        );
+        let ticket = orchestrator
+            .submit(
+                parent.clone(),
+                request("delay:150"),
+                Arc::clone(&observer),
+                CancellationToken::default(),
+            )
+            .await
+            .expect("start");
+        assert!(!ticket.queued);
+        handles.push(ticket.handle);
     }
-    let exceeded = orchestrator
-        .start(
-            parent,
+    let queued = orchestrator
+        .submit(
+            parent.clone(),
             request("delay:1"),
             Arc::clone(&observer),
             CancellationToken::default(),
         )
         .await
-        .expect_err("fifth child must be rejected");
+        .expect("fifth child queues");
+    assert!(queued.queued);
+    let cancelled = orchestrator
+        .submit(
+            parent.clone(),
+            request("delay:1"),
+            Arc::clone(&observer),
+            CancellationToken::default(),
+        )
+        .await
+        .expect("sixth child queues");
+    assert_eq!(orchestrator.queued_for_parent(&parent).len(), 2);
+    assert!(
+        orchestrator
+            .queued_for_parent(&SessionId("stranger".into()))
+            .is_empty()
+    );
+    orchestrator
+        .cancel(&parent, &cancelled.handle.subagent_id)
+        .await
+        .expect("cancel queued child");
     assert!(matches!(
-        exceeded,
-        OrchestrationError::ConcurrencyExceeded { maximum: 4 }
+        orchestrator
+            .wait_for_parent(&parent, &cancelled.handle.subagent_id)
+            .await,
+        Ok(super::super::ChildWait::NeverStarted(_)) | Err(OrchestrationError::UnknownSubagent(_))
+    ));
+    let finished = orchestrator
+        .wait_for_parent(&parent, &queued.handle.subagent_id)
+        .await
+        .expect("queued child runs");
+    assert!(matches!(
+        finished,
+        super::super::ChildWait::Finished(result) if result.status == SubagentStatus::Completed
     ));
     for handle in &handles {
         orchestrator.wait(handle).await.expect("result");
     }
-    assert_eq!(factory.peak.load(Ordering::Acquire), 4);
+    assert_eq!(
+        factory.peak.load(Ordering::Acquire),
+        4,
+        "never above the limit"
+    );
+    assert!(orchestrator.queued_for_parent(&parent).is_empty());
+    assert_eq!(
+        factory
+            .launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        5,
+        "the cancelled queued child never launched"
+    );
 }
 
 #[tokio::test]

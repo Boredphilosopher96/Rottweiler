@@ -30,12 +30,21 @@ export async function runRichExtensionProbe(directory: string): Promise<void> {
     rows: Array.from({ length: MAX_UI_TABLE_ROWS }, (_, index) => [`remote-${index}.ts`, "Verified"]),
   }))
   const item = mixedHistoryPage("rich-session", { known_view: null, position: { type: "latest" }, max_items: 3, max_bytes: 262144 }, 3, "2").items[2]!
-  item.ordinal = "0"
   if (item.content.type !== "tool" || item.content.status.type !== "finished") throw new Error("tool fixture")
   item.content.status.output.text = "Artifact preview"
   item.content.status.output.complete = false
   item.content.status.presentation = { title: presentation.descriptor.title,
     source: { sequence: "2", selector: { type: "tool_presentation", invocation_id: "historical-2" } } }
+  // A presented tool's one link opens its structured view, so the paged remote
+  // artifact is exercised through a plain tool whose output is truncated.
+  const raw = structuredClone(item)
+  Object.assign(raw, { id: "1", ordinal: "0", revision: "1", agent_turn: "1" })
+  item.ordinal = "1"
+  if (raw.content.type !== "tool" || raw.content.status.type !== "finished") throw new Error("tool fixture")
+  raw.content.invocation_id = "historical-1"
+  raw.content.arguments.source = { sequence: "1", selector: { type: "tool_arguments" } }
+  raw.content.status.output.source = { sequence: "1", selector: { type: "tool_output" } }
+  raw.content.status.presentation = null
   let generation = presentation.owner.generation, malformed = false, hold = false, pending = 0, next = 0
   const release = Promise.withResolvers<void>()
   const commands: ClientCommand[] = []
@@ -50,7 +59,7 @@ export async function runRichExtensionProbe(directory: string): Promise<void> {
     let event: EngineEvent
     switch (command.type) {
       case "read_transcript": event = { type: "transcript_page_ready", meta, session_id: command.session_id,
-        result: { type: "ready", page: { ...mixedHistoryPage(command.session_id, command.read, 1, "2"), first_ordinal: "0", total_items: "1", items: [item] } } }; break
+        result: { type: "ready", page: { ...mixedHistoryPage(command.session_id, command.read, 1, "2"), first_ordinal: "0", total_items: "2", items: [raw, item] } } }; break
       case "read_session_children": event = { type: "session_children_ready", meta, session_id: command.session_id,
         result: { type: "ready", snapshot: { through: "2", children: [] } } }; break
       case "get_todos": event = { type: "todos_read", meta, session_id: command.session_id,
@@ -102,20 +111,20 @@ export async function runRichExtensionProbe(directory: string): Promise<void> {
   }
   const openRich = async () => {
     const row = app.transcript.mountedCards.get("2")!
-    if (!row.presentationFooter.visible) row.toggle()
+    if (!row.footer.visible) row.toggle()
     await setup.renderOnce()
-    await setup.mockMouse.click(row.presentationFooter.x + 2, row.presentationFooter.y)
+    await setup.mockMouse.click(row.footer.x + 2, row.footer.y)
     await until(() => app.outputViewer.actions.visible && app.outputViewer.hint.plainText.includes("Tab actions"))
   }
   const openPanels = async () => {
-    app.openCommandPicker(); app.commandPalette.selectById("ui.panels"); app.commandPalette.activateSelected()
-    await until(() => app.picker.select.options.some(option => option.name === "Remote artifact panel"))
-    app.picker.select.selectCurrent()
+    app.openMcpPicker(); app.mcpBrowser.selectById("mcp.panels"); app.mcpBrowser.activateSelected()
+    await until(() => app.picker.items.some(item => item.label === "Remote artifact panel"))
+    app.picker.selectById(app.picker.items.find(item => item.label === "Remote artifact panel")!.id); app.picker.activateSelected()
   }
   try {
     app.composer.value = "draft survives"
     app.composer.editor.gotoBufferEnd()
-    await until(() => app.transcript.mountedCards.has("2"))
+    await until(() => app.transcript.mountedCards.has("1") && app.transcript.mountedCards.has("2"))
     await openRich()
     requireThat(setup.captureCharFrame().includes("engine.rs"), "rich tool fields were not rendered")
     setup.mockInput.pressTab(); setup.mockInput.pressEnter()
@@ -127,7 +136,9 @@ export async function runRichExtensionProbe(directory: string): Promise<void> {
     requireThat(commands.filter(command => command.type === "invoke_ui_action").length === 1, "retired generation dispatched an action")
     setup.mockInput.pressEscape(); await until(() => !app.outputViewer.visible)
     hold = true
-    const row = app.transcript.mountedCards.get("2")!
+    const row = app.transcript.mountedCards.get("1")!
+    if (!row.footer.visible) row.toggle()
+    await setup.renderOnce()
     requireThat(!app.outputViewer.visible, "closed remote content view reappeared")
     await setup.mockMouse.click(row.footer.x + 2, row.footer.y)
     await until(() => pending === 1)
@@ -155,7 +166,7 @@ export async function runRichExtensionProbe(directory: string): Promise<void> {
     await until(() => app.outputViewer.body.plainText.includes("Remote canonical artifact: λ.ts"))
     setup.mockInput.pressArrow("right")
     await until(() => artifacts.some(read => read.offset > 0))
-    requireThat(artifacts.every(read => JSON.stringify(read.source) === JSON.stringify({ sequence: "2", selector: { type: "tool_output" } })), "remote artifact lost its canonical source")
+    requireThat(artifacts.every(read => JSON.stringify(read.source) === JSON.stringify({ sequence: "1", selector: { type: "tool_output" } })), "remote artifact lost its canonical source")
     setup.mockInput.pressEscape(); await until(() => !app.outputViewer.visible)
     await openPanels(); await until(() => app.outputViewer.surface.getChildren().length === MAX_UI_FIELDS)
     const nodes = app.outputViewer.surface.getChildren()

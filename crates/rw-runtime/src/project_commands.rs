@@ -7,7 +7,6 @@ use rw_ext::{
     CommandRegistryError,
 };
 use rw_store::ProjectMemoryStore;
-use rw_types::CommandSource;
 
 /// Add project-owned commands to the same registry used by core and extensions.
 pub(crate) fn register_project_commands(
@@ -15,30 +14,9 @@ pub(crate) fn register_project_commands(
     workspace: PathBuf,
     storage_root: PathBuf,
 ) -> Result<(), CommandRegistryError> {
+    registry.register(catalog_descriptor("init")?, InitCommand)?;
     registry.register(
-        CommandDescriptor::new(
-            "init",
-            "Generate a root AGENTS.md without executing project code",
-        )
-        .with_source(CommandSource::Project),
-        InitCommand {
-            depth: InitDepth::Root,
-        },
-    )?;
-    registry.register(
-        CommandDescriptor::new(
-            "deep-init",
-            "Generate bounded root and per-package AGENTS.md files",
-        )
-        .with_source(CommandSource::Project),
-        InitCommand {
-            depth: InitDepth::Deep,
-        },
-    )?;
-    registry.register(
-        CommandDescriptor::new("memory", "Read or update private project memory")
-            .with_argument_hint("[list|read <id>|write <text>|clear]")
-            .with_source(CommandSource::Project),
+        catalog_descriptor("memory")?,
         MemoryCommand {
             workspace,
             storage_root,
@@ -47,9 +25,16 @@ pub(crate) fn register_project_commands(
     Ok(())
 }
 
-struct InitCommand {
-    depth: InitDepth,
+/// Registry metadata for a runtime-owned built-in, taken from the engine catalog.
+pub(crate) fn catalog_descriptor(name: &str) -> Result<CommandDescriptor, CommandRegistryError> {
+    rw_types::client_navigation::catalog_entry(name)
+        .map(CommandDescriptor::from_catalog)
+        .ok_or_else(|| CommandRegistryError::Unknown {
+            name: name.to_owned(),
+        })
 }
+
+struct InitCommand;
 
 #[async_trait]
 impl CommandHandler<SessionCommandContext, SessionCommandOutput> for InitCommand {
@@ -64,16 +49,19 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for InitCommand
                 "repository initialization requires an idle session",
             ));
         }
-        if !invocation.arguments().trim().is_empty() {
-            let usage = match self.depth {
-                InitDepth::Root => "usage: /init",
-                InitDepth::Deep => "usage: /deep-init",
-            };
-            return Err(CommandExecutionError::new("invalid_init_command", usage));
-        }
+        let depth = match invocation.arguments().trim() {
+            "" => InitDepth::Root,
+            "--deep" => InitDepth::Deep,
+            _ => {
+                return Err(CommandExecutionError::new(
+                    "invalid_init_command",
+                    "usage: /init [--deep]",
+                ));
+            }
+        };
         Ok(SessionCommandOutput {
             message: "workspace initialization started".to_owned(),
-            action: SessionCommandAction::InitializeWorkspace { depth: self.depth },
+            action: SessionCommandAction::InitializeWorkspace { depth },
         })
     }
 }
@@ -260,6 +248,23 @@ mod tests {
                 depth: InitDepth::Root
             }
         );
+        let deep = registry
+            .dispatch_line(&mut context, "/init --deep")
+            .await
+            .expect("deep init command");
+        assert_eq!(
+            deep.action,
+            SessionCommandAction::InitializeWorkspace {
+                depth: InitDepth::Deep
+            }
+        );
+        assert!(
+            registry
+                .dispatch_line(&mut context, "/init everything")
+                .await
+                .is_err()
+        );
+        assert!(registry.resolve("deep-init").is_none());
         assert!(!root.path().join("AGENTS.md").exists());
     }
 

@@ -141,14 +141,34 @@ describe("Rottweiler presentation", () => {
     await setup.renderOnce()
 
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("rottweiler")
     expect(frame).toContain("hello")
-    expect(frame).toContain("model not selected · Alt+M")
+    expect(frame).toContain("loading models · Alt+M")
 
     const cells = setup.captureSpans()
     expect(cells.cols).toBe(72)
     expect(cells.rows).toBe(12)
     expect(cells.lines).toHaveLength(12)
+  })
+
+  test("replay shows the recorded model and no model call to action", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 24, useThread: false })
+    renderer = setup.renderer
+    renderer.root.add(createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      initialState: {
+        ...createInitialState(),
+        replay: { active: true, sessionId: "session-replayed", completedThrough: null },
+        model: "anthropic/claude-recorded",
+      },
+    }))
+
+    await setup.flush()
+
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("REPLAY")
+    expect(frame).toContain("claude-recorded")
+    expect(frame).not.toContain("loading models")
+    expect(frame).not.toContain("Alt+M")
   })
 
   test("presents an intentional ready state without an empty context sidebar", async () => {
@@ -168,7 +188,7 @@ describe("Rottweiler presentation", () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("rottweiler")
     expect(frame).toContain("Describe a task, or press / for commands.")
-    expect(frame).toContain("model not selected · Alt+M")
+    expect(frame).toContain("loading models · Alt+M")
     expect(frame).not.toContain("No tasks")
     expect(frame).not.toContain("No changed files")
     expect(app.contextPanel.visible).toBeFalse()

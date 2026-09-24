@@ -72,7 +72,7 @@ describe("live-tools components", () => {
     }
   })
 
-  test("shows elapsed time only for running tools after three seconds", async () => {
+  test("shows elapsed time only for tools running longer than one second", async () => {
     const originalNow = Date.now
     let now = 1_000
     Date.now = () => now
@@ -91,18 +91,18 @@ describe("live-tools components", () => {
         display: null, source: null,
         isError: null,
         callIndex: 0,
-        timing: { kind: "unknown" as const },
+        timing: { kind: "open" as const, startedAtMs: 1_000, lastObservedAtMs: 1_000 },
       }
       const setup = await createTestRenderer({ width: 86, height: 16, useThread: false })
       renderer = setup.renderer
       const card = new ToolBlockRenderable(renderer, kennelTheme, tool)
-      expect(card.header.plainText).not.toContain("1s")
-      const header = card.header.content
+      expect(card.header.plainText).not.toMatch(/\ds/)
+      now = 1_900
       card.update({ ...tool, chunks: toolOutputBuffer([{ stream: "stdout", chunk: "new output" }]) })
-      expect(card.header.content).toBe(header)
+      expect(card.header.plainText).not.toMatch(/\ds/)
       now = 5_000
-      card.update(tool)
-      expect(card.header.plainText).toEndWith(" · 4s")
+      card.update({ ...tool })
+      expect(card.header.plainText).toEndWith(" 4.0s")
     } finally {
       Date.now = originalNow
     }
@@ -130,9 +130,10 @@ describe("live-tools components", () => {
     renderer.root.add(card)
     await setup.renderOnce()
 
-    expect(card.header.plainText).toStartWith("▸ custom-tool")
-    expect(card.header.plainText).toEndWith("✓ Completed")
+    expect(card.header.plainText).toStartWith("● custom_tool src/main.rs")
+    expect(card.header.plainText).toEndWith("✓")
     expect(card.header.plainText.match(/src\/main\.rs/g)).toHaveLength(1)
+    expect(card.header.plainText).not.toContain("Path=")
   })
 
   test("expands a successful file edit and shows its diff by default", async () => {
@@ -165,7 +166,7 @@ describe("live-tools components", () => {
     renderer.root.add(card)
     await setup.renderOnce()
 
-    expect(card.header.plainText).toStartWith("⌄ edit  src/main.rs")
+    expect(card.header.plainText).toStartWith("● Edit src/main.rs  +1 −1")
     expect(card.header.plainText).toContain("✓")
     expect(card.diff).not.toBeNull()
     expect(card.diff?.visible).toBeTrue()
@@ -193,8 +194,8 @@ describe("live-tools components", () => {
     const card = new ToolBlockRenderable(renderer, kennelTheme, running)
     renderer.root.add(card)
     await setup.renderOnce()
-    expect(card.header.plainText).toStartWith("▸ edit  src/live.rs")
-    expect(card.header.plainText).toContain("◌")
+    expect(card.header.plainText).toStartWith("● Edit src/live.rs")
+    expect(card.expanded).toBeFalse()
 
     card.update({
       ...running,
@@ -213,7 +214,8 @@ describe("live-tools components", () => {
     })
     await setup.renderOnce()
 
-    expect(card.header.plainText).toStartWith("⌄ edit  src/live.rs")
+    expect(card.header.plainText).toStartWith("● Edit src/live.rs  +1 −1")
+    expect(card.expanded).toBeTrue()
     expect(card.header.plainText).toContain("✓")
     expect(card.diff?.visible).toBeTrue()
     const renderedDiff = card.diff instanceof DiffRenderable
@@ -249,7 +251,7 @@ describe("live-tools components", () => {
     await setup.renderOnce()
 
     expect(card.truncationMarker.plainText).toMatch(
-      /^… \d+ more lines · click to view all$/,
+      /^… \d+ more lines · click to open full output$/,
     )
     expect(card.body.plainText).toContain("progress-12")
     expect(card.body.plainText).not.toContain("progress-1\n")
@@ -318,7 +320,7 @@ describe("live-tools components", () => {
 
     expect(card.body.plainText.split("\n")).toHaveLength(7)
     expect(card.truncationMarker.plainText).toMatch(
-      /^… \d+ more lines · click to view all$/,
+      /^… \d+ more lines · click to open full output$/,
     )
     await setup.mockMouse.click(
       card.truncationMarker.x + 2,

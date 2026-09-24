@@ -83,7 +83,7 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
         .expect("tool context")
         .with_session_id(SessionId("parent".to_owned()))
         .with_model_alias("openai_codex/gpt-5.6-sol")
-        .with_subagent_event_sink(sink.clone());
+        .with_background_subagent_event_sink(sink.clone());
     let gate = crate::PermissionGate::from_config(crate::PermissionConfig {
         default: PermissionDecision::Ask,
         rules: Vec::new(),
@@ -97,6 +97,7 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
             "task": "delay:1",
             "agent": agent,
             "isolation": isolation,
+            "background": false,
         });
         let capabilities = tool
             .invocation_capabilities(&input)
@@ -108,6 +109,7 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
             "the parent control call must not claim the child's tool authority"
         );
         let permission = crate::PermissionRequest {
+            prompt_reason: None,
             invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: format!("spawn-{agent}"),
             tool_name: "spawn_agent".to_owned(),
@@ -120,9 +122,12 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
             crate::PermissionOutcome::Allowed,
             "subagent control must bypass the parent approval modal"
         );
-        tool.execute(&context, input)
+        let finished = tool
+            .execute(&context, input)
             .await
             .expect("built-in child uses parent model");
+        assert_eq!(finished.data["status"], "completed");
+        assert!(finished.content.contains("<child-agent-result"));
     }
 
     assert_eq!(approver.0.load(Ordering::SeqCst), 0);
@@ -150,18 +155,27 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
 #[test]
 fn action_shapes_are_rejected_at_the_input_boundary() {
     for value in [
-        json!({"action":"spawn","task":"x","subagent_id":"child"}),
-        json!({"action":"follow_up","subagent_id":"child","follow_up":"x","agent":"general"}),
-        json!({"action":"cancel","subagent_id":"child","follow_up":"x"}),
-        json!({"action":"close","subagent_id":"child","isolation":"worktree"}),
+        json!({"action":"spawn","task":"x","id":"child"}),
+        json!({"action":"start","task":"x"}),
+        json!({"action":"follow_up","subagent_id":"child","follow_up":"x"}),
+        json!({"action":"message","id":"child","message":"x","agent":"general"}),
+        json!({"action":"cancel","id":"child","message":"x"}),
+        json!({"action":"close","id":"child","isolation":"worktree"}),
+        json!({"action":"wait","id":"child"}),
     ] {
         assert!(serde_json::from_value::<SpawnAgentAction>(value).is_err());
     }
-    let follow_up: SpawnAgentAction = serde_json::from_value(json!({
-        "action":"follow_up", "subagent_id":"child", "follow_up":"continue"
+    let message: SpawnAgentAction = serde_json::from_value(json!({
+        "action":"message", "id":"child", "message":"continue"
     }))
-    .expect("explicit follow-up action");
-    assert!(matches!(follow_up, SpawnAgentAction::FollowUp { .. }));
+    .expect("explicit message action");
+    assert!(matches!(
+        message,
+        SpawnAgentAction::Message {
+            background: true,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -234,18 +248,19 @@ fn result_schema_round_trips_cost_and_usage() {
 fn missing_subagent_action_is_rejected() {
     for input in [
         json!({"task":"inspect","agent":"explore"}),
-        json!({"subagent_id":"child","follow_up":"continue"}),
+        json!({"id":"child","message":"continue"}),
     ] {
         assert!(serde_json::from_value::<SpawnAgentAction>(input).is_err());
     }
 }
 
 #[test]
-fn every_subagent_schema_variant_requires_its_action_and_own_fields() {
+fn every_subagent_schema_variant_is_self_describing_and_requires_its_action() {
     let schema =
         serde_json::to_value(schemars::schema_for!(SpawnAgentAction)).expect("action schema");
     let variants = schema["oneOf"].as_array().expect("action variants");
-    assert_eq!(variants.len(), 7);
+    assert_eq!(variants.len(), 6);
+    let mut actions = Vec::new();
     for variant in variants {
         assert!(
             variant["required"]
@@ -254,145 +269,45 @@ fn every_subagent_schema_variant_requires_its_action_and_own_fields() {
                 .contains(&json!("action"))
         );
         assert_eq!(variant["additionalProperties"], json!(false));
+        assert!(
+            variant["description"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "every action explains itself: {variant}"
+        );
+        for (name, property) in variant["properties"].as_object().expect("properties") {
+            if name == "action" {
+                actions.push(property["const"].as_str().expect("action tag").to_owned());
+                continue;
+            }
+            assert!(
+                property["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "field `{name}` explains itself"
+            );
+        }
     }
+    actions.sort();
+    assert_eq!(
+        actions,
+        ["cancel", "close", "list", "message", "spawn", "wait"]
+    );
     let spawn =
         serde_json::from_value::<SpawnAgentAction>(json!({"action":"spawn","task":"inspect"}))
             .expect("spawn defaults");
-    assert!(
-        matches!(spawn, SpawnAgentAction::Spawn { agent, isolation: SubagentIsolation::Worktree, .. } if agent == "general")
-    );
+    assert!(matches!(
+        spawn,
+        SpawnAgentAction::Spawn { agent, isolation: SubagentIsolation::Worktree, background: true, .. }
+            if agent == "general"
+    ));
     for action in ["cancel", "close"] {
         assert!(
-            serde_json::from_value::<SpawnAgentAction>(
-                json!({"action":action,"subagent_id":"child"})
-            )
-            .is_ok()
+            serde_json::from_value::<SpawnAgentAction>(json!({"action":action,"id":"child"}))
+                .is_ok()
         );
         assert!(serde_json::from_value::<SpawnAgentAction>(json!({"action":action})).is_err());
     }
-}
-
-#[tokio::test]
-async fn background_start_lists_and_delivers_results_after_the_invocation_returns() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let factory = Arc::new(FakeFactory::default());
-    let owner = orchestrator(SubagentLimits::default(), factory.clone());
-    let metadata = Arc::new(RecordingMetadataStore::default());
-    owner.bind_metadata_store(metadata.clone());
-    let mut agents =
-        rw_ext::compose_agent_registry(&rw_ext::ExtensionCatalog::default()).expect("agents");
-    agents
-        .resolve_tool_names(std::iter::empty())
-        .expect("tools");
-    let tool = SpawnAgentTool::new(
-        owner.clone(),
-        Arc::new(agents),
-        Arc::new(|| Ok(Arc::new(SelectedModel) as Arc<dyn crate::ModelDriver>)),
-    );
-    let sink = Arc::new(RecordingSubagentSink::default());
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_session_id(SessionId("parent".into()))
-        .with_model_alias("openai_codex/gpt-5.6-sol")
-        .with_background_subagent_event_sink(sink.clone());
-    let started = tokio::time::timeout(
-        Duration::from_millis(100),
-        tool.execute(
-            &context,
-            json!({"action":"start","task":"delay:250","agent":"explore","isolation":"shared"}),
-        ),
-    )
-    .await
-    .expect("start must not await child completion")
-    .expect("start");
-    let id = started.data["subagent_id"].clone();
-    assert_eq!(started.data["completed"], false);
-    let listed = tool
-        .execute(&context, json!({"action":"list"}))
-        .await
-        .expect("list");
-    assert_eq!(listed.data["children"][0]["activity"], "running");
-    assert!(tool.session_activity(&SessionId("parent".into())).is_some());
-    let stranger = ToolContext::new(workspace.path())
-        .expect("stranger")
-        .with_session_id(SessionId("other-parent".into()));
-    assert!(
-        tool.execute(&stranger, json!({"action":"wait","subagent_id":id}))
-            .await
-            .is_err()
-    );
-    context.cancellation.cancel();
-    // Ending the invoking turn does not cancel the session-owned child.
-    let next_turn = ToolContext::new(workspace.path())
-        .expect("next turn")
-        .with_session_id(SessionId("parent".into()));
-    let result = tool
-        .execute(&next_turn, json!({"action":"wait","subagent_id":id}))
-        .await
-        .expect("result");
-    assert_eq!(result.data["status"], "completed");
-    assert_eq!(sink.lifecycles.lock().expect("lifecycle").len(), 2);
-    tool.end_session(&SessionId("parent".into()))
-        .await
-        .expect("close children");
-    assert!(
-        owner
-            .list_for_parent(&SessionId("parent".into()))
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn background_children_cancel_and_settle_on_session_close() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let factory = Arc::new(FakeFactory::default());
-    let owner = orchestrator(SubagentLimits::default(), factory.clone());
-    let mut agents =
-        rw_ext::compose_agent_registry(&rw_ext::ExtensionCatalog::default()).expect("agents");
-    agents
-        .resolve_tool_names(std::iter::empty())
-        .expect("tools");
-    let tool = SpawnAgentTool::new(
-        owner.clone(),
-        Arc::new(agents),
-        Arc::new(|| Ok(Arc::new(SelectedModel) as Arc<dyn crate::ModelDriver>)),
-    );
-    let sink = Arc::new(RecordingSubagentSink::default());
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_session_id(SessionId("parent".into()))
-        .with_model_alias("openai_codex/gpt-5.6-sol")
-        .with_background_subagent_event_sink(sink.clone());
-    assert!(
-        tool.execute(
-            &context,
-            json!({"action":"start","task":"unsafe","agent":"general","isolation":"shared"})
-        )
-        .await
-        .is_err()
-    );
-    tool.execute(
-        &context,
-        json!({"action":"start","task":"delay:10000","agent":"explore","isolation":"shared"}),
-    )
-    .await
-    .expect("start");
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        tool.end_session(&SessionId("parent".into())),
-    )
-    .await
-    .expect("shutdown bounded")
-    .expect("shutdown settles child");
-    assert!(
-        owner
-            .list_for_parent(&SessionId("parent".into()))
-            .is_empty()
-    );
-    let events = sink.lifecycles.lock().expect("events");
-    assert!(
-        matches!(events.last(), Some(SubagentLifecycleEvent::Finished { result, .. }) if result.status == SubagentStatus::Cancelled)
-    );
 }
 
 #[tokio::test]

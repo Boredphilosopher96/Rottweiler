@@ -5,7 +5,7 @@ import {
 } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { createRottweilerApp } from "../../src/app"
-import { ContextPanelRenderable, SubagentPanelRenderable, SubagentTrayRenderable } from "../../src/components"
+import { AgentsStripRenderable, ContextPanelRenderable, SubagentPanelRenderable, agentsStripEntries, type AgentsStripInput } from "../../src/components"
 import {
   type EngineEvent
 } from "../../src/protocol"
@@ -129,10 +129,11 @@ describe("subagents components", () => {
     await setup.flush()
 
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Ctrl+G inspect · click a row to open")
+    expect(frame).toContain("Ctrl+G agents")
     expect(frame).toContain("Inspect provider boundaries · using tool · read")
     expect(frame).toContain("1m23s")
-    expect(app.subagentTray.rows.size).toBe(2)
+    // The child that finished before this client attached is not replayed into the strip.
+    expect([...app.agentsStrip.rows.keys()]).toEqual(["explore"])
     expect(
       app.transcript.streamingCard
         .getChildren()
@@ -160,8 +161,9 @@ describe("subagents components", () => {
       subagents: { tests: initial.subagents.tests! },
     })
     await setup.flush()
-    expect(app.transcript.mountedCards.get("9")?.header.plainText).toContain("2 files · diff ready")
-    expect(app.transcript.mountedCards.get("9")?.markdown.content).toContain("Added deterministic coverage")
+    // The child row stays one line; its report appears once, in the result card.
+    expect(app.transcript.mountedCards.get("9")?.header.plainText).toBe("↳ Agent · Add orchestration tests · completed · 2 files · diff ready")
+    expect(app.transcript.mountedCards.get("9")?.markdown.content).toBe("")
 
     expect(app.transcript.mountedCards.get("1")).toBe(retained)
     const many = Object.fromEntries(
@@ -190,8 +192,8 @@ describe("subagents components", () => {
       subagents: many,
     })
     await setup.flush()
-    expect(app.subagentTray.rows.size).toBe(6)
-    expect(app.subagentTray.more.plainText).toBe("… 14 more · Ctrl+G")
+    expect([...app.agentsStrip.rows.keys()]).toEqual(["child-0", "child-1", "child-2", "child-3"])
+    expect(app.agentsStrip.more.visible).toBeFalse()
   })
 
   test("opens an exact child transcript from a clicked tree row", async () => {
@@ -222,134 +224,104 @@ describe("subagents components", () => {
     expect(opened).toEqual(["child-exact"])
   })
 
-  test("opens an exact child transcript from a clicked tray row", async () => {
+  test("opens an exact child transcript from a clicked strip row", async () => {
     const setup = await createTestRenderer({ width: 100, height: 12, useThread: false })
     renderer = setup.renderer
     const opened: string[] = []
-    const tray = new SubagentTrayRenderable(renderer, kennelTheme, (subagentId) => {
+    const strip = new AgentsStripRenderable(renderer, kennelTheme, (subagentId) => {
       opened.push(subagentId)
     })
-    const state: RottweilerState = {
-      ...createInitialState(),
-      turns: {
-        "1": { turnId: "1", status: "running", usage: null, cost: null, timing: { kind: "unknown" } },
-      },
-      subagentOrder: ["child-row"],
-      subagents: {
-        "child-row": {
-          projectionId: "child-row",
-          subagentId: "child-exact",
-          parentTurnId: "1",
-          task: "Inspect the provider layer",
-          spawnedAtMs: 1_000,
-          status: "running",
-          childSessionId: "child-session",
-          lastChildSequence: "3",
-          activity: "using tool · read · components/transcript.ts",
-          summary: null,
-          touchedFileCount: 0,
-          diffArtifactId: null,
-        },
-      },
-    }
-    tray.update(state, 84_000)
-    renderer.root.add(tray)
+    strip.update(stripInput([child("child-row", "running", { subagentId: "child-exact", activity: "using tool · read" })]), 84_000)
+    renderer.root.add(strip)
     await setup.renderOnce()
-    expect(tray.rows.get("child-row")?.plainText).toContain("1m23s")
-    const row = tray.rows.get("child-row")!
+    expect(strip.rows.get("child-row")?.plainText).toBe("◌ explore · Inspect child-row · using tool · read · 1m23s")
+    const row = strip.rows.get("child-row")!
     await setup.mockMouse.click(row.x + 2, row.y)
     expect(opened).toEqual(["child-exact"])
   })
 
-  test("bounds the persistent subagent tray and keeps running children visible", async () => {
+  test("bounds the agents strip and keeps running children first", async () => {
     const setup = await createTestRenderer({ width: 100, height: 14, useThread: false })
     renderer = setup.renderer
-    const tray = new SubagentTrayRenderable(renderer, kennelTheme, () => { })
-    const subagents: RottweilerState["subagents"] = Object.fromEntries(
-      Array.from({ length: 9 }, (_, index) => [
-        `child-${index}`,
-        {
-          projectionId: `child-${index}`,
-          subagentId: `child-${index}`,
-          parentTurnId: "1",
-          task: `Inspect child ${index}`,
-          spawnedAtMs: 1_000,
-          status: index < 7 ? ("running" as const) : ("completed" as const),
-          childSessionId: `session-${index}`,
-          lastChildSequence: String(index),
-          activity: index < 7 ? "working" : "finished",
-          summary: null,
-          touchedFileCount: 0,
-          diffArtifactId: null,
-        },
-      ]),
-    )
-    tray.update({
-      ...createInitialState(),
-      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
-      subagentOrder: Object.keys(subagents),
-      subagents,
-    }, 84_000)
-    renderer.root.add(tray)
+    const strip = new AgentsStripRenderable(renderer, kennelTheme, () => { })
+    const children = Array.from({ length: 9 }, (_, index) => child(`child-${index}`, index < 7 ? "running" : "completed"))
+    const state = stateWith(children)
+    const entries = agentsStripEntries(state, new Set(), new Set(children.map((subagent) => subagent.projectionId)))
+    strip.update({ ...stripInput(entries), backgroundKey: "Ctrl+B" }, 84_000)
+    renderer.root.add(strip)
     await setup.renderOnce()
-    expect(tray.rows.size).toBe(6)
-    expect([...tray.rows.keys()]).toEqual(Array.from({ length: 6 }, (_, index) => `child-${index}`))
-    expect(tray.more.plainText).toBe("… 3 more · Ctrl+G")
-    expect(tray.footer.plainText).toBe("╰ Ctrl+G inspect · click a row to open")
+    expect([...strip.rows.keys()]).toEqual(Array.from({ length: 5 }, (_, index) => `child-${index}`))
+    expect(strip.more.plainText).toBe("… 4 more")
+    expect(strip.footer.plainText).toBe("╰ Ctrl+B background · Ctrl+G agents")
   })
 
-  test("retains finished children after the parent turn leaves the live tail", async () => {
+  test("keeps finished children dimmed until they are hidden", async () => {
     const setup = await createTestRenderer({ width: 100, height: 14, useThread: false })
     renderer = setup.renderer
-    const tray = new SubagentTrayRenderable(renderer, kennelTheme, () => {})
-    const state: RottweilerState = { ...createInitialState(), subagentOrder: ["done"], subagents: {
-      done: { projectionId: "done", subagentId: "done", parentTurnId: "1", task: "Inspect code",
-        spawnedAtMs: 1, status: "completed", childSessionId: "child", lastChildSequence: "3",
-        activity: null, summary: "Done", touchedFileCount: 0, diffArtifactId: null,
-        cost: { kind: "monetary", amount_micros: "12500", currency: "USD" } },
-    } }
-    tray.update(state)
+    const strip = new AgentsStripRenderable(renderer, kennelTheme, () => {})
+    const done = child("done", "completed", { cost: { kind: "monetary", amount_micros: "12500", currency: "USD" } })
+    const state = stateWith([done])
+    expect(agentsStripEntries(state, new Set(), new Set())).toEqual([])
+    strip.update(stripInput(agentsStripEntries(state, new Set(), new Set(["done"]))))
     const panel = new ContextPanelRenderable(renderer, kennelTheme, {})
     panel.update(state)
-    renderer.root.add(tray)
+    renderer.root.add(strip)
     await setup.renderOnce()
     expect(panel.agents.options[0]?.name).toContain("USD 0.0125")
     expect(panel.agentsTitle.plainText).toContain("1 finished")
     panel.destroy()
-    expect(tray.visible).toBeTrue()
-    expect(tray.rows.get("done")?.plainText).toContain("completed")
+    expect(strip.visible).toBeTrue()
+    expect(strip.rows.get("done")?.plainText).toContain("completed · USD 0.0125")
+    expect(strip.footer.plainText).toContain("hidden after your next message")
+    strip.update(stripInput(agentsStripEntries(state, new Set(["done"]), new Set(["done"]))))
+    expect(strip.visible).toBeFalse()
   })
 
-  test("bounds a composed subagent tray row to its measured content width", async () => {
+  test("bounds a composed strip row to its measured content width", async () => {
     const setup = await createTestRenderer({ width: 32, height: 12, useThread: false })
     renderer = setup.renderer
-    const tray = new SubagentTrayRenderable(renderer, kennelTheme, () => { })
-    tray.update({
-      ...createInitialState(),
-      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } },
-      subagentOrder: ["child-wide"],
-      subagents: {
-        "child-wide": {
-          projectionId: "child-wide",
-          subagentId: "child-wide",
-          parentTurnId: "1",
-          task: "界".repeat(48),
-          spawnedAtMs: 1_000,
-          status: "running",
-          childSessionId: "child-session",
-          lastChildSequence: "3",
-          activity: "👨‍👩‍👧‍👦 reviewing the terminal layout with a long status",
-          summary: null,
-          touchedFileCount: 0,
-          diffArtifactId: null,
-        },
-      },
-    }, 84_000)
-    renderer.root.add(tray)
+    const strip = new AgentsStripRenderable(renderer, kennelTheme, () => { })
+    strip.update(stripInput([child("child-wide", "running", {
+      task: "界".repeat(48),
+      activity: "👨‍👩‍👧‍👦 reviewing the terminal layout with a long status",
+    })]), 84_000)
+    renderer.root.add(strip)
     await setup.renderOnce()
 
-    const row = tray.rows.get("child-wide")!
+    const row = strip.rows.get("child-wide")!
     expect(stringCellWidth(row.plainText)).toBeLessThanOrEqual(28)
     expect(row.plainText.endsWith("…")).toBe(true)
   })
 })
+
+type Projection = RottweilerState["subagents"][string]
+
+function child(id: string, status: Projection["status"], overrides: Partial<Projection> = {}): Projection {
+  return {
+    projectionId: id,
+    subagentId: id,
+    parentTurnId: "1",
+    task: `Inspect ${id}`,
+    spawnedAtMs: 1_000,
+    status,
+    childSessionId: `session-${id}`,
+    lastChildSequence: "3",
+    activity: status === "running" ? "working" : null,
+    summary: null,
+    touchedFileCount: 0,
+    diffArtifactId: null,
+    ...overrides,
+  }
+}
+
+function stateWith(children: readonly Projection[]): RottweilerState {
+  return {
+    ...createInitialState(),
+    subagentOrder: children.map((subagent) => subagent.projectionId),
+    subagents: Object.fromEntries(children.map((subagent) => [subagent.projectionId, subagent])),
+  }
+}
+
+function stripInput(entries: readonly Projection[]): AgentsStripInput {
+  return { entries, agentName: () => "explore", agentsKey: "Ctrl+G", backgroundKey: null }
+}

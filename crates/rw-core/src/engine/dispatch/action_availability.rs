@@ -177,8 +177,7 @@ pub(super) fn slash_action(name: &str) -> Option<SessionActionKind> {
     match name {
         "rewind" => Some(SessionActionKind::Rewind),
         "review" => Some(SessionActionKind::Review),
-        "fork" => Some(SessionActionKind::Fork),
-        "add-dir" => Some(SessionActionKind::AddWorkspaceRoot),
+        "dirs" => Some(SessionActionKind::AddWorkspaceRoot),
         _ => None,
     }
 }

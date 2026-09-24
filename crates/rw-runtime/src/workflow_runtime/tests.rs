@@ -88,7 +88,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for TypedComman
                 content: format!("typed-command-prelude:{}", invocation.arguments()),
                 model_alias: None,
                 allowed_tools: Some(Vec::new()),
-                permission_patterns: Vec::new(),
+                pre_approvals: Vec::new(),
                 tool_calls: Vec::new(),
             },
         })

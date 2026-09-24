@@ -38,6 +38,9 @@ export interface ModePickerPresentation {
   readonly items: readonly {
     readonly id: string
     readonly label: string
+    readonly marker?: string
+    readonly hint?: string
+    readonly tone?: "error"
     readonly description: string
     readonly value: ModePickerValue
   }[]
@@ -57,7 +60,8 @@ export function modePickerPresentation(
         : ""
   const items: ModePickerPresentation["items"][number][] = state.modes.map((mode) => ({
     id: `mode:${mode.id}`,
-    label: `${mode.id === state.mode ? "● " : ""}${modeDisplayName(mode.id)}`,
+    label: modeDisplayName(mode.id),
+    ...(mode.id === state.mode ? { marker: "●", hint: "current" } : {}),
     description: boundedUiText(mode.description, 160),
     value: { kind: "mode", id: mode.id },
   }))
@@ -65,11 +69,12 @@ export function modePickerPresentation(
     items.unshift({
       id: "modes.retry",
       label: "Retry loading modes",
+      tone: "error",
       description: boundedUiText(error, 160),
       value: { kind: "retry" },
     })
   }
-  return { title: `Modes${status}`, items }
+  return { title: `MODE${status}   /mode`, items }
 }
 
 export function nextModeId(
@@ -154,7 +159,7 @@ export function providerStatusDetail(provider: ProviderProjection): string {
 }
 
 export function contextPanelHasContent(state: RottweilerState): boolean {
-  const statusPaths = state.workspaceStatus?.changedPaths
+  const statusPaths = state.workspaceStatus?.changes
   const hasChangedFiles = statusPaths === undefined
     ? (state.review?.files.length ?? 0) > 0
     : statusPaths.length > 0

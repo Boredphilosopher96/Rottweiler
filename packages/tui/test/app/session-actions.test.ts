@@ -8,6 +8,7 @@ import {
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select, statusText } from "../picker-screen"
 
 describe("Rottweiler session-actions", () => {
   let renderer: TestRenderer | undefined
@@ -38,30 +39,27 @@ describe("Rottweiler session-actions", () => {
 
     app.openCommandPicker()
     const paletteOptions = app.commandPalette.itemIds
-    const planIndex = paletteOptions.indexOf("plan.show")
-    const queueIndex = paletteOptions.indexOf("queue.manage")
-    const costIndex = paletteOptions.indexOf("cost.show")
-    expect(queueIndex).toBe(planIndex + 1)
-    expect(costIndex).toBeGreaterThan(queueIndex)
-    app.commandPalette.selectById("queue.manage")
-    expect(app.commandPalette.detail.plainText).toContain("Manage queued messages")
+    const compactIndex = paletteOptions.indexOf("cmd.compact")
+    const queueIndex = paletteOptions.indexOf("cmd.queue")
+    const usageIndex = paletteOptions.indexOf("cmd.usage")
+    expect(queueIndex).toBe(compactIndex + 1)
+    expect(usageIndex).toBeGreaterThan(queueIndex)
+    app.commandPalette.selectById("cmd.queue")
+    expect(app.commandPalette.detail.plainText).toContain("Queued messages")
     expect(app.commandPalette.detail.plainText).toContain("Review, remove, or clear queued messages")
     app.commandPalette.activateSelected()
 
-    expect(app.picker.title).toContain("Queued work")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    expect(app.picker.screenTitle).toContain("QUEUED WORK")
+    expect(app.picker.sectionLabels).toEqual(["Messages"])
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "Remove this instruction",
       "Keep this instruction",
-      "Clear all queued messages",
     ])
-    expect(app.picker.select.options.map((option) => option.description)).toEqual([
-      "queued",
-      "queued",
-      "Remove every queued message",
-    ])
+    expect(app.picker.items.map((item) => item.hint)).toEqual(["#1", "#2"])
+    expect(app.picker.footer.plainText).toBe("⏎ remove · ctrl+l clear all · esc close")
 
-    app.picker.select.setSelectedIndex(0)
-    app.picker.select.selectCurrent()
+    select(app.picker, 0)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "remove_queued_message",
@@ -80,7 +78,7 @@ describe("Rottweiler session-actions", () => {
       position: "1",
     })
     expect(app.picker.visible).toBeTrue()
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "Keep this instruction",
     ])
 
@@ -96,12 +94,7 @@ describe("Rottweiler session-actions", () => {
       content: "Another queued instruction",
       attachments: [],
     })
-    const clearIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "queued.messages.clear",
-    )
-    expect(clearIndex).toBeGreaterThanOrEqual(0)
-    app.picker.select.setSelectedIndex(clearIndex)
-    app.picker.select.selectCurrent()
+    setup.mockInput.pressKey("l", { ctrl: true })
     await Bun.sleep(0)
     expect(app.picker.visible).toBeFalse()
     expect(emitted).toContainEqual(expect.objectContaining({
@@ -123,11 +116,11 @@ describe("Rottweiler session-actions", () => {
     renderer.root.add(app)
 
     app.openQueuedMessagesPicker()
-    expect(app.picker.status.plainText).toContain("No queued messages")
-    expect(app.picker.status.visible).toBeTrue()
-    expect(app.picker.select.visible).toBeFalse()
-    expect(app.picker.select.options).toHaveLength(0)
-    app.picker.select.selectCurrent()
+    expect(statusText(app.picker)).toContain("Nothing is queued")
+    expect((app.picker.mode === "status")).toBeTrue()
+    expect((app.picker.mode === "list")).toBeFalse()
+    expect(options(app.picker)).toHaveLength(0)
+    app.picker.activateSelected()
     expect(emitted.filter((command) =>
       command.type === "remove_queued_message" || command.type === "clear_queued_messages"
     )).toEqual([])
@@ -158,7 +151,7 @@ describe("Rottweiler session-actions", () => {
     )).toEqual([])
   })
 
-  test("exports the live session through the Conversation palette picker and path prompt", async () => {
+  test("exports the live session from the Sessions screen through the format picker and path prompt", async () => {
     const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
@@ -174,29 +167,30 @@ describe("Rottweiler session-actions", () => {
     renderer.root.add(app)
 
     app.openCommandPicker()
-    const paletteOptions = app.commandPalette.itemIds
-    const reviewIndex = paletteOptions.indexOf("review.open")
-    const exportIndex = paletteOptions.indexOf("session.export")
-    expect(exportIndex).toBeLessThan(reviewIndex)
-    app.commandPalette.selectById("session.export")
-    expect(app.commandPalette.detail.plainText).toContain("Export session")
-    expect(app.commandPalette.detail.plainText).toContain("Save this session's transcript to a file")
+    app.commandPalette.selectById("cmd.resume")
+    expect(app.commandPalette.detail.plainText).toContain("Resume, rename, or export a session")
     app.commandPalette.activateSelected()
+    const list = emitted.findLast((command) => command.type === "list_sessions")
+    if (list?.type !== "list_sessions") throw new Error("missing session list")
+    app.handleEvent({ type: "sessions_listed", meta: { ...list.meta, emitted_at: "2026-01-01T00:00:00Z" }, sessions: [] })
+    expect(app.picker.footer.plainText).toContain("ctrl+x export")
+    setup.mockInput.pressKey("x", { ctrl: true })
 
-    expect(app.picker.title).toContain("Export session")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    expect(app.picker.screenTitle).toContain("EXPORT SESSION")
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "Markdown",
       "HTML",
       "JSON",
     ])
-    expect(app.picker.select.options.map((option) => option.description)).toEqual([
+    expect(options(app.picker).map((option) => option.description)).toEqual([
       "Readable text",
       "Formatted for a browser",
       "Structured data",
     ])
-    app.picker.select.setSelectedIndex(1)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Save to path, e.g. ~/transcript.md")
+    select(app.picker, 1)
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toBe("EXPORT › HTML")
+    expect(statusText(app.picker)).toContain("Path for the HTML transcript")
     expect(app.picker.input.placeholder).toBe("~/rottweiler-export.html")
 
     await setup.mockInput.typeText("~/rottweiler-session-export.html")
@@ -255,7 +249,7 @@ describe("Rottweiler session-actions", () => {
     renderer.root.add(app)
 
     app.openExportSessionPicker()
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     await setup.mockInput.typeText("/tmp/existing-transcript.md")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
@@ -264,12 +258,14 @@ describe("Rottweiler session-actions", () => {
       code: "host_query_failure",
       message: "export output already exists; pass --force to replace it",
     })
-    expect(app.picker.title).toContain("Overwrite existing file?")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    expect(app.picker.screenTitle).toContain("File exists")
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "Overwrite",
-      "Cancel",
+      "Keep existing file",
     ])
-    app.picker.select.selectCurrent()
+    expect(app.picker.selectedItem?.label).toBe("Keep existing file")
+    app.picker.selectById("export.overwrite.confirm")
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(emitted.filter((command) => command.type === "export_session")).toEqual([
       expect.objectContaining({
@@ -322,27 +318,23 @@ describe("Rottweiler session-actions", () => {
 
     app.openCommandPicker()
     const paletteOptions = app.commandPalette.itemIds
-    const addIndex = paletteOptions.indexOf("workspace.add")
-    const rootsIndex = paletteOptions.indexOf("workspace.roots")
-    const trustIndex = paletteOptions.indexOf("trust.manage")
-    expect(rootsIndex).toBe(addIndex + 1)
-    expect(trustIndex).toBeGreaterThan(rootsIndex)
-    app.commandPalette.selectById("workspace.roots")
-    expect(app.commandPalette.detail.plainText).toContain("Workspace roots")
-    expect(app.commandPalette.detail.plainText).toContain("See every live workspace root")
+    const reviewIndex = paletteOptions.indexOf("cmd.review")
+    const dirsIndex = paletteOptions.indexOf("cmd.dirs")
+    const permissionsIndex = paletteOptions.indexOf("cmd.permissions")
+    expect(dirsIndex).toBe(reviewIndex + 1)
+    expect(permissionsIndex).toBeGreaterThan(dirsIndex)
+    app.commandPalette.selectById("cmd.dirs")
+    expect(app.commandPalette.detail.plainText).toContain("Directories")
+    expect(app.commandPalette.detail.plainText).toContain("List workspace roots or add one")
     app.commandPalette.activateSelected()
 
-    expect(app.picker.title).toContain("Workspace roots")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+    expect(app.picker.screenTitle).toContain("WORKSPACE")
+    expect(options(app.picker).map((option) => option.name)).toEqual([
       "/workspace/primary",
       "/workspace/additional",
     ])
-    expect(app.picker.select.options.map((option) => option.description)).toEqual([
-      "primary",
-      "additional",
-    ])
-    app.picker.select.selectCurrent()
-    expect(app.picker.visible).toBeFalse()
+    expect(app.picker.items.map((item) => item.hint)).toEqual(["primary", "added"])
+    expect(app.picker.footer.plainText).toBe("esc close")
   })
 
   test("shows workspace-root loading state before the live inventory arrives", async () => {
@@ -353,10 +345,10 @@ describe("Rottweiler session-actions", () => {
 
     app.openWorkspaceRootsPicker()
 
-    expect(app.picker.title).toContain("Workspace roots")
-    expect(app.picker.status.plainText).toContain("Loading workspace roots")
-    expect(app.picker.status.visible).toBeTrue()
-    expect(app.picker.select.visible).toBeFalse()
-    expect(app.picker.select.options).toHaveLength(0)
+    expect(app.picker.screenTitle).toContain("WORKSPACE")
+    expect(statusText(app.picker)).toContain("Loading workspace directories")
+    expect((app.picker.mode === "status")).toBeTrue()
+    expect((app.picker.mode === "list")).toBeFalse()
+    expect(options(app.picker)).toHaveLength(0)
   })
 })

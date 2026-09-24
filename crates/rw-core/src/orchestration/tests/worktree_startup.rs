@@ -108,17 +108,7 @@ async fn rejected_child_configuration_proves_worktree_cleanup_before_releasing_a
                 "partial child work"
             );
             assert!(orchestrator.settle_startups().await.is_err());
-            assert!(matches!(
-                orchestrator
-                    .start(
-                        SessionId("parent".to_owned()),
-                        request,
-                        Arc::new(RecordingObserver::default()),
-                        CancellationToken::default()
-                    )
-                    .await,
-                Err(OrchestrationError::ConcurrencyExceeded { .. })
-            ));
+            super::assert_capacity_retained(&orchestrator, request).await;
         } else {
             assert!(matches!(error, OrchestrationError::Session(_)));
             assert!(!path.exists());

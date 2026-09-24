@@ -361,7 +361,7 @@ describe("standard TUI keyboard safety", () => {
     })
     renderer.root.add(app)
 
-    app.composer.value = "/status"
+    app.composer.value = "/usage"
     expect(await app.composer.submit()).toBeTrue()
     app.composer.value = "/cost"
     expect(await app.composer.submit()).toBeTrue()
@@ -373,7 +373,7 @@ describe("standard TUI keyboard safety", () => {
     expect(app.composer.value).toBe("/cost")
     expect(app.picker.visible).toBeFalse()
     setup.mockInput.pressArrow("up")
-    expect(app.composer.value).toBe("/status")
+    expect(app.composer.value).toBe("/usage")
     expect(app.picker.visible).toBeFalse()
     // Production OpenTUI can publish a deferred/duplicate content notification
     // after programmatic history restoration. It must not erase the cursor and
@@ -439,13 +439,13 @@ describe("Vim TUI interaction", () => {
     app.transcript.selectNextBlock()
 
     setup.mockInput.pressEnter()
-    expect(block?.markdown.visible).toBeFalse()
+    expect(block?.expanded).toBeFalse()
     expect(app.composer.value).toBe("")
 
     setup.mockInput.pressTab()
     expect(app.composer.hintText.plainText).toContain("NORMAL")
     setup.mockInput.pressEnter()
-    expect(block?.markdown.visible).toBeTrue()
+    expect(block?.expanded).toBeTrue()
   })
 
   test("leaves insert mode before double Escape interrupts", async () => {

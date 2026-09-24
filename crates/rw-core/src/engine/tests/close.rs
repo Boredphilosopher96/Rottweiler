@@ -74,11 +74,12 @@ impl Tool for CleanupTool {
         let callback = self.callback.lock().expect("callback").take();
         if let Some(handle) = callback {
             handle
-                .record_subagent_spawned(
-                    SubagentId("cleanup-child".to_owned()),
-                    SessionId("cleanup-child-session".to_owned()),
-                    "closing child acknowledgement".to_owned(),
-                )
+                .background_subagent_event_sink()
+                .lifecycle(rw_tools::SubagentLifecycleEvent::Spawned {
+                    subagent_id: SubagentId("cleanup-child".to_owned()),
+                    child_session_id: SessionId("cleanup-child-session".to_owned()),
+                    task: "closing child acknowledgement".to_owned(),
+                })
                 .await
                 .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))?;
         }

@@ -197,6 +197,9 @@ pub(super) fn lazy_live_provider_model(
         user_config_path: user_config_path.clone(),
         project_config_path: project_config_path.clone(),
     });
+    // The private catalog cache lives in the configuration root beside the
+    // user configuration; it only seeds context limits for the selection.
+    let catalog_cache = user_config_path.with_file_name("model-catalog.json");
     let initial_model: Arc<dyn ModelDriver> = Arc::new(UnavailableHostedModel {
         alias: persisted_model_alias.clone(),
         reason: "the provider has not been connected for this session yet".to_owned(),
@@ -249,13 +252,16 @@ pub(super) fn lazy_live_provider_model(
         redactor,
     );
 
-    Arc::new(RecomposableHostedModel::new_lazy(
-        initial_model,
-        persisted_model_alias,
-        fallback_catalog,
-        activate,
-        initialize,
-    ))
+    Arc::new(
+        RecomposableHostedModel::new_lazy(
+            initial_model,
+            persisted_model_alias,
+            fallback_catalog,
+            activate,
+            initialize,
+        )
+        .with_catalog_cache(catalog_cache),
+    )
 }
 
 // Called only inside the already-owned blocking preparation worker. A new

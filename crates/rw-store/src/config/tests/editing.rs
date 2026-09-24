@@ -641,6 +641,34 @@ fn first_concrete_selection_seeds_user_default_without_overwriting_it() {
 }
 
 #[test]
+fn first_concrete_selection_seeds_a_handwritten_provider_only_user_config() {
+    let root = tempdir().expect("root");
+    let user = root.path().join("user/config.toml");
+    let first = root.path().join("first/.rottweiler/config.toml");
+    let second = root.path().join("second/.rottweiler/config.toml");
+    fs::create_dir_all(user.parent().expect("user")).expect("user directory");
+    fs::create_dir_all(first.parent().expect("first")).expect("directory");
+    fs::create_dir_all(second.parent().expect("second")).expect("directory");
+    fs::write(&user, "[providers.openai_codex]\nkind = \"openai_codex\"\n").expect("user config");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&user, fs::Permissions::from_mode(0o600)).expect("private config");
+    }
+
+    ConfigLoader::new(user.clone(), first)
+        .persist_tui_project_model("openai_codex/gpt-5.6-terra")
+        .expect("first selection");
+
+    let next = ConfigLoader::new(user.clone(), second)
+        .load()
+        .expect("config")
+        .config;
+    assert_eq!(next.models.default, "openai_codex/gpt-5.6-terra");
+    assert!(next.providers.contains_key("openai_codex"));
+}
+
+#[test]
 fn compatible_setup_is_atomic_private_and_preserves_existing_model_choice() {
     let root = tempdir().expect("root");
     let user = root.path().join("user/config.toml");

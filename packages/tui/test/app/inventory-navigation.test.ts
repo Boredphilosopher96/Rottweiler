@@ -7,6 +7,7 @@ import {
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select } from "../picker-screen"
 
 describe("Rottweiler inventory-navigation", () => {
   let renderer: TestRenderer | undefined
@@ -76,13 +77,13 @@ describe("Rottweiler inventory-navigation", () => {
     app.mcpBrowser.selectById("mcp.server.docs.remote")
     expect(app.mcpBrowser.activateSelected()).toBeTrue()
     expect(app.mcpBrowser.visible).toBeFalse()
-    expect(app.picker.title).toContain("MCP actions · docs.remote")
+    expect(app.picker.screenTitle).toBe("MCP › docs.remote")
 
     app.closePicker()
     app.openMcpPicker()
     app.mcpBrowser.selectById("mcp.add.http")
     expect(app.mcpBrowser.activateSelected()).toBeTrue()
-    expect(app.picker.title).toContain("Add remote MCP server")
+    expect(app.picker.screenTitle).toContain("Add remote MCP server")
   })
 
   test("keeps cached MCP rows on list failure, retries, and collapses below 108 columns", async () => {
@@ -123,7 +124,8 @@ describe("Rottweiler inventory-navigation", () => {
     expect(app.mcpBrowser.itemIds).toContain("mcp.server.broken.remote")
     expect(app.mcpBrowser.itemIds).toContain("mcp.retry")
     expect(app.mcpBrowser.footer.plainText).toContain("MCP discovery timed out")
-    setup.mockInput.pressKey("r", { ctrl: true })
+    app.mcpBrowser.selectById("mcp.retry")
+    app.mcpBrowser.activateSelected()
     await Bun.sleep(0)
     expect(attempts).toBe(2)
 
@@ -186,10 +188,13 @@ describe("Rottweiler inventory-navigation", () => {
     await setup.mockInput.typeText("docs")
     app.mcpBrowser.selectById("mcp.server.docs.remote")
     app.mcpBrowser.activateSelected()
-    const remove = app.picker.select.options.findIndex((option) => option.value === "mcp.remove.docs.remote")
-    app.picker.select.setSelectedIndex(remove)
-    app.picker.select.selectCurrent()
+    const remove = options(app.picker).findIndex((option) => option.value === "mcp.remove.docs.remote")
+    select(app.picker, remove)
+    app.picker.activateSelected()
     await setup.renderOnce()
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.picker.screenTitle).toBe("MCP › docs.remote")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expectRestored()
@@ -214,18 +219,19 @@ describe("Rottweiler inventory-navigation", () => {
       onCommand: readyCatalog(() => app),
       initialState: {
         ...createInitialState(),
-        models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true }],
+        models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true, contextTokens: null }],
       },
     })
     renderer.root.add(app)
-    await setup.mockInput.typeText("/")
-    await setup.mockInput.typeText("switch model")
+    await setup.mockInput.typeText("/mod")
     await Bun.sleep(0)
-    app.commandPalette.activateSelected()
+    expect(app.slashPopup.selectedId).toBe("cmd.model")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
     await setup.renderOnce()
 
     expect(app.composer.value).toBe("")
-    expect(app.picker.title).toContain("Models")
+    expect(app.picker.screenTitle).toContain("MODELS")
   })
 
   test("scrolls the Ctrl-P viewport without moving selection and activates the exact mouse row", async () => {
@@ -248,10 +254,10 @@ describe("Rottweiler inventory-navigation", () => {
 
     app.commandPalette.input.value = "command-"
     await setup.renderOnce()
-    expect(app.commandPalette.selectedId).toBe("slash.command-0")
+    expect(app.commandPalette.selectedId).toBe("ext.command-0")
     expect(app.commandPalette.scrollOffset).toBe(0)
     await setup.mockMouse.scroll(app.commandPalette.listPane.x + 2, app.commandPalette.listPane.y + 1, "down")
-    expect(app.commandPalette.selectedId).toBe("slash.command-0")
+    expect(app.commandPalette.selectedId).toBe("ext.command-0")
     expect(app.commandPalette.scrollOffset).toBe(1)
     await setup.mockMouse.click(app.commandPalette.listPane.x + 2, app.commandPalette.listPane.y)
     expect(app.commandPalette.visible).toBeFalse()

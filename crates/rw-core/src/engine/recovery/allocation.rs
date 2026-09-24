@@ -112,7 +112,7 @@ fn head_heap(head: &RecoveryHead) -> Option<usize> {
         }),
         heap(&head.plugin_statuses),
         heap(&head.completions.pending),
-        vector(&head.completions.retained, |_| Some(0)),
+        vector(&head.completions.undelivered, |_| Some(0)),
         head.accounting.retained_heap_bytes(),
         heap(&control.driver),
         heap(&control.mode_id),

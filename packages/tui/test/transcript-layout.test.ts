@@ -278,7 +278,7 @@ describe("retained transcript layout", () => {
     )
   }, 20_000)
 
-  test("labels every live turn ending and retains compaction completion", async () => {
+  test("labels abnormal live turn endings, keeps normal completion quiet, and retains compaction completion", async () => {
     renderer = await createTestRenderer({ width: 80, height: 24, useThread: false })
     const initial = createInitialState()
     const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader, initialState: initial })
@@ -290,8 +290,22 @@ describe("retained transcript layout", () => {
           cost: { kind: "monetary", currency: "USD", amount_micros: "12400" } },
       }) })
       await renderer.renderOnce()
-      expect(renderer.captureCharFrame()).toContain(`${status.replaceAll("_", " ")} · USD 0.0124`)
+      const frame = renderer.captureCharFrame()
+      expect(frame).toContain({
+        completed: "2 tokens · $0.01", failed: "Failed", interrupted: "Interrupted", max_turns: "Stopped · turn limit reached",
+        doom_loop: "Stopped · repeated tool calls detected", budget_exceeded: "Stopped · budget limit reached",
+      }[status])
+      expect(frame).not.toContain("unpriced")
+      expect(frame).not.toContain("rottweiler")
     }
+    app.setState({ ...initial, streamingTail: createStreamingTail({
+      turnId: "turn", text: "Response", thinking: "", citations: [], toolInvocationIds: [],
+      finished: { status: "completed", usage: { input_tokens: "0", output_tokens: "0", cache_read_tokens: "0", cache_write_tokens: "0", reasoning_tokens: "0" },
+        cost: { kind: "unavailable", reason: "unpriced" } },
+    }) })
+    await renderer.renderOnce()
+    expect(renderer.captureCharFrame()).not.toContain("completed")
+    expect(renderer.captureCharFrame()).not.toContain("unpriced")
     app.setState({ ...initial, compaction: { ...initial.compaction, reclaimedTokens: "12000", text: "Retained decisions and next steps" } })
     await settleMarkdownHighlights([app.transcript], renderer)
     expect(renderer.captureCharFrame()).toContain("Context compacted · 12000 tokens reclaimed")

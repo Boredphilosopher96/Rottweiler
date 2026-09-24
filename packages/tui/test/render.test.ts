@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, diffStats, filetypeForPath, formatCost, formatSessionCost, formatStatusContext, formatStatusModel, formatStatusSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, truncateUnifiedDiff, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, diffStats, filetypeForPath, formatCost, formatSessionCost, formatKnownSessionCost, formatStatusContext, modelDisplayLabel, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, truncateUnifiedDiff, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
@@ -28,10 +28,10 @@ describe("bounded retained rendering", () => {
       status: null,
       vision: true,
       thinking: true,
-      toolCalling: true,
+      toolCalling: true, contextTokens: null,
     }]
-    expect(formatStatusModel("fast", "openai_codex", models))
-      .toBe("openai_codex/gpt-5.4-mini")
+    expect(modelDisplayLabel("fast", models)).toBe("GPT-5.4 mini")
+    expect(modelDisplayLabel("openai_codex/gpt-5.4-mini", models)).toBe("GPT-5.4 mini")
 
     const zeroCost = {
       utc_day: "2026-08-22",
@@ -72,10 +72,12 @@ describe("bounded retained rendering", () => {
       daily_cost_unavailable_entries: "0",
       daily_non_usd_monetary_entries: "0",
     }
-    expect(formatStatusSessionCost(zeroCost, "openai_codex", "3900"))
-      .toBe("quota —")
-    expect(formatStatusSessionCost(zeroCost, "github_copilot", "3900"))
-      .toBe("credits —")
+    expect(formatKnownSessionCost(zeroCost)).toBeNull()
+    expect(formatKnownSessionCost(null)).toBeNull()
+    expect(formatKnownSessionCost({ ...zeroCost, session_cost_micros_usd: "12000" })).toBe("$0.01")
+    expect(formatKnownSessionCost({ ...zeroCost, session_cost_micros_usd: "1200" })).toBe("$0.001")
+    expect(formatKnownSessionCost({ ...zeroCost, session_cost_micros_usd: "12000", session_monetary_accounting_complete: false })).toBeNull()
+    expect(formatKnownSessionCost({ ...zeroCost, session_subscription_quota_entries: "1" })).toBeNull()
     const quota = { ...zeroCost, session_monetary_accounting_complete: false,
       session_subscription_quota_entries: "2", subscription_quota: { used: "9007199254740993.000001", unit: "requests" } }
     expect(formatSessionCost(quota)).toBe("9007199254740993.000001 requests")
@@ -367,7 +369,7 @@ describe("bounded retained rendering", () => {
 })
 
 test("status never presents an unresolved role alias as a concrete model", () => {
-  expect(formatStatusModel("fast", null, [])).toBeNull()
-  expect(formatStatusModel("fast", "fixture", [])).toBeNull()
-  expect(formatStatusModel("fixture/coding", "fixture", [])).toBe("fixture/coding")
+  expect(modelDisplayLabel(null, [])).toBeNull()
+  expect(modelDisplayLabel("fast", [])).toBeNull()
+  expect(modelDisplayLabel("fixture/coding", [])).toBe("coding")
 })

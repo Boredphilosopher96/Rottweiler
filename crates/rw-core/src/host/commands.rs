@@ -354,8 +354,15 @@ impl EngineHost {
                 let registry = self.registry.lock().await;
                 for slot in registry.sessions.values() {
                     if let SessionSlot::Ready(session) = slot {
-                        let descriptor = session.descriptor();
-                        sessions.retain(|existing| existing.session_id != descriptor.session_id);
+                        // Live control state comes from the registry; recorded
+                        // activity comes from the persisted projection.
+                        let mut descriptor = session.descriptor();
+                        if let Some(position) = sessions
+                            .iter()
+                            .position(|existing| existing.session_id == descriptor.session_id)
+                        {
+                            descriptor.activity = sessions.swap_remove(position).activity;
+                        }
                         sessions.push(descriptor);
                     }
                 }
@@ -561,6 +568,23 @@ impl EngineHost {
                         meta: ack_meta(&meta, &*self.clock),
                         session_id,
                         settings,
+                    }],
+                ))
+            }
+            ClientCommand::ListExtensions { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let inventory = self
+                    .queries
+                    .extension_inventory(&session.descriptor())
+                    .await?;
+                Ok((
+                    CommandOutcome::Accepted {},
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ExtensionsListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        entries: inventory.entries,
+                        truncated: inventory.truncated,
                     }],
                 ))
             }
@@ -1330,6 +1354,24 @@ impl EngineHost {
                         )
                     })?
                     .interrupt(&session_id, &subagent_id)
+                    .await?;
+                Ok((CommandOutcome::Accepted {}, Some(session_id), Vec::new()))
+            }
+            ClientCommand::BackgroundSubagent {
+                meta,
+                session_id,
+                subagent_id,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                ensure_session_driver(&session, &meta.client_id).await?;
+                session
+                    .subagents()
+                    .ok_or_else(|| {
+                        HostError::Query(
+                            "child-agent control is unavailable for this session".to_owned(),
+                        )
+                    })?
+                    .move_to_background(&session_id, &subagent_id)
                     .await?;
                 Ok((CommandOutcome::Accepted {}, Some(session_id), Vec::new()))
             }

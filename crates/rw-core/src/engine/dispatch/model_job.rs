@@ -310,7 +310,7 @@ fn reject(
             let outcome = if matches!(*command, ClientCommand::SendMessage { .. }) {
                 super::replies::protocol_rejection(
                     "no_model_selected",
-                    "Choose a model with /models before sending a message. Connect a provider with /providers if needed.",
+                    "Choose a model with /model before sending a message. Connect a provider from the same screen if needed.",
                 )
             } else {
                 super::replies::protocol_rejection("model_unavailable", error.to_string())

@@ -296,43 +296,84 @@ fn append_extension_checks(checks: &mut Vec<DoctorCheck>, credentials_path: &Pat
                 "extensions",
                 CheckStatus::Fail,
                 "extension_discovery_failed",
-                format!("extension trust inventory could not complete: {error}"),
+                format!("extension discovery could not run: {error}"),
             ));
             return;
         }
     };
-    if catalog.diagnostics().is_empty() {
+    let inventory = rw_runtime::session::extension_inventory(&catalog, None);
+    let loaded_skills = inventory
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.kind == rw_types::ExtensionArtifactKind::Skill
+                && matches!(
+                    entry.status,
+                    rw_types::ExtensionArtifactStatus::Loaded
+                        | rw_types::ExtensionArtifactStatus::LoadedWithWarnings
+                )
+        })
+        .count();
+    let notes = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.status != rw_types::ExtensionArtifactStatus::Loaded)
+        .collect::<Vec<_>>();
+    if notes.is_empty() {
         checks.push(check(
             "extensions",
             CheckStatus::Pass,
             "extensions_valid",
-            "declarative extension discovery found no refused artifacts",
+            format!("declarative extensions loaded ({loaded_skills} skills); none were skipped"),
         ));
         return;
     }
-    for (index, diagnostic) in catalog.diagnostics().iter().enumerate() {
-        let mut item = check(
-            format!("extensions.{}", index.saturating_add(1)),
-            CheckStatus::Warning,
-            "extension_skipped",
-            format!(
-                "{} was skipped: {}",
-                diagnostic.path().display(),
-                diagnostic.message()
-            ),
-        );
-        item.details
-            .insert("path".to_owned(), diagnostic.path().display().to_string());
-        item.details
-            .insert("scope".to_owned(), format!("{:?}", diagnostic.scope()));
-        item.details.insert(
-            "location".to_owned(),
-            format!("{:?}", diagnostic.location()),
-        );
-        item.details
-            .insert("kind".to_owned(), format!("{:?}", diagnostic.kind()));
-        checks.push(item);
+    for (index, entry) in notes.into_iter().enumerate() {
+        checks.push(extension_inventory_check(index, entry));
     }
+}
+
+fn extension_inventory_check(
+    index: usize,
+    entry: &rw_types::ExtensionInventoryEntry,
+) -> DoctorCheck {
+    let (status, code, verb) = match entry.status {
+        rw_types::ExtensionArtifactStatus::Skipped => {
+            (CheckStatus::Warning, "extension_skipped", "was skipped")
+        }
+        rw_types::ExtensionArtifactStatus::Shadowed => {
+            (CheckStatus::Pass, "extension_shadowed", "is shadowed")
+        }
+        rw_types::ExtensionArtifactStatus::Untrusted => {
+            (CheckStatus::Skipped, "extension_untrusted", "is inactive")
+        }
+        rw_types::ExtensionArtifactStatus::LoadedWithWarnings
+        | rw_types::ExtensionArtifactStatus::Loaded => {
+            (CheckStatus::Pass, "extension_loaded_with_notes", "loaded")
+        }
+    };
+    let label = format!("{:?}", entry.kind).to_lowercase();
+    let name = entry.name.as_deref().unwrap_or("artifact");
+    let mut item = check(
+        format!("extensions.{}", index.saturating_add(1)),
+        status,
+        code,
+        format!(
+            "{label} {name} {verb}: {} ({})",
+            entry.notes.join("; "),
+            entry.source_path
+        ),
+    );
+    item.details
+        .insert("path".to_owned(), entry.source_path.clone());
+    item.details
+        .insert("scope".to_owned(), format!("{:?}", entry.scope));
+    item.details
+        .insert("location".to_owned(), entry.location.clone());
+    item.details.insert("kind".to_owned(), label);
+    item.details
+        .insert("status".to_owned(), format!("{:?}", entry.status));
+    item
 }
 
 fn finish_report(network: bool, checks: Vec<DoctorCheck>) -> DoctorReport {

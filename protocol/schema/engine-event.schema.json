@@ -907,6 +907,41 @@
       ]
     },
     {
+      "description": "Declarative extension inventory for one session.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExtensionInventoryEntry"
+          },
+          "maxItems": 512
+        },
+        "truncated": {
+          "description": "More entries existed than the inventory bound.",
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "extensions_listed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "entries",
+        "truncated"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {
@@ -2053,7 +2088,11 @@
           }
         },
         "rationale": {
-          "type": "string"
+          "description": "Short user-facing reason for the prompt; `None` when the action\nitself is the explanation.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "diff": {
           "anyOf": [
@@ -2079,8 +2118,7 @@
         "invocation_id",
         "name",
         "args",
-        "capabilities",
-        "rationale"
+        "capabilities"
       ]
     },
     {
@@ -2340,13 +2378,6 @@
         },
         "turn_id": {
           "$ref": "#/$defs/TurnId"
-        },
-        "completion_sources": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/SequenceId"
-          },
-          "maxItems": 8
         },
         "used_tokens": {
           "type": "string"
@@ -3975,7 +4006,11 @@
           }
         },
         "rationale": {
-          "type": "string"
+          "description": "Short user-facing reason for the prompt; `None` when the action\nitself is the explanation.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "diff": {
           "anyOf": [
@@ -7690,6 +7725,17 @@
         },
         "shell_active": {
           "type": "boolean"
+        },
+        "activity": {
+          "description": "Recorded history; null until the session index has projected it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionActivity"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -7699,6 +7745,40 @@
         "workspace_name",
         "model",
         "shell_active"
+      ]
+    },
+    "SessionActivity": {
+      "description": "What a session's recorded history holds, from the session index and the\naccounting ledger.",
+      "type": "object",
+      "properties": {
+        "updated_unix_ms": {
+          "description": "Last durable activity, in Unix milliseconds.",
+          "type": "string"
+        },
+        "turn_count": {
+          "description": "Accepted user turns.",
+          "type": "string"
+        },
+        "first_prompt": {
+          "description": "Bounded, whitespace-collapsed preview of the first user prompt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cost_micros_usd": {
+          "description": "Lifetime USD spend in micro-dollars; null when nothing was charged or\nsome entries have no USD price.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "updated_unix_ms",
+        "turn_count",
+        "cost_micros_usd"
       ]
     },
     "SubagentDescriptor": {
@@ -7755,10 +7835,19 @@
     },
     "SubagentActivity": {
       "description": "Current parent-visible lifecycle state of a retained child agent.",
-      "type": "string",
-      "enum": [
-        "running",
-        "idle"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "running",
+            "idle"
+          ]
+        },
+        {
+          "description": "Admitted by its parent and waiting for a free child slot.",
+          "type": "string",
+          "const": "queued"
+        }
       ]
     },
     "SessionSearchHit": {
@@ -7832,6 +7921,17 @@
         },
         "source": {
           "$ref": "#/$defs/CommandSource"
+        },
+        "scope": {
+          "description": "Where a declarative command or skill was discovered; `null` for\nbuilt-in, plugin, workflow, and MCP commands.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtensionArtifactScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -7839,7 +7939,8 @@
         "name",
         "description",
         "usage",
-        "source"
+        "source",
+        "scope"
       ]
     },
     "CommandSource": {
@@ -7853,6 +7954,13 @@
         "skill",
         "workflow",
         "mcp"
+      ]
+    },
+    "ExtensionArtifactScope": {
+      "type": "string",
+      "enum": [
+        "project",
+        "user"
       ]
     },
     "SessionActionAvailability": {
@@ -8134,6 +8242,99 @@
         "choices",
         "provenance",
         "applies_immediately"
+      ]
+    },
+    "ExtensionInventoryEntry": {
+      "description": "One row of the extension inventory.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ExtensionArtifactKind"
+        },
+        "name": {
+          "description": "Artifact name when one could be determined.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "Description for loaded artifacts; empty otherwise.",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/ExtensionArtifactScope"
+        },
+        "location": {
+          "description": "`.agents`, `.rottweiler`, or `.claude`.",
+          "type": "string"
+        },
+        "source_path": {
+          "description": "Source file as discovered.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ExtensionArtifactStatus"
+        },
+        "notes": {
+          "description": "Human-readable explanation for every status other than `loaded`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name",
+        "description",
+        "scope",
+        "location",
+        "source_path",
+        "status",
+        "notes"
+      ]
+    },
+    "ExtensionArtifactKind": {
+      "type": "string",
+      "enum": [
+        "skill",
+        "command",
+        "agent",
+        "workflow",
+        "mode",
+        "hook"
+      ]
+    },
+    "ExtensionArtifactStatus": {
+      "description": "Outcome of one discovered artifact.",
+      "oneOf": [
+        {
+          "description": "Active and invocable.",
+          "type": "string",
+          "const": "loaded"
+        },
+        {
+          "description": "Active, with a non-fatal note (for example ignored `allowed-tools`\nentries, or a slash name taken by a built-in command).",
+          "type": "string",
+          "const": "loaded_with_warnings"
+        },
+        {
+          "description": "Not loaded; `reason` says why.",
+          "type": "string",
+          "const": "skipped"
+        },
+        {
+          "description": "Valid but hidden by a higher-precedence artifact of the same name.",
+          "type": "string",
+          "const": "shadowed"
+        },
+        {
+          "description": "Project artifact held inactive until the folder is trusted.",
+          "type": "string",
+          "const": "untrusted"
+        }
       ]
     },
     "McpServerDescriptor": {
@@ -8624,10 +8825,11 @@
             "null"
           ]
         },
-        "changed_paths": {
+        "changes": {
+          "description": "Changed, added, deleted, and untracked paths; ignored files are omitted.",
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/WorkspaceChange"
           }
         },
         "truncated": {
@@ -8637,8 +8839,37 @@
       "additionalProperties": false,
       "required": [
         "workspace_name",
-        "changed_paths",
+        "changes",
         "truncated"
+      ]
+    },
+    "WorkspaceChange": {
+      "description": "One workspace-relative path that differs from the committed tree.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkspaceChangeKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "kind"
+      ]
+    },
+    "WorkspaceChangeKind": {
+      "description": "How a path differs, from Git's staged and worktree status combined.",
+      "type": "string",
+      "enum": [
+        "modified",
+        "added",
+        "deleted",
+        "renamed",
+        "untracked",
+        "conflicted"
       ]
     },
     "WorkspaceDiff": {
@@ -8914,6 +9145,24 @@
           "additionalProperties": false,
           "required": [
             "type"
+          ]
+        },
+        {
+          "description": "A finished child agent's result, delivered to its parent exactly once.\n`source` is the parent's `subagent_finished` event.",
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/SequenceId"
+            },
+            "type": {
+              "type": "string",
+              "const": "child_result"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
           ]
         }
       ]

@@ -1,38 +1,38 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`approval and plan keep a usable composer at 110x32: approval 1`] = `
-"Waiting for approval · Edit file                                                                              
+"                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
                                                                                                               
                                                                                                               
                                                                                                               
   rottweiler                                                                                                  
-  Workspace · not loaded                                                                                      
-  Instructions · not loaded                                                                                   
-  MCP · not loaded                                                                                            
-  Skill commands · not loaded                                                                                 
-  Model · Choose a model · /models · /providers to connect                                                    
+  Rottweiler                                                                                                  
+  Loading models…                                                                                             
   Describe a task, or press / for commands.                                                                   
                                                                                                               
                                                                                                               
                                                                                                               
                                                                                                               
-╭─ Permission · y once / a session / n deny · Tab to message ────────────────────────────────────────────────╮
-│ Edit file src/main.rs                                                                                      │
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+╭─ Edit src/main.rs? ────────────────────────────────────────────────────────────────────────────────────────╮
 │ Apply the reviewed correction                                                                              │
-│  ▶ Allow once                                                                                              │
-│    Run only this invocation                                                                                │
-│    Allow session                                                                                           │
-│    Remember for this session                                                                               │
-│    Allow project                                                                                           │
-│    Remember this exact invocation in this project                                                          │
-│    Review a permission rule…                                                                               │
-│    Review an explicit session pattern                                                                      │
+│  ▶ y  Yes                                                                                                  │
+│    p  Always allow in this project…                                                                        │
+│    n  No, and tell the agent what to do differently                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │ Please keep the public API compatible.                                                                   │ 
- │ Tab decision/message · Enter choose · Ctrl+P commands                                                    │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                                                     │ 
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   model not selected · Alt+M  approval · Edit file    ctx —  $—  —                                  
+  EXECUTE   loading models · Alt+M  ctx —  approval · Edit file                                               
 "
 `;
 
@@ -40,13 +40,13 @@ exports[`approval and plan keep a usable composer at 110x32: plan 1`] = `
 "                                                                                                              
                                                                                                               
                                                                                                               
+                                                                                                              
+                                                                                                              
   rottweiler                                                                                                  
-  Workspace · not loaded                                                                                      
-  Instructions · not loaded                                                                                   
-  MCP · not loaded                                                                                            
-  Skill commands · not loaded                                                                                 
-  Model · Choose a model · /models · /providers to connect                                                    
+  Rottweiler                                                                                                  
+  Loading models…                                                                                             
   Describe a task, or press / for commands.                                                                   
+                                                                                                              
                                                                                                               
                                                                                                               
                                                                                                               
@@ -66,47 +66,47 @@ exports[`approval and plan keep a usable composer at 110x32: plan 1`] = `
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │ Please keep the public API compatible.                                                                   │ 
- │ Tab decision/message · Enter choose · Ctrl+P commands                                                    │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                                                     │ 
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
-  PLAN   model not selected · Alt+M                                                                           
+  PLAN   loading models · Alt+M                                                                               
 "
 `;
 
 exports[`approval and plan keep a usable composer at 80x24: approval 1`] = `
-"Waiting for approval · Edit file                                                
-  Workspace · not loaded                                                        
-  Instructions · not loaded                                                     
-  MCP · not loaded                                                              
-  Skill commands · not loaded                                                  █
-  Model · Choose a model · /models · /providers to connect                     █
-  Describe a task, or press / for commands.                                    █
-╭─ Permission · y once / a session / n deny · Tab to message ──────────────────╮
-│ Edit file src/main.rs                                                        │
+"                                                                                
+                                                                                
+                                                                                
+                                                                                
+  rottweiler                                                                    
+  Rottweiler                                                                    
+  Loading models…                                                               
+  Describe a task, or press / for commands.                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+╭─ Edit src/main.rs? ──────────────────────────────────────────────────────────╮
 │ Apply the reviewed correction                                                │
-│  ▶ Allow once                                                                │
-│    Run only this invocation                                                  │
-│    Allow session                                                             │
-│    Remember for this session                                                 │
-│    Allow project                                                             │
-│    Remember this exact invocation in this project                            │
-│    Review a permission rule…                                                 │
-│    Review an explicit session pattern                                        │
+│  ▶ y  Yes                                                                    │
+│    p  Always allow in this project…                                          │
+│    n  No, and tell the agent what to do differently                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  ╭────────────────────────────────────────────────────────────────────────────╮ 
  │ Please keep the public API compatible.                                     │ 
- │ Tab decision/message · Enter choose · Ctrl+P commands                      │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                       │ 
  ╰────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   model not selected · Alt+M  approval · Edit file    ctx —  $—  —    
+  EXECUTE   loading models · Alt+M  ctx —  approval · Edit file                 
 "
 `;
 
 exports[`approval and plan keep a usable composer at 80x24: plan 1`] = `
-"  Workspace · not loaded                                                        
-  Instructions · not loaded                                                     
-  MCP · not loaded                                                              
-  Skill commands · not loaded                                                  █
-  Model · Choose a model · /models · /providers to connect                     █
-  Describe a task, or press / for commands.                                    █
+"                                                                                
+  rottweiler                                                                    
+  Rottweiler                                                                    
+  Loading models…                                                               
+  Describe a task, or press / for commands.                                     
+                                                                                
 ╭─ Plan approval required ─────────────────────────────────────────────────────╮
 │ Fix the request boundary · PgUp/PgDn to review                               │
 │ Keep the public API compatible.                                              │
@@ -122,8 +122,8 @@ exports[`approval and plan keep a usable composer at 80x24: plan 1`] = `
 ╰──────────────────────────────────────────────────────────────────────────────╯
  ╭────────────────────────────────────────────────────────────────────────────╮ 
  │ Please keep the public API compatible.                                     │ 
- │ Tab decision/message · Enter choose · Ctrl+P commands                      │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                       │ 
  ╰────────────────────────────────────────────────────────────────────────────╯ 
-  PLAN   model not selected · Alt+M                                             
+  PLAN   loading models · Alt+M                                                 
 "
 `;

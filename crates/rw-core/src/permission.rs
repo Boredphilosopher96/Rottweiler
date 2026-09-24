@@ -8,7 +8,8 @@ use std::{
 
 use async_trait::async_trait;
 use rw_tools::{
-    BashSandboxMode, CommandSafety, CommandSafetyClassifier, ToolBehavior, ToolInvocationSemantics,
+    BashSandboxMode, CommandSafety, CommandSafetyClassifier, MutationScope, ToolBehavior,
+    ToolInvocationSemantics,
 };
 use rw_types::{
     ApprovalDecision, PermissionModeDescriptor, SessionMode, ToolCapability, UnifiedDiff,
@@ -27,15 +28,49 @@ pub struct PermissionRequest {
     pub capabilities: Vec<ToolCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_diff: Option<UnifiedDiff>,
+    /// Short user-facing reason for the prompt, recorded by the gate when it
+    /// asks. `None` when the action itself is the explanation. Callers
+    /// constructing a request leave this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_reason: Option<String>,
 }
 
-impl PermissionRequest {
-    pub(crate) fn rationale(&self) -> String {
-        if self.arguments.get("sandbox").and_then(Value::as_str) == Some("unsandboxed") {
-            "UNSANDBOXED EXECUTION: this command will bypass native filesystem and network isolation".to_owned()
-        } else {
-            format!("permission required for tool `{}`", self.tool_name)
+/// Policy facts that explain an approval prompt when the invocation alone
+/// does not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AskReason {
+    /// A shell command outside the audited safe list.
+    NotSafeListed,
+    /// A file mutation that resolves outside every workspace root.
+    OutsideWorkspace,
+    /// A hook asked for confirmation of an otherwise allowed action.
+    HookRequested,
+}
+
+/// One short sentence for the prompt. Sandbox bypass and network reach
+/// outrank the policy reason because they widen what the action can touch.
+fn prompt_reason(request: &PermissionRequest, reason: Option<AskReason>) -> Option<String> {
+    if request.arguments.get("sandbox").and_then(Value::as_str) == Some("unsandboxed") {
+        return Some(
+            "Runs outside the sandbox, without filesystem or network isolation".to_owned(),
+        );
+    }
+    if let Some(domains) = request
+        .arguments
+        .get("network_domains")
+        .and_then(normalize_network_domains)
+        .filter(|domains| !domains.is_empty())
+    {
+        return Some(format!("Network access to {}", domains.join(", ")));
+    }
+    match reason {
+        Some(AskReason::NotSafeListed) => Some("Not in the safe command list".to_owned()),
+        Some(AskReason::OutsideWorkspace) => Some("Writes outside the workspace".to_owned()),
+        Some(AskReason::HookRequested) => Some("A hook asked to confirm this".to_owned()),
+        None if request.capabilities.contains(&ToolCapability::Network) => {
+            Some("Network access".to_owned())
         }
+        None => None,
     }
 }
 
@@ -106,8 +141,8 @@ struct PermissionMemory {
 pub struct PermissionGate {
     policy: PermissionPolicy,
     runtime_mode: Arc<RwLock<Option<PermissionModeDescriptor>>>,
-    restrictive_rules: Option<Vec<PermissionRule>>,
-    memory: RwLock<PermissionMemory>,
+    turn_pre_approvals: Vec<PermissionRule>,
+    memory: Arc<RwLock<PermissionMemory>>,
     session_rules: Arc<RwLock<Vec<PermissionRule>>>,
     project_store: Option<Arc<ProjectApprovalStore>>,
     command_safety: Arc<CommandSafetyClassifier>,
@@ -138,8 +173,8 @@ impl PermissionGate {
         Self {
             policy: PermissionPolicy::Configured(config),
             runtime_mode: Arc::new(RwLock::new(None)),
-            restrictive_rules: None,
-            memory: RwLock::new(PermissionMemory::default()),
+            turn_pre_approvals: Vec::new(),
+            memory: Arc::new(RwLock::new(PermissionMemory::default())),
             session_rules: Arc::new(RwLock::new(Vec::new())),
             project_store: None,
             command_safety: Arc::new(CommandSafetyClassifier::default()),
@@ -160,8 +195,8 @@ impl PermissionGate {
         Self {
             policy: PermissionPolicy::Headless(mode),
             runtime_mode: Arc::new(RwLock::new(None)),
-            restrictive_rules: None,
-            memory: RwLock::new(PermissionMemory::default()),
+            turn_pre_approvals: Vec::new(),
+            memory: Arc::new(RwLock::new(PermissionMemory::default())),
             session_rules: Arc::new(RwLock::new(Vec::new())),
             project_store: None,
             command_safety: Arc::new(CommandSafetyClassifier::default()),
@@ -353,8 +388,8 @@ impl PermissionGate {
         Ok(Self {
             policy: self.policy.clone(),
             runtime_mode: Arc::clone(&self.runtime_mode),
-            restrictive_rules: self.restrictive_rules.clone(),
-            memory: RwLock::new(PermissionMemory {
+            turn_pre_approvals: Vec::new(),
+            memory: Arc::new(RwLock::new(PermissionMemory {
                 workspace_namespace: workspace_namespace(&roots),
                 trusted_read_roots: lock_read(&self.memory)
                     .trusted_read_roots
@@ -365,22 +400,26 @@ impl PermissionGate {
                 workspace_roots: roots,
                 generation,
                 session_allows: BTreeSet::new(),
-            }),
+            })),
             session_rules: Arc::clone(&self.session_rules),
             project_store: self.project_store.clone(),
             command_safety: Arc::clone(&self.command_safety),
         })
     }
 
-    /// Clones this gate for one turn and adds a fail-closed invocation
-    /// allowlist. Base policy still applies after an invocation matches one of
-    /// these patterns, so this can only remove authority.
+    /// Clones this gate for one turn with `tool(glob)` invocations that run
+    /// without an approval prompt, as declared by a skill or command's
+    /// `allowed-tools`. A pre-approval only turns an `Ask` into `Allow`: deny
+    /// rules, hooks, Discuss/Plan read-only modes, a launch policy that cannot
+    /// prompt, unsandboxed execution, and network-domain requests keep their
+    /// normal decision. Session state is shared with this gate, so approvals
+    /// remembered during the turn outlive it.
     ///
     /// # Errors
     ///
     /// Returns an error if any pattern is not valid `tool(glob)` syntax.
-    pub fn restricted_to_patterns(&self, patterns: &[String]) -> Result<Self, String> {
-        let restrictive_rules = patterns
+    pub fn with_turn_pre_approvals(&self, patterns: &[String]) -> Result<Self, String> {
+        let turn_pre_approvals = patterns
             .iter()
             .map(|pattern| {
                 validate_rule(pattern)?;
@@ -390,22 +429,47 @@ impl PermissionGate {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let memory = lock_read(&self.memory);
         Ok(Self {
             policy: self.policy.clone(),
             runtime_mode: Arc::clone(&self.runtime_mode),
-            restrictive_rules: Some(restrictive_rules),
-            memory: RwLock::new(PermissionMemory {
-                workspace_roots: memory.workspace_roots.clone(),
-                trusted_read_roots: memory.trusted_read_roots.clone(),
-                workspace_namespace: memory.workspace_namespace.clone(),
-                generation: memory.generation,
-                session_allows: memory.session_allows.clone(),
-            }),
+            turn_pre_approvals,
+            memory: Arc::clone(&self.memory),
             session_rules: Arc::clone(&self.session_rules),
             project_store: self.project_store.clone(),
             command_safety: Arc::clone(&self.command_safety),
         })
+    }
+
+    /// Whether a turn pre-approval covers every command of this invocation.
+    /// Unsandboxed execution and network-domain requests are never covered.
+    fn turn_pre_approved(&self, request: &PermissionRequest, behavior: ToolBehavior) -> bool {
+        !self.turn_pre_approvals.is_empty()
+            && (behavior != ToolBehavior::Shell
+                || bash_sandbox_mode(request) != Some(BashSandboxMode::Unsandboxed))
+            && rule_decision(
+                &PermissionConfig {
+                    default: PermissionDecision::Deny,
+                    rules: self.turn_pre_approvals.clone(),
+                },
+                request,
+                behavior,
+            ) == PermissionDecision::Allow
+    }
+
+    /// Policy decision with this turn's pre-approvals applied: a pre-approved
+    /// invocation that would prompt is allowed instead.
+    fn turn_decision(
+        &self,
+        request: &PermissionRequest,
+        semantics: Option<&ToolInvocationSemantics>,
+        behavior: ToolBehavior,
+    ) -> PermissionDecision {
+        match self.decision_for(request, semantics, behavior) {
+            PermissionDecision::Ask if self.turn_pre_approved(request, behavior) => {
+                PermissionDecision::Allow
+            }
+            decision => decision,
+        }
     }
 
     pub(crate) fn registered_execution_identity(
@@ -441,6 +505,7 @@ impl PermissionGate {
     }
 
     /// Removes a session-scoped rule with the exact normalized pattern.
+    #[must_use]
     pub fn remove_session_rule(&self, pattern: &str) -> bool {
         let mut rules = lock_write(&self.session_rules);
         let before = rules.len();
@@ -449,6 +514,7 @@ impl PermissionGate {
     }
 
     /// Clears all session-scoped rules and returns the number removed.
+    #[must_use]
     pub fn clear_session_rules(&self) -> usize {
         let mut rules = lock_write(&self.session_rules);
         let removed = rules.len();
@@ -457,6 +523,7 @@ impl PermissionGate {
     }
 
     /// Clears session-scoped rules and remembered `AllowSession` decisions.
+    #[must_use]
     pub fn clear_session_permissions(&self) -> ClearedSessionPermissions {
         let rules = self.clear_session_rules();
         let mut memory = lock_write(&self.memory);
@@ -490,6 +557,7 @@ impl PermissionGate {
 
     /// Revokes one opaque session approval id, or all session approvals when
     /// `id` is `None`. Returns the number removed.
+    #[must_use]
     pub fn revoke_session_approvals(&self, id: Option<&str>) -> usize {
         let mut memory = lock_write(&self.memory);
         revoke_approvals(&mut memory.session_allows, id)
@@ -618,10 +686,10 @@ impl PermissionGate {
         if hook_decision == Some(HookPermissionDecision::Deny) {
             return PermissionOutcome::Denied;
         }
-        let decision = self.decision_for(&request, semantics, behavior);
-        let decision = if decision == PermissionDecision::Allow
-            && hook_decision == Some(HookPermissionDecision::Ask)
-        {
+        let decision = self.turn_decision(&request, semantics, behavior);
+        let hook_forced_ask = decision == PermissionDecision::Allow
+            && hook_decision == Some(HookPermissionDecision::Ask);
+        let decision = if hook_forced_ask {
             PermissionDecision::Ask
         } else {
             decision
@@ -652,6 +720,7 @@ impl PermissionGate {
                 if remembered && hook_decision != Some(HookPermissionDecision::Ask) {
                     return PermissionOutcome::Allowed;
                 }
+                let request = self.explained(request, semantics, behavior, hook_forced_ask);
                 match approver.decide(request).await {
                     ApprovalDecision::AllowOnce => {
                         if lock_read(&self.memory).generation == generation {
@@ -709,18 +778,6 @@ impl PermissionGate {
                 &lock_read(&self.memory).workspace_roots,
             )
         {
-            return PermissionDecision::Deny;
-        }
-        if self.restrictive_rules.as_ref().is_some_and(|rules| {
-            rule_decision(
-                &PermissionConfig {
-                    default: PermissionDecision::Deny,
-                    rules: rules.clone(),
-                },
-                request,
-                behavior,
-            ) != PermissionDecision::Allow
-        }) {
             return PermissionDecision::Deny;
         }
         if matches!(
@@ -856,6 +913,43 @@ impl PermissionGate {
         }
     }
 
+    /// Records the user-facing reason for a prompt the gate is about to open.
+    fn explained(
+        &self,
+        mut request: PermissionRequest,
+        semantics: Option<&ToolInvocationSemantics>,
+        behavior: ToolBehavior,
+        hook_forced_ask: bool,
+    ) -> PermissionRequest {
+        let reason = hook_forced_ask
+            .then_some(AskReason::HookRequested)
+            .or_else(|| self.ask_reason(&request, semantics, behavior));
+        request.prompt_reason = prompt_reason(&request, reason);
+        request
+    }
+
+    /// The policy fact behind an `Ask`, when one is worth telling the user.
+    fn ask_reason(
+        &self,
+        request: &PermissionRequest,
+        semantics: Option<&ToolInvocationSemantics>,
+        behavior: ToolBehavior,
+    ) -> Option<AskReason> {
+        if behavior == ToolBehavior::Shell {
+            return (!self.is_safe_listed_bash(request, behavior))
+                .then_some(AskReason::NotSafeListed);
+        }
+        let MutationScope::Paths(paths) = &semantics?.mutation_scope else {
+            return None;
+        };
+        let memory = lock_read(&self.memory);
+        (!memory.workspace_roots.is_empty()
+            && paths
+                .iter()
+                .any(|path| resolve_workspace_write_path(&memory.workspace_roots, path).is_none()))
+        .then_some(AskReason::OutsideWorkspace)
+    }
+
     fn yolo_active(&self) -> bool {
         *lock_read(&self.runtime_mode) == Some(PermissionModeDescriptor::Yolo)
             || matches!(
@@ -980,8 +1074,8 @@ use identity::{
     PermissionKey, RememberedApproval, bash_sandbox_mode, canonical_key_arguments_for,
     canonical_webfetch_origin, canonical_workspace_roots, contains_approval, fingerprint,
     is_auto_safe_workspace_write, is_builtin_read_only_bash, is_read_only,
-    normalize_network_domains, rememberable_request, replace_approval, revoke_approvals,
-    workspace_namespace,
+    normalize_network_domains, rememberable_request, replace_approval,
+    resolve_workspace_write_path, revoke_approvals, workspace_namespace,
 };
 
 mod rules;

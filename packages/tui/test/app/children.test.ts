@@ -1,388 +1,296 @@
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
-import {
-  createRottweilerApp
-} from "../../src/app"
-import type { ClientCommand, CommandOutcome } from "../../src/protocol"
+import { createRottweilerApp, type RottweilerApp } from "../../src/app"
+import type { ClientCommand, CommandOutcome, EngineEvent } from "../../src/protocol"
+import type { SubagentDescriptor } from "../../src/subagent-state"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select } from "../picker-screen"
 
-describe("Rottweiler children", () => {
+const SESSION = "parent-session"
+
+function eventMeta(sequence: number) {
+  return { protocol_version: PROTOCOL_VERSION, session_id: SESSION, sequence_id: String(sequence), emitted_at: "2026-01-01T00:00:00Z" }
+}
+
+function descriptor(id: string, activity: SubagentDescriptor["activity"], task = `Task for ${id}`): SubagentDescriptor {
+  return { subagent_id: id, child_session_id: `session-${id}`, task, agent: "reviewer", model: "fast", isolation: "shared", activity }
+}
+
+interface Harness {
+  readonly app: RottweilerApp
+  readonly emitted: ClientCommand[]
+  readonly setup: Awaited<ReturnType<typeof createTestRenderer>>
+  listChildren(children: readonly SubagentDescriptor[]): void
+  emit(event: EngineEvent): void
+}
+
+describe("Rottweiler agents", () => {
   let renderer: TestRenderer | undefined
   afterEach(() => {
     renderer?.destroy()
     renderer = undefined
   })
 
-  test("opens the child-agent tree from the global Ctrl+G binding", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 20, useThread: false })
-    renderer = setup.renderer
-    const emitted: ClientCommand[] = []
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      sessionId: "parent-session",
-      onCommand(command) {
-        emitted.push(command)
-        return { type: "accepted" }
-      },
-    })
-    renderer.root.add(app)
-    setup.mockInput.pressKey("g", { ctrl: true })
-    await Bun.sleep(0)
-    expect(app.picker.title).toContain("Child agents")
-    expect(emitted.at(-1)).toMatchObject({
-      type: "list_subagents",
-      session_id: "parent-session",
-    })
-  })
-
-  test("uses Escape to return to the parent and Ctrl+C to interrupt the armed child", async () => {
-    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+  async function harness(options: {
+    readonly width?: number
+    readonly height?: number
+    readonly onCommand?: (command: ClientCommand) => CommandOutcome | Promise<CommandOutcome> | undefined
+  } = {}): Promise<Harness> {
+    const setup = await createTestRenderer({ width: options.width ?? 100, height: options.height ?? 24, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     let request = 0
     const app = createRottweilerApp(renderer, {
       sessionReader: emptySessionReader,
-      sessionId: "parent-session",
+      sessionId: SESSION,
       requestId: () => `request-${++request}`,
       onCommand(command) {
         emitted.push(command)
-        return { type: "accepted" }
+        return options.onCommand?.(command) ?? { type: "accepted" }
       },
     })
     renderer.root.add(app)
-    app.composer.value = "parent draft stays private"
-    app.composer.addAttachment({
-      name: "parent context.txt",
-      media_type: "text/plain",
-      data: { type: "text", content: "parent only" },
-    })
-    app.openSubagentPicker()
-    const list = emitted.find((command) => command.type === "list_subagents")!
-    app.handleEvent({
-      type: "subagents_listed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "tui-client",
-        request_id: list.meta.request_id,
-        emitted_at: "2026-01-01T00:00:00Z",
+    return {
+      app, emitted, setup,
+      listChildren(children) {
+        const list = emitted.findLast((command) => command.type === "list_subagents")!
+        app.handleEvent({
+          type: "subagents_listed",
+          meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: list.meta.request_id, emitted_at: "2026-01-01T00:00:00Z" },
+          session_id: SESSION,
+          subagents: [...children],
+        })
       },
-      session_id: "parent-session",
-      subagents: [{
-        subagent_id: "child-running",
-        child_session_id: "child-session",
-        task: "Review runtime",
-        agent: "reviewer",
-        model: "fast",
-        isolation: "shared",
-        activity: "running",
-      }],
-    })
-    app.picker.select.selectCurrent()
-    await Bun.sleep(0)
-    expect(app.activeSubagentId).toBe("child-running")
-    expect(app.composer.value).toBe("")
-    expect(app.composer.attachments).toEqual([])
-    app.composer.value = "child-only follow-up"
+      emit(event) {
+        app.handleEvent(event)
+      },
+    }
+  }
 
-    setup.mockInput.pressEscape()
-    await Bun.sleep(30)
-    expect(app.activeSubagentId).toBeNull()
-    expect(app.composer.value).toBe("parent draft stays private")
-    expect(app.composer.attachments.map((attachment) => attachment.name)).toEqual([
-      "parent context.txt",
-    ])
-    expect(app.banner.plainText).toContain("press Esc again to stop the child agent")
-    setup.mockInput.pressKey("c", { ctrl: true })
-    await Bun.sleep(30)
-    expect(emitted.at(-1)).toMatchObject({
-      type: "interrupt_subagent",
-      session_id: "parent-session",
-      subagent_id: "child-running",
+  function spawn(h: Harness, id: string, first = 1): void {
+    h.emit({ type: "turn_started", meta: eventMeta(first), turn_id: "1" })
+    h.emit({ type: "subagent_spawned", meta: eventMeta(first + 1), subagent_id: id, child_session_id: `session-${id}`, task: `Task for ${id}` })
+  }
+
+  function finish(h: Harness, id: string, sequence: number): void {
+    h.emit({
+      type: "subagent_finished", meta: eventMeta(sequence), subagent_id: id,
+      result: {
+        subagent_id: id, session_id: `session-${id}`, status: "completed", final_text: "Found the regression in the router",
+        touched_files: [], usage: { input_tokens: "1", output_tokens: "1", cache_read_tokens: "0", cache_write_tokens: "0", reasoning_tokens: "0" },
+        cost: { kind: "monetary", amount_micros: "12500", currency: "USD" }, turns: "1", duration_millis: "10",
+      },
     })
+  }
+
+  test("Ctrl+G opens the Agents screen with running and finished children", async () => {
+    const h = await harness()
+    spawn(h, "child-running")
+    h.setup.mockInput.pressKey("g", { ctrl: true })
+    await Bun.sleep(0)
+    expect(h.app.agentsBrowser.visible).toBeTrue()
+    expect(h.app.agentsBrowser.heading.plainText).toContain("AGENTS")
+    expect(h.emitted.at(-1)).toMatchObject({ type: "list_subagents", session_id: SESSION })
+    h.listChildren([descriptor("child-running", "running"), descriptor("child-idle", "idle")])
+    expect(h.app.agentsBrowser.sectionLabels).toEqual(["Running", "Finished"])
+    expect(h.app.agentsBrowser.itemIds).toEqual(["agents.child.child-running", "agents.child.child-idle"])
+    expect(h.app.agentsBrowser.detail.plainText).toContain("reviewer · running")
+    h.setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(h.app.agentsBrowser.visible).toBeFalse()
   })
 
-  test("leaves Vim insert mode before Escape exits a child transcript", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
-    renderer = setup.renderer
-    const emitted: ClientCommand[] = []
-    let request = 0
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      sessionId: "parent-session",
-      keybindings: { preset: "vim" },
-      requestId: () => `request-${++request}`,
-      onCommand(command) {
-        emitted.push(command)
-        return { type: "accepted" }
-      },
-    })
-    renderer.root.add(app)
-    app.openSubagentPicker()
-    const list = emitted.find((command) => command.type === "list_subagents")!
-    app.handleEvent({
-      type: "subagents_listed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "tui-client",
-        request_id: list.meta.request_id,
-        emitted_at: "2026-01-01T00:00:00Z",
-      },
-      session_id: "parent-session",
-      subagents: [{
-        subagent_id: "child-vim",
-        child_session_id: "child-session",
-        task: "Vim child",
-        agent: "reviewer",
-        model: "fast",
-        isolation: "shared",
-        activity: "running",
-      }],
-    })
-    app.picker.select.selectCurrent()
+  test("viewing a child overlays it while the parent composer and stream stay intact", async () => {
+    const h = await harness()
+    h.app.composer.value = "parent draft stays private"
+    h.app.composer.addAttachment({ name: "parent context.txt", media_type: "text/plain", data: { type: "text", content: "parent only" } })
+    spawn(h, "child-running")
+    h.app.openSubagentPicker()
+    h.listChildren([descriptor("child-running", "running")])
+    h.app.agentsBrowser.activateSelected()
+    expect(options(h.app.picker).map((option) => option.value)).toEqual(["view", "stop", "close"])
+    h.app.picker.activateSelected()
     await Bun.sleep(0)
-    expect(app.activeSubagentId).toBe("child-vim")
-    setup.mockInput.pressKey("i")
-    expect(app.composer.hintText.plainText).toContain("INSERT")
-    setup.mockInput.pressEscape()
+
+    expect(h.app.activeSubagentId).toBe("child-running")
+    expect(h.app.agentsBrowser.visible).toBeFalse()
+    expect(h.app.composer.visible).toBeFalse()
+    expect(h.app.banner.plainText).toContain("Agent · reviewer · running")
+    expect(h.app.banner.plainText).toContain("Esc back")
+    h.emit({ type: "text_delta", meta: eventMeta(3), turn_id: "1", text: "parent keeps streaming" })
+    expect(h.app.state.streamingTail?.text).toContain("parent keeps streaming")
+
+    h.setup.mockInput.pressEscape()
     await Bun.sleep(30)
-    expect(app.activeSubagentId).toBe("child-vim")
-    expect(app.composer.hintText.plainText).toContain("NORMAL")
-    setup.mockInput.pressEscape()
+    expect(h.app.activeSubagentId).toBeNull()
+    expect(h.app.composer.visible).toBeTrue()
+    expect(h.app.composer.value).toBe("parent draft stays private")
+    expect(h.app.composer.attachments.map((attachment) => attachment.name)).toEqual(["parent context.txt"])
+    expect(h.emitted.some((command) => command.type === "interrupt_subagent")).toBeFalse()
+    expect(h.app.banner.plainText).toContain("press Esc again to stop the child agent")
+    h.setup.mockInput.pressKey("c", { ctrl: true })
     await Bun.sleep(30)
-    expect(app.activeSubagentId).toBeNull()
+    expect(h.emitted.at(-1)).toMatchObject({ type: "interrupt_subagent", session_id: SESSION, subagent_id: "child-running" })
   })
 
-  test("shows running child state without offering or selecting a follow-up action", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
-    renderer = setup.renderer
-    const emitted: ClientCommand[] = []
-    let request = 0
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      sessionId: "parent-session",
-      requestId: () => `request-${++request}`,
-      onCommand(command) {
-        emitted.push(command)
-        return { type: "accepted" }
-      },
-    })
-    renderer.root.add(app)
-    app.openSubagentPicker()
-    const list = emitted.find((command) => command.type === "list_subagents")!
-    app.handleEvent({
-      type: "subagents_listed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "tui-client",
-        request_id: list.meta.request_id,
-        emitted_at: "2026-01-01T00:00:00Z",
-      },
-      session_id: "parent-session",
-      subagents: [{
-        subagent_id: "child-running-actions",
-        child_session_id: "child-session",
-        task: "Finish current work",
-        agent: "reviewer",
-        model: "fast",
-        isolation: "shared",
-        activity: "running",
-      }],
-    })
-    app.closePicker()
-    app.openSubagentActionPicker("child-running-actions")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
-      "inspect",
-      "running",
-      "interrupt",
-      "close",
-    ])
-    expect(app.picker.select.options.map((option) => option.name).join(" ")).not.toContain(
-      "Send follow-up",
-    )
-    app.picker.moveSelection(1)
-    expect(app.picker.select.getSelectedOption()?.value).toBe("interrupt")
-
-    const commandCount = emitted.length
-    app.picker.select.setSelectedIndex(1)
-    app.picker.select.selectCurrent()
+  test("messages a finished child explicitly without touching the parent composer", async () => {
+    const h = await harness()
+    h.app.composer.value = "parent draft"
+    h.app.openSubagentPicker()
+    h.listChildren([descriptor("child-idle", "idle")])
+    h.app.agentsBrowser.activateSelected()
+    expect(options(h.app.picker).map((option) => option.value)).toEqual(["view", "message", "close"])
+    select(h.app.picker, 1)
+    h.app.picker.activateSelected()
+    expect(h.app.picker.screenTitle).toContain("Message reviewer")
+    h.app.setState(h.app.state)
+    expect(h.app.picker.screenTitle).toContain("Message reviewer")
+    await h.setup.mockInput.typeText("check the edge cases too")
+    h.setup.mockInput.pressEnter()
     await Bun.sleep(0)
-    expect(app.picker.visible).toBeTrue()
-    expect(emitted).toHaveLength(commandCount)
-    expect(emitted.some((command) => command.type === "continue_subagent")).toBeFalse()
+    expect(h.emitted.at(-1)).toMatchObject({
+      type: "continue_subagent", session_id: SESSION, subagent_id: "child-idle", content: "check the edge cases too",
+    })
+    expect(h.app.composer.value).toBe("parent draft")
+    expect(h.app.activeSubagentId).toBeNull()
+    expect(h.app.agentsBrowser.visible).toBeTrue()
+  })
+
+  test("child actions go back step by step: prompt to actions to list", async () => {
+    const h = await harness()
+    h.app.openSubagentPicker()
+    h.listChildren([descriptor("child-idle", "idle")])
+    h.app.agentsBrowser.activateSelected()
+    expect(h.app.picker.footer.plainText).toContain("esc back")
+    select(h.app.picker, 1)
+    h.app.picker.activateSelected()
+    expect(h.app.picker.screenTitle).toContain("Message reviewer")
+    h.setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(options(h.app.picker).map((option) => option.value)).toEqual(["view", "message", "close"])
+    h.setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(h.app.agentsBrowser.visible).toBeTrue()
+    expect(h.emitted.some((command) => command.type === "continue_subagent")).toBeFalse()
+  })
+
+  test("refuses to message a child that started working again", async () => {
+    const h = await harness()
+    h.app.openSubagentPicker()
+    h.listChildren([descriptor("child-idle", "idle")])
+    h.app.agentsBrowser.activateSelected()
+    select(h.app.picker, 1)
+    h.app.picker.activateSelected()
+    await h.setup.mockInput.typeText("one more thing")
+    spawn(h, "child-idle")
+    h.setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(h.emitted.some((command) => command.type === "continue_subagent")).toBeFalse()
+    expect(h.app.state.errors.at(-1)).toMatchObject({ code: "subagent_still_running" })
+  })
+
+  test("stop and close are explicit actions that return to the list", async () => {
+    const h = await harness()
+    spawn(h, "child-running")
+    h.app.openSubagentPicker()
+    h.listChildren([descriptor("child-running", "running")])
+    h.app.agentsBrowser.activateSelected()
+    select(h.app.picker, 1)
+    h.app.picker.activateSelected()
+    await Bun.sleep(0)
+    expect(h.emitted.at(-1)).toMatchObject({ type: "interrupt_subagent", subagent_id: "child-running" })
+    expect(h.app.agentsBrowser.visible).toBeTrue()
   })
 
   test("keeps child-list failures retryable instead of claiming the list is empty", async () => {
-    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
-    renderer = setup.renderer
     let attempts = 0
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      sessionId: "parent-session",
+    const h = await harness({
+      width: 72, height: 12,
       onCommand(command) {
-        if (command.type === "list_subagents") {
-          attempts += 1
-          return {
-            type: "rejected",
-            error: {
-              category: "protocol",
-              code: "offline",
-              message: "engine temporarily unavailable",
-              retryable: true,
-            },
-          }
-        }
-        return { type: "accepted" }
+        if (command.type !== "list_subagents") return undefined
+        attempts += 1
+        return { type: "rejected", error: { category: "protocol", code: "offline", message: "engine temporarily unavailable", retryable: true } }
       },
     })
-    renderer.root.add(app)
-    app.openSubagentPicker()
+    h.app.openSubagentPicker()
     await Bun.sleep(0)
-    expect(app.picker.select.options.map((option) => option.value)).toEqual(["agents.retry"])
-    app.picker.select.selectCurrent()
+    expect(h.app.agentsBrowser.itemIds).toEqual(["agents.retry"])
+    h.app.agentsBrowser.activateSelected()
     await Bun.sleep(0)
     expect(attempts).toBe(2)
   })
 
-  test("restores a rejected child submission only to its originating child draft", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
-    renderer = setup.renderer
-    const emitted: ClientCommand[] = []
-    let rejectFollowUp: ((outcome: CommandOutcome) => void) | undefined
-    let request = 0
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      sessionId: "parent-session",
-      requestId: () => `request-${++request}`,
-      onCommand(command) {
-        emitted.push(command)
-        if (command.type === "continue_subagent") {
-          return new Promise<CommandOutcome>((resolve) => {
-            rejectFollowUp = resolve
-          })
-        }
-        return { type: "accepted" }
-      },
-    })
-    renderer.root.add(app)
-    app.composer.value = "parent draft"
-    app.openSubagentPicker()
-    const list = emitted.find((command) => command.type === "list_subagents")!
-    app.handleEvent({
-      type: "subagents_listed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "tui-client",
-        request_id: list.meta.request_id,
-        emitted_at: "2026-01-01T00:00:00Z",
-      },
-      session_id: "parent-session",
-      subagents: [{
-        subagent_id: "child-draft",
-        child_session_id: "child-session",
-        task: "Keep drafts isolated",
-        agent: "reviewer",
-        model: "fast",
-        isolation: "shared",
-        activity: "idle",
-      }],
-    })
-    app.picker.select.selectCurrent()
-    await Bun.sleep(0)
-    app.composer.value = "child submission that will fail"
-    const submission = app.composer.submit()
-    await Bun.sleep(0)
-    setup.mockInput.pressEscape()
-    await Bun.sleep(30)
-    expect(app.activeSubagentId).toBeNull()
-    expect(app.composer.value).toBe("parent draft")
+  test("the strip lists running children and keeps finished ones until the next message", async () => {
+    const h = await harness()
+    expect(h.app.agentsStrip.visible).toBeFalse()
+    spawn(h, "child-a")
+    h.app.openSubagentPicker()
+    h.listChildren([descriptor("child-a", "running")])
+    h.app.closePicker()
+    await h.setup.renderOnce()
+    expect(h.app.agentsStrip.visible).toBeTrue()
+    expect(h.app.agentsStrip.rows.get("child-a")?.plainText).toContain("◌ reviewer · Task for child-a")
+    expect(h.app.statusLine.plainText).toContain("1 agent running")
+    // The sidebar names the agent and its task, never the raw child id.
+    expect(h.app.contextPanel.agents.options.map(option => option.name)).toEqual(["◌ reviewer · Task for child-a"])
+    finish(h, "child-a", 3)
+    h.emit({ type: "turn_finished", meta: eventMeta(4), turn_id: "1", status: "completed",
+      usage: { input_tokens: "1", output_tokens: "1", cache_read_tokens: "0", cache_write_tokens: "0", reasoning_tokens: "0" },
+      cost: { kind: "monetary", amount_micros: "1", currency: "USD" } })
+    expect(h.app.agentsStrip.visible).toBeTrue()
+    expect(h.app.agentsStrip.rows.get("child-a")?.plainText).toContain("completed · USD 0.0125")
+    expect(h.app.statusLine.plainText).not.toContain("agent running")
+    expect(h.app.agentsStrip.footer.plainText).toContain("hidden after your next message")
 
-    rejectFollowUp?.({
-      type: "rejected",
-      error: {
-        category: "protocol",
-        code: "child_busy",
-        message: "child is temporarily busy",
-        retryable: true,
-      },
-    })
-    expect(await submission).toBeFalse()
-    expect(app.composer.value).toBe("parent draft")
-    app.openSubagentActionPicker("child-draft")
-    app.picker.select.selectCurrent()
-    await Bun.sleep(0)
-    expect(app.activeSubagentId).toBe("child-draft")
-    expect(app.composer.value).toBe("child submission that will fail")
+    // Clearing finished agents from the strip is a footer chord, not a list row.
+    h.app.openSubagentPicker()
+    expect(h.app.agentsBrowser.itemIds).toEqual(["agents.child.child-a"])
+    expect(h.app.agentsBrowser.footer.plainText).toContain("Ctrl+D clear finished from strip")
+    h.setup.mockInput.pressKey("d", { ctrl: true })
+    expect(h.app.agentsStrip.visible).toBeFalse()
+    expect(h.app.agentsBrowser.footer.plainText).not.toContain("Ctrl+D")
+    h.app.closePicker()
+    h.app.composer.value = "next task"
+    await h.app.composer.submit()
+    expect(h.app.agentsStrip.visible).toBeFalse()
+    h.app.openSubagentPicker()
+    expect(h.app.agentsBrowser.itemIds).toEqual(["agents.child.child-a"])
+    expect(h.app.agentsBrowser.detail.plainText).toContain("Found the regression in the router")
   })
 
-  test("keeps the newly inspected child active when an older child shell command is accepted", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
-    renderer = setup.renderer
-    const emitted: ClientCommand[] = []
-    let acceptShell: ((outcome: CommandOutcome) => void) | undefined
-    let request = 0
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      sessionId: "parent-session",
-      requestId: () => `request-${++request}`,
-      terminalHandover: { suspend() { }, resume() { } },
-      onCommand(command) {
-        emitted.push(command)
-        if (command.type === "user_shell_started") {
-          return new Promise<CommandOutcome>((resolve) => {
-            acceptShell = resolve
-          })
-        }
-        return { type: "accepted" }
-      },
+  test("queued children are live in the strip and the Agents screen", async () => {
+    const h = await harness()
+    spawn(h, "child-running")
+    h.app.openSubagentPicker()
+    h.listChildren([descriptor("child-running", "running"), descriptor("child-queued", "queued")])
+    expect(h.app.agentsBrowser.sectionLabels).toEqual(["Running"])
+    expect(h.app.agentsBrowser.footer.plainText).toContain("1 running · 1 queued · 0 finished")
+    h.app.agentsBrowser.selectById("agents.child.child-queued")
+    expect(h.app.agentsBrowser.detail.plainText).toContain("waiting for a free agent slot")
+    h.app.closePicker()
+    await h.setup.renderOnce()
+    expect([...h.app.agentsStrip.rows.keys()]).toEqual(["child-running", "child-queued"])
+    expect(h.app.agentsStrip.rows.get("child-queued")?.plainText).toBe("◷ reviewer · Task for child-queued · queued")
+    expect(h.app.agentsStrip.footer.plainText).not.toContain("hidden after your next message")
+  })
+
+  test("Ctrl+B backgrounds only the child a foreground spawn is blocked on", async () => {
+    const h = await harness()
+    spawn(h, "child-bg")
+    h.setup.mockInput.pressKey("b", { ctrl: true })
+    await Bun.sleep(0)
+    expect(h.emitted.some((command) => command.type === "background_subagent")).toBeFalse()
+    expect(h.app.composer.hintText.plainText).not.toContain("background")
+
+    h.emit({
+      type: "tool_call_started", meta: eventMeta(3), turn_id: "1", tool_call_id: "call-wait", invocation_id: "inv-wait",
+      name: "spawn_agent", args: { action: "wait", ids: ["child-bg"] }, call_index: 0,
     })
-    renderer.root.add(app)
-    app.openSubagentPicker()
-    const list = emitted.find((command) => command.type === "list_subagents")!
-    app.handleEvent({
-      type: "subagents_listed",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "tui-client",
-        request_id: list.meta.request_id,
-        emitted_at: "2026-01-01T00:00:00Z",
-      },
-      session_id: "parent-session",
-      subagents: [
-        {
-          subagent_id: "child-a",
-          child_session_id: "child-session-a",
-          task: "Origin child",
-          agent: "reviewer",
-          model: "fast",
-          isolation: "shared",
-          activity: "running",
-        },
-        {
-          subagent_id: "child-b",
-          child_session_id: "child-session-b",
-          task: "New child",
-          agent: "reviewer",
-          model: "fast",
-          isolation: "shared",
-          activity: "running",
-        },
-      ],
-    })
-    app.picker.select.selectCurrent()
+    expect(h.app.composer.hintText.plainText).toContain("Ctrl+B background")
+    expect(h.app.agentsStrip.footer.plainText).toContain("Ctrl+B background")
+    h.setup.mockInput.pressKey("b", { ctrl: true })
     await Bun.sleep(0)
-    expect(app.activeSubagentId).toBe("child-a")
-    app.composer.value = "!pwd"
-    const submission = app.composer.submit()
-    await Bun.sleep(0)
-    setup.mockInput.pressEscape()
-    await Bun.sleep(30)
-    app.openSubagentActionPicker("child-b")
-    app.picker.select.selectCurrent()
-    await Bun.sleep(0)
-    expect(app.activeSubagentId).toBe("child-b")
-    acceptShell?.({ type: "accepted" })
-    expect(await submission).toBeTrue()
-    expect(app.activeSubagentId).toBe("child-b")
+    expect(h.emitted.at(-1)).toMatchObject({ type: "background_subagent", session_id: SESSION, subagent_id: "child-bg" })
   })
 })

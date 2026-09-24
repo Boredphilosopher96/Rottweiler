@@ -81,7 +81,6 @@ impl SessionActor {
             background_children,
             shutdown: shutdown.clone(),
             commands: command_tx,
-            child_progress: super::child_progress::HostedChildProgress::new(),
             events: event_tx.clone(),
             active_turn: active_turn.clone(),
             session_id: config.session_id.clone(),
@@ -470,6 +469,52 @@ pub(super) async fn run_actor(
             {
                 state.unsettled.get_or_insert_with(|| error.to_string());
                 continue;
+            }
+        }
+        // A background child finished while the parent was idle: start a turn
+        // whose first provider call receives the undelivered results.
+        if !state.closing
+            && !state.recovery_requested
+            && state.suspended_inputs.is_none()
+            && state.running.is_none()
+            && !state.initialization_running
+            && state.active_shell.is_none()
+            && state.pending_command.is_none()
+            && state.pending_model_preparation.is_none()
+            && state.deferred_controls.is_empty()
+            && state.pending_model_switches.is_empty()
+            && state.queued.is_empty()
+            && state.child_results.take()
+        {
+            match start_turn(
+                &mut state,
+                &config,
+                &tool_context,
+                &turn_signals,
+                &events,
+                Vec::new(),
+                &active_turn,
+            )
+            .await
+            {
+                Ok(()) => {}
+                // The results stay undelivered and join the next turn.
+                Err(AgentLoopError::InvalidConfiguration(message)) => {
+                    let notice = PendingEvent::Error {
+                        message: format!(
+                            "A child agent finished, but no turn could start to receive its result: {message}"
+                        ),
+                    };
+                    if let Err(error) = emit(&mut state, &events, &config.event_sink, notice).await
+                    {
+                        state.unsettled.get_or_insert_with(|| error.to_string());
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    state.unsettled.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
             }
         }
         let tasks = state.tasks.clone();

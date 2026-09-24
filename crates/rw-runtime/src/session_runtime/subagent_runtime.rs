@@ -7,11 +7,9 @@ use rw_core::HostError;
 use rw_core::HostSubagentService;
 use rw_core::PermissionGate;
 use rw_core::SessionActorConfig;
-use rw_core::SubagentObserver;
 use rw_core::SubagentOrchestrator;
 use rw_core::SubagentSessionFactory;
 use rw_tools::CancellationToken;
-use rw_tools::SubagentProgressEvent;
 use rw_tools::ToolRegistry;
 use rw_tools::WorktreeLeaseRecord;
 use rw_types::SessionId;
@@ -161,62 +159,6 @@ impl HostedSubagentController {
     }
 }
 
-pub(super) struct HostedSubagentObserver {
-    pub(super) parent: rw_core::SessionHandle,
-}
-impl HostedSubagentObserver {
-    pub(super) fn new(parent: rw_core::SessionHandle) -> Self {
-        Self { parent }
-    }
-}
-
-#[async_trait]
-impl SubagentObserver for HostedSubagentObserver {
-    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
-        self.parent.subagent_progress_budget()
-    }
-    async fn spawned(
-        &self,
-        handle: &rw_core::SubagentHandle,
-        task: &str,
-    ) -> Result<(), rw_core::OrchestrationError> {
-        self.parent
-            .record_subagent_spawned(
-                handle.subagent_id.clone(),
-                handle.session_id.clone(),
-                task.to_owned(),
-            )
-            .await
-            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
-    }
-
-    async fn finished(
-        &self,
-        result: &rw_core::SubagentResult,
-    ) -> Result<(), rw_core::OrchestrationError> {
-        self.parent
-            .record_subagent_finished(result.clone())
-            .await
-            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
-    }
-
-    async fn progress(
-        &self,
-        handle: &rw_core::SubagentHandle,
-        child_sequence: Option<u64>,
-        event: rw_tools::ChildProgressPreview,
-    ) -> Result<(), rw_core::OrchestrationError> {
-        self.parent
-            .publish_subagent_progress(SubagentProgressEvent {
-                subagent_id: handle.subagent_id.clone(),
-                child_session_id: handle.session_id.clone(),
-                child_sequence,
-                event,
-            })
-            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
-    }
-}
-
 #[async_trait]
 impl HostSubagentService for HostedSubagentController {
     async fn family_controls(
@@ -318,8 +260,11 @@ impl HostSubagentService for HostedSubagentController {
         content: String,
     ) -> Result<(), HostError> {
         self.ensure_parent(parent_session_id)?;
-        let observer: Arc<dyn SubagentObserver> =
-            Arc::new(HostedSubagentObserver::new(self.parent.clone()));
+        // A user-continued child reports like a background child: its result
+        // is delivered once and wakes the parent if it is idle.
+        let observer = self
+            .orchestrator
+            .background_observer(self.parent.background_subagent_event_sink());
         self.orchestrator
             .follow_up(
                 parent_session_id,
@@ -342,6 +287,17 @@ impl HostSubagentService for HostedSubagentController {
         self.orchestrator
             .cancel(parent_session_id, subagent_id)
             .await
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+
+    async fn move_to_background(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+    ) -> Result<(), HostError> {
+        self.ensure_parent(parent_session_id)?;
+        self.orchestrator
+            .move_to_background(parent_session_id, subagent_id)
             .map_err(|error| HostError::Protocol(error.to_string()))
     }
 

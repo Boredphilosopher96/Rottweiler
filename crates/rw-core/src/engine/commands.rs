@@ -16,7 +16,6 @@ pub struct SessionCommandContext {
     pub(super) mode_id: ModeId,
     pub(super) modes: Arc<ModeRegistry>,
     pub(super) permission_summary: String,
-    pub(super) plan_summary: String,
     pub(super) command_summary: String,
 }
 
@@ -30,7 +29,6 @@ impl Default for SessionCommandContext {
             mode_id: ModeId("execute".to_owned()),
             modes: Arc::new(ModeRegistry::builtins().unwrap_or_default()),
             permission_summary: String::new(),
-            plan_summary: String::new(),
             command_summary: String::new(),
         }
     }
@@ -94,7 +92,6 @@ pub enum CommandToolOutputKind {
 pub enum SessionCommandAction {
     #[default]
     None,
-    Interrupt,
     Navigate {
         target: rw_types::extension_control::SessionNavigationTarget,
     },
@@ -144,11 +141,14 @@ pub enum SessionCommandAction {
         depth: InitDepth,
     },
     /// Starts a normal model turn from an expanded declarative command.
+    /// `allowed_tools` narrows the turn's tool set when present;
+    /// `pre_approvals` are `tool(glob)` invocations that run without an
+    /// approval prompt during the turn.
     SubmitPrompt {
         content: String,
         model_alias: Option<String>,
         allowed_tools: Option<Vec<String>>,
-        permission_patterns: Vec<String>,
+        pre_approvals: Vec<String>,
         tool_calls: Vec<CommandToolCall>,
     },
 }
@@ -267,8 +267,6 @@ impl WorkspaceRootController for NoopWorkspaceRootController {
         Ok(())
     }
 }
-
-struct StatusCommand;
 
 fn permission_decision_label(decision: PermissionDecision) -> &'static str {
     decision.as_str()
@@ -493,63 +491,6 @@ pub(super) fn render_cost_snapshot(snapshot: &CostSnapshot) -> String {
     lines.join("\n")
 }
 
-pub(super) fn render_plan(plan: &PlanArtifact) -> String {
-    let mut lines = vec![plan.title.clone(), plan.summary_md.clone()];
-    for (index, step) in plan.steps.iter().enumerate() {
-        lines.push(format!("{}. {}", index + 1, step.description));
-        if !step.files_touched.is_empty() {
-            lines.push(format!("   Files: {}", step.files_touched.join(", ")));
-        }
-        if !step.verification.trim().is_empty() {
-            lines.push(format!("   Verify: {}", step.verification));
-        }
-    }
-    if !plan.open_questions.is_empty() {
-        lines.push("Open questions:".to_owned());
-        lines.extend(
-            plan.open_questions
-                .iter()
-                .map(|question| format!("- {question}")),
-        );
-    }
-    lines.join("\n")
-}
-
-#[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for StatusCommand {
-    async fn execute(
-        &self,
-        context: &mut SessionCommandContext,
-        _invocation: CommandInvocation,
-    ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        Ok(SessionCommandOutput {
-            message: format!(
-                "Agent: {}\nQueued messages: {}\nMode: {}",
-                if context.running { "working" } else { "idle" },
-                context.queued_messages,
-                context.mode_id.0
-            ),
-            action: SessionCommandAction::None,
-        })
-    }
-}
-
-struct InterruptCommand;
-
-#[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for InterruptCommand {
-    async fn execute(
-        &self,
-        _context: &mut SessionCommandContext,
-        _invocation: CommandInvocation,
-    ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        Ok(SessionCommandOutput {
-            message: "interrupt requested".to_owned(),
-            action: SessionCommandAction::Interrupt,
-        })
-    }
-}
-
 struct HelpCommand;
 
 #[async_trait]
@@ -647,6 +588,14 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for Permissions
                 action: SessionCommandAction::ListPermissionApprovals,
             });
         }
+        if arguments == "trust" || arguments.starts_with("trust ") {
+            return Ok(SessionCommandOutput {
+                message: String::new(),
+                action: SessionCommandAction::Trust {
+                    operation: folder_trust_operation(&arguments["trust".len()..])?,
+                },
+            });
+        }
         if let Some(value) = arguments.strip_prefix("mode ").map(str::trim) {
             let mode = if matches!(value, "default" | "standard") {
                 None
@@ -716,29 +665,22 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for Permissions
 fn invalid_permissions_command() -> CommandExecutionError {
     CommandExecutionError::new(
         "invalid_permissions_command",
-        "usage: /permissions [list | mode <default|strict|auto-safe|yolo> | approvals | add <allow|ask|deny> <tool(glob)> | remove <tool(glob)> | clear-session | revoke-session <id|all> | revoke-project <id|all>]",
+        "usage: /permissions [list | mode <default|strict|auto-safe|yolo> | approvals | add <allow|ask|deny> <tool(glob)> | remove <tool(glob)> | clear-session | revoke-session <id|all> | revoke-project <id|all> | trust [status|grant|revoke]]",
     )
 }
 
-struct PlanCommand;
-
-#[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for PlanCommand {
-    async fn execute(
-        &self,
-        context: &mut SessionCommandContext,
-        invocation: CommandInvocation,
-    ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        if !invocation.arguments().trim().is_empty() {
-            return Err(CommandExecutionError::new(
-                "invalid_plan_command",
-                "usage: /plan",
-            ));
-        }
-        Ok(SessionCommandOutput {
-            message: context.plan_summary.clone(),
-            action: SessionCommandAction::None,
-        })
+fn folder_trust_operation(arguments: &str) -> Result<FolderTrustOperation, CommandExecutionError> {
+    match arguments.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] | ["status"] => Ok(FolderTrustOperation::Status),
+        ["grant"] => Ok(FolderTrustOperation::Grant { confirmation: None }),
+        ["grant", confirmation] => Ok(FolderTrustOperation::Grant {
+            confirmation: Some((*confirmation).to_owned()),
+        }),
+        ["revoke"] => Ok(FolderTrustOperation::Revoke),
+        _ => Err(CommandExecutionError::new(
+            "invalid_trust_command",
+            "usage: /permissions trust [status|grant|revoke]",
+        )),
     }
 }
 
@@ -796,10 +738,10 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ContextComm
     }
 }
 
-struct CostCommand;
+struct UsageCommand;
 
 #[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CostCommand {
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for UsageCommand {
     async fn execute(
         &self,
         _context: &mut SessionCommandContext,
@@ -807,8 +749,8 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CostCommand
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
         if !invocation.arguments().trim().is_empty() {
             return Err(CommandExecutionError::new(
-                "invalid_cost_command",
-                "usage: /cost",
+                "invalid_usage_command",
+                "usage: /usage",
             ));
         }
         Ok(SessionCommandOutput {
@@ -839,36 +781,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CompactComm
 
 struct RewindCommand;
 
-struct ForkCommand;
-
 struct ReviewCommand;
-
-#[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ForkCommand {
-    async fn execute(
-        &self,
-        context: &mut SessionCommandContext,
-        invocation: CommandInvocation,
-    ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        if context.running() {
-            return Err(CommandExecutionError::new(
-                "turn_running",
-                "forking requires an idle session",
-            ));
-        }
-        let turn = invocation.arguments().trim();
-        if !turn.is_empty() && turn.parse::<u64>().is_err() {
-            return Err(CommandExecutionError::new(
-                "invalid_turn",
-                "usage: /fork [turn]",
-            ));
-        }
-        Err(CommandExecutionError::new(
-            "host_dispatch_required",
-            "fork is handled by the authenticated session host",
-        ))
-    }
-}
 
 #[async_trait]
 impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ReviewCommand {
@@ -896,44 +809,10 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ReviewComma
     }
 }
 
-struct TrustCommand;
+struct DirsCommand;
 
 #[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for TrustCommand {
-    async fn execute(
-        &self,
-        _context: &mut SessionCommandContext,
-        invocation: CommandInvocation,
-    ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        let arguments = invocation
-            .arguments()
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        let operation = match arguments.as_slice() {
-            [] | ["status"] => FolderTrustOperation::Status,
-            ["grant"] => FolderTrustOperation::Grant { confirmation: None },
-            ["grant", confirmation] => FolderTrustOperation::Grant {
-                confirmation: Some((*confirmation).to_owned()),
-            },
-            ["revoke"] => FolderTrustOperation::Revoke,
-            _ => {
-                return Err(CommandExecutionError::new(
-                    "invalid_trust_command",
-                    "usage: /trust [status|grant|revoke]",
-                ));
-            }
-        };
-        Ok(SessionCommandOutput {
-            message: String::new(),
-            action: SessionCommandAction::Trust { operation },
-        })
-    }
-}
-
-struct AddDirCommand;
-
-#[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for AddDirCommand {
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for DirsCommand {
     async fn execute(
         &self,
         context: &mut SessionCommandContext,
@@ -942,8 +821,8 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for AddDirComma
         let path = invocation.arguments().trim();
         if path.is_empty() {
             return Err(CommandExecutionError::new(
-                "invalid_add_dir_command",
-                "usage: /add-dir <path>",
+                "interactive_client_required",
+                "Listing workspace roots requires an interactive client; add one with /dirs <path>.",
             ));
         }
         if context.running() {
@@ -974,10 +853,12 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for RewindComma
                 "interrupt the active turn before rewinding",
             ));
         }
-        let to_turn = invocation
-            .arguments()
-            .parse::<u64>()
-            .map_err(|_| CommandExecutionError::new("invalid_turn", "usage: /rewind <turn>"))?;
+        let to_turn = invocation.arguments().parse::<u64>().map_err(|_| {
+            CommandExecutionError::new(
+                "invalid_turn",
+                "usage: /rewind <turn>; interactive clients open the turn timeline",
+            )
+        })?;
         Ok(SessionCommandOutput {
             message: format!("rewound to turn {to_turn}"),
             action: SessionCommandAction::Rewind { to_turn },
@@ -985,7 +866,10 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for RewindComma
     }
 }
 
-/// Registers core commands through rw-ext's public registry API.
+/// Registers every core-owned catalog entry through rw-ext's public registry API.
+///
+/// Runtime-owned entries (`mcp`, `init`, `memory`) are registered by the host
+/// that owns their backing resources, using the same catalog metadata.
 ///
 /// # Errors
 ///
@@ -993,118 +877,26 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for RewindComma
 pub fn builtin_command_registry()
 -> Result<CommandRegistry<SessionCommandContext, SessionCommandOutput>, AgentLoopError> {
     let mut registry = CommandRegistry::new();
-    registry
-        .register(
-            CommandDescriptor::new("goto", "Navigate to a session or transcript sequence")
-                .with_argument_hint("session <id> | sequence <number>"),
-            navigation::NavigateCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("help", "List available commands"),
-            HelpCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("status", "Show actor running and queue state"),
-            StatusCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("mode", "Show or switch the interaction mode")
-                .with_argument_hint("[id]"),
-            ModeCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new(
-                "permissions",
-                "Show or edit session-scoped permission rules",
-            )
-            .with_argument_hint(
-                "[list|mode|approvals|add|remove|clear-session|revoke-session|revoke-project]",
-            ),
-            PermissionsCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("plan", "Show the pending or approved plan artifact"),
-            PlanCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("rewind", "Restore a completed turn checkpoint")
-                .with_argument_hint("<turn>"),
-            RewindCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("fork", "Fork this session at a completed turn")
-                .with_argument_hint("[turn]"),
-            ForkCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("review", "Review the cumulative session diff"),
-            ReviewCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("interrupt", "Interrupt the active turn"),
-            InterruptCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    for &(name, description, arguments) in rw_types::client_navigation::INTERACTIVE_COMMANDS {
+    for entry in rw_types::client_navigation::COMMAND_CATALOG {
+        if entry.registrar != rw_types::client_navigation::CommandRegistrar::Core {
+            continue;
+        }
         let handler: Arc<dyn CommandHandler<SessionCommandContext, SessionCommandOutput>> =
-            match name {
+            match entry.name {
+                "rewind" => Arc::new(RewindCommand),
+                "compact" => Arc::new(CompactCommand),
+                "mode" => Arc::new(ModeCommand),
                 "context" => Arc::new(ContextCommand),
-                "cost" => Arc::new(CostCommand),
+                "usage" => Arc::new(UsageCommand),
+                "review" => Arc::new(ReviewCommand),
+                "dirs" => Arc::new(DirsCommand),
+                "permissions" => Arc::new(PermissionsCommand),
+                "help" => Arc::new(HelpCommand),
                 _ => Arc::new(navigation::InteractiveClientCommand),
             };
-        let mut descriptor = CommandDescriptor::new(name, description);
-        if !arguments.is_empty() {
-            descriptor = descriptor.with_argument_hint(arguments);
-        }
         registry
-            .register_shared(descriptor, handler)
+            .register_shared(CommandDescriptor::from_catalog(entry), handler)
             .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
     }
-    registry
-        .register(
-            CommandDescriptor::new("compact", "Compact conversation context")
-                .with_argument_hint("[instructions]"),
-            CompactCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    register_workspace_commands(&mut registry)?;
     Ok(registry)
-}
-
-fn register_workspace_commands(
-    registry: &mut CommandRegistry<SessionCommandContext, SessionCommandOutput>,
-) -> Result<(), AgentLoopError> {
-    registry
-        .register(
-            CommandDescriptor::new("trust", "Inspect or change folder trust")
-                .with_argument_hint("[status|grant|revoke]"),
-            TrustCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("add-dir", "Append a live workspace root")
-                .with_argument_hint("<path>"),
-            AddDirCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    Ok(())
 }

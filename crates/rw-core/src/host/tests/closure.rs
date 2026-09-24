@@ -175,6 +175,7 @@ fn fork_request(child: SessionId) -> ForkSessionRequest {
             model: ModelAlias("fast".to_owned()),
             driver_client_id: None,
             shell_active: false,
+            activity: None,
         },
         child_session_id: child,
         at_turn: TurnId("turn".to_owned()),

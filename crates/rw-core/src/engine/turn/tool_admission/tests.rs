@@ -71,6 +71,7 @@ fn redacted_announcement_must_fit_before_the_batch_can_execute() {
 
 fn approval(diff_bytes: usize) -> crate::PermissionRequest {
     crate::PermissionRequest {
+        prompt_reason: None,
         id: "call".into(),
         invocation_id: rw_types::ToolInvocationId("invocation".into()),
         tool_name: "write".into(),

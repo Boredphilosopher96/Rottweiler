@@ -12,7 +12,7 @@ through sessions and clients.
 
 Connecting a provider opens its models. If no model is selected, Rottweiler
 selects an available tool-capable model from that provider's catalog. Connecting
-another provider preserves your selection. `/models` changes it explicitly.
+another provider preserves your selection. `/model` changes it explicitly.
 The first concrete selection becomes your user default when none is configured;
 subsequent choices are remembered per workspace. Cached lists are labeled.
 
@@ -63,8 +63,9 @@ than appearing as free API routes.
 
 ### Compatible endpoints
 
-Choose **Connect compatible endpoint…** in `/providers` to add a user-scoped
-Chat Completions or Responses endpoint. Supply its full inference URL, for
+In `/model`, press `Ctrl+N` to connect a provider, then choose **Compatible
+endpoint…** under **Custom** to add a user-scoped Chat Completions or Responses
+endpoint. Supply its full inference URL, for
 example `https://gateway.example/v1/chat/completions`, and a unique local name.
 API keys are entered separately and stored through the credential manager;
 they never enter configuration commands or session history. Unauthenticated

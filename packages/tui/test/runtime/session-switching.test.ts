@@ -102,7 +102,7 @@ describe("runtime session-switching", () => {
         emitted_at: "2026-07-10T00:00:00Z",
       },
       session_id: "session-old",
-      commands: [{ source: "builtin", name: "stale", description: "wrong session", usage: "" }],
+      commands: [{ source: "builtin", scope: null, name: "stale", description: "wrong session", usage: "" }],
       truncated: false,
     })
     expect(app.state.commands).toEqual([])
@@ -115,7 +115,7 @@ describe("runtime session-switching", () => {
         emitted_at: "2026-07-10T00:00:00Z",
       },
       session_id: "session-new",
-      commands: [{ source: "builtin", name: "current", description: "right session", usage: "" }],
+      commands: [{ source: "builtin", scope: null, name: "current", description: "right session", usage: "" }],
       truncated: false,
     })
     expect(app.state.commands.map((command) => command.name)).toEqual(["current"])

@@ -1,12 +1,24 @@
 import { readyCatalog } from "../fixtures/catalog"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
-import {
-  createRottweilerApp
-} from "../../src/app"
-import type { CommandOutcome } from "../../src/protocol"
-import { createInitialState } from "../../src/state"
+import { createRottweilerApp } from "../../src/app"
+import type { ClientCommand } from "../../src/protocol"
+import { createInitialState, type RottweilerState } from "../../src/state"
 import { emptySessionReader } from "../fixtures/history"
+import { options } from "../picker-screen"
+
+const REMOVED = [
+  "goto", "status", "interrupt", "plan", "fork", "trust", "add-dir", "cost", "models", "providers",
+  "deep-init", "workflow-status", "mcp.prompt",
+]
+
+const childState = (): RottweilerState => ({
+  ...createInitialState(), subagentOrder: ["child"], subagents: { child: {
+    projectionId: "child", subagentId: "child", parentTurnId: "1", task: "Inspect code", spawnedAtMs: null,
+    status: "completed", childSessionId: "child-session", lastChildSequence: "4", activity: null,
+    summary: "Done.", touchedFileCount: 0, diffArtifactId: null, cost: { kind: "monetary", currency: "USD", amount_micros: "0" },
+  } },
+})
 
 describe("Rottweiler palette", () => {
   let renderer: TestRenderer | undefined
@@ -15,83 +27,168 @@ describe("Rottweiler palette", () => {
     renderer = undefined
   })
 
-  test("keeps local slash actions and the full action palette useful before engine projections", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+  test("lists one engine catalog entry per action in fixed sections before engine projections", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
-
-    await setup.mockInput.typeText("/")
-    const slash = app.commandPalette.itemIds
-    expect(slash).toContain("provider.list")
-    expect(slash).toContain("agent.children")
-    expect(slash).toContain("theme.list")
-    expect(slash).toContain("settings.open")
-    expect(slash).toContain("app.exit")
-
-    app.closePicker()
     app.openCommandPicker()
-    const palette = app.commandPalette.itemIds
-    expect(palette).toContain("session.list")
-    expect(palette).toContain("provider.list")
-    expect(palette).toContain("agent.children")
-    expect(palette).toContain("mcp.manage")
-    expect(palette).toContain("keyboard.help")
-    expect(palette).not.toContain("mcp.configure")
-    expect(palette).toContain("permissions.manage")
-    expect(palette.length).toBeGreaterThan(10)
 
-    app.commandPalette.selectById("status.show")
-    app.commandPalette.activateSelected()
-    expect(app.composer.value).toBe("/status")
+    expect(app.commandPalette.sectionLabels).toEqual([
+      "Conversation", "Models & agents", "Context & usage", "Workspace", "Safety", "Settings & help",
+    ])
+    const ids = app.commandPalette.itemIds
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const id of ["cmd.new", "cmd.resume", "cmd.rewind", "cmd.compact", "cmd.model", "cmd.mode", "cmd.context",
+      "cmd.usage", "cmd.review", "cmd.dirs", "cmd.mcp", "cmd.init", "cmd.memory", "cmd.permissions", "cmd.settings",
+      "cmd.theme", "cmd.help", "cmd.exit"]) expect(ids).toContain(id)
+    // Agents, queued messages, and errors appear only once they exist.
+    for (const id of ["cmd.agents", "cmd.queue", "cmd.errors"]) expect(ids).not.toContain(id)
+    for (const name of REMOVED) {
+      expect(ids).not.toContain(`cmd.${name}`)
+      expect(ids).not.toContain(`ext.${name}`)
+    }
+    expect(app.commandPalette.selectedId).toBe("cmd.new")
   })
 
-  test("opens the command palette as a split list and selected-only detail surface", async () => {
+  test("shows the Agents entry once this session has a child agent", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, initialState: childState() })
+    renderer.root.add(app)
+    app.openCommandPicker()
+    expect(app.commandPalette.itemIds).toContain("cmd.agents")
+  })
+
+  test("renders a split list with right-aligned keys and toggles closed with Ctrl+P", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
-    app.openCommandPicker()
+    setup.mockInput.pressKey("p", { ctrl: true })
     await setup.renderOnce()
 
-    expect(app.picker.visible).toBeFalse()
     expect(app.commandPalette.visible).toBeTrue()
     expect(app.commandPalette.x).toBe(0)
     expect(app.commandPalette.y).toBe(0)
     expect(app.commandPalette.width).toBe(110)
     expect(app.commandPalette.height).toBe(app.composer.y)
-    app.commandPalette.selectById("compact.run")
-    expect(app.commandPalette.detail.plainText).toContain("Checking availability")
-    expect(app.commandPalette.footer.plainText).toContain("commands")
+    const frame = setup.captureCharFrame()
+    expect(frame).toMatch(/New session\s+Ctrl\+N/)
+    expect(frame).toMatch(/Review changes\s+Ctrl\+R/)
+    expect(app.commandPalette.footer.plainText).toContain("Ctrl+P close")
+    expect(app.commandPalette.detail.plainText).toContain("/new")
 
-    await setup.mockInput.typeText("status")
-    expect(app.commandPalette.detail.plainText).toContain("Display running and queue state")
+    await setup.mockInput.typeText("providers")
+    expect(app.commandPalette.selectedId).toBe("cmd.model")
     expect(renderer.currentFocusedRenderable).toBe(app.commandPalette.input)
-    setup.mockInput.pressEnter()
+    setup.mockInput.pressKey("p", { ctrl: true })
     expect(app.commandPalette.visible).toBeFalse()
-    expect(app.composer.value).toBe("/status")
   })
 
-  test("keeps local command palette actions usable while the live catalog loads", async () => {
+  test("labels extension commands by source and dispatches them", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
-    const pending = new Promise<CommandOutcome>(() => { })
+    const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
       sessionReader: emptySessionReader,
-      onCommand(command) {
-        return command.type === "list_commands" ? pending : { type: "accepted" }
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        commands: [
+          { name: "deploy", description: "Deploy project", usage: "/deploy <environment>", source: "project" },
+          { name: "careful", description: "Warn before destructive commands", usage: "/careful", source: "skill" },
+          { name: "mcp.github.triage", description: "MCP prompt triage from github", usage: "/mcp.github.triage [JSON object]", source: "mcp" },
+          { name: "compact", description: "Compact conversation context", usage: "/compact [instructions]", source: "builtin" },
+        ],
+        commandsTruncated: true,
       },
+      onCommand(command) { emitted.push(command); return { type: "accepted" } },
     })
     renderer.root.add(app)
     app.openCommandPicker()
     await setup.renderOnce()
 
-    expect(app.commandPalette.footer.plainText).toContain("Loading extension commands")
-    await setup.mockInput.typeText("workspace roots")
-    expect(app.commandPalette.detail.plainText).toContain("See every live workspace root")
+    expect(app.commandPalette.sectionLabels.at(-1)).toBe("Extensions")
+    expect(app.commandPalette.itemIds.filter((id) => id.startsWith("ext."))).toEqual([
+      "ext.careful", "ext.deploy", "ext.mcp.github.triage",
+    ])
+    expect(app.commandPalette.itemIds.filter((id) => id.endsWith(".compact"))).toEqual(["cmd.compact"])
+    expect(app.commandPalette.footer.plainText).toContain("Extension results are truncated")
+    await setup.mockInput.typeText("triage")
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("mcp · github")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({ type: "send_message", content: "/mcp.github.triage" }))
+
+    app.openCommandPicker()
+    await setup.mockInput.typeText("deploy")
+    setup.mockInput.pressEnter()
+    expect(app.composer.value).toBe("/deploy ")
+
+    app.composer.value = ""
+    app.openCommandPicker()
+    await setup.mockInput.typeText("careful")
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toMatch(/careful\s+skill/)
   })
 
-  test("retries a failed command catalog from the command palette", async () => {
+  test("sinks engine-refused actions with their reason and never selects them first", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      initialState: {
+        ...createInitialState(),
+        availableActions: [
+          { action: "rewind", unavailable_reason: "Stop the current turn or wait for it to finish." },
+          { action: "compact", queued: true, unavailable_reason: null },
+        ],
+      },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+
+    const ids = app.commandPalette.itemIds
+    const conversation = ids.slice(0, ids.indexOf("cmd.model"))
+    expect(conversation.at(-1)).toBe("cmd.rewind")
+    app.commandPalette.selectById("cmd.rewind")
+    expect(app.commandPalette.detail.plainText).toContain("Stop the current turn")
+    expect(app.commandPalette.activateSelected()).toBeFalse()
+    app.commandPalette.selectById("cmd.compact")
+    expect(app.commandPalette.detail.plainText).toContain("Queues until the current work finishes")
+    await setup.mockInput.typeText("rewind")
+    expect(app.commandPalette.itemIds).toEqual(["cmd.rewind"])
+    expect(app.commandPalette.activateSelected()).toBeFalse()
+  })
+
+  test("opens screens from the palette and lists recent commands first", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, onCommand: readyCatalog(() => app) })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    await setup.mockInput.typeText("model")
+    setup.mockInput.pressEnter()
+    expect(app.picker.visible).toBeTrue()
+    expect(app.picker.screenTitle).toContain("MODELS")
+    app.closePicker()
+
+    app.openCommandPicker()
+    await setup.mockInput.typeText("dirs")
+    setup.mockInput.pressEnter()
+    expect(app.picker.visible).toBeTrue()
+    app.closePicker()
+
+    app.openCommandPicker()
+    expect(app.commandPalette.sectionLabels[0]).toBe("Recent")
+    expect(app.commandPalette.itemIds.slice(0, 2)).toEqual(["cmd.dirs", "cmd.model"])
+    expect(app.commandPalette.itemIds.filter((id) => id === "cmd.model")).toHaveLength(1)
+  })
+
+  test("offers a retry row when the live catalog fails", async () => {
     const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
     renderer = setup.renderer
     let attempts = 0
@@ -102,12 +199,7 @@ describe("Rottweiler palette", () => {
         attempts += 1
         return {
           type: "rejected",
-          error: {
-            category: "protocol",
-            code: "catalog_unavailable",
-            message: "driver lease rejected the command catalog",
-            retryable: true,
-          },
+          error: { category: "protocol", code: "catalog_unavailable", message: "driver lease rejected the command catalog", retryable: true },
         }
       },
     })
@@ -117,139 +209,33 @@ describe("Rottweiler palette", () => {
 
     expect(app.commandPalette.footer.plainText).toContain("driver lease rejected the command catalog")
     expect(attempts).toBe(1)
-    setup.mockInput.pressKey("r", { ctrl: true })
+    app.commandPalette.selectById("ext.retry")
+    app.commandPalette.activateSelected()
     await Bun.sleep(0)
     expect(attempts).toBe(2)
+    expect(app.commandPalette.visible).toBeTrue()
   })
 
-  test("derives command palette source counts and truncation from the live catalog", async () => {
-    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
-    renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      initialState: {
-        ...createInitialState(),
-        commands: [{ name: "deploy", description: "Deploy project", usage: "/deploy", source: "project" }],
-        commandsTruncated: true,
-      },
-    })
-    renderer.root.add(app)
-    app.openCommandPicker()
-
-    expect(app.commandPalette.footer.plainText).toContain("commands")
-    expect(app.commandPalette.footer.plainText).toContain("results are truncated")
-  })
-
-  test("preserves local, prefill, open, and live dispatch from the command palette", async () => {
-    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
-    renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      onCommand: readyCatalog(() => app),
-      initialState: {
-        ...createInitialState(),
-        commands: [{ name: "deploy", description: "Deploy project", usage: "/deploy" }],
-      },
-    })
-    renderer.root.add(app)
-
-    app.openCommandPicker()
-    await setup.mockInput.typeText("add workspace directory")
-    setup.mockInput.pressEnter()
-    expect(app.composer.value).toBe("/add-dir ")
-
-    app.composer.value = ""
-    app.openCommandPicker()
-    await setup.mockInput.typeText("switch model")
-    setup.mockInput.pressEnter()
-    expect(app.picker.visible).toBeTrue()
-    expect(app.picker.title).toContain("Models")
-
-    app.closePicker()
-    app.openCommandPicker()
-    await setup.mockInput.typeText("/deploy")
-    setup.mockInput.pressEnter()
-    expect(app.composer.value).toBe("/deploy")
-  })
-
-  test("groups an empty palette in fixed section order and removes headers while filtering", async () => {
+  test("help lists commands and the active compiled key bindings", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
       sessionReader: emptySessionReader,
-      initialState: {
-        ...createInitialState(),
-        commands: [{
-          name: "deploy",
-          description: "Deploy the project",
-          usage: "/deploy [environment]",
-          source: "project",
-        }],
-      },
+      keybindings: { bindings: { global: { open_model_picker: "ctrl+k" } } },
     })
     renderer.root.add(app)
-    app.openCommandPicker()
-
-    const headers = app.commandPalette.sectionLabels
-    expect(headers).toEqual([
-      "Conversation",
-      "Models & agents",
-      "Context & usage",
-      "Workspace",
-      "Safety",
-      "Settings & help",
+    await setup.mockInput.typeText("?")
+    expect(app.composer.value).toBe("")
+    expect(app.picker.screenTitle).toContain("HELP")
+    expect(app.picker.sectionLabels).toEqual([
+      "Conversation", "Models & agents", "Context & usage", "Workspace", "Safety", "Settings & help",
+      "Keys · Global", "Keys · Editing", "Keys · Review",
     ])
-    expect(app.commandPalette.itemIds).not.toContain("interrupt.run")
-    expect(app.commandPalette.selectedId).toBe("rewind.run")
-    expect(app.commandPalette.activateSelected()).toBeFalse()
-    expect(app.commandPalette.detail.plainText).toContain("Checking availability")
-
-    await setup.mockInput.typeText("model")
-    expect(app.commandPalette.sectionLabels).toEqual([])
-    expect(app.commandPalette.itemIds).toContain("model.list")
-  })
-
-  test("lists searchable keyboard shortcuts from the active compiled bindings", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
-    renderer = setup.renderer
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      keybindings: {
-        bindings: { global: { open_model_picker: "ctrl+k" } },
-      },
-    })
-    renderer.root.add(app)
-    app.openKeyboardHelpPicker()
-
-    expect(app.picker.title).toContain("Keyboard shortcuts")
-    expect(app.picker.select.options
-      .filter((option) => String(option.value).startsWith("keyboard-help.section."))
-      .map((option) => option.description)).toEqual(["Global", "Editing", "Review"])
-    const model = app.picker.select.options.find(
-      (option) => option.description === "Switch model",
-    )
-    expect(model?.name).toBe("Ctrl+K")
-    expect(app.picker.select.options.find(
-      (option) => option.description === "Select previous block",
-    )?.name).toBe("Ctrl+UP")
-    expect(app.picker.select.options.find(
-      (option) => option.description === "Select next block",
-    )?.name).toBe("Ctrl+DOWN")
-    expect(app.picker.select.options.find(
-      (option) => option.description === "Expand or collapse block",
-    )?.name).toBe("Ctrl+Space")
-
-    await setup.mockInput.typeText("switch model")
-    expect(app.picker.select.options.some(
-      (option) => String(option.value).startsWith("keyboard-help.section."),
-    )).toBeFalse()
-    expect(app.picker.select.options.map((option) => option.name)).toContain("Ctrl+K")
-
-    app.closePicker()
-    app.openKeyboardHelpPicker()
-    await setup.mockInput.typeText("ctrl+k")
-    expect(app.picker.select.options.map((option) => option.name)).toContain("Ctrl+K")
-    app.picker.select.selectCurrent()
-    expect(app.picker.visible).toBeFalse()
+    const model = app.picker.items.find((item) => item.label === "Switch model")
+    expect(model?.hint).toBe("Ctrl+K")
+    expect(model?.primary).toBeNull()
+    expect(options(app.picker).some((option) => option.name === "/compact [instructions]")).toBeTrue()
+    expect(app.picker.items.some((item) => item.hint === "Ctrl+O")).toBeFalse()
+    expect(app.picker.items.find((item) => item.label.startsWith("Switch between conversation"))?.hint).toBe("Ctrl+T")
   })
 })

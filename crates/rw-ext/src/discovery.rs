@@ -7,14 +7,23 @@
 mod filesystem;
 pub(crate) use filesystem::read_bounded_relative_utf8;
 use filesystem::{
-    ScanDiagnostic, collect_resource_paths, read_bounded_relative_file, read_bounded_utf8,
+    LinkPolicy, ScanDiagnostic, read_bounded_relative_file, read_bounded_utf8,
     regular_children_with_extension, skill_manifests, strict_regular_children_with_extension,
     strict_skill_manifests, validate_relative_resource,
 };
 
+mod frontmatter;
+use frontmatter::parse_frontmatter;
+
 mod markdown;
 use markdown::{
-    discover_agent, discover_command, discover_skill, parse_frontmatter, parse_template,
+    ArgumentIndexing, discover_agent, discover_command, discover_skill, parse_template,
+};
+
+mod skill;
+pub use skill::{
+    DiscoveredSkill, MAX_SKILL_BUNDLED_FILE_BYTES, SKILL_BUNDLE_LISTING_LIMIT, SkillBundleListing,
+    SkippedBundleEntry, SkippedBundleReason,
 };
 
 use std::{
@@ -35,7 +44,6 @@ mod shell_hook;
 pub use shell_hook::DiscoveredShellHook;
 
 pub(crate) const MAX_MARKDOWN_BYTES: u64 = 1024 * 1024;
-const MAX_RESOURCE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Whether an artifact came from the project or user configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,11 +52,44 @@ pub enum ArtifactScope {
     User,
 }
 
-/// The open or Rottweiler-specific declarative location.
+/// The declarative location an artifact was discovered in.
+///
+/// `.agents` is the open cross-tool location, `.rottweiler` is
+/// Rottweiler-specific, and `.claude` reads the Claude Code skill and command
+/// convention in place so existing libraries work without import.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactLocation {
     Agents,
     Rottweiler,
+    Claude,
+}
+
+impl ArtifactLocation {
+    /// Directory name that holds this location's artifacts.
+    #[must_use]
+    pub const fn directory_name(self) -> &'static str {
+        match self {
+            Self::Agents => ".agents",
+            Self::Rottweiler => ".rottweiler",
+            Self::Claude => ".claude",
+        }
+    }
+
+    /// Precedence inside one scope; lower wins.
+    #[must_use]
+    pub const fn precedence(self) -> usize {
+        match self {
+            Self::Agents => 0,
+            Self::Rottweiler => 1,
+            Self::Claude => 2,
+        }
+    }
+
+    /// `.claude` holds only the skill and command formats shared with Claude
+    /// Code; its agent definitions use a different schema and are not read.
+    const fn reads_rottweiler_artifacts(self) -> bool {
+        !matches!(self, Self::Claude)
+    }
 }
 
 /// Stable provenance attached to every discovered artifact.
@@ -74,7 +115,7 @@ impl ArtifactOrigin {
         self.scope
     }
 
-    /// `.agents` or `.rottweiler` source.
+    /// `.agents`, `.rottweiler`, or `.claude` source.
     #[must_use]
     pub const fn location(&self) -> ArtifactLocation {
         self.location
@@ -162,6 +203,46 @@ impl ExtensionDiagnostic {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// Declared or inferred artifact name, when one could be determined.
+    #[must_use]
+    pub fn artifact_name(&self) -> Option<&str> {
+        self.artifact_name.as_deref()
+    }
+}
+
+/// A valid artifact hidden by a higher-precedence artifact of the same kind
+/// and name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowedArtifact {
+    kind: ArtifactKind,
+    name: String,
+    origin: ArtifactOrigin,
+    selected_path: PathBuf,
+}
+
+impl ShadowedArtifact {
+    #[must_use]
+    pub const fn kind(&self) -> ArtifactKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The hidden artifact's source.
+    #[must_use]
+    pub const fn origin(&self) -> &ArtifactOrigin {
+        &self.origin
+    }
+
+    /// Source of the artifact that won precedence.
+    #[must_use]
+    pub fn selected_path(&self) -> &Path {
+        &self.selected_path
+    }
 }
 
 /// An untrusted project artifact visible to the folder-trust inventory.
@@ -172,6 +253,7 @@ impl ExtensionDiagnostic {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InertProjectArtifact {
     kind: ArtifactKind,
+    location: ArtifactLocation,
     name: String,
     path: PathBuf,
     contains_shell_interpolation: bool,
@@ -182,6 +264,11 @@ impl InertProjectArtifact {
     #[must_use]
     pub const fn kind(&self) -> ArtifactKind {
         self.kind
+    }
+
+    #[must_use]
+    pub const fn location(&self) -> ArtifactLocation {
+        self.location
     }
 
     #[must_use]
@@ -326,6 +413,9 @@ impl LazyMarkdownBody {
                 path: self.path.clone(),
             });
         }
+        if !frontmatter::has_frontmatter(&contents) {
+            return Ok(contents);
+        }
         let document = parse_frontmatter(&self.path, &contents)?;
         Ok(document.body.to_owned())
     }
@@ -392,67 +482,12 @@ impl DiscoveredCommand {
     /// Fails if the source changed after discovery, is unreadable, or contains
     /// an unterminated shell interpolation.
     pub fn load_template(&self) -> Result<CommandTemplate, ExtensionDiscoveryError> {
-        parse_template(&self.origin.path, &self.body.load()?)
+        let indexing = match self.origin.location {
+            ArtifactLocation::Claude => ArgumentIndexing::ZeroBased,
+            ArtifactLocation::Agents | ArtifactLocation::Rottweiler => ArgumentIndexing::OneBased,
+        };
+        parse_template(&self.origin.path, &self.body.load()?, indexing)
     }
-}
-
-/// A lazily loadable file bundled with a skill.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SkillResource {
-    skill_root: PathBuf,
-    relative_path: PathBuf,
-}
-
-impl SkillResource {
-    #[must_use]
-    pub fn relative_path(&self) -> &Path {
-        &self.relative_path
-    }
-
-    /// Reads this resource only when explicitly invoked by the skill loader.
-    ///
-    /// # Errors
-    ///
-    /// Rejects traversal, symlinks, non-files, and oversized resources.
-    pub fn load(&self) -> Result<LoadedSkillResource, ExtensionDiscoveryError> {
-        validate_relative_resource(&self.relative_path)?;
-        let bytes =
-            read_bounded_relative_file(&self.skill_root, &self.relative_path, MAX_RESOURCE_BYTES)?;
-        Ok(LoadedSkillResource {
-            relative_path: self.relative_path.clone(),
-            bytes,
-        })
-    }
-}
-
-/// Bytes returned by an explicit lazy skill-resource load.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LoadedSkillResource {
-    relative_path: PathBuf,
-    bytes: Vec<u8>,
-}
-
-impl LoadedSkillResource {
-    #[must_use]
-    pub fn relative_path(&self) -> &Path {
-        &self.relative_path
-    }
-
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-/// SKILL.md metadata. Instructions and bundled files stay lazy.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DiscoveredSkill {
-    name: String,
-    description: String,
-    allowed_tools: Vec<String>,
-    origin: ArtifactOrigin,
-    root: PathBuf,
-    body: LazyMarkdownBody,
 }
 
 /// A lazily loaded declarative subagent definition.
@@ -514,57 +549,6 @@ impl DiscoveredAgent {
     }
 }
 
-impl DiscoveredSkill {
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    #[must_use]
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    #[must_use]
-    pub fn allowed_tools(&self) -> &[String] {
-        &self.allowed_tools
-    }
-
-    #[must_use]
-    pub const fn origin(&self) -> &ArtifactOrigin {
-        &self.origin
-    }
-
-    /// Loads the instruction body only when the skill is invoked.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed when SKILL.md changed after discovery.
-    pub fn load_instructions(&self) -> Result<String, ExtensionDiscoveryError> {
-        self.body.load()
-    }
-
-    /// Enumerates bundled files without reading their contents. `SKILL.md` is
-    /// excluded and symlinks are rejected.
-    ///
-    /// # Errors
-    ///
-    /// Fails on unreadable directories, symlinks, or unsupported entries.
-    pub fn resources(&self) -> Result<Vec<SkillResource>, ExtensionDiscoveryError> {
-        let mut paths = Vec::new();
-        collect_resource_paths(&self.root, &self.root, &mut paths)?;
-        paths.sort();
-        Ok(paths
-            .into_iter()
-            .filter(|path| path != Path::new("SKILL.md"))
-            .map(|relative_path| SkillResource {
-                skill_root: self.root.clone(),
-                relative_path,
-            })
-            .collect())
-    }
-}
-
 /// Active declarative extensions plus the project entries held behind trust.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExtensionCatalog {
@@ -577,13 +561,18 @@ pub struct ExtensionCatalog {
     inert_project_artifacts: Vec<InertProjectArtifact>,
     uninventoried_project_roots: Vec<UninventoriedProjectRoot>,
     diagnostics: Vec<ExtensionDiagnostic>,
+    shadowed: Vec<ShadowedArtifact>,
 }
 
 impl ExtensionCatalog {
-    /// Discovers commands and skills in ADR-014 order. First active match by
-    /// name wins: project `.agents`, project `.rottweiler`, user `.agents`,
-    /// user `.rottweiler`. An untrusted project is inventoried but skipped for
-    /// active resolution.
+    /// Discovers artifacts in ADR-014 order. First active match by name wins:
+    /// each project root's `.agents`, `.rottweiler`, then `.claude`, followed
+    /// by the user's `~/.agents`, Rottweiler directory, then `~/.claude`. An
+    /// untrusted project is inventoried but skipped for active resolution.
+    ///
+    /// Skill directories and SKILL.md files may be symbolic links: a user
+    /// link resolves to any target the current user owns; a project link must
+    /// also stay inside the project or the user's home directory.
     ///
     /// Malformed, unsafe, or unreadable sources are skipped and reported
     /// through [`Self::diagnostics`]. An incomplete untrusted-project inventory
@@ -597,6 +586,7 @@ impl ExtensionCatalog {
                 ArtifactLocation::Rottweiler,
                 config.user_rottweiler_root.clone(),
             ),
+            (ArtifactLocation::Claude, config.user_home.join(".claude")),
         ];
         let mut catalog = Self::default();
 
@@ -609,22 +599,25 @@ impl ExtensionCatalog {
             )
         {
             let project_sources = [
-                (ArtifactLocation::Agents, project_root.join(".agents")),
-                (
-                    ArtifactLocation::Rottweiler,
-                    project_root.join(".rottweiler"),
-                ),
-            ];
+                ArtifactLocation::Agents,
+                ArtifactLocation::Rottweiler,
+                ArtifactLocation::Claude,
+            ]
+            .map(|location| (location, project_root.join(location.directory_name())));
+            let policy = LinkPolicy::Project {
+                project_root,
+                user_home: &config.user_home,
+            };
             if trusted {
                 for (location, root) in project_sources {
-                    catalog.discover_active_root(ArtifactScope::Project, location, &root);
+                    catalog.discover_active_root(ArtifactScope::Project, location, &root, policy);
                 }
             } else {
-                catalog.inventory_inert_project(project_root, &project_sources);
+                catalog.inventory_inert_project(project_root, &project_sources, policy);
             }
         }
         for (location, root) in user_sources {
-            catalog.discover_active_root(ArtifactScope::User, location, &root);
+            catalog.discover_active_root(ArtifactScope::User, location, &root, LinkPolicy::User);
         }
         catalog.shell_hooks.sort_by(|left, right| {
             left.registration()
@@ -721,18 +714,42 @@ impl ExtensionCatalog {
         &self.diagnostics
     }
 
+    /// Valid artifacts hidden by a higher-precedence artifact of the same name.
+    #[must_use]
+    pub fn shadowed(&self) -> &[ShadowedArtifact] {
+        &self.shadowed
+    }
+
     fn discover_active_root(
         &mut self,
         scope: ArtifactScope,
         location: ArtifactLocation,
         root: &Path,
+        policy: LinkPolicy<'_>,
     ) {
         self.discover_commands(scope, location, root);
-        self.discover_skills(scope, location, root);
-        self.discover_agents(scope, location, root);
-        self.discover_workflows(scope, location, root);
-        self.discover_modes(scope, location, root);
-        self.discover_hooks(scope, location, root);
+        self.discover_skills(scope, location, root, policy);
+        if location.reads_rottweiler_artifacts() {
+            self.discover_agents(scope, location, root);
+            self.discover_workflows(scope, location, root);
+            self.discover_modes(scope, location, root);
+            self.discover_hooks(scope, location, root);
+        }
+    }
+
+    fn record_shadowed(
+        &mut self,
+        kind: ArtifactKind,
+        name: &str,
+        origin: ArtifactOrigin,
+        selected: &Path,
+    ) {
+        self.shadowed.push(ShadowedArtifact {
+            kind,
+            name: name.to_owned(),
+            origin,
+            selected_path: selected.to_owned(),
+        });
     }
 
     fn discover_commands(&mut self, scope: ArtifactScope, location: ArtifactLocation, root: &Path) {
@@ -742,16 +759,22 @@ impl ExtensionCatalog {
             match discover_command(scope, location, root, &path) {
                 Ok(command) => {
                     let name = command.name.clone();
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        self.commands.entry(name.clone())
-                    {
+                    if let Some(selected) = self.commands.get(&name) {
+                        let selected = selected.origin.path.clone();
+                        self.record_shadowed(
+                            ArtifactKind::Command,
+                            &name,
+                            command.origin,
+                            &selected,
+                        );
+                    } else {
                         mark_lower_precedence_fallback(
                             &mut self.diagnostics,
                             ArtifactKind::Command,
                             &name,
                             &path,
                         );
-                        entry.insert(command);
+                        self.commands.insert(name, command);
                     }
                 }
                 Err(error) => {
@@ -761,23 +784,31 @@ impl ExtensionCatalog {
         }
     }
 
-    fn discover_skills(&mut self, scope: ArtifactScope, location: ArtifactLocation, root: &Path) {
-        let skills = skill_manifests(&root.join("skills"));
+    fn discover_skills(
+        &mut self,
+        scope: ArtifactScope,
+        location: ArtifactLocation,
+        root: &Path,
+        policy: LinkPolicy<'_>,
+    ) {
+        let skills = skill_manifests(&root.join("skills"), policy);
         self.record_scan_diagnostics(scope, location, ArtifactKind::Skill, skills.diagnostics);
-        for path in skills.paths {
-            match discover_skill(scope, location, root, &path) {
+        for manifest in skills.manifests {
+            let path = manifest.path.clone();
+            match discover_skill(scope, location, manifest) {
                 Ok(skill) => {
                     let name = skill.name.clone();
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        self.skills.entry(name.clone())
-                    {
+                    if let Some(selected) = self.skills.get(&name) {
+                        let selected = selected.origin.path.clone();
+                        self.record_shadowed(ArtifactKind::Skill, &name, skill.origin, &selected);
+                    } else {
                         mark_lower_precedence_fallback(
                             &mut self.diagnostics,
                             ArtifactKind::Skill,
                             &name,
                             &path,
                         );
-                        entry.insert(skill);
+                        self.skills.insert(name, skill);
                     }
                 }
                 Err(error) => {
@@ -942,11 +973,14 @@ impl ExtensionCatalog {
     fn inventory_inert_project(
         &mut self,
         project_root: &Path,
-        sources: &[(ArtifactLocation, PathBuf); 2],
+        sources: &[(ArtifactLocation, PathBuf); 3],
+        policy: LinkPolicy<'_>,
     ) {
         let mut artifacts = Vec::new();
         for (location, root) in sources {
-            if let Err(error) = Self::inventory_inert_project_root(root, &mut artifacts) {
+            if let Err(error) =
+                Self::inventory_inert_project_root(*location, root, policy, &mut artifacts)
+            {
                 let offending_path = discovery_error_path(&error).to_owned();
                 let kind = inventory_artifact_kind(root, &offending_path);
                 self.record_diagnostic(
@@ -969,7 +1003,9 @@ impl ExtensionCatalog {
     }
 
     fn inventory_inert_project_root(
+        location: ArtifactLocation,
         root: &Path,
+        policy: LinkPolicy<'_>,
         artifacts: &mut Vec<InertProjectArtifact>,
     ) -> Result<(), ExtensionDiscoveryError> {
         match fs::symlink_metadata(root) {
@@ -997,6 +1033,7 @@ impl ExtensionCatalog {
                 Err(error) => return Err(error),
             };
             artifacts.push(InertProjectArtifact {
+                location,
                 kind: ArtifactKind::Command,
                 name: inert_file_stem(&path),
                 path,
@@ -1004,20 +1041,22 @@ impl ExtensionCatalog {
                 executes_command: contains_shell_interpolation,
             });
         }
-        for path in strict_skill_manifests(&root.join("skills"))? {
+        for manifest in strict_skill_manifests(&root.join("skills"), policy)? {
             artifacts.push(InertProjectArtifact {
+                location,
                 kind: ArtifactKind::Skill,
-                name: path.parent().and_then(Path::file_name).map_or_else(
-                    || path.to_string_lossy().into_owned(),
-                    |name| name.to_string_lossy().into_owned(),
-                ),
-                path,
+                name: manifest.entry_name,
+                path: manifest.path,
                 contains_shell_interpolation: false,
                 executes_command: false,
             });
         }
+        if !location.reads_rottweiler_artifacts() {
+            return Ok(());
+        }
         for path in strict_regular_children_with_extension(&root.join("agents"), "md")? {
             artifacts.push(InertProjectArtifact {
+                location,
                 kind: ArtifactKind::Agent,
                 name: inert_file_stem(&path),
                 path,
@@ -1027,6 +1066,7 @@ impl ExtensionCatalog {
         }
         for path in strict_regular_children_with_extension(&root.join("workflows"), "toml")? {
             artifacts.push(InertProjectArtifact {
+                location,
                 kind: ArtifactKind::Workflow,
                 name: inert_file_stem(&path),
                 path,
@@ -1036,6 +1076,7 @@ impl ExtensionCatalog {
         }
         for path in strict_regular_children_with_extension(&root.join("modes"), "toml")? {
             artifacts.push(InertProjectArtifact {
+                location,
                 kind: ArtifactKind::Mode,
                 name: inert_file_stem(&path),
                 path,
@@ -1047,6 +1088,7 @@ impl ExtensionCatalog {
         match fs::symlink_metadata(&hooks_path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
                 artifacts.push(InertProjectArtifact {
+                    location,
                     kind: ArtifactKind::Hook,
                     name: "hooks".to_owned(),
                     path: hooks_path,
@@ -1078,6 +1120,8 @@ pub enum ExtensionDiscoveryError {
     },
     #[error("extension path `{path}` is not a regular file or directory of the expected kind")]
     UnsafeEntry { path: PathBuf },
+    #[error("symbolic link `{path}` {reason}")]
+    UnsafeLink { path: PathBuf, reason: &'static str },
     #[error("extension file `{path}` exceeds the {limit}-byte limit")]
     TooLarge { path: PathBuf, limit: u64 },
     #[error("extension file `{path}` is not UTF-8")]
@@ -1120,10 +1164,11 @@ pub enum ExtensionDiscoveryError {
     InvalidMode { path: PathBuf, message: String },
 }
 
-fn discovery_error_path(error: &ExtensionDiscoveryError) -> &Path {
+pub(super) fn discovery_error_path(error: &ExtensionDiscoveryError) -> &Path {
     match error {
         ExtensionDiscoveryError::Io { path, .. }
         | ExtensionDiscoveryError::UnsafeEntry { path }
+        | ExtensionDiscoveryError::UnsafeLink { path, .. }
         | ExtensionDiscoveryError::TooLarge { path, .. }
         | ExtensionDiscoveryError::NotUtf8 { path }
         | ExtensionDiscoveryError::InvalidPath { path }
@@ -1175,13 +1220,6 @@ fn invalid_frontmatter<T>(
     })
 }
 
-fn valid_frontmatter_key(key: &str) -> bool {
-    !key.is_empty()
-        && key
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
 fn validate_artifact_name(path: &Path, name: &str) -> Result<(), ExtensionDiscoveryError> {
     let valid = !name.is_empty()
         && name.bytes().all(|byte| {
@@ -1199,21 +1237,19 @@ fn validate_artifact_name(path: &Path, name: &str) -> Result<(), ExtensionDiscov
 
 fn diagnostic_artifact_name(kind: ArtifactKind, path: &Path) -> Option<String> {
     match kind {
-        ArtifactKind::Skill | ArtifactKind::Agent => read_bounded_utf8(path, MAX_MARKDOWN_BYTES)
-            .ok()
-            .and_then(|contents| {
-                contents.lines().find_map(|line| {
-                    line.strip_prefix("name:")
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .map(str::to_owned)
+        ArtifactKind::Skill => path.parent()?.file_name()?.to_str().map(str::to_owned),
+        ArtifactKind::Agent => {
+            read_bounded_utf8(path, MAX_MARKDOWN_BYTES)
+                .ok()
+                .and_then(|contents| {
+                    contents.lines().find_map(|line| {
+                        line.strip_prefix("name:")
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_owned)
+                    })
                 })
-            })
-            .or_else(|| {
-                (kind == ArtifactKind::Skill)
-                    .then(|| path.parent()?.file_name()?.to_str().map(str::to_owned))
-                    .flatten()
-            }),
+        }
         ArtifactKind::Command | ArtifactKind::Workflow | ArtifactKind::Mode => {
             path.file_stem()?.to_str().map(str::to_owned)
         }
@@ -1266,3 +1302,6 @@ fn inert_file_stem(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod claude_tests;

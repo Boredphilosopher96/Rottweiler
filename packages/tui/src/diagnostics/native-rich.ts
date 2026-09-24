@@ -39,10 +39,10 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
     return text ? JSON.parse(text) as Record<string, unknown> : {}
   }
   const panels = async (phase: string) => {
-    app.openCommandPicker(); app.commandPalette.selectById("ui.panels"); app.commandPalette.activateSelected()
-    await until("actual native panel catalog", () => app.picker.select.options.some(option => option.value === "artifact" || option.name.toLowerCase().includes("artifact")))
-    const index = app.picker.select.options.findIndex(option => option.value === "artifact" || option.name.toLowerCase().includes("artifact"))
-    app.picker.select.setSelectedIndex(index); app.picker.select.selectCurrent()
+    app.openMcpPicker(); app.mcpBrowser.selectById("mcp.panels"); app.mcpBrowser.activateSelected()
+    const artifact = () => app.picker.items.find(item => item.id.includes("artifact") || item.label.toLowerCase().includes("artifact"))
+    await until("actual native panel catalog", () => artifact() !== undefined)
+    app.picker.selectById(artifact()!.id); app.picker.activateSelected()
     await until(`native panel ${phase}`, () => app.outputViewer.visible && setup.captureCharFrame().includes(phase))
   }
   const activate = async (count: number) => {
@@ -73,9 +73,9 @@ export async function runNativeRichProbe(directory: string): Promise<void> {
       await setup.renderOnce()
       await setup.mockMouse.click(current.footer.x + 2, current.footer.y)
     }
-    if (!row.presentationFooter.visible) row.toggle()
+    if (!row.footer.visible) row.toggle()
     await setup.renderOnce()
-    await setup.mockMouse.click(row.presentationFooter.x + 2, row.presentationFooter.y)
+    await setup.mockMouse.click(row.footer.x + 2, row.footer.y)
     await until("SDK rich fields rendered", () => setup.captureCharFrame().includes("Native SDK artifact workflow"))
     await activate(1)
     await panels("advanced:1")

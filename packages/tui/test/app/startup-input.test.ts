@@ -4,6 +4,7 @@ import { createRottweilerApp } from "../../src/app"
 import { createInitialState } from "../../src/state"
 import { PROTOCOL_VERSION, type ClientCommand, type CommandOutcome, type EngineEvent } from "../../src/protocol"
 import { emptySessionReader } from "../fixtures/history"
+import { options } from "../picker-screen"
 
 let renderer: TestRenderer | undefined
 afterEach(() => { renderer?.destroy(); renderer = undefined })
@@ -23,7 +24,7 @@ test("cached incomplete catalog cannot erase a hydrated configured selection or 
   app.handleEvent({ ...emptyCatalog, providers: [{ name: "fixture", auth_kind: "api_key", next_action: "select_models", configured: true, authenticated: true, reachable: false, model_count: 0 }] })
   app.handleEvent(sessions)
   expect(app.state.model).toBe("fast")
-  expect(app.statusLine.plainText).toContain("checking model")
+  expect(app.statusLine.plainText).toContain("loading models")
   expect(app.statusLine.plainText).not.toContain("fast")
   expect(app.picker.visible).toBeFalse()
   await setup.mockInput.typeText("First configured prompt")
@@ -100,6 +101,6 @@ test("fresh home clears the placeholder default and offers setup even when its e
   expect(app.picker.visible).toBeTrue()
   const request = commands.findLast(command => command.type === "list_models")!
   app.handleEvent({ ...emptyCatalog, meta: reply(request.meta.request_id), cached: false })
-  expect(app.picker.title).toContain("Welcome")
-  expect(app.picker.select.options.some(option => option.value === "providers.compatible")).toBeTrue()
+  expect(app.picker.screenTitle).toContain("WELCOME")
+  expect(options(app.picker).some(option => option.value === "providers.compatible")).toBeTrue()
 })

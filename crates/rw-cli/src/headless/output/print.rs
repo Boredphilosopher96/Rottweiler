@@ -3,7 +3,10 @@ use super::{aggregate::PrintOutput, display_agent_error, repl_encoding, terminal
 use crate::cli_args::OutputFormat;
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{EngineEvent, MessageDisposition, TurnStatus};
+use rw_runtime::session::WakingChildren;
 use rw_types::{ApprovalBinding, ApprovalDecision};
+
+mod wake;
 
 /// Register once before any print work. A fresh `ctrl_c` future drops signals
 /// delivered between output/event waits after Tokio has installed its handler.
@@ -22,8 +25,12 @@ impl PrintInterrupts {
     }
 }
 
+/// Runs one prompt. When the turn completes while background children still
+/// owe the parent a result, the run stays open and prints each turn their
+/// results wake, ending once no child can report again.
 pub(in crate::headless) async fn run_print(
     actor: &rw_core::SessionHandle,
+    children: Option<&WakingChildren>,
     session_id: &str,
     prompt: &str,
     format: OutputFormat,
@@ -35,6 +42,7 @@ pub(in crate::headless) async fn run_print(
         ready(actor, &mut printer, &mut interrupts, perf_markers).await?;
         consume(
             actor,
+            children,
             session_id,
             prompt,
             format,
@@ -123,8 +131,10 @@ fn event_message(event: &EngineEvent, format: OutputFormat) -> Result<Option<(St
     Ok(repl_encoding::message(event, format)?.map(|message| (message, stderr)))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn consume(
     actor: &rw_core::SessionHandle,
+    children: Option<&WakingChildren>,
     session_id: &str,
     prompt: &str,
     format: OutputFormat,
@@ -138,6 +148,7 @@ async fn consume(
     let mut completion = Completion::new(disposition, prompt);
     let mut aggregate = PrintOutput::new(session_id, format);
     let mut first_event = Some(first_event);
+    let mut wakes = wake::WakeTracker::default();
     loop {
         let event = if let Some(event) = first_event.take() {
             event
@@ -153,6 +164,7 @@ async fn consume(
                 }
             }
         };
+        wakes.observe(event.as_ref());
         answer_noninteractive(actor, event.as_ref()).await?;
         if let Some((message, stderr)) = event_message(event.as_ref(), format)? {
             write(actor, printer, interrupts, message, stderr).await?;
@@ -177,6 +189,22 @@ async fn consume(
             }
             break;
         }
+    }
+    if let Some(children) = children
+        && !completion.command
+        && aggregate.status() == Some(&TurnStatus::Completed)
+    {
+        wake::WakeRun {
+            actor,
+            children,
+            events: &mut events,
+            format,
+            printer,
+            interrupts,
+            aggregate: &mut aggregate,
+        }
+        .follow(wakes)
+        .await?;
     }
     let (status, message) = aggregate.finish(format)?;
     if let Some(message) = message {

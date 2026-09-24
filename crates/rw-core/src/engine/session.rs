@@ -3,6 +3,8 @@ mod background_children;
 mod bootstrap;
 pub use bootstrap::SessionActorRecovery;
 mod child_progress;
+mod child_results;
+pub(in crate::engine) use child_results::ChildResultWake;
 mod config;
 mod initial_context;
 pub use initial_context::InitialSessionContext;

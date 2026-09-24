@@ -4,6 +4,7 @@ import { createRottweilerApp, type RottweilerApp } from "../../src/app"
 import { createInitialState } from "../../src/state"
 import type { ClientCommand, SessionSearchMatch, TranscriptRead } from "../../src/protocol"
 import { fixturePage, emptySessionReader, waitForHistory } from "../fixtures/history"
+import { options, select } from "../picker-screen"
 
 const source: SessionSearchMatch = { session_id: "matched", source_sequence: "900", through: "2000", digest: Array(32).fill(0) as SessionSearchMatch["digest"] }
 
@@ -44,7 +45,7 @@ async function fixture(match: SessionSearchMatch | null, failure = false) {
   await waitForHistory(setup, () => app.transcript.mountedEntryCount > 0)
   app.composer.value = "unfinished draft"
   app.openSessionPicker()
-  await waitForHistory(setup, () => app.picker.select.options.some(option => option.value === "sessions.new"))
+  await waitForHistory(setup, () => app.picker.visible && app.picker.mode === "list")
   expect(setup.renderer.currentFocusedRenderable).toBe(app.picker.input)
   await setup.mockInput.typeText("body-only-needle")
   await searchStarted.promise
@@ -59,9 +60,9 @@ async function fixture(match: SessionSearchMatch | null, failure = false) {
   } catch (error) {
     app.destroy(); setup.renderer.destroy(); throw error
   } finally { releaseSearch.resolve() }
-  await waitForHistory(setup, () => app.picker.select.options.some(option => option.value === "matched"))
-  app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "matched"))
-  app.picker.select.selectCurrent(); await setup.flush()
+  await waitForHistory(setup, () => options(app.picker).some(option => option.value === "matched"))
+  select(app.picker, options(app.picker).findIndex(option => option.value === "matched"))
+  app.picker.activateSelected(); await setup.flush()
   return { setup, app, reads, switches }
 }
 

@@ -77,7 +77,7 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
       if (cycle === 0) history = await exerciseHistory(app, fixture, setup)
       app.composer.restoreDraft(`draft ${cycle} ${"d".repeat(MEMORY_LOAD.draftBytes)}`, [{ name: "notes.txt", media_type: "text/plain", data: { type: "text", content: "attachment ".repeat(24_000) } }])
       app.openSubagentPicker()
-      await until(() => app!.picker.select.options.length === MEMORY_LOAD.catalogRows)
+      await until(() => app!.agentsBrowser.itemIds.length === MEMORY_LOAD.catalogRows)
       sample(cycle, "mounted-history-draft-catalog-picker")
       setup.mockInput.pressEscape()
 
@@ -137,8 +137,8 @@ export async function runClientMemoryProbe(reportPath: string, workDirectory: st
       if (cycle === cycles - 1) verifyHandoffAttachments(app.composer.attachments)
       if (cycle === cycles - 1) {
         app.openSubagentPicker()
-        await until(() => app!.picker.select.options[0]?.name.includes("Response needed") === true)
-        app.picker.select.selectCurrent()
+        await until(() => app!.agentsBrowser.sectionLabels[0] === "Needs response")
+        app.agentsBrowser.activateSelected()
         await until(() => app!.activeSubagentId === "agent-0" && app!.interactionPanel.usesComposer && app!.recycleState() !== null)
         app.composer.restoreDraft(`handoff child draft ${cycle}`, [])
         const selected = app.recycleState()

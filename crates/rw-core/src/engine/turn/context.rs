@@ -129,7 +129,7 @@ pub(in crate::engine) fn prompt_turn(
     }
 }
 
-#[cfg(test)]
+#[tracing::instrument(target = "rw_performance", level = "trace", name = "context.assemble", skip_all, fields(session_id = config.session_id.0.as_str(), turns = conversation.len()))]
 pub(in crate::engine) fn assemble_session_context(
     config: &SessionActorConfig,
     working: &super::context_memory::ContextWorkingSet,
@@ -139,31 +139,6 @@ pub(in crate::engine) fn assemble_session_context(
     surgery: &[ContextSurgeryAction],
     pruned_tool_outputs: &BTreeMap<String, u64>,
 ) -> Result<AssembledContext, AgentLoopError> {
-    assemble_session_context_with_notices(
-        config,
-        working,
-        conversation,
-        sources,
-        queued,
-        surgery,
-        (pruned_tool_outputs, &[]),
-    )
-}
-
-#[tracing::instrument(target = "rw_performance", level = "trace", name = "context.assemble", skip_all, fields(session_id = config.session_id.0.as_str(), turns = conversation.len()))]
-pub(in crate::engine) fn assemble_session_context_with_notices(
-    config: &SessionActorConfig,
-    working: &super::context_memory::ContextWorkingSet,
-    conversation: &[Turn],
-    sources: &[ConversationSource],
-    queued: &VecDeque<String>,
-    surgery: &[ContextSurgeryAction],
-    completion: (
-        &BTreeMap<String, u64>,
-        &[crate::engine::recovery::CompletionNotice],
-    ),
-) -> Result<AssembledContext, AgentLoopError> {
-    let (pruned_tool_outputs, notices) = completion;
     working.validate()?;
     if conversation.len() != sources.len() {
         return Err(AgentLoopError::Persistence(
@@ -175,43 +150,13 @@ pub(in crate::engine) fn assemble_session_context_with_notices(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let normalized = cache.conversation(conversation, sources, pruned_tool_outputs);
-    let mut conversation = conversation_items(
+    let conversation = conversation_items(
         conversation,
         normalized,
         sources,
         surgery,
         pruned_tool_outputs,
     );
-    if notices.len() > crate::engine::recovery::MAX_COMPLETION_NOTICES
-        || notices
-            .iter()
-            .any(|notice| notice.text.len() > crate::engine::recovery::MAX_COMPLETION_NOTICE_BYTES)
-    {
-        return Err(AgentLoopError::InvalidConfiguration(
-            "child completion notice bounds".into(),
-        ));
-    }
-    conversation.extend(notices.iter().map(|notice| {
-        rw_context::PreparedContextItem::new(AssemblyContextItem {
-            id: AssemblyContextItemId(format!("child_completion:{}", notice.sequence.0)),
-            kind: AssemblyContextItemKind::Conversation,
-            label: "Child agent completion".into(),
-            provenance: ContextProvenance::Conversation {
-                sequence: notice.sequence.0,
-            },
-            turn: Turn {
-                role: Role::User,
-                blocks: vec![Block::Text {
-                    text: notice.text.clone(),
-                }],
-                meta: TurnMeta::default(),
-            },
-            pinned: false,
-            evicted: false,
-            summarized: false,
-            pruned: false,
-        })
-    }));
     let queued = queued_items(queued)
         .into_iter()
         .map(rw_context::PreparedContextItem::new)

@@ -5,6 +5,7 @@ import { createInitialState } from "../../src/state"
 import { PROTOCOL_VERSION, type ClientCommand, type EngineEvent } from "../../src/protocol"
 import { emptySessionReader } from "../fixtures/history"
 import { childResult } from "../state/fixtures"
+import { options, select } from "../picker-screen"
 
 let renderer: TestRenderer | undefined
 afterEach(() => { renderer?.destroy(); renderer = undefined })
@@ -75,7 +76,7 @@ for (const [width, height] of [[110, 32], [80, 24]] as const) {
     await Bun.sleep(0)
     expect(commands.at(-1)?.type).toBe("interrupt")
     await deliver({ type: "turn_finished", meta: meta(), turn_id: "turn", status: "interrupted", usage, cost })
-    expect(setup.captureCharFrame()).toContain("interrupted")
+    expect(setup.captureCharFrame()).toContain("Interrupted")
     await deliver({ type: "subagent_spawned", meta: meta(), subagent_id: "child", child_session_id: "child-session", task: "Review the tests" })
     await deliver({ type: "subagent_finished", meta: meta(), subagent_id: "child", result: childResult("child", "child-session", "Tests reviewed") })
     expect(app.state.subagents.child?.status).toBe("completed")
@@ -86,8 +87,8 @@ for (const [width, height] of [[110, 32], [80, 24]] as const) {
     app.openSessionPicker()
     const list = commands.findLast(command => command.type === "list_sessions")!
     await deliver({ type: "sessions_listed", meta: reply(list.meta.request_id), sessions: [{ session_id: "past", title: "Previous work", workspace_name: "fixture", model: "openai/coding", driver_client_id: null, shell_active: false }] })
-    app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "past"))
-    app.picker.select.selectCurrent()
+    select(app.picker, options(app.picker).findIndex(option => option.value === "past"))
+    app.picker.activateSelected()
     expect(resumed).toEqual(["past"])
     expect(app.picker.visible).toBeFalse()
     setup.mockInput.pressKey("c", { ctrl: true })

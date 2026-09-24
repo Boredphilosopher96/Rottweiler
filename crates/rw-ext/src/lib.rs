@@ -32,7 +32,8 @@ pub use discovery::{
     ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope, CommandTemplate,
     DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog,
     ExtensionDiagnostic, ExtensionDiscoveryConfig, ExtensionDiscoveryError, InertProjectArtifact,
-    LoadedSkillResource, SkillResource, TemplatePart, UninventoriedProjectRoot,
+    MAX_SKILL_BUNDLED_FILE_BYTES, SKILL_BUNDLE_LISTING_LIMIT, ShadowedArtifact, SkillBundleListing,
+    SkippedBundleEntry, SkippedBundleReason, TemplatePart, UninventoriedProjectRoot,
 };
 pub use hook::{
     HookClass, HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect,

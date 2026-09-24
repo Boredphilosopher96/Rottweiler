@@ -23,18 +23,22 @@ const running = runtime.start()
 try {
   await waitFor("engine connection", () => app.state.connection.phase === "connected")
 
-  app.composer.value = "/status"
+  app.composer.value = "/permissions approvals"
   await app.composer.submit()
-  await waitFor("human-readable status result", () => commandResult(app).includes("**Idle**"))
+  await waitFor("engine command result", () => commandResult(app).includes("Remembered approvals: none"))
 
   app.composer.value = "Create approval.txt with the acceptance canary."
   await app.composer.submit()
   await waitFor("tool approval panel", () => app.interactionPanel.visible)
   await setup.renderOnce()
   const approvalBanner = app.banner.plainText
-  const approvalPanel = app.interactionPanel.prompt.plainText
+  // The pending decision is announced by the status line and the approval dock, not a banner.
+  const approvalStatus = app.statusLine.plainText
+  // The dock's title asks about the action; its body carries the reason.
+  const approvalPanel = [app.interactionPanel.title ?? "", app.interactionPanel.prompt.plainText].join("\n")
   const approvalObservation = {
     banner: approvalBanner.slice(0, 4096),
+    status: approvalStatus.slice(0, 4096),
     panel: approvalPanel.slice(0, 4096),
     connection: app.state.connection.phase,
     errors: app.state.errors.slice(-4).map(error => ({ code: error.code, message: error.message.slice(0, 512) })),
@@ -49,6 +53,7 @@ try {
   await writeFile(reportFile, JSON.stringify({
     commandResult: commandResult(app),
     approvalBanner,
+    approvalStatus,
     approvalPanel,
     approvalObservation,
     toolStatus: tool?.status ?? null,
@@ -65,7 +70,7 @@ try {
 
 function commandResult(app: ReturnType<typeof createRottweilerApp>): string {
   return [...app.transcript.mountedCards.values()]
-    .filter(row => row.item.content.type === "command" && row.item.content.name === "status")
+    .filter(row => row.item.content.type === "command" && row.item.content.name === "permissions")
     .map(row => row.markdown.content).join("\n")
 }
 

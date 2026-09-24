@@ -21,6 +21,7 @@ pub(super) async fn run(options: LocalSessionOptions, client: ClientOptions) -> 
         } else if let Some(prompt) = client.prompt {
             output::run_print(
                 session.handle(),
+                session.waking_children(),
                 session.session_id(),
                 &prompt,
                 client.format,

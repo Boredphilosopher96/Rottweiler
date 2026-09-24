@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read as _, Write as _},
+    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -184,6 +184,8 @@ pub enum FolderTrustError {
     },
     #[error("unsafe project extension entry {0}")]
     UnsafeEntry(PathBuf),
+    #[error("unsafe project extension link {path}: {reason}")]
+    UnsafeLink { path: PathBuf, reason: &'static str },
     #[error("project extension inventory exceeded its {limit}-file limit")]
     FileLimit { limit: usize },
     #[error("project extension file exceeds its {limit}-byte limit: {path}")]
@@ -226,6 +228,7 @@ impl FolderTrustError {
             self,
             Self::Workspace { .. }
                 | Self::UnsafeEntry(_)
+                | Self::UnsafeLink { .. }
                 | Self::FileLimit { .. }
                 | Self::FileSize { .. }
                 | Self::TotalSize { .. }
@@ -237,6 +240,7 @@ impl FolderTrustError {
         let path = match self {
             Self::Workspace { path, .. }
             | Self::FileSize { path, .. }
+            | Self::UnsafeLink { path, .. }
             | Self::UnsafeEntry(path)
             | Self::NonUtf8Path(path)
             | Self::ReadLedger { path, .. }
@@ -281,12 +285,28 @@ struct TrustedWorkspace {
 #[derive(Clone, Debug)]
 pub struct FolderTrustStore {
     path: PathBuf,
+    user_home: Option<PathBuf>,
 }
 
 impl FolderTrustStore {
+    /// Opens the ledger at `path`. Project skill links may resolve into the
+    /// user's home directory, taken from an absolute `HOME`; without one, links
+    /// must stay inside the project.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        let user_home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute());
+        Self { path, user_home }
+    }
+
+    /// Sets the home directory that bounds project skill links, matching the
+    /// home used by extension discovery.
+    #[must_use]
+    pub fn with_user_home(mut self, user_home: impl Into<PathBuf>) -> Self {
+        self.user_home = Some(user_home.into());
+        self
     }
 
     #[must_use]
@@ -307,7 +327,7 @@ impl FolderTrustStore {
                 path: workspace.to_owned(),
                 source,
             })?;
-        let inventory = match executable_inventory(&workspace) {
+        let inventory = match executable_inventory(&workspace, self.user_home.as_deref()) {
             Ok(inventory) => inventory,
             Err(error) if error.is_inventory_failure() => {
                 let failure = FolderTrustInventoryFailure {
@@ -597,221 +617,6 @@ impl Drop for TrustLedgerLock {
     }
 }
 
-fn executable_inventory(workspace: &Path) -> Result<Vec<TrustInventoryItem>, FolderTrustError> {
-    let mut files = Vec::new();
-    for discovery in [".agents", ".rottweiler"] {
-        let root = workspace.join(discovery);
-        match fs::symlink_metadata(&root) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(FolderTrustError::UnsafeEntry(root));
-            }
-            Ok(_) => collect_files(workspace, &root, &mut files)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(FolderTrustError::Workspace { path: root, source });
-            }
-        }
-    }
-    files.sort();
-    let mut total = 0_u64;
-    let mut inventory = Vec::with_capacity(files.len());
-    for path in files {
-        let relative_path = path
-            .strip_prefix(workspace)
-            .map_err(|_| FolderTrustError::UnsafeEntry(path.clone()))?;
-        let bytes = read_inventory_file(workspace, relative_path)?;
-        let byte_count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        total = total.saturating_add(byte_count);
-        if total > MAX_INVENTORY_TOTAL_BYTES {
-            return Err(FolderTrustError::TotalSize {
-                limit: MAX_INVENTORY_TOTAL_BYTES,
-            });
-        }
-        let relative = relative_path
-            .to_str()
-            .ok_or_else(|| FolderTrustError::NonUtf8Path(relative_path.to_owned()))?
-            .replace('\\', "/");
-        inventory.push(TrustInventoryItem {
-            kind: inventory_kind(&relative).to_owned(),
-            path: relative,
-            content_hash: blake3::hash(&bytes).to_hex().to_string(),
-            bytes: byte_count,
-        });
-    }
-    Ok(inventory)
-}
-
-fn read_inventory_file(workspace: &Path, relative: &Path) -> Result<Vec<u8>, FolderTrustError> {
-    #[cfg(unix)]
-    let file = {
-        use std::os::fd::OwnedFd;
-
-        let mut directory: OwnedFd = rustix::fs::open(
-            workspace,
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::DIRECTORY
-                | rustix::fs::OFlags::CLOEXEC
-                | rustix::fs::OFlags::NOFOLLOW,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|source| FolderTrustError::Workspace {
-            path: workspace.to_owned(),
-            source: source.into(),
-        })?;
-        if let Some(parent) = relative.parent() {
-            for component in parent.components() {
-                let std::path::Component::Normal(name) = component else {
-                    return Err(FolderTrustError::UnsafeEntry(relative.to_owned()));
-                };
-                directory = rustix::fs::openat(
-                    &directory,
-                    name,
-                    rustix::fs::OFlags::RDONLY
-                        | rustix::fs::OFlags::DIRECTORY
-                        | rustix::fs::OFlags::CLOEXEC
-                        | rustix::fs::OFlags::NOFOLLOW,
-                    rustix::fs::Mode::empty(),
-                )
-                .map_err(|source| FolderTrustError::Workspace {
-                    path: workspace.join(relative),
-                    source: source.into(),
-                })?;
-            }
-        }
-        let file_name = relative
-            .file_name()
-            .ok_or_else(|| FolderTrustError::UnsafeEntry(relative.to_owned()))?;
-        let descriptor = rustix::fs::openat(
-            &directory,
-            file_name,
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC
-                | rustix::fs::OFlags::NOFOLLOW,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|source| FolderTrustError::Workspace {
-            path: workspace.join(relative),
-            source: source.into(),
-        })?;
-        let file = fs::File::from(descriptor);
-        if !file
-            .metadata()
-            .map_err(|source| FolderTrustError::Workspace {
-                path: workspace.join(relative),
-                source,
-            })?
-            .is_file()
-        {
-            return Err(FolderTrustError::UnsafeEntry(workspace.join(relative)));
-        }
-        file
-    };
-    #[cfg(not(unix))]
-    let file = {
-        let path = workspace.join(relative);
-        let file = fs::File::open(&path).map_err(|source| FolderTrustError::Workspace {
-            path: path.clone(),
-            source,
-        })?;
-        if !file
-            .metadata()
-            .map_err(|source| FolderTrustError::Workspace {
-                path: path.clone(),
-                source,
-            })?
-            .is_file()
-        {
-            return Err(FolderTrustError::UnsafeEntry(path));
-        }
-        file
-    };
-    let mut bytes = Vec::new();
-    file.take(MAX_INVENTORY_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| FolderTrustError::Workspace {
-            path: workspace.join(relative),
-            source,
-        })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_INVENTORY_FILE_BYTES {
-        return Err(FolderTrustError::FileSize {
-            path: workspace.join(relative),
-            limit: MAX_INVENTORY_FILE_BYTES,
-        });
-    }
-    Ok(bytes)
-}
-
-fn collect_files(
-    workspace: &Path,
-    directory: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), FolderTrustError> {
-    let entries = fs::read_dir(directory).map_err(|source| FolderTrustError::Workspace {
-        path: directory.to_owned(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| FolderTrustError::Workspace {
-            path: directory.to_owned(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|source| FolderTrustError::Workspace {
-                path: path.clone(),
-                source,
-            })?;
-        if metadata.file_type().is_symlink() {
-            return Err(FolderTrustError::UnsafeEntry(path));
-        }
-        if metadata.is_dir() {
-            collect_files(workspace, &path, files)?;
-        } else if metadata.is_file() {
-            files.push(path);
-            if files.len() > MAX_INVENTORY_FILES {
-                return Err(FolderTrustError::FileLimit {
-                    limit: MAX_INVENTORY_FILES,
-                });
-            }
-        } else {
-            return Err(FolderTrustError::UnsafeEntry(path));
-        }
-    }
-    let _ = workspace;
-    Ok(())
-}
-
-fn inventory_kind(path: &str) -> &'static str {
-    let normalized = path
-        .strip_prefix(".agents/")
-        .or_else(|| path.strip_prefix(".rottweiler/"))
-        .unwrap_or(path);
-    if normalized.starts_with("commands/") {
-        "command"
-    } else if normalized.starts_with("skills/") {
-        "skill"
-    } else if normalized.starts_with("agents/") {
-        "agent"
-    } else if normalized.starts_with("modes/") {
-        "mode"
-    } else if normalized.starts_with("workflows/") {
-        "workflow"
-    } else if normalized == "hooks.toml" {
-        "hook"
-    } else if normalized == "toolchain.toml" {
-        "toolchain"
-    } else if normalized == "plugins.toml" {
-        "plugin"
-    } else if matches!(normalized, "mcp.toml" | "mcp.json") {
-        "mcp"
-    } else if normalized == "config.toml" {
-        "project_config"
-    } else {
-        "project_extension"
-    }
-}
-
 fn inventory_hash(inventory: &[TrustInventoryItem]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rottweiler-folder-trust-v1\0");
@@ -865,202 +670,8 @@ fn workspace_key(workspace: &Path) -> Result<String, FolderTrustError> {
         .ok_or_else(|| FolderTrustError::NonUtf8Path(workspace.to_owned()))
 }
 
+mod inventory;
+use inventory::executable_inventory;
+
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used)]
-
-    use tempfile::TempDir;
-
-    use super::*;
-
-    #[test]
-    fn empty_project_extension_inventory_never_requests_a_trust_decision() {
-        let root = TempDir::new().expect("root");
-        let workspace = root.path().join("repo");
-        fs::create_dir_all(&workspace).expect("workspace");
-        let store = FolderTrustStore::new(root.path().join("user/trust.json"));
-
-        let assessment = store.assess(&workspace).expect("assessment");
-
-        assert!(assessment.inventory().is_empty());
-        assert!(!assessment.requires_confirmation());
-    }
-
-    #[test]
-    fn supporting_project_extension_artifacts_are_part_of_the_trust_inventory() {
-        let root = TempDir::new().expect("root");
-        let workspace = root.path().join("repo");
-        fs::create_dir_all(workspace.join(".rottweiler")).expect("extension directory");
-        fs::write(
-            workspace.join(".rottweiler/README.md"),
-            "supporting extension documentation",
-        )
-        .expect("supporting artifact");
-        let store = FolderTrustStore::new(root.path().join("user/trust.json"));
-
-        let assessment = store.assess(&workspace).expect("assessment");
-
-        assert!(assessment.requires_confirmation());
-        assert!(matches!(
-            assessment.inventory(),
-            [TrustInventoryItem { kind, path, .. }]
-                if kind == "project_extension" && path == ".rottweiler/README.md"
-        ));
-    }
-
-    #[test]
-    fn malicious_project_is_inert_until_exact_inventory_is_trusted() {
-        let canary = Path::new("/tmp/rottweiler-untrusted-folder-pwned");
-        let _ = fs::remove_file(canary);
-        let root = TempDir::new().expect("root");
-        let workspace = root.path().join("repo");
-        let agents = workspace.join(".agents/commands");
-        let rottweiler = workspace.join(".rottweiler");
-        fs::create_dir_all(&agents).expect("agents");
-        fs::create_dir_all(&rottweiler).expect("rottweiler");
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/untrusted-project");
-        fs::write(
-            agents.join("x.md"),
-            fs::read(fixture.join(".agents/commands/x.md")).expect("command fixture"),
-        )
-        .expect("command");
-        fs::write(
-            rottweiler.join("plugins.toml"),
-            fs::read(fixture.join(".rottweiler/plugins.toml")).expect("plugin fixture"),
-        )
-        .expect("plugin");
-        let store = FolderTrustStore::new(root.path().join("user/trust.json"));
-        let first = store.assess(&workspace).expect("assessment");
-        assert_eq!(first.state(), FolderTrustState::Untrusted);
-        assert!(!first.project_execution_enabled());
-        assert!(first.requires_confirmation());
-        assert!(first.inventory().iter().any(|item| item.kind == "command"));
-        assert!(first.inventory().iter().any(|item| item.kind == "plugin"));
-        let prompt = first.render_prompt();
-        assert!(prompt.contains(".agents/commands/x.md"));
-        assert!(prompt.contains(".rottweiler/plugins.toml"));
-        assert!(
-            !canary.exists(),
-            "inventory must never execute project content"
-        );
-
-        store.grant(&first).expect("grant");
-        let trusted = store.assess(&workspace).expect("trusted");
-        assert_eq!(trusted.state(), FolderTrustState::Trusted);
-        assert!(!trusted.requires_confirmation());
-        assert!(
-            !canary.exists(),
-            "grant persistence must not execute project content"
-        );
-
-        fs::write(agents.join("x.md"), "!`touch /tmp/changed`\n").expect("change");
-        let changed = store.assess(&workspace).expect("changed");
-        assert_eq!(changed.state(), FolderTrustState::Changed);
-        assert!(!changed.project_execution_enabled());
-        assert!(changed.requires_confirmation());
-        assert!(matches!(
-            changed.changes(),
-            [TrustInventoryChange::Modified { after, .. }] if after.path == ".agents/commands/x.md"
-        ));
-
-        fs::remove_file(agents.join("x.md")).expect("remove command");
-        fs::remove_file(rottweiler.join("plugins.toml")).expect("remove plugin");
-        let removed = store.assess(&workspace).expect("removed inventory");
-        assert_eq!(removed.state(), FolderTrustState::Changed);
-        assert!(removed.inventory().is_empty());
-        assert!(!removed.project_execution_enabled());
-        assert!(!removed.requires_confirmation());
-    }
-
-    #[test]
-    fn decisions_are_keyed_by_canonical_absolute_workspace() {
-        let root = TempDir::new().expect("root");
-        let first = root.path().join("first");
-        let second = root.path().join("second");
-        fs::create_dir_all(&first).expect("first");
-        fs::create_dir_all(&second).expect("second");
-        let store = FolderTrustStore::new(root.path().join("user/trust.json"));
-        let first_assessment = store.assess(&first).expect("first assessment");
-        store.grant(&first_assessment).expect("grant first");
-        assert_eq!(
-            store.assess(&first).expect("first trusted").state(),
-            FolderTrustState::Trusted
-        );
-        assert_eq!(
-            store.assess(&second).expect("second untrusted").state(),
-            FolderTrustState::Untrusted
-        );
-
-        let second_assessment = store.assess(&second).expect("second assessment");
-        store.grant(&second_assessment).expect("grant second");
-        assert_eq!(
-            store.assess(&first).expect("first retained").state(),
-            FolderTrustState::Trusted
-        );
-        assert_eq!(
-            store.assess(&second).expect("second trusted").state(),
-            FolderTrustState::Trusted
-        );
-    }
-
-    #[test]
-    fn concurrent_writer_lock_fails_closed_instead_of_losing_a_decision() {
-        let root = TempDir::new().expect("root");
-        let workspace = root.path().join("repo");
-        fs::create_dir_all(&workspace).expect("workspace");
-        let path = root.path().join("user/trust.json");
-        let store = FolderTrustStore::new(path.clone());
-        let assessment = store.assess(&workspace).expect("assessment");
-        fs::create_dir_all(path.parent().expect("parent")).expect("parent");
-        fs::create_dir(path.with_extension("lock")).expect("competing lock");
-        assert!(matches!(
-            store.grant(&assessment),
-            Err(FolderTrustError::LedgerLocked(_))
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_project_extension_is_untrustable_without_a_partial_fingerprint() {
-        use std::os::unix::fs::symlink;
-
-        let root = TempDir::new().expect("root");
-        let workspace = root.path().join("repo");
-        fs::create_dir_all(workspace.join(".agents/commands")).expect("commands");
-        fs::write(
-            workspace.join(".agents/commands/valid.md"),
-            "---\ndescription: valid\n---\nbody",
-        )
-        .expect("valid command");
-        fs::write(root.path().join("outside"), "payload").expect("outside");
-        symlink(
-            root.path().join("outside"),
-            workspace.join(".agents/commands/x.md"),
-        )
-        .expect("symlink");
-        let ledger = root.path().join("user/trust.json");
-        let store = FolderTrustStore::new(ledger.clone());
-        let assessment = store.assess(&workspace).expect("untrustable assessment");
-        let canonical_offending = assessment.workspace().join(".agents/commands/x.md");
-
-        assert_eq!(assessment.state(), FolderTrustState::Untrustable);
-        assert!(!assessment.project_execution_enabled());
-        assert!(!assessment.requires_confirmation());
-        assert!(assessment.inventory().is_empty());
-        assert_eq!(assessment.executable_hash(), None);
-        let failure = assessment.inventory_failure().expect("inventory failure");
-        assert_eq!(failure.path(), canonical_offending);
-        assert!(
-            assessment
-                .render_prompt()
-                .contains("no fingerprint was produced")
-        );
-        assert!(matches!(
-            store.grant(&assessment),
-            Err(FolderTrustError::Untrustable { path, .. })
-                if path == canonical_offending
-        ));
-        assert!(!ledger.exists(), "refused grant must not create a ledger");
-    }
-}
+mod tests;

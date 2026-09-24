@@ -117,6 +117,7 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::ListModes { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ListSettings { .. }
+        | ClientCommand::ListExtensions { .. }
         | ClientCommand::ListMcpServers { .. }
         | ClientCommand::ListRuntimeServices { .. }
         | ClientCommand::ReviewMcpServer { .. }
@@ -130,6 +131,7 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::GetWorkspaceDiff { .. }
         | ClientCommand::ListSubagents { .. }
         | ClientCommand::InterruptSubagent { .. }
+        | ClientCommand::BackgroundSubagent { .. }
         | ClientCommand::ShutdownHost { .. } => false,
     }
 }

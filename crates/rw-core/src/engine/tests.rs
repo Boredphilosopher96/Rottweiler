@@ -2,6 +2,7 @@
 #![allow(clippy::expect_used)]
 
 mod attachments;
+mod background_children;
 mod budget;
 mod cancellation;
 mod close;

@@ -7,7 +7,7 @@ export { type ReviewFileDecision, type ReviewPanelCallbacks, ReviewPanelRenderab
 export { type ContextPanelCallbacks, ContextPanelRenderable } from "./context-panel"
 export { StatusLineRenderable, StateBannerRenderable } from "./status"
 export * from "./picker"
-export * from "./subagent-tray"
+export * from "./agents-strip"
 export * from "./tools-workspace"
 export * from "./transcript"
 export { ReasoningBlockRenderable, ToolBlockRenderable, SubagentPanelRenderable, formatElapsed, toolOutputContent, toolOutputPreview, subagentGlyph } from "./transcript/blocks"

@@ -108,7 +108,7 @@ function fixtureState(): RottweilerState {
     workspaceStatus: {
       workspaceName: "Rottweiler",
       branch: "feature/tui-v1",
-      changedPaths: ["packages/tui/src/app.ts"],
+      changes: [{ path: "packages/tui/src/app.ts", kind: "modified" as const }],
       truncated: false,
     },
     commands: [
@@ -117,8 +117,8 @@ function fixtureState(): RottweilerState {
       { name: "rewind", description: "Restore a prior checkpoint", usage: "/rewind" },
     ],
     models: [
-      { id: "openai_codex/fast", displayName: "fast", provider: "openai_codex", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true },
-      { id: "github_copilot/deep", displayName: "deep", provider: "github_copilot", aliases: ["deep"], current: false, available: true, status: null, vision: false, thinking: true, toolCalling: true },
+      { id: "openai_codex/fast", displayName: "fast", provider: "openai_codex", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true, contextTokens: null },
+      { id: "github_copilot/deep", displayName: "deep", provider: "github_copilot", aliases: ["deep"], current: false, available: true, status: null, vision: false, thinking: true, toolCalling: true, contextTokens: null },
     ],
     sessions: [
       {
@@ -127,6 +127,12 @@ function fixtureState(): RottweilerState {
         model: "fast",
         driverClientId: "client",
         shellActive: false,
+        activity: {
+          updatedUnixMs: Date.parse("2026-01-01T09:30:00.000Z"),
+          turnCount: 12,
+          firstPrompt: "Rebuild the session picker around recorded activity",
+          costMicrosUsd: 1_840_000,
+        },
       },
       {
         sessionId: "session-2",
@@ -134,6 +140,12 @@ function fixtureState(): RottweilerState {
         model: "deep",
         driverClientId: null,
         shellActive: true,
+        activity: {
+          updatedUnixMs: Date.parse("2025-12-29T18:00:00.000Z"),
+          turnCount: 1,
+          firstPrompt: null,
+          costMicrosUsd: null,
+        },
       },
     ],
     workspaceFiles: [
@@ -539,6 +551,7 @@ describe("M4 golden screens", () => {
       } },
         initialState: scenario.state,
         requestId: () => "golden-request",
+        nowMs: () => TOOLS_FIXTURE_NOW_MS,
         treeSitterClient: treeSitter,
         ...(scenario.replaySessionId === undefined
           ? {}

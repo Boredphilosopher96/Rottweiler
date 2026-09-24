@@ -1097,6 +1097,7 @@ pub(super) fn configured_setting_value(config: &Config, key: &str) -> Option<Str
     match key {
         "ui.theme" => Some(config.ui.theme.clone()),
         "compaction.auto" => Some(config.compaction.auto.to_string()),
+        "agents.wake_on_completion" => Some(config.agents.wake_on_completion.to_string()),
         "permissions.default" => Some(config.permissions.default.as_str().to_owned()),
         "budget.session_cost_cap_micros_usd" => config
             .budget
@@ -1164,7 +1165,7 @@ pub(super) fn set_toml_leaf(
             .entry((*segment).to_owned())
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
     }
-    let boolean_leaf = key == "compaction.auto"
+    let boolean_leaf = matches!(key, "compaction.auto" | "agents.wake_on_completion")
         || (segments.first() == Some(&"servers") && segments.last() == Some(&"enabled"));
     let integer_leaf = matches!(
         key,

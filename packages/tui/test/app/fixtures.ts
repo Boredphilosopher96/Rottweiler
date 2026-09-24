@@ -67,7 +67,7 @@ export function expectCoherentTheme(app: ReturnType<typeof createRottweilerApp>,
   expect(app.reviewPanel.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.reviewPanel.rightRail.backgroundColor.toInts()).toEqual(rgba(theme.backgroundPanel))
   expect(app.interactionPanel.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
-  expect(app.picker.backgroundColor.toInts()).toEqual(rgba(theme.backgroundElement))
+  expect(app.picker.backgroundColor.toInts()).toEqual(rgba(theme.background))
   expect(app.statusLine.bg.toInts()).toEqual(rgba(theme.backgroundPanel))
 }
 
@@ -97,7 +97,7 @@ export function visionCapableState() {
       status: null,
       vision: true,
       thinking: true,
-      toolCalling: true,
+      toolCalling: true, contextTokens: null,
     }],
   }
 }

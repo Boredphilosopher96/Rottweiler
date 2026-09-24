@@ -125,7 +125,7 @@ describe("Rottweiler tools-history", () => {
     )
   })
 
-  test("switches mounted conversation and Tools views from the palette without sharing scroll state", async () => {
+  test("switches mounted conversation and Tools views with Ctrl+T without sharing scroll state", async () => {
     const setup = await createTestRenderer({ width: 110, height: 24, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: sessionReaderFor(Array.from({ length: 24 }, (_, index) => conversationItem(index + 1, "assistant", `Historical response ${index}\nsecond line`))), initialState: toolsAppState() })
@@ -136,11 +136,7 @@ describe("Rottweiler tools-history", () => {
     const transcriptScroll = app.transcript.scroller.scrollTop
     expect(transcriptScroll).toBeGreaterThan(0)
 
-    app.openCommandPicker()
-    expect(app.commandPalette.itemIds).toContain("view.tools")
-    expect(app.commandPalette.itemIds).toContain("view.conversation")
-    app.commandPalette.selectById("view.tools")
-    app.commandPalette.activateSelected()
+    setup.mockInput.pressKey("t", { ctrl: true })
     await setup.flush()
 
     expect(app.primaryView).toBe("tools")
@@ -155,23 +151,20 @@ describe("Rottweiler tools-history", () => {
     app.toolsWorkspace.activityScroller.scrollTo(2)
     await setup.flush()
     const toolsScroll = app.toolsWorkspace.activityScroller.scrollTop
-    app.openCommandPicker()
-    app.commandPalette.selectById("view.conversation")
-    app.commandPalette.activateSelected()
+    setup.mockInput.pressKey("t", { ctrl: true })
     await setup.flush()
     expect(app.primaryView).toBe("conversation")
     expect(app.transcript.scroller.scrollTop).toBe(transcriptScroll)
     expect(app.toolsElapsedTimerActive).toBeFalse()
 
-    app.openCommandPicker()
-    app.commandPalette.selectById("view.tools")
-    app.commandPalette.activateSelected()
+    setup.mockInput.pressKey("t", { ctrl: true })
     await setup.flush()
     expect(app.toolsWorkspace.activityScroller.scrollTop).toBe(toolsScroll)
 
-    setup.mockInput.pressKey("o", { ctrl: true })
-    expect(app.picker.visible).toBeTrue()
-    expect(app.picker.title).toContain("Modes")
+    app.openCommandPicker()
+    setup.mockInput.pressKey("t", { ctrl: true })
+    await setup.flush()
+    expect(app.primaryView).toBe("tools")
   })
 
   test("an open live output reader follows completion into canonical content", async () => {

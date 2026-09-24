@@ -61,20 +61,7 @@ impl ProviderContext<'_> {
         reservation: Reservation,
         selection: Selection<'_>,
         prune: bool,
-    ) -> Result<
-        (
-            ContextWorkingSet,
-            AssembledContext,
-            Vec<rw_types::SequenceId>,
-        ),
-        AgentLoopError,
-    > {
-        let view = self.config.history.capture_history().await?;
-        let notices = view.completion_notices().await?;
-        let completion_sources = notices
-            .iter()
-            .map(|notice| notice.sequence)
-            .collect::<Vec<_>>();
+    ) -> Result<(ContextWorkingSet, AssembledContext), AgentLoopError> {
         let conversation = Arc::new(Mutex::new(std::mem::take(selection.conversation)));
         let worker_conversation = Arc::clone(&conversation);
         let config = Arc::clone(self.config);
@@ -106,14 +93,14 @@ impl ProviderContext<'_> {
                             pruned.insert(source.key(), *reclaimed_tokens);
                         }
                     }
-                    let assembled = context::assemble_session_context_with_notices(
+                    let assembled = context::assemble_session_context(
                         &config,
                         &working,
                         &conversation,
                         &sources,
                         &VecDeque::new(),
                         &surgery,
-                        (&pruned, &notices),
+                        &pruned,
                     )?;
                     Ok::<_, AgentLoopError>((working, assembled, events, pruned))
                 },
@@ -142,7 +129,7 @@ impl ProviderContext<'_> {
             persist_event(self.signals, event).await?;
         }
         *selection.pruned = pruned;
-        Ok((working, assembled, completion_sources))
+        Ok((working, assembled))
     }
 }
 

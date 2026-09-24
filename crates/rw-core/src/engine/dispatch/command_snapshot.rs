@@ -1,7 +1,6 @@
 //! Immutable command input captured before asynchronous execution.
 use crate::engine::commands::SessionCommandContext;
 use crate::engine::commands::render_permission_snapshot;
-use crate::engine::commands::render_plan;
 use std::sync::Arc;
 
 use crate::engine::session::{ActorState, SessionActorConfig};
@@ -14,11 +13,6 @@ pub(super) fn capture(state: &ActorState, config: &SessionActorConfig) -> Sessio
         mode_id: state.mode_id.clone(),
         modes: Arc::clone(&config.modes),
         permission_summary: render_permission_snapshot(&config.permissions.snapshot()),
-        plan_summary: state
-            .pending_plan
-            .as_ref()
-            .or(state.approved_plan.as_ref())
-            .map_or_else(|| "no plan has been submitted".to_owned(), render_plan),
         command_summary: config
             .commands
             .descriptors()

@@ -1237,6 +1237,28 @@
       ]
     },
     {
+      "description": "Read the session's declarative extension inventory: every discovered\nskill, command, and agent with its source and load outcome.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_extensions"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {
@@ -2032,6 +2054,32 @@
         "type": {
           "type": "string",
           "const": "close_subagent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "description": "Moves a running child out of the parent's foreground. The tool call waiting\non it returns at once and the parent turn continues; the child's result is\ndelivered to the parent when it finishes, like any background child.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "type": {
+          "type": "string",
+          "const": "background_subagent"
         }
       },
       "additionalProperties": false,

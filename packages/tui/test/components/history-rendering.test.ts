@@ -103,8 +103,9 @@ describe("semantic history rendering", () => {
         reserved_tokens: "0", context_window_known: true, cache_breakpoints: [], items: []
       }
     })
-    expect(app.transcript.mountedCards.get("1")?.header.plainText).toBe("you")
-    expect(app.transcript.mountedCards.get("3")?.header.plainText).toContain("turn usage · 1234 tokens")
+    expect(app.transcript.mountedCards.get("1")?.prefix.plainText).toBe("›")
+    expect(app.transcript.mountedCards.get("1")?.header.visible).toBeFalse()
+    expect(app.transcript.mountedCards.get("3")?.header.plainText).toBe("1.2k tokens")
     expect(app.statusLine.plainText).toContain("ctx 5%")
   })
 
@@ -162,7 +163,7 @@ describe("semantic history rendering", () => {
     app.setState({ ...app.state, workspaceRoots: { generation: "2", roots: [], effectiveFromTurn: "1" } })
     await setup.flush()
     expect(app.transcript.mountedCards.get("1")).toBe(row)
-    expect(row?.markdown.content).toContain("Retained tool output")
-    expect(row?.header.plainText).toContain("read  README.md")
+    expect(row?.tool?.body.plainText).toContain("Retained tool output")
+    expect(row?.header.plainText).toStartWith("● Read README.md")
   })
 })

@@ -1,4 +1,5 @@
 import { emptyRecovery, type RecoveryProjection } from "./recovery"
+import type { ExtensionArtifactScope } from "../../../../protocol/types"
 import { emptyControlFence, type ControlFence } from "./controls"
 import { citationBytes } from "./live-admission"
 import type { ToolDisplay } from "./tool-display"
@@ -34,6 +35,7 @@ import type {
   TurnStatus,
   UnifiedDiff,
   Usage,
+  WorkspaceChange,
 } from "../protocol"
 
 export type ContextUsageProjection = Pick<ContextSnapshot, "through" | "turn_id" | "stable_prefix_hash" | "used_tokens" | "usable_tokens" | "reserved_tokens" | "context_window_known" | "context_window_reason">
@@ -226,6 +228,16 @@ export interface SessionChoice {
   readonly model: string
   readonly driverClientId: string | null
   readonly shellActive: boolean
+  /** Recorded history; null until the engine's session index has projected it. */
+  readonly activity: SessionActivityProjection | null
+}
+
+export interface SessionActivityProjection {
+  readonly updatedUnixMs: number
+  readonly turnCount: number
+  readonly firstPrompt: string | null
+  /** Lifetime USD spend in micro-dollars, when every entry is priced. */
+  readonly costMicrosUsd: number | null
 }
 
 export type ReviewFileStatus = "pending" | "accepted" | "reverted"
@@ -262,6 +274,8 @@ export interface CommandChoice {
   readonly description: string
   readonly usage: string
   readonly source?: CommandSource
+  /** Discovery scope of a declarative command or skill. */
+  readonly scope?: ExtensionArtifactScope | null
 }
 
 export interface ModeChoice {
@@ -281,6 +295,8 @@ export interface ModelChoice {
   readonly vision: boolean
   readonly thinking: boolean
   readonly toolCalling: boolean
+  /** Provider-reported context window; null when the provider does not publish one. */
+  readonly contextTokens: string | null
 }
 
 export interface ModelAliasChoice {
@@ -340,7 +356,8 @@ export interface WorkspacePreviewProjection {
 export interface WorkspaceStatusProjection {
   readonly workspaceName: string
   readonly branch: string | null
-  readonly changedPaths: readonly string[]
+  /** Git changes, untracked files included and ignored files omitted. */
+  readonly changes: readonly WorkspaceChange[]
   readonly truncated: boolean
 }
 

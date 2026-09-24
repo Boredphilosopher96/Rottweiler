@@ -8,7 +8,7 @@ import type {
   ReviewPanelRenderable,
   OutputViewerRenderable,
   InteractionPanelRenderable,
-  FuzzyPickerRenderable,
+  PickerScreenRenderable,
 } from "../components"
 import type { DocumentController } from "../history/document"
 import {
@@ -56,10 +56,12 @@ interface InputUiHost {
   readonly toolsWorkspace: ToolsWorkspaceRenderable
   readonly statusLine: StatusLineRenderable
   readonly banner: StateBannerRenderable
-  readonly picker: FuzzyPickerRenderable<unknown>
+  readonly picker: PickerScreenRenderable<unknown>
   readonly mcpBrowser: NavigableBrowser
   readonly settingsBrowser: NavigableBrowser
   readonly themeBrowser: NavigableBrowser
+  /** Agents and Skills screens, which share the list-detail anatomy. */
+  readonly screenBrowsers: readonly NavigableBrowser[]
   readonly commandPalette: NavigableBrowser
   discardPendingRestore(): void
   projectRejection(outcome: void | CommandOutcome | null): void
@@ -70,10 +72,12 @@ interface InputUiHost {
   closePicker(): void
   openSessionPicker(): void
   openSubagentPicker(): void
+  /** Ctrl+B: detach the child a foreground spawn or wait blocks on; false when none does. */
+  backgroundForeground(): boolean
   openReview(): void
   openCommandPicker(): void
   openModelPicker(): void
-  openModePicker(): void
+  toggleToolsView(): void
   onExit(): void
 }
 export class InputUiController {
@@ -306,7 +310,7 @@ export class InputUiController {
         return true
       }
       if (this.pickerVisible()) {
-        this.#host.closePicker()
+        if (!this.#host.pickerController.back()) this.#host.closePicker()
         return true
       }
       if (this.#host.reviewOpen) {
@@ -327,6 +331,7 @@ export class InputUiController {
       this.#host.openSubagentPicker()
       return true
     }
+    if (action === "background_subagent") return !this.pickerVisible() && this.#host.backgroundForeground()
     if (action === "block_previous" || action === "block_next" || action === "block_toggle") {
       const focusOwner = this.visibleFocusOwner()
       if (
@@ -357,13 +362,16 @@ export class InputUiController {
         this.#host.openReview()
         return true
       case "open_command_picker":
-        this.#host.openCommandPicker()
+        // The same chord toggles the palette closed.
+        if (this.#host.commandPalette.visible) this.#host.closePicker()
+        else this.#host.openCommandPicker()
         return true
       case "open_model_picker":
         this.#host.openModelPicker()
         return true
-      case "open_mode_picker":
-        this.#host.openModePicker()
+      case "toggle_tools_view":
+        if (this.pickerVisible() || this.#host.outputViewer.visible || this.#host.reviewOpen) return false
+        this.#host.toggleToolsView()
         return true
       case "paste_image":
         if (!this.#host.modelSupportsVision(this.#host.children.presentedState())) return false
@@ -447,8 +455,9 @@ export class InputUiController {
       case "select_current":
         if (!this.pickerVisible()) return false
         if (this.#host.themeBrowser.visible) this.#host.themeBrowser.activateSelected()
+        else if (this.#screenBrowser() !== undefined) this.#screenBrowser()!.activateSelected()
         else if (this.#host.commandPalette.visible) this.#host.commandPalette.activateSelected()
-        else this.#host.picker.select.selectCurrent()
+        else this.#host.picker.activateSelected()
         return true
     }
   }
@@ -501,18 +510,16 @@ export class InputUiController {
       this.#host.themeBrowser.input.focus()
       return
     }
+    const screen = this.#screenBrowser()
+    if (screen !== undefined) {
+      screen.input.focus()
+      return
+    }
     if (this.#host.commandPalette.visible) {
       this.#host.commandPalette.input.focus()
       return
     }
-    if (this.#host.picker.visible && !this.#host.pickerController.anchored) {
-      if (this.#inputMode !== "normal") {
-        this.#host.picker.input.focus()
-      } else {
-        this.#host.picker.select.focus()
-      }
-      return
-    }
+    if (this.#host.picker.visible && !this.#host.pickerController.anchored) this.#host.picker.input.focus()
   }
 
   focusForInputMode(): void {
@@ -530,7 +537,7 @@ export class InputUiController {
       this.#host.interactionPanel.select.focus()
       return
     }
-    if (this.#host.children.isActiveSubagentRunning()) {
+    if (this.#host.children.composerHidden) {
       this.#host.composer.editor.showCursor = false
       this.#host.transcript.scroller.focus()
       return
@@ -567,6 +574,8 @@ export class InputUiController {
       this.#host.settingsBrowser.moveSelection(direction)
     } else if (this.#host.themeBrowser.visible) {
       this.#host.themeBrowser.moveSelection(direction)
+    } else if (this.#screenBrowser() !== undefined) {
+      this.#screenBrowser()!.moveSelection(direction)
     } else if (this.#host.commandPalette.visible) {
       this.#host.commandPalette.moveSelection(direction)
     } else if (this.#host.picker.visible) {
@@ -592,6 +601,8 @@ export class InputUiController {
       this.#host.mcpBrowser.moveToBoundary(end)
     } else if (this.#host.themeBrowser.visible) {
       this.#host.themeBrowser.moveToBoundary(end)
+    } else if (this.#screenBrowser() !== undefined) {
+      this.#screenBrowser()!.moveToBoundary(end)
     } else if (this.#host.commandPalette.visible) {
       this.#host.commandPalette.moveToBoundary(end)
     } else if (this.#host.picker.visible) {
@@ -636,16 +647,20 @@ export class InputUiController {
     if (this.#host.interactionPanel.capturesInput && this.#host.interactionPanel.select.focused) return "interaction"
     if (this.#host.interactionPanel.visible && this.#host.composer.editor.focused) return "composer"
     if (this.#host.state.replay.active) return "transcript"
-    if (this.#host.children.isActiveSubagentRunning()) return "transcript"
+    if (this.#host.children.composerHidden) return "transcript"
     return this.#vimFocus
   }
 
   pickerVisible(): boolean {
-    return this.#host.mcpBrowser.visible || this.#host.settingsBrowser.visible || this.#host.themeBrowser.visible || this.#host.commandPalette.visible || this.#host.picker.visible
+    return this.#host.mcpBrowser.visible || this.#host.settingsBrowser.visible || this.#host.themeBrowser.visible || this.#screenBrowser() !== undefined || this.#host.commandPalette.visible || this.#host.picker.visible
   }
 
   modalPickerVisible(): boolean {
-    return this.#host.mcpBrowser.visible || this.#host.settingsBrowser.visible || this.#host.themeBrowser.visible || this.#host.commandPalette.visible || (this.#host.picker.visible && !this.#host.pickerController.anchored)
+    return this.#host.mcpBrowser.visible || this.#host.settingsBrowser.visible || this.#host.themeBrowser.visible || this.#screenBrowser() !== undefined || this.#host.commandPalette.visible || (this.#host.picker.visible && !this.#host.pickerController.anchored)
+  }
+
+  #screenBrowser(): NavigableBrowser | undefined {
+    return this.#host.screenBrowsers.find(browser => browser.visible)
   }
 
   statusFocusOwner(): VimFocus | "interaction" | "review" {

@@ -320,7 +320,7 @@ async fn resume_durably_closes_projected_inflight_turn_before_new_commands() {
     let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
         .await
         .expect("actor");
-    handle.send_message("/status").await.expect("status");
+    handle.send_message("/help").await.expect("help");
     let persisted = sink.events.lock().expect("sink events");
     assert!(matches!(
         persisted.get(prefix).map(|event| &event.kind),

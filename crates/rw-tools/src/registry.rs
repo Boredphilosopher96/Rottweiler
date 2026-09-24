@@ -1,4 +1,5 @@
 mod background;
+pub use background::SessionActivity;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -266,6 +267,12 @@ pub trait SubagentEventSink: Send + Sync {
     async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError>;
 
     async fn progress(&self, event: SubagentProgressEvent) -> Result<(), ToolError>;
+
+    /// Persists a finished child whose result no tool call waits on. Session-owned
+    /// sinks also start a parent turn to receive it when the parent is idle.
+    async fn background_finished(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
+        self.lifecycle(event).await
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1129,9 +1136,9 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
-    /// Human-readable active resource which makes idle-sensitive engine
-    /// operations fail closed.
-    fn session_activity(&self, _session_id: &SessionId) -> Option<String> {
+    /// Session-owned work holding the workspace lock, which makes
+    /// workspace-mutating and idle-sensitive engine operations fail closed.
+    fn session_activity(&self, _session_id: &SessionId) -> Option<SessionActivity> {
         None
     }
 
@@ -1237,7 +1244,7 @@ impl Tool for GuardedTool {
         self.inner.end_session(session_id).await
     }
 
-    fn session_activity(&self, session_id: &SessionId) -> Option<String> {
+    fn session_activity(&self, session_id: &SessionId) -> Option<SessionActivity> {
         self.inner.session_activity(session_id)
     }
 
@@ -1425,7 +1432,7 @@ impl ToolRegistry {
     }
 
     #[must_use]
-    pub fn session_activity(&self, session_id: &SessionId) -> Option<String> {
+    pub fn session_activity(&self, session_id: &SessionId) -> Option<SessionActivity> {
         self.session_observers
             .iter()
             .find_map(|observer| observer.session_activity(session_id))

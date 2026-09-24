@@ -148,21 +148,21 @@ impl EngineHost {
         let (ready, readiness_message) = match (activated, catalog_ready) {
             (true, Some(true)) => (
                 true,
-                "Provider connected. Choose a model from /models.".to_owned(),
+                "Provider connected. Choose a model from /model.".to_owned(),
             ),
             (false, _) => (
                 false,
-                "Signed in, but the provider connection is not ready. Retry from /providers."
+                "Signed in, but the provider connection is not ready. Retry from /model."
                     .to_owned(),
             ),
             (true, None) => (
                 false,
-                "Signed in, but the model catalog could not be refreshed. Retry from /providers."
+                "Signed in, but the model catalog could not be refreshed. Retry from /model."
                     .to_owned(),
             ),
             (true, Some(false)) => (
                 false,
-                "Signed in, but this provider is not reachable or returned no models. Retry from /providers."
+                "Signed in, but this provider is not reachable or returned no models. Retry from /model."
                     .to_owned(),
             ),
         };

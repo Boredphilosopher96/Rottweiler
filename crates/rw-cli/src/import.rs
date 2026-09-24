@@ -43,6 +43,8 @@ pub(crate) enum ImportStatus {
     Unchanged,
     Conflict,
     Unsupported,
+    /// Read in place by extension discovery; not copied.
+    DiscoveredInPlace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -197,19 +199,18 @@ fn import_claude(
     if let Some(bytes) = source.first_file(&["CLAUDE.md", ".claude/CLAUDE.md"])? {
         writes.push(write("instructions", "AGENTS.md", bytes));
     }
-    copy_markdown_dir(
-        source,
-        &[".claude/commands", "commands"],
-        ".agents/commands",
-        true,
-        writes,
-    )?;
-    copy_tree(
-        source,
-        &[".claude/skills", "skills"],
-        ".agents/skills",
-        writes,
-    )?;
+    // Skills and commands are discovered in place from `.claude/skills` and
+    // `.claude/commands`; copying them would create stale duplicates.
+    for path in [".claude/skills", ".claude/commands"] {
+        if source.kind(path).map_or(true, |kind| kind.is_some()) {
+            diagnostics.push(item(
+                "discovered",
+                path,
+                ImportStatus::DiscoveredInPlace,
+                "loaded in place by extension discovery; nothing to import",
+            ));
+        }
+    }
     copy_markdown_dir(
         source,
         &[".claude/memory", "memory"],

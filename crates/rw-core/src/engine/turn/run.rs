@@ -259,6 +259,24 @@ pub(super) async fn run_turn(
             status = AgentTurnStatus::BudgetExceeded;
             break;
         }
+        match super::child_results::deliver(&config, &signals, turn, &mut conversation).await {
+            // A turn started for child results that an earlier call already
+            // delivered has nothing new to answer.
+            Ok(0)
+                if iteration == 0
+                    && conversation
+                        .last()
+                        .is_some_and(|last| last.role == rw_types::Role::Assistant) =>
+            {
+                status = AgentTurnStatus::Completed;
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                status = super::provider_context::report_failure(&error, &signals);
+                break;
+            }
+        }
         let mut sources =
             match super::history_context::current_sources(&config, conversation.len()).await {
                 Ok(sources) => sources,
@@ -296,7 +314,7 @@ pub(super) async fn run_turn(
             signals: &signals,
             cancellation: &cancellation,
         };
-        let (mut working, mut assembled, mut completion_sources) = match context_worker
+        let (mut working, mut assembled) = match context_worker
             .assemble(
                 reservation,
                 Selection {
@@ -377,7 +395,7 @@ pub(super) async fn run_turn(
                         break;
                     }
                 };
-                (working, assembled, completion_sources) = match context_worker
+                (working, assembled) = match context_worker
                     .assemble(
                         Reservation::Retained(Box::new(working)),
                         Selection {
@@ -424,7 +442,6 @@ pub(super) async fn run_turn(
             &signals,
             PendingEvent::ContextUsage {
                 turn,
-                completion_sources: completion_sources.clone(),
                 used_tokens: snapshot.used_tokens,
                 usable_tokens: snapshot.usable_tokens,
                 reserved_tokens: snapshot.reserved_tokens,
@@ -824,7 +841,6 @@ pub(super) async fn run_turn(
             &signals,
             PendingEvent::ContextUsage {
                 turn,
-                completion_sources: completion_sources.clone(),
                 used_tokens: context_metrics.0,
                 usable_tokens: context_metrics.1,
                 reserved_tokens: context_metrics.2,

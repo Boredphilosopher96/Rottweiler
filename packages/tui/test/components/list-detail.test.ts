@@ -4,9 +4,10 @@ import {
   type TestRenderer
 } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
-import { FuzzyPickerRenderable, ListDetailRenderable } from "../../src/components"
+import { ListDetailRenderable, PickerScreenRenderable } from "../../src/components"
 import { kennelTheme } from "../../src/theme"
 import { listDetailRows } from "./fixtures"
+import { statusText } from "../picker-screen"
 
 describe("list-detail components", () => {
   let renderer: TestRenderer | undefined
@@ -237,25 +238,94 @@ describe("list-detail components", () => {
     expect(setup.captureCharFrame().match(/Compact the conversation context/g)).toHaveLength(1)
   })
 
-  test("shows a muted, non-selectable row when filtering has no matches", async () => {
+  test("filters generic screen rows and shows no-match copy in the list, not as a row", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const selected: string[] = []
-    const picker = new FuzzyPickerRenderable<string>(renderer, kennelTheme)
+    const picker = new PickerScreenRenderable<string>(renderer, kennelTheme)
     renderer.root.add(picker)
-    picker.open("Choices", [{ id: "alpha", label: "Alpha", description: "First", value: "alpha" }], (item) => {
-      selected.push(item.value)
-    })
+    picker.resizeForTerminal(80, 18, 14)
+    picker.present("choices:", "CHOICES", [
+      { id: "section", label: "Letters", description: "", sectionHeader: true, value: "" },
+      { id: "alpha", label: "Alpha", description: "First", value: "alpha" },
+      { id: "beta", label: "Beta", description: "Second", value: "beta" },
+    ], (item) => { selected.push(item.value) }, {}, false, "")
 
+    expect(picker.sectionLabels).toEqual(["Letters"])
+    await setup.mockInput.typeText("bet")
+    expect(picker.items.map(item => item.id)).toEqual(["beta"])
+    expect(picker.sectionLabels).toEqual([])
     await setup.mockInput.typeText("zzz")
-
-    expect(picker.select.options).toEqual([{
-      name: "No matches for “zzz”",
-      description: "",
-      value: "picker.no-matches",
-    }])
-    expect(picker.select.showSelectionIndicator).toBeFalse()
-    picker.select.selectCurrent()
+    expect(picker.items).toEqual([])
+    expect(statusText(picker)).toBe("No matches for “betzzz”")
+    picker.activateSelected()
     expect(selected).toEqual([])
+  })
+
+  test("lists screen chords in a state-aware footer and runs them for the selected row", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const ran: string[] = []
+    const picker = new PickerScreenRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(picker)
+    picker.resizeForTerminal(110, 32, 26)
+    picker.present("sessions:", "SESSIONS", [
+      { id: "one", label: "One", hint: "GPT-5", marker: "●", description: "first", value: "one" },
+      { id: "two", label: "Two", description: "second", primary: null, value: "two" },
+    ], (item) => { ran.push(`enter:${item.value}`) }, {
+      primary: "resume",
+      back: () => { ran.push("back") },
+      keys: [{ stroke: "ctrl+r", label: "rename", available: item => item?.value === "one", run: item => { ran.push(`rename:${item?.value}`) } }],
+    }, false, "")
+    await setup.renderOnce()
+
+    expect(picker.footer.plainText).toBe("⏎ resume · ctrl+r rename · esc back")
+    expect(setup.captureCharFrame()).toMatch(/› ● One\s+GPT-5/)
+    setup.mockInput.pressKey("r", { ctrl: true })
+    expect(ran).toEqual(["rename:one"])
+    picker.moveSelection(1)
+    expect(picker.footer.plainText).toBe("esc back")
+    setup.mockInput.pressKey("r", { ctrl: true })
+    picker.activateSelected()
+    expect(ran).toEqual(["rename:one"])
+    expect(picker.back).toBeDefined()
+  })
+
+  test("anchors a composer list above a row without a filter, detail, or footer", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+    renderer = setup.renderer
+    const picked: string[] = []
+    const picker = new PickerScreenRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(picker)
+    picker.present("files:", "@ files", [
+      { id: "src/app.ts", label: "src/app.ts", hint: "file", description: "", primary: "attach", value: "src/app.ts" },
+      { id: "src/", label: "src/", hint: "dir", description: "", primary: "open", value: "src/" },
+    ], (item) => { picked.push(item.value) }, { primary: "attach" }, true, "app")
+    picker.resizeInline(80, 17, picker.desiredInlineRows)
+    await setup.renderOnce()
+
+    expect(picker.layoutMode).toBe("inline")
+    expect(picker.input.visible).toBeFalse()
+    expect(picker.detailPane.visible).toBeFalse()
+    expect(picker.footer.visible).toBeFalse()
+    expect(picker.heading.plainText).toContain("⏎/tab attach")
+    setup.mockInput.pressTab()
+    expect(picked).toEqual(["src/app.ts"])
+  })
+
+  test("text prompts own printable input, byte limits, and Enter", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+    renderer = setup.renderer
+    const submitted: string[] = []
+    const picker = new PickerScreenRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(picker)
+    picker.openTextPrompt({ title: "RENAME", placeholder: "title", maxBytes: 4, empty: "reject",
+      detail: "The new title", onSubmit: value => { submitted.push(value) } }, () => {})
+    await setup.mockInput.typeText("abcdef")
+    expect(picker.input.value).toBe("abcd")
+    expect(picker.footer.plainText).toBe("⏎ save · esc back")
+    expect(statusText(picker)).toBe("The new title")
+    setup.mockInput.pressEnter()
+    expect(submitted).toEqual(["abcd"])
   })
 })

@@ -144,7 +144,10 @@ mod questions;
 mod tool_result_tests;
 
 mod completions;
-pub use completions::{CompletionNotice, MAX_COMPLETION_NOTICE_BYTES, MAX_COMPLETION_NOTICES};
+pub use completions::{
+    CompletionNotice, MAX_COMPLETION_NOTICE_BYTES, MAX_COMPLETION_NOTICES,
+    MAX_UNDELIVERED_CHILD_RESULTS, child_result_turn,
+};
 
 #[cfg(test)]
 mod completion_tests;

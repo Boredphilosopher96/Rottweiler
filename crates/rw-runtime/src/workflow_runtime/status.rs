@@ -1,6 +1,5 @@
-use async_trait::async_trait;
 use rw_core::{SessionCommandAction, SessionCommandContext, SessionCommandOutput};
-use rw_ext::{CommandExecutionError, CommandHandler, CommandInvocation};
+use rw_ext::CommandExecutionError;
 use rw_store::workflow::WorkflowRunStore;
 use rw_types::workflow::{WorkflowRunId, WorkflowRunState, WorkflowTaskOutcome, WorkflowTaskState};
 use std::{fmt::Write as _, path::PathBuf};
@@ -9,14 +8,14 @@ pub(super) struct WorkflowStatusCommand {
     pub(super) storage_root: PathBuf,
 }
 
-#[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for WorkflowStatusCommand {
-    async fn execute(
+impl WorkflowStatusCommand {
+    /// Handles `/workflow status <run-id>` for runs owned by this session.
+    pub(super) async fn report(
         &self,
-        context: &mut SessionCommandContext,
-        invocation: CommandInvocation,
+        context: &SessionCommandContext,
+        run_id: &str,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        let run_id = WorkflowRunId::parse(invocation.arguments().trim().to_owned())
+        let run_id = WorkflowRunId::parse(run_id.trim().to_owned())
             .map_err(|error| CommandExecutionError::new("invalid_workflow_run", error))?;
         let root = self.storage_root.clone();
         let parent = context.session_id().clone();
@@ -62,12 +61,11 @@ fn summary(state: &WorkflowRunState) -> String {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
-    use rw_ext::{CommandDescriptor, CommandRegistry};
     use rw_types::workflow::TaskId;
     #[tokio::test]
     async fn registered_status_reads_an_active_writer_and_enforces_parent_identity() {
         let root = tempfile::tempdir().expect("root");
-        let mut context = SessionCommandContext::default();
+        let context = SessionCommandContext::default();
         let run_id = WorkflowRunId::parse("a".repeat(32)).expect("id");
         let mut state = WorkflowRunState {
             run_id: run_id.clone(),
@@ -83,20 +81,11 @@ mod tests {
                 step_id: "plan".to_owned(),
             }])
             .expect("claim");
-        let mut registry = CommandRegistry::new();
-        registry
-            .register(
-                CommandDescriptor::new("workflow-status", "status"),
-                WorkflowStatusCommand {
-                    storage_root: root.path().to_owned(),
-                },
-            )
-            .expect("registration");
-        let output = registry
-            .dispatch_line(
-                &mut context,
-                &format!("/workflow-status {}", run_id.as_str()),
-            )
+        let status = WorkflowStatusCommand {
+            storage_root: root.path().to_owned(),
+        };
+        let output = status
+            .report(&context, run_id.as_str())
             .await
             .expect("status");
         assert!(
@@ -109,11 +98,8 @@ mod tests {
         state.parent_session_id = rw_types::SessionId("foreign".to_owned());
         let _foreign = WorkflowRunStore::open(root.path(), state.clone()).expect("foreign writer");
         assert!(
-            registry
-                .dispatch_line(
-                    &mut context,
-                    &format!("/workflow-status {}", state.run_id.as_str())
-                )
+            status
+                .report(&context, state.run_id.as_str())
                 .await
                 .is_err()
         );

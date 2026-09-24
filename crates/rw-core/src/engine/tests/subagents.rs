@@ -423,8 +423,8 @@ async fn active_child_activity_refuses_rewind_before_changing_source() {
         fn observes_session_resources(&self) -> bool {
             true
         }
-        fn session_activity(&self, _: &SessionId) -> Option<String> {
-            Some("A child agent is running".into())
+        fn session_activity(&self, _: &SessionId) -> Option<rw_tools::SessionActivity> {
+            Some(rw_tools::SessionActivity::SharedWorkspaceChild)
         }
         async fn execute(
             &self,
@@ -491,109 +491,4 @@ async fn active_child_activity_refuses_rewind_before_changing_source() {
         matches!(result, CommandOutcome::Rejected { error } if error.code == "invalid_rewind_target" && error.message.contains("idle"))
     );
     handle.close().await.expect("close");
-}
-
-#[tokio::test]
-async fn two_background_children_do_not_block_parent_and_results_enter_next_request() {
-    use super::fixtures::{
-        models::M3Model,
-        support::{collect_turn, config, stop_script},
-    };
-    use rw_types::config::PermissionDecision;
-    let root = tempfile::tempdir().expect("workspace");
-    let model = Arc::new(M3Model::new([
-        stop_script("parent continues", &[]),
-        stop_script("results received", &[]),
-        stop_script("still bounded", &[]),
-    ]));
-    let handle = super::fixtures::history::spawn(config(
-        root.path(),
-        model.clone(),
-        Arc::new(ToolRegistry::new()),
-        PermissionDecision::Allow,
-        crate::engine::builtin_hook_dispatcher().expect("hooks"),
-    ))
-    .await
-    .expect("actor");
-    let sink = handle.background_subagent_event_sink();
-    let mut events = handle.subscribe().expect("events");
-    let children = [
-        fixture_subagent_result("first"),
-        fixture_subagent_result("second"),
-    ];
-    for result in &children {
-        sink.lifecycle(SubagentLifecycleEvent::Spawned {
-            subagent_id: result.subagent_id.clone(),
-            child_session_id: result.session_id.clone(),
-            task: "concurrent work".into(),
-        })
-        .await
-        .expect("spawn");
-    }
-    handle
-        .send_message("continue while both children work")
-        .await
-        .expect("send");
-    collect_turn(&mut events).await;
-    assert_eq!(
-        model.requests().len(),
-        1,
-        "parent completes before either child"
-    );
-    for result in children {
-        sink.lifecycle(SubagentLifecycleEvent::Finished {
-            subagent_id: result.subagent_id.clone(),
-            result: Box::new(result),
-        })
-        .await
-        .expect("finish");
-    }
-    assert_eq!(
-        model.requests().len(),
-        1,
-        "completion never wakes idle inference"
-    );
-    let inventory = handle
-        .context_snapshot()
-        .await
-        .expect("current child inventory");
-    let notice = inventory
-        .items
-        .iter()
-        .find(|item| item.item_id.0.starts_with("child_completion:"))
-        .expect("child notice");
-    assert!(
-        handle
-            .pin_context(notice.item_id.clone())
-            .await
-            .expect_err("immutable notice")
-            .to_string()
-            .contains("only conversation-resident context items")
-    );
-
-    for _ in 0..2 {
-        handle
-            .send_message("use the child results")
-            .await
-            .expect("send");
-        collect_turn(&mut events).await;
-        let requests = model.requests();
-        let request = requests.last().expect("request");
-        assert_child_notice_context(request);
-    }
-    handle.close().await.expect("close");
-}
-
-fn assert_child_notice_context(request: &rw_providers::ProviderRequest) {
-    let count = request.turns.iter().flat_map(|turn| &turn.blocks).filter(|block| matches!(block, rw_types::Block::Text { text } if text.contains("untrusted result excerpt"))).count();
-    assert_eq!(
-        count, 2,
-        "one bounded notice per completed source on every request"
-    );
-    let user_position = request.turns.iter().rposition(|turn| turn.blocks.iter().any(|block| matches!(block, rw_types::Block::Text { text } if text == "use the child results"))).expect("current user message");
-    let notice_position = request.turns.iter().position(|turn| turn.blocks.iter().any(|block| matches!(block, rw_types::Block::Text { text } if text.contains("untrusted result excerpt")))).expect("notice");
-    assert!(
-        user_position < notice_position,
-        "result observations follow the request they inform"
-    );
 }

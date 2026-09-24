@@ -4,6 +4,7 @@ import { createRottweilerApp } from "../../src/app"
 import { createInitialState } from "../../src/state"
 import { createStreamingTail } from "../../src/state/model"
 import { emptySessionReader } from "../fixtures/history"
+import { options } from "../picker-screen"
 
 let renderer: TestRenderer | undefined
 afterEach(() => { renderer?.destroy(); renderer = undefined })
@@ -27,12 +28,13 @@ for (const [width, height] of [[110, 32], [80, 24]] as const) {
       () => app.openWorkspaceRootsPicker(), () => app.openExportSessionPicker(),
       () => app.openQueuedMessagesPicker(), () => app.openKeyboardHelpPicker(),
       () => app.openThemePicker(), () => app.openSettingsPicker(), () => app.openMcpPicker(),
+      async () => { app.composer.value = "/skills"; await app.composer.submit(); app.composer.value = "Retained steering draft" },
     ]
     for (const open of screens) {
       app.closePicker()
-      open()
+      await open()
       await setup.renderOnce()
-      const screen = [app.commandPalette, app.mcpBrowser, app.settingsBrowser, app.themeBrowser, app.picker].find(item => item.visible)!
+      const screen = [app.commandPalette, app.mcpBrowser, app.settingsBrowser, app.themeBrowser, app.agentsBrowser, app.skillsBrowser, app.picker].find(item => item.visible)!
       expect(screen).toBeDefined()
       expect(screen.x).toBe(0)
       expect(screen.y).toBe(0)
@@ -61,15 +63,13 @@ for (const [width, height] of [[110, 32], [80, 24]] as const) {
     app.openSubagentPicker()
     app.handleEvent({ type: "subagents_listed", meta: { ...list!.meta, emitted_at: "2026-09-16T00:00:00Z" }, session_id: "parent",
       subagents: [{ subagent_id: "child", child_session_id: "child-session", task: "Inspect code", agent: "reviewer", model: "coding", isolation: "shared", activity: "idle" }] })
-    app.closePicker()
-    app.openSubagentActionPicker("child")
-    app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "result"))
-    app.picker.select.selectCurrent()
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("Verified the change and retained the child result.")
     expect(setup.captureCharFrame()).toContain("USD 0.0125")
-    expect(app.picker.title).toContain("completed")
-    expect(app.picker.select.options.some(option => option.value === "inspect")).toBeTrue()
-    expect(app.picker.height).toBe(app.composer.y)
+    expect(app.agentsBrowser.sectionLabels).toEqual(["Finished"])
+    expect(app.agentsBrowser.height).toBe(app.composer.y)
+    app.agentsBrowser.activateSelected()
+    expect(app.picker.screenTitle).toContain("completed")
+    expect(options(app.picker).map(option => option.value)).toEqual(["view", "message", "close"])
   })
 }

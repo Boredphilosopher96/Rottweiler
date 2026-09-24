@@ -86,7 +86,7 @@ describe("settings browser model", () => {
     expect(createSettingsBrowserModel({ catalog: failed, query: "", selectedId: null })).toMatchObject({
       rows: [],
       emptyCopy: "settings unavailable",
-      status: "Ctrl-R retry",
+      status: "Esc close · reopen to retry",
       notice: { message: "settings unavailable", tone: "error" },
     })
   })

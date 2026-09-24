@@ -11,7 +11,6 @@ use rw_types::{Role, SequenceId};
 pub(super) fn usage(turn: u64) -> PendingEvent {
     PendingEvent::ContextUsage {
         turn,
-        completion_sources: Vec::new(),
         used_tokens: 10,
         usable_tokens: 100,
         reserved_tokens: 0,

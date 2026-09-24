@@ -14,7 +14,7 @@ use workspace::{
 };
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     io::Write as _,
     path::{Component, Path, PathBuf},
@@ -56,8 +56,12 @@ use rw_core::{
 };
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
-use rw_store::session::{SessionIndex, SessionStoreError, UtcTimestamp};
-use rw_types::{PermissionModeDescriptor as PermissionMode, config::ThinkingLevel};
+use rw_store::session::{
+    AccountingLedger, SessionIndex, SessionStoreError, SessionSummary, UtcTimestamp,
+};
+use rw_types::{
+    PermissionModeDescriptor as PermissionMode, SessionActivity, config::ThinkingLevel,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::session_runtime::{
@@ -269,6 +273,7 @@ enum EditableSettingKey {
     Theme,
     ModelThinking(String),
     AutomaticCompaction,
+    WakeOnChildCompletion,
     DefaultPermission,
     SessionCostCap,
     DailyCostCap,
@@ -286,6 +291,7 @@ impl EditableSettingKey {
     const THEME: &'static str = "ui.theme";
     const MODEL_THINKING_PREFIX: &'static str = "models.thinking.";
     const AUTOMATIC_COMPACTION: &'static str = "compaction.auto";
+    const WAKE_ON_CHILD_COMPLETION: &'static str = "agents.wake_on_completion";
     const DEFAULT_PERMISSION: &'static str = "permissions.default";
     const SESSION_COST_CAP: &'static str = "budget.session_cost_cap_micros_usd";
     const DAILY_COST_CAP: &'static str = "budget.daily_cost_cap_micros_usd";
@@ -303,6 +309,7 @@ impl EditableSettingKey {
             Self::PROJECT_DEFAULT_MODEL => Some(Self::ProjectDefaultModel),
             Self::THEME => Some(Self::Theme),
             Self::AUTOMATIC_COMPACTION => Some(Self::AutomaticCompaction),
+            Self::WAKE_ON_CHILD_COMPLETION => Some(Self::WakeOnChildCompletion),
             Self::DEFAULT_PERMISSION => Some(Self::DefaultPermission),
             Self::SESSION_COST_CAP => Some(Self::SessionCostCap),
             Self::DAILY_COST_CAP => Some(Self::DailyCostCap),
@@ -339,6 +346,7 @@ impl EditableSettingKey {
             Self::Theme => Self::THEME.to_owned(),
             Self::ModelThinking(alias) => format!("{}{alias}", Self::MODEL_THINKING_PREFIX),
             Self::AutomaticCompaction => Self::AUTOMATIC_COMPACTION.to_owned(),
+            Self::WakeOnChildCompletion => Self::WAKE_ON_CHILD_COMPLETION.to_owned(),
             Self::DefaultPermission => Self::DEFAULT_PERMISSION.to_owned(),
             Self::SessionCostCap => Self::SESSION_COST_CAP.to_owned(),
             Self::DailyCostCap => Self::DAILY_COST_CAP.to_owned(),
@@ -543,8 +551,6 @@ impl RuntimeSessionFactory {
         };
         let theme_key = EditableSettingKey::Theme.render();
         let thinking_key = EditableSettingKey::ModelThinking(alias.to_owned()).render();
-        let compaction_key = EditableSettingKey::AutomaticCompaction.render();
-        let permission_key = EditableSettingKey::DefaultPermission.render();
         let provenance = |key: &str| {
             loaded
                 .provenance(key)
@@ -598,29 +604,8 @@ impl RuntimeSessionFactory {
                 provenance: provenance(&thinking_key),
                 applies_immediately: false,
             },
-            UserSettingDescriptor {
-                key: compaction_key.clone(),
-                label: "Automatic compaction".to_owned(),
-                value: loaded.config.compaction.auto.to_string(),
-                choices: vec!["true".to_owned(), "false".to_owned()],
-                provenance: provenance(&compaction_key),
-                applies_immediately: false,
-            },
-            UserSettingDescriptor {
-                key: permission_key.clone(),
-                label: "Default permission".to_owned(),
-                value: loaded.config.permissions.default.as_str().to_owned(),
-                choices: [
-                    PermissionDecision::Ask,
-                    PermissionDecision::Allow,
-                    PermissionDecision::Deny,
-                ]
-                .map(|decision| decision.as_str().to_owned())
-                .to_vec(),
-                provenance: provenance(&permission_key),
-                applies_immediately: false,
-            },
         ];
+        settings.extend(behavior_setting_descriptors(loaded));
         settings.extend(budget_setting_descriptors(loaded));
         settings.extend(
             mcp_servers
@@ -782,11 +767,12 @@ impl RuntimeSessionFactory {
         let session = HostedSession::new(
             SessionDescriptor {
                 session_id,
-                title: "New session".to_owned(),
+                title: "Untitled".to_owned(),
                 workspace_name: workspace_name(&workspace),
                 model: ModelAlias(runtime.model_alias),
                 driver_client_id: runtime.driver_client_id,
                 shell_active: runtime.shell_active,
+                activity: None,
             },
             runtime.handle,
         );
@@ -805,7 +791,12 @@ impl RuntimeSessionFactory {
         })
     }
 
-    fn persisted_descriptor(&self, session_id: &str) -> Result<SessionDescriptor, HostError> {
+    fn persisted_descriptor(
+        &self,
+        session_id: &str,
+        index: Option<&SessionIndex>,
+        ledger: Option<&AccountingLedger>,
+    ) -> Result<SessionDescriptor, HostError> {
         let metadata = load_session_metadata_any(
             &self.options.storage_root,
             session_id,
@@ -813,20 +804,21 @@ impl RuntimeSessionFactory {
         )
         .map_err(|_| HostError::Persistence("session metadata is unavailable".to_owned()))?;
         let workspace = self.authorize_workspace_path(&metadata.workspace)?;
+        let summary = index.and_then(|index| index.get(session_id).ok().flatten());
         Ok(SessionDescriptor {
             session_id: SessionId(session_id.to_owned()),
-            title: SessionIndex::open(&self.options.storage_root)
-                .ok()
-                .and_then(|index| index.get(session_id).ok().flatten())
-                .map(|summary| summary.title)
+            title: summary
+                .as_ref()
+                .map(|summary| summary.title.clone())
                 .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| "New session".to_owned()),
+                .unwrap_or_else(|| "Untitled".to_owned()),
             workspace_name: workspace_name(&workspace),
             model: ModelAlias(metadata.model_alias.clone()),
             // Persisted sessions are inactive until resumed. Live descriptors
             // from the host registry replace these entries after opening.
             driver_client_id: None,
             shell_active: false,
+            activity: summary.map(|summary| session_activity(&summary, ledger)),
         })
     }
 
@@ -841,6 +833,8 @@ impl RuntimeSessionFactory {
                 ));
             }
         };
+        let index = SessionIndex::open(&self.options.storage_root).ok();
+        let ledger = AccountingLedger::open(&self.options.storage_root).ok();
         let mut descriptors = Vec::new();
         for entry in entries.take(MAX_SESSION_RESULTS).flatten() {
             if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
@@ -849,7 +843,9 @@ impl RuntimeSessionFactory {
             let Some(session_id) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            if let Ok(descriptor) = self.persisted_descriptor(&session_id) {
+            if let Ok(descriptor) =
+                self.persisted_descriptor(&session_id, index.as_ref(), ledger.as_ref())
+            {
                 descriptors.push(descriptor);
             }
         }
@@ -893,6 +889,52 @@ fn format_cost_cap(micros: Option<u64>) -> String {
 
 fn format_token_limit(tokens: Option<u64>) -> String {
     tokens.map_or_else(|| "Unlimited".to_owned(), |tokens| tokens.to_string())
+}
+
+/// Session behavior rows: compaction, child-agent wake, and default permission.
+fn behavior_setting_descriptors(
+    loaded: &rw_store::config::LoadedConfig,
+) -> [UserSettingDescriptor; 3] {
+    let compaction_key = EditableSettingKey::AutomaticCompaction.render();
+    let wake_key = EditableSettingKey::WakeOnChildCompletion.render();
+    let permission_key = EditableSettingKey::DefaultPermission.render();
+    let provenance = |key: &str| {
+        loaded
+            .provenance(key)
+            .map_or_else(|| "built-in".to_owned(), ToString::to_string)
+    };
+    [
+        UserSettingDescriptor {
+            key: compaction_key.clone(),
+            label: "Automatic compaction".to_owned(),
+            value: loaded.config.compaction.auto.to_string(),
+            choices: vec!["true".to_owned(), "false".to_owned()],
+            provenance: provenance(&compaction_key),
+            applies_immediately: false,
+        },
+        UserSettingDescriptor {
+            key: wake_key.clone(),
+            label: "Wake when child agents finish".to_owned(),
+            value: loaded.config.agents.wake_on_completion.to_string(),
+            choices: vec!["true".to_owned(), "false".to_owned()],
+            provenance: provenance(&wake_key),
+            applies_immediately: false,
+        },
+        UserSettingDescriptor {
+            key: permission_key.clone(),
+            label: "Default permission".to_owned(),
+            value: loaded.config.permissions.default.as_str().to_owned(),
+            choices: [
+                PermissionDecision::Ask,
+                PermissionDecision::Allow,
+                PermissionDecision::Deny,
+            ]
+            .map(|decision| decision.as_str().to_owned())
+            .to_vec(),
+            provenance: provenance(&permission_key),
+            applies_immediately: false,
+        },
+    ]
 }
 
 fn budget_setting_descriptors(
@@ -961,6 +1003,24 @@ fn budget_setting_descriptors(
     ]
 }
 
+/// Recorded activity for a persisted session: its index row plus lifetime
+/// spend when the ledger prices every entry in USD.
+fn session_activity(
+    summary: &SessionSummary,
+    ledger: Option<&AccountingLedger>,
+) -> SessionActivity {
+    let cost_micros_usd = ledger
+        .and_then(|ledger| ledger.session_spend(&summary.id).ok())
+        .filter(|spend| spend.unpriced_entries == 0 && spend.micros_usd > 0)
+        .map(|spend| spend.micros_usd);
+    SessionActivity {
+        updated_unix_ms: u64::try_from(summary.updated_unix_ms).unwrap_or(0),
+        turn_count: u64::try_from(summary.turn_count).unwrap_or(0),
+        first_prompt: summary.first_prompt.clone(),
+        cost_micros_usd,
+    }
+}
+
 fn workspace_name(workspace: &Path) -> String {
     workspace
         .file_name()
@@ -972,7 +1032,7 @@ fn workspace_name(workspace: &Path) -> String {
 
 #[cfg(test)]
 fn configured_alias_providers(candidates: &[String]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     candidates
         .iter()
         .filter_map(|candidate| candidate.split_once('/').map(|(provider, _)| provider))

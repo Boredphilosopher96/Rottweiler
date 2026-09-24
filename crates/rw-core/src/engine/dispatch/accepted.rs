@@ -28,7 +28,6 @@ use rw_types::PlanArtifact;
 use rw_types::PlanDecision;
 use rw_types::RewindTarget;
 use rw_types::ShellId;
-use std::sync::atomic::Ordering;
 use tokio::sync::oneshot;
 
 #[allow(clippy::too_many_lines)]
@@ -269,7 +268,6 @@ pub(super) async fn apply_accepted(
                     super::command_job::start(
                         meta,
                         Ok(bound),
-                        active_turn.load(Ordering::Acquire),
                         super::command_job::CommandReply::Protocol(completion.take()),
                         DispatchContext {
                             state,
@@ -296,7 +294,6 @@ pub(super) async fn apply_accepted(
                 super::command_job::start(
                     meta,
                     bound,
-                    active_turn.load(Ordering::Acquire),
                     super::command_job::CommandReply::Protocol(completion.take()),
                     DispatchContext {
                         state,
@@ -318,7 +315,6 @@ pub(super) async fn apply_accepted(
                     command_meta: meta,
                     content,
                     attachments,
-                    observed_turn: active_turn.load(Ordering::Acquire),
                     respond: internal_respond,
                 },
                 state,
@@ -565,6 +561,7 @@ pub(super) async fn apply_accepted(
         | ClientCommand::ListModes { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ListSettings { .. }
+        | ClientCommand::ListExtensions { .. }
         | ClientCommand::SetSetting { .. }
         | ClientCommand::BeginProviderAuth { .. }
         | ClientCommand::ConfigureCompatibleProvider { .. }
@@ -578,6 +575,7 @@ pub(super) async fn apply_accepted(
         | ClientCommand::ListSubagents { .. }
         | ClientCommand::ContinueSubagent { .. }
         | ClientCommand::InterruptSubagent { .. }
+        | ClientCommand::BackgroundSubagent { .. }
         | ClientCommand::CloseSubagent { .. }
         | ClientCommand::ShutdownHost { .. }
         | ClientCommand::Rewind {

@@ -8,7 +8,7 @@ import type {
   PlanDecision,
 } from "../protocol"
 import { presentError } from "../render"
-import { parseSessionAction } from "../session-commands"
+import { resolveSlashInput, type CatalogScreenName } from "../session-commands"
 import type { QuestionProjection, ToolProjection } from "../state"
 import type { ChildUiController } from "./children"
 import type { SessionUiController } from "./sessions"
@@ -18,17 +18,6 @@ interface SubmissionHost {
   readonly ui: Pick<RottweilerApp,
     | "closePicker"
     | "composer"
-    | "openErrorsPicker"
-    | "openContextPicker"
-    | "openCostPicker"
-    | "openMcpPicker"
-    | "openModelPicker"
-    | "openPermissionPicker"
-    | "openProviderPicker"
-    | "openSettingsPicker"
-    | "openSubagentPicker"
-    | "openThemePicker"
-    | "openTimelinePicker"
     | "reviewPanel"
     | "setState"
     | "state"
@@ -56,7 +45,7 @@ export class SubmissionController {
   #lastComposerValue = ""
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
-  #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | "agents" | "context" | "cost" | "errors" | null = null
+  #postSubmitPicker: CatalogScreenName | null = null
   constructor(readonly host: SubmissionHost) {}
   get notice(): string | null { return this.#composerNotice }
   set notice(value: string | null) { this.#composerNotice = value }
@@ -93,84 +82,7 @@ export class SubmissionController {
         return await this.host.children.respond({ type: "question", question_id: question.questionId, answer: { question_id: question.questionId, value: content } })
       }
     }
-    if (content.startsWith("!")) {
-      const originatingSubagentId = this.host.children.activeId
-      const accepted = await this.startForegroundShell(content, attachments)
-      if (!this.#live(scope)) return accepted
-      if (accepted && originatingSubagentId !== null && this.host.children.activeId === originatingSubagentId) {
-        this.host.children.leaveSubagent()
-      }
-      return accepted
-    }
-    if (this.host.children.activeId !== null) {
-      const action = attachments.length === 0 ? parseSessionAction(content) : null
-      if (action?.type === "exit") {
-        this.host.onExit?.()
-        return true
-      }
-      if (action?.type === "agents") {
-        this.#postSubmitPicker = "agents"
-        this.host.ui.closePicker()
-        return true
-      }
-      if (attachments.length > 0) {
-        this.host.projectError(
-          "subagent_attachments_unsupported",
-          "Child follow-ups are text-only; remove attachments or return to the parent session.",
-        )
-        return false
-      }
-      const subagentId = this.host.children.activeId
-      if (this.host.children.selectedFamily && this.host.children.subagentDescriptor(subagentId) === undefined) {
-        this.host.projectError("child_followup_unavailable", "This descendant view accepts pending control responses. Return to its parent for a new task.")
-        return false
-      }
-      if (this.host.children.subagentDescriptor(subagentId)?.activity === "running") {
-        this.host.projectError(
-          "subagent_still_running",
-          "This child is still working. Inspect its progress or interrupt it before sending a follow-up.",
-        )
-        return false
-      }
-      let outcome: void | CommandOutcome | null
-      try {
-        outcome = await this.host.requests.emit({
-          type: "continue_subagent",
-          meta: this.host.requests.meta(),
-          session_id: this.host.sessionId,
-          subagent_id: subagentId,
-          content,
-        }, replyAllocation)
-    if (!this.#live(scope)) return outcome?.type === "accepted"
-      } catch (error) {
-        if (!this.#live(scope)) return false
-        this.host.projectError(
-          "subagent_continue_failed",
-          presentError({
-            category: "protocol",
-            code: "subagent_continue_failed",
-            message: safeErrorMessage(error),
-          }).text,
-          true,
-        )
-        return false
-      }
-      if (outcome?.type !== "accepted") {
-        if (outcome?.type === "rejected") this.host.projectRejection(outcome)
-        else {
-          const presentation = presentError({
-            category: "protocol",
-            code: "subagent_continue_unavailable",
-            message: "Couldn't continue the child because the engine connection is unavailable.",
-          })
-          this.host.projectError("subagent_continue_unavailable", presentation.text, true)
-        }
-        return false
-      }
-      this.host.children.responseStarted(subagentId)
-      this.host.ui.setState(this.host.ui.state)
-      return true
-    }
+    if (content.startsWith("!")) return await this.startForegroundShell(content, attachments)
     const textQuestion = Object.values(this.host.ui.state.questions).find(
       (question) => question.question.response_kind === "text",
     )
@@ -196,101 +108,32 @@ export class SubmissionController {
       }
       return true
     }
-    const sessionAction = attachments.length === 0 ? parseSessionAction(content) : null
-    if (sessionAction?.type === "invalid") {
-      this.host.invalidSlash(sessionAction.message)
+    const slash = attachments.length === 0 ? resolveSlashInput(content) : null
+    if (attachments.length === 0) this.host.pickerContent.rememberSlash(content)
+    if (slash?.type === "invalid") {
+      this.host.invalidSlash(slash.message)
       return false
     }
-    if (sessionAction?.type === "exit") {
+    if (slash?.type === "screen") {
       this.host.ui.closePicker()
-      this.host.onExit?.()
-      return true
-    }
-    if (sessionAction?.type === "new") {
-      this.host.ui.closePicker()
-      void this.host.sessions.createSession()
-      return true
-    }
-    if (sessionAction?.type === "rewindTimeline") {
-      this.host.ui.closePicker()
-      this.host.ui.openTimelinePicker()
-      return true
-    }
-    if (sessionAction?.type === "context" || sessionAction?.type === "cost" || sessionAction?.type === "errors") {
-      this.#postSubmitPicker = sessionAction.type
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "models") {
-      this.#postSubmitPicker = "models"
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "providers") {
-      this.#postSubmitPicker = "providers"
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "agents") {
-      this.#postSubmitPicker = "agents"
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "theme") {
-      this.#postSubmitPicker = "themes"
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "settings") {
-      this.#postSubmitPicker = "settings"
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "permissions") {
-      this.#postSubmitPicker = "permissions"
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "mcp") {
-      this.#postSubmitPicker = "mcp"
-      this.host.ui.closePicker()
-      return true
-    }
-    if (sessionAction?.type === "review") {
-      if (this.host.ui.state.shell.active) {
-        this.host.projectError(
-          "review_unavailable_during_shell",
-          "exit the foreground shell before opening session review",
-        )
-        return false
+      if (slash.name === "exit") {
+        this.host.onExit?.()
+        return true
       }
-      this.host.ui.reviewPanel.showSessionReview()
-      this.host.reviewOpen = true
-      this.host.ui.setState(this.host.ui.state)
-      const meta = this.host.requests.issue("review")
-      const outcome = await this.host.requests.emit({
-        type: "get_session_review",
-        meta,
-        session_id: this.host.sessionId,
-      }, replyAllocation)
-    if (!this.#live(scope)) return outcome?.type === "accepted"
-      if (outcome?.type !== "accepted") {
-        this.host.reviewOpen = false
-        this.host.ui.reviewPanel.closePresentation()
-        this.host.ui.setState(this.host.ui.state)
-        this.host.projectRejection(outcome)
+      if (slash.name === "new") {
+        void this.host.sessions.createSession()
+        return true
       }
-      return outcome?.type === "accepted"
-    }
-    if (sessionAction?.type === "fork") {
-      return await this.requestFork(sessionAction.atTurn)
+      if (slash.name === "review") return await this.#openSessionReview(replyAllocation, scope)
+      this.#postSubmitPicker = slash.name
+      return true
     }
     const meta = this.host.requests.meta()
     const outcome = await this.host.requests.emit({
       type: "send_message",
       meta,
       session_id: this.host.sessionId,
-      content,
+      content: slash?.type === "engine" ? slash.content : content,
       attachments: [...attachments],
     }, replyAllocation)
     if (!this.#live(scope)) return outcome?.type === "accepted"
@@ -299,6 +142,33 @@ export class SubmissionController {
       return false
     }
     return true
+  }
+
+  async #openSessionReview(replyAllocation: ReturnType<ProjectionRequestBroker["allocate"]>, scope: object): Promise<boolean> {
+    if (this.host.ui.state.shell.active) {
+      this.host.projectError(
+        "review_unavailable_during_shell",
+        "exit the foreground shell before opening session review",
+      )
+      return false
+    }
+    this.host.ui.reviewPanel.showSessionReview()
+    this.host.reviewOpen = true
+    this.host.ui.setState(this.host.ui.state)
+    const meta = this.host.requests.issue("review")
+    const outcome = await this.host.requests.emit({
+      type: "get_session_review",
+      meta,
+      session_id: this.host.sessionId,
+    }, replyAllocation)
+    if (!this.#live(scope)) return outcome?.type === "accepted"
+    if (outcome?.type !== "accepted") {
+      this.host.reviewOpen = false
+      this.host.ui.reviewPanel.closePresentation()
+      this.host.ui.setState(this.host.ui.state)
+      this.host.projectRejection(outcome)
+    }
+    return outcome?.type === "accepted"
   }
 
   async startForegroundShell(
@@ -523,19 +393,11 @@ export class SubmissionController {
   }
 
   openPostSubmitPicker(): void {
-    const picker = this.#postSubmitPicker
+    const screen = this.#postSubmitPicker
     this.#postSubmitPicker = null
-    if (picker === "context") this.host.ui.openContextPicker()
-    else if (picker === "errors") this.host.ui.openErrorsPicker()
-    else if (picker === "cost") this.host.ui.openCostPicker()
-    else if (picker === "models") this.host.ui.openModelPicker()
-    else if (picker === "providers") this.host.ui.openProviderPicker()
-    else if (picker === "themes") this.host.ui.openThemePicker()
-    else if (picker === "settings") this.host.ui.openSettingsPicker()
-    else if (picker === "permissions") this.host.ui.openPermissionPicker()
-    else if (picker === "mcp") this.host.ui.openMcpPicker()
-    else if (picker === "agents") this.host.ui.openSubagentPicker()
+    if (screen !== null) this.host.pickerContent.openScreen(screen)
   }
+
 
 }
 function safeErrorMessage(error: unknown): string {

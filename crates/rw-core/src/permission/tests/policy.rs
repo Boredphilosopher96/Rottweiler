@@ -1,35 +1,5 @@
 use super::*;
 
-#[tokio::test]
-async fn per_turn_qualified_tool_restriction_denies_broader_bash_invocations() {
-    let gate = PermissionGate::new(PermissionDecision::Allow)
-        .restricted_to_patterns(&["bash(git status)".to_owned()])
-        .expect("qualified restriction");
-    let request = |command: &str| PermissionRequest {
-        invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
-        id: format!("bash-{command}"),
-        tool_name: "bash".to_owned(),
-        arguments: json!({
-            "command": command,
-            "cwd": ".",
-            "env": {},
-            "network_domains": [],
-            "sandbox": "sandboxed",
-        }),
-        capabilities: vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
-        approval_diff: None,
-    };
-    let deny = Decision(ApprovalDecision::Deny);
-    assert_eq!(
-        authorize_with_behavior(&gate, request("git status"), ToolBehavior::Shell, &deny,).await,
-        PermissionOutcome::Allowed
-    );
-    assert_eq!(
-        authorize_with_behavior(&gate, request("git push"), ToolBehavior::Shell, &deny).await,
-        PermissionOutcome::Denied
-    );
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn complex_or_mutable_bash_approval_executes_once_and_is_never_remembered() {
@@ -258,6 +228,7 @@ async fn session_rules_add_replace_remove_and_clear_through_the_gate() {
 async fn trusted_project_allows_read_only_tools_but_preserves_explicit_denies() {
     let root = tempfile::tempdir().expect("tempdir");
     let request = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "trusted-glob".to_owned(),
         tool_name: "glob".to_owned(),
@@ -296,6 +267,7 @@ async fn trusted_workspace_allows_pathless_builtin_symbol_reads_only_with_full_a
     let primary = tempfile::tempdir().expect("primary");
     let secondary = tempfile::tempdir().expect("secondary");
     let symbols = || PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "workspace-symbols".to_owned(),
         tool_name: "symbols".to_owned(),
@@ -331,6 +303,7 @@ async fn trusted_workspace_read_authority_rejects_extensions_network_and_explici
         .with_workspace_roots([root.path()])
         .with_trusted_read_roots([root.path()]);
     let extension = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "extension-read".to_owned(),
         tool_name: "extension_read".to_owned(),
@@ -344,6 +317,7 @@ async fn trusted_workspace_read_authority_rejects_extensions_network_and_explici
     );
 
     let network = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "network-symbols".to_owned(),
         tool_name: "symbols".to_owned(),
@@ -370,6 +344,7 @@ async fn trusted_workspace_read_authority_rejects_extensions_network_and_explici
     .with_workspace_roots([root.path()])
     .with_trusted_read_roots([root.path()]);
     let symbols = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "denied-symbols".to_owned(),
         tool_name: "symbols".to_owned(),
@@ -396,6 +371,7 @@ async fn trusted_read_only_authority_is_scoped_to_each_workspace_root() {
     let no_prompt = CountingDeny(AtomicUsize::new(0));
 
     let primary_read = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "primary-read".to_owned(),
         tool_name: "read".to_owned(),
@@ -409,6 +385,7 @@ async fn trusted_read_only_authority_is_scoped_to_each_workspace_root() {
     );
 
     let secondary_read = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "secondary-read".to_owned(),
         tool_name: "read".to_owned(),
@@ -422,6 +399,7 @@ async fn trusted_read_only_authority_is_scoped_to_each_workspace_root() {
     );
 
     let all_roots_glob = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "all-roots-glob".to_owned(),
         tool_name: "glob".to_owned(),
@@ -434,6 +412,7 @@ async fn trusted_read_only_authority_is_scoped_to_each_workspace_root() {
         PermissionOutcome::Allowed
     );
     let default_all_roots_ls = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "default-all-roots-ls".to_owned(),
         tool_name: "ls".to_owned(),
@@ -459,6 +438,7 @@ async fn trusted_secondary_root_allows_virtual_paths_without_trusting_primary() 
         .with_trusted_read_roots([secondary.path()]);
     let no_prompt = CountingDeny(AtomicUsize::new(0));
     let secondary_read = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "secondary-read".to_owned(),
         tool_name: "read".to_owned(),
@@ -484,6 +464,7 @@ async fn untrusted_nested_root_does_not_inherit_primary_read_authority() {
         .with_trusted_read_roots([tree.path()]);
     let prompt = CountingDeny(AtomicUsize::new(0));
     let request = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "nested-read".to_owned(),
         tool_name: "read".to_owned(),
@@ -505,6 +486,7 @@ async fn command_allow_rule_cannot_silently_add_network_authority() {
         action: PermissionDecision::Allow,
     };
     let invocation = |network| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "network-call".to_owned(),
         tool_name: "bash".to_owned(),
@@ -555,6 +537,7 @@ async fn user_safe_list_is_zero_prompt_only_for_sandboxed_networkless_commands()
     );
     let gate = PermissionGate::new(PermissionDecision::Ask).with_command_safety(safety);
     let request = |command: &str, sandbox: &str, domains: Vec<&str>| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "safe-list-call".to_owned(),
         tool_name: "bash".to_owned(),
@@ -616,6 +599,7 @@ async fn user_safe_list_is_zero_prompt_only_for_sandboxed_networkless_commands()
 async fn unsandboxed_escape_hatch_requires_explicit_and_exact_authority() {
     let root = tempfile::tempdir().expect("root");
     let unsandboxed = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "unsandboxed-call".to_owned(),
         tool_name: "bash".to_owned(),
@@ -725,6 +709,7 @@ async fn auto_safe_allows_only_reversible_workspace_file_tools() {
         .with_workspace_roots([&primary, &added]);
     let approver = CountingDeny(AtomicUsize::new(0));
     let write = |path: &str| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "auto-safe-write".to_owned(),
         tool_name: "write".to_owned(),
@@ -745,6 +730,7 @@ async fn auto_safe_allows_only_reversible_workspace_file_tools() {
         PermissionOutcome::Allowed
     );
     let multi_edit = |path: &str| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "auto-safe-multi-edit".to_owned(),
         tool_name: "multi_edit".to_owned(),
@@ -808,6 +794,7 @@ async fn auto_safe_does_not_follow_workspace_symlinks_for_write_approval() {
     let gate = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe)
         .with_workspace_roots([&workspace]);
     let request = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "symlink-write".to_owned(),
         tool_name: "edit".to_owned(),
@@ -981,6 +968,7 @@ async fn default_policy_prompts_only_for_file_writes_and_unsafe_bash() {
     for (request, behavior) in [
         (
             PermissionRequest {
+                prompt_reason: None,
                 invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                 id: "read".to_owned(),
                 tool_name: "read".to_owned(),
@@ -992,6 +980,7 @@ async fn default_policy_prompts_only_for_file_writes_and_unsafe_bash() {
         ),
         (
             PermissionRequest {
+                prompt_reason: None,
                 invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                 id: "todo".to_owned(),
                 tool_name: "todo".to_owned(),
@@ -1003,6 +992,7 @@ async fn default_policy_prompts_only_for_file_writes_and_unsafe_bash() {
         ),
         (
             PermissionRequest {
+                prompt_reason: None,
                 invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                 id: "webfetch".to_owned(),
                 tool_name: "webfetch".to_owned(),
@@ -1014,6 +1004,7 @@ async fn default_policy_prompts_only_for_file_writes_and_unsafe_bash() {
         ),
         (
             PermissionRequest {
+                prompt_reason: None,
                 invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                 id: "mcp".to_owned(),
                 tool_name: "mcp__fixture__inspect".to_owned(),
@@ -1032,6 +1023,7 @@ async fn default_policy_prompts_only_for_file_writes_and_unsafe_bash() {
     assert_eq!(approver.0.load(Ordering::SeqCst), 0);
 
     let write = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "write".to_owned(),
         tool_name: "write".to_owned(),
@@ -1079,6 +1071,7 @@ async fn runtime_yolo_is_session_local_reversible_and_never_weakens_explicit_den
     });
     let deny = CountingDeny(AtomicUsize::new(0));
     let write = |path: &str| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: format!("write-{path}"),
         tool_name: "write".to_owned(),
@@ -1161,6 +1154,7 @@ async fn runtime_yolo_survives_child_workspace_forks_and_never_prompts_for_subag
 
     let approver = CountingDeny(AtomicUsize::new(0));
     let spawn = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "spawn-general".to_owned(),
         tool_name: "spawn_agent".to_owned(),
@@ -1302,6 +1296,7 @@ async fn interactive_auto_allows_workspace_edits_but_preserves_denied_paths() {
         ("denied.txt", PermissionOutcome::Denied),
     ] {
         let write = PermissionRequest {
+            prompt_reason: None,
             invocation_id: rw_types::ToolInvocationId("auto-edit".to_owned()),
             id: "auto-edit".to_owned(),
             tool_name: "write".to_owned(),

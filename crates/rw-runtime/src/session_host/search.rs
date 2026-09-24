@@ -2,9 +2,9 @@
 use super::{
     HostError, RuntimeSessionFactory, SESSION_INDEX_SEARCH_MAX_ATTEMPTS,
     SESSION_INDEX_SEARCH_RETRY_DELAY, SessionIndex, SessionStoreError, load_session_metadata_any,
-    workspace_name,
+    session_activity, workspace_name,
 };
-use rw_store::session::{SessionIndexReadControl, SessionSummary};
+use rw_store::session::{AccountingLedger, SessionIndexReadControl, SessionSummary};
 use rw_types::{
     ModelAlias, SequenceId, SessionDescriptor, SessionId,
     session_search::{SessionSearchHit, SessionSearchMatch},
@@ -31,6 +31,7 @@ impl RuntimeSessionFactory {
     fn search_descriptor(
         &self,
         summary: &SessionSummary,
+        ledger: Option<&AccountingLedger>,
     ) -> Result<Option<SessionDescriptor>, HostError> {
         let metadata = load_session_metadata_any(
             &self.options.storage_root,
@@ -50,6 +51,7 @@ impl RuntimeSessionFactory {
             model: ModelAlias(metadata.model_alias.clone()),
             driver_client_id: None,
             shell_active: false,
+            activity: Some(session_activity(summary, ledger)),
         }))
     }
     fn search_sessions_blocking(
@@ -60,6 +62,7 @@ impl RuntimeSessionFactory {
     ) -> Result<(Vec<SessionSearchHit>, bool), SearchFailure> {
         let requested = usize::try_from(limit)
             .map_err(|_| SearchFailure::Index(SessionStoreError::SearchLimitTooLarge))?;
+        let ledger = AccountingLedger::open(&self.options.storage_root).ok();
         let rows = SessionIndex::search_selected_read_only(
             &self.options.storage_root,
             query,
@@ -67,7 +70,7 @@ impl RuntimeSessionFactory {
             control,
             |summary| {
                 control.check().map_err(SearchFailure::Index)?;
-                self.search_descriptor(summary)
+                self.search_descriptor(summary, ledger.as_ref())
                     .map_err(SearchFailure::Metadata)
             },
         )?;

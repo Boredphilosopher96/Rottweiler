@@ -82,7 +82,7 @@ describe("Rottweiler attachments", () => {
       matches: [{ path: "docs/UI screen shot.png", is_directory: false }],
       truncated: false,
     })
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     expect(app.composer.value).toBe("compare @first with @screen shot")
     const preview = commands.filter((command) => command.type === "preview_workspace_file").at(-1)
     if (preview?.type !== "preview_workspace_file") throw new Error("missing file preview")
@@ -147,7 +147,7 @@ describe("Rottweiler attachments", () => {
       matches: [{ path: "docs/UI screen shot.png", is_directory: false }],
       truncated: false,
     })
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(app.composer.value).toBe("compare @screen shot with the baseline")
     expect(app.composer.attachments).toEqual([])
@@ -186,7 +186,7 @@ describe("Rottweiler attachments", () => {
       matches: [{ path: "docs/UI screen shot.png", is_directory: false }],
       truncated: false,
     })
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     const preview = commands.find((command) => command.type === "preview_workspace_file")
     if (preview?.type !== "preview_workspace_file") throw new Error("missing file preview")
     for (let index = 0; index < 16; index += 1) {
@@ -251,7 +251,7 @@ describe("Rottweiler attachments", () => {
       matches: [{ path: "docs/same.png", is_directory: false }],
       truncated: false,
     })
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     const preview = commands.find((command) => command.type === "preview_workspace_file")
     if (preview?.type !== "preview_workspace_file") throw new Error("missing file preview")
     app.composer.value = "keep @same then changed"

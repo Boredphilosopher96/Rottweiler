@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, panic::AssertUnwindSafe, sync::Arc};
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
-use rw_types::CommandSource;
+use rw_types::{CommandSource, ExtensionArtifactScope};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11,6 +11,7 @@ pub struct CommandDescriptor {
     description: String,
     argument_hint: Option<String>,
     source: CommandSource,
+    scope: Option<ExtensionArtifactScope>,
     host_tools: Arc<[String]>,
 }
 
@@ -23,7 +24,19 @@ impl CommandDescriptor {
             description: description.into(),
             argument_hint: None,
             source: CommandSource::Builtin,
+            scope: None,
             host_tools: Arc::from([]),
+        }
+    }
+
+    /// Projects one engine-owned built-in catalog entry.
+    #[must_use]
+    pub fn from_catalog(entry: &rw_types::client_navigation::CommandCatalogEntry) -> Self {
+        let descriptor = Self::new(entry.name, entry.description);
+        if entry.argument_hint.is_empty() {
+            descriptor
+        } else {
+            descriptor.with_argument_hint(entry.argument_hint)
         }
     }
 
@@ -68,6 +81,19 @@ impl CommandDescriptor {
     #[must_use]
     pub const fn source(&self) -> CommandSource {
         self.source
+    }
+
+    /// Records where a declarative command or skill was discovered.
+    #[must_use]
+    pub const fn with_scope(mut self, scope: ExtensionArtifactScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Discovery scope of a declarative command or skill.
+    #[must_use]
+    pub const fn scope(&self) -> Option<ExtensionArtifactScope> {
+        self.scope
     }
 }
 

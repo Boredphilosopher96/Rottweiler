@@ -207,7 +207,6 @@ pub(super) enum PendingEvent {
     },
     ContextUsage {
         turn: u64,
-        completion_sources: Vec<rw_types::SequenceId>,
         used_tokens: u64,
         usable_tokens: u64,
         reserved_tokens: u64,
@@ -542,7 +541,7 @@ impl PendingEvent {
                 decision,
             },
             Self::PermissionRequested { turn, request } => {
-                let rationale = request.rationale();
+                let rationale = request.prompt_reason;
                 EngineEvent::ToolApprovalNeeded {
                     meta,
                     turn_id: wire_turn_id(turn),
@@ -651,7 +650,6 @@ impl PendingEvent {
             },
             Self::ContextUsage {
                 turn,
-                completion_sources,
                 used_tokens,
                 usable_tokens,
                 reserved_tokens,
@@ -664,7 +662,6 @@ impl PendingEvent {
                 correction_millionths,
             } => EngineEvent::ContextUsageUpdated {
                 meta,
-                completion_sources,
                 turn_id: wire_turn_id(turn),
                 used_tokens,
                 usable_tokens,

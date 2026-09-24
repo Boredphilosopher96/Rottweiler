@@ -1250,7 +1250,7 @@ fn approval_diff_content_uses_its_exact_canonical_source() {
         name: "edit".into(),
         args: serde_json::json!({}),
         capabilities: vec![],
-        rationale: "review".into(),
+        rationale: Some("review".into()),
         diff: Some(diff),
     };
     let document = TranscriptDocument::from_event(

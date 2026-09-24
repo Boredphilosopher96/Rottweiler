@@ -54,6 +54,8 @@ impl ModelDriver for SelectedModel {
 struct RecordingSubagentSink {
     progress: rw_tools::ChildProgressBudget,
     lifecycles: Mutex<Vec<SubagentLifecycleEvent>>,
+    /// Completions that asked the session to wake an idle parent.
+    wakes: AtomicUsize,
 }
 
 #[async_trait]
@@ -71,6 +73,11 @@ impl SubagentEventSink for RecordingSubagentSink {
 
     async fn progress(&self, _event: SubagentProgressEvent) -> Result<(), ToolError> {
         Ok(())
+    }
+
+    async fn background_finished(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        self.lifecycle(event).await
     }
 }
 
@@ -549,6 +556,25 @@ fn test_event_meta(sequence: u64) -> rw_types::EventMeta {
     }
 }
 
+/// An unproven startup keeps its slot: a new child queues instead of starting.
+async fn assert_capacity_retained(orchestrator: &SubagentOrchestrator, request: SubagentRequest) {
+    let parent = SessionId("parent".to_owned());
+    let ticket = orchestrator
+        .submit(
+            parent.clone(),
+            request,
+            Arc::new(RecordingObserver::default()),
+            CancellationToken::default(),
+        )
+        .await
+        .expect("admitted");
+    assert!(ticket.queued, "unproven startup keeps its slot");
+    orchestrator
+        .cancel(&parent, &ticket.handle.subagent_id)
+        .await
+        .expect("cancel queued child");
+}
+
 fn orchestrator(limits: SubagentLimits, factory: Arc<FakeFactory>) -> SubagentOrchestrator {
     SubagentOrchestrator::new(
         limits,
@@ -646,6 +672,7 @@ impl Tool for FixedResultTool {
     }
 }
 
+mod background;
 mod lifecycle;
 mod tools;
 

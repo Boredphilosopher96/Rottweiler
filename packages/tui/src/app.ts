@@ -15,6 +15,8 @@ import { SubmissionController } from "./app/submission"
 import { PickerContentController, type PaletteAction } from "./app/picker-content"
 import { InputUiController } from "./app/input"
 import { ChildUiController } from "./app/children"
+import { AgentsScreenController } from "./app/agents-screen"
+import { SkillsScreenController } from "./app/skills-screen"
 import { SessionUiController } from "./app/sessions"
 import {
   BoxRenderable,
@@ -37,19 +39,21 @@ export type { RottweilerAppOptions,TerminalHandoverAdapter } from "./app/options
 import {
   ComposerRenderable,
   ContextPanelRenderable,
-  FuzzyPickerRenderable,
+  PickerScreenRenderable,
   InteractionPanelRenderable,
   ListDetailRenderable,
   OutputViewerRenderable,
   ReviewPanelRenderable,
   StateBannerRenderable,
   StatusLineRenderable,
-  SubagentTrayRenderable,
+  AgentsStripRenderable,
   ToolsWorkspaceRenderable,
   TranscriptRenderable,
 } from "./components"
 import { compileKeybindings } from "./keybindings"
 import { type McpBrowserAction } from "./mcp-browser"
+import type { AgentsBrowserAction } from "./agents-browser"
+import type { SkillsBrowserAction } from "./skills-browser"
 import { PickerController, type PickerCloseReason, type PickerKind } from "./picker-controller"
 import { noExternalEditor, noExternalUrl, noImagePaste, noNotifications, noTextClipboard } from "./platform"
 import { PresentationController, deferPresentationForEvent } from "./presentation"
@@ -100,14 +104,16 @@ export class RottweilerApp extends BoxRenderable {
   interactionPanel!: InteractionPanelRenderable
   outputViewer!: OutputViewerRenderable
   reviewPanel!: ReviewPanelRenderable
-  picker!: FuzzyPickerRenderable<unknown>
+  picker!: PickerScreenRenderable<unknown>
   commandPalette!: ListDetailRenderable<PaletteAction>
   mcpBrowser!: ListDetailRenderable<McpBrowserAction>
   settingsBrowser!: ListDetailRenderable<SettingsBrowserAction>
   themeBrowser!: ListDetailRenderable<RottweilerTheme>
+  agentsBrowser!: ListDetailRenderable<AgentsBrowserAction>
+  skillsBrowser!: ListDetailRenderable<SkillsBrowserAction>
   composer!: ComposerRenderable
   statusLine!: StatusLineRenderable
-  subagentTray!: SubagentTrayRenderable
+  agentsStrip!: AgentsStripRenderable
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
@@ -116,6 +122,8 @@ export class RottweilerApp extends BoxRenderable {
   readonly #clientRestore: ClientRestoreController
   readonly #input: InputUiController
   readonly #children: ChildUiController
+  readonly #agents: AgentsScreenController
+  readonly #skills: SkillsScreenController
   readonly #sessions: SessionUiController
   readonly #themes: ThemeUiController
   readonly #settings: SettingsUiController
@@ -296,7 +304,8 @@ export class RottweilerApp extends BoxRenderable {
       get statusLine() { return inputApp.statusLine }, get banner() { return inputApp.banner },
       get picker() { return inputApp.picker }, get mcpBrowser() { return inputApp.mcpBrowser },
       get settingsBrowser() { return inputApp.settingsBrowser }, get themeBrowser() { return inputApp.themeBrowser },
-      get commandPalette() { return inputApp.commandPalette },
+      get commandPalette() { return inputApp.commandPalette }, get screenBrowsers() { return [inputApp.agentsBrowser, inputApp.skillsBrowser] },
+      backgroundForeground: () => this.#agents.backgroundForeground(),
       discardPendingRestore: () => { this.#clientRestore.discard() },
       projectRejection: outcome => this.#projectRejection(outcome),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
@@ -305,7 +314,7 @@ export class RottweilerApp extends BoxRenderable {
       closePicker: () => this.closePicker(), openSessionPicker: () => this.openSessionPicker(),
       openSubagentPicker: () => this.openSubagentPicker(), openReview: () => this.openReview(),
       openCommandPicker: () => this.openCommandPicker(), openModelPicker: () => this.openModelPicker(),
-      openModePicker: () => this.openModePicker(),
+      toggleToolsView: () => this.#setPrimaryView(this.#primaryView === "tools" ? "conversation" : "tools"),
       onExit: () => this.#options.onExit?.(),
     }, compileKeybindings(options.keybindings))
     this.#theme = theme
@@ -344,7 +353,9 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerController = new PickerController({
       allocations: this.#allocations.allocations,
       picker: () => this.picker,
+      terminalWidth: () => this.width === 0 ? this.ctx.width : this.width,
       terminalHeight: () => this.height === 0 ? this.ctx.height : this.height,
+      vim: () => this.#input.bindings.preset === "vim",
       statusHeight: () => Math.max(1, this.statusLine.height || 1),
       composerDockHeight: () => this.composer.visible ? this.composer.dockHeight : 0,
       focusComposer: () => this.composer.focus(),
@@ -382,10 +393,11 @@ export class RottweilerApp extends BoxRenderable {
       get projectionErrors() { return app.#projectionErrors }, get destroyed() { return app.#destroyed },
       get composerNotice() { return app.#submission.notice }, set composerNotice(value) { app.#submission.notice = value },
       pickerController: this.#pickerController, requests: this.#projectionRequests,
+      nowMs: () => this.#options.nowMs(),
       refresh: () => this.setState(this.#state), closePicker: () => this.closePicker(),
       selectSession: id => this.#options.onSessionSelect?.(id),
       navigateTranscript: source => navigateTranscript(this, this.#children, this.#document, () => this.#closeReview(), source),
-      sendMessage: (content, attachments) => this.#submission.sendMessage(content, attachments),
+      sendMessage: (content, attachments) => this.#submission.sendMessage(content, attachments), requestFork: turn => this.#submission.requestFork(turn),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       projectRejection: outcome => this.#projectRejection(outcome),
     })
@@ -395,7 +407,6 @@ export class RottweilerApp extends BoxRenderable {
       get activeSubagentId() { return app.#children.activeId },
       get draft() { return app.composer.value },
       get submissionPending() { return app.composer.submitting },
-      get picker() { return app.picker },
       pickerController: this.#pickerController,
       requests: this.#projectionRequests,
       get projectionErrors() { return app.#projectionErrors },
@@ -431,10 +442,11 @@ export class RottweilerApp extends BoxRenderable {
       modalOpened: () => this.#modalOpened(),
     })
     this.#permissions = new PermissionUiController({
-      get state() { return app.#state }, get picker() { return app.picker },
+      get state() { return app.#state },
       pickerController: this.#pickerController, requests: this.#projectionRequests,
       get projectionErrors() { return app.#projectionErrors },
       closePicker: () => this.closePicker(), submitPaletteCommand: content => this.#pickerContent.submitPaletteCommand(content),
+      approve: (tool, decision) => this.#submission.approve(tool, decision),
     })
     this.#mcp = new McpUiController({
       get state() { return app.#state },
@@ -448,6 +460,7 @@ export class RottweilerApp extends BoxRenderable {
       get statusHeight() { return app.statusLine.height },
       get composerDockHeight() { return app.composer.dockHeight },
       get vim() { return app.#input.bindings.preset === "vim" },
+      get panelsAvailable() { return !app.#state.replay.active && app.#children.activeId === null }, openPanels: () => app.#contributions.openPanels(),
       closePicker: () => this.closePicker(),
       modalOpened: () => this.#modalOpened(),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
@@ -458,16 +471,25 @@ export class RottweilerApp extends BoxRenderable {
       document: this.#document, picker: this.#pickerController, requests: this.#projectionRequests,
       closePicker: () => this.closePicker(), refresh: () => this.setState(this.#state),
     }, options.sessionReader, this.#history.controller.cache)
+    const screenHost = {
+      pickerController: this.#pickerController, closePicker: () => this.closePicker(), modalOpened: () => this.#modalOpened(),
+      get terminalWidth() { return app.width || app.ctx.width }, get terminalHeight() { return app.height || app.ctx.height },
+      get statusHeight() { return app.statusLine.height }, get composerDockHeight() { return app.composer.dockHeight }, get vim() { return app.#input.bindings.preset === "vim" },
+    }
+    this.#agents = new AgentsScreenController({ children: this.#children, get state() { return app.#state }, get browser() { return app.agentsBrowser },
+      projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable) }, screenHost)
+    this.#skills = new SkillsScreenController({ requests: this.#projectionRequests, get sessionId() { return app.#sessionId }, get replay() { return app.#state.replay.active },
+      get browser() { return app.skillsBrowser }, get composer() { return app.composer }, focusComposer: () => this.#input.focusForInputMode() }, screenHost)
     this.#pickerContent = new PickerContentController({
       get terminalWidth() { return app.width || app.ctx.width }, get terminalHeight() { return app.height || app.ctx.height },
       ui: this, pickerController: this.#pickerController, input: this.#input,
-      requests: this.#projectionRequests, children: this.#children, sessions: this.#sessions,
+      requests: this.#projectionRequests, children: this.#children, agents: this.#agents, skills: this.#skills, sessions: this.#sessions,
       providers: this.#providers, permissions: this.#permissions, settings: this.#settings,
       mcp: this.#mcp, themes: this.#themes, contributions: this.#contributions,
-      get projectionErrors() { return app.#projectionErrors }, get sessionId() { return app.#sessionId },
+      get projectionErrors() { return app.#projectionErrors }, get sessionId() { return app.#sessionId }, get theme() { return app.#theme },
       onExit: () => this.#options.onExit?.(), modalOpened: () => this.#modalOpened(),
       clearProjectionError: kind => this.#clearProjectionError(kind),
-      requestFork: turn => this.#submission.requestFork(turn), sendMessage: (content, attachments) => this.#submission.sendMessage(content, attachments),
+      sendMessage: (content, attachments) => this.#submission.sendMessage(content, attachments),
     })
     this.#submission = new SubmissionController({
       ui: this, children: this.#children, sessions: this.#sessions, pickerContent: this.#pickerContent,
@@ -541,45 +563,11 @@ export class RottweilerApp extends BoxRenderable {
     const outputInteraction = rebuilding ? this.outputViewer.captureInteraction() : null
     const toolsScrollTop = rebuilding ? this.toolsWorkspace.activityScroller.scrollTop : 0
     const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
-    const pickerWasVisible = rebuilding && this.#input.pickerVisible()
     const pickerKind = this.#pickerController.kind
-    const paletteWasVisible = pickerWasVisible && pickerKind === "palette"
-    const mcpBrowserWasVisible = pickerWasVisible && pickerKind === "mcp"
-    const settingsBrowserWasVisible = pickerWasVisible && pickerKind === "settings"
-    const themeBrowserWasVisible = pickerWasVisible && pickerKind === "themes"
-    const pickerQuery = rebuilding
-      ? paletteWasVisible
-        ? this.commandPalette.input.value
-        : mcpBrowserWasVisible
-          ? this.mcpBrowser.input.value
-        : settingsBrowserWasVisible
-          ? this.settingsBrowser.input.value
-        : themeBrowserWasVisible
-          ? this.themeBrowser.input.value
-          : this.picker.input.value
-      : ""
-    const pickerSelection = rebuilding
-      ? paletteWasVisible
-        ? this.commandPalette.selectedId
-        : mcpBrowserWasVisible
-          ? this.mcpBrowser.selectedId
-        : settingsBrowserWasVisible
-          ? this.settingsBrowser.selectedId
-        : themeBrowserWasVisible
-          ? this.themeBrowser.selectedId
-          : this.picker.select.getSelectedOption()?.value
-      : undefined
-    const pickerScrollOffset = rebuilding
-      ? paletteWasVisible
-        ? this.commandPalette.scrollOffset
-        : mcpBrowserWasVisible
-          ? this.mcpBrowser.scrollOffset
-        : settingsBrowserWasVisible
-          ? this.settingsBrowser.scrollOffset
-        : themeBrowserWasVisible
-          ? this.themeBrowser.scrollOffset
-          : 0
-      : 0
+    const screen = rebuilding && pickerKind !== null && this.#input.pickerVisible() ? this.#visibleScreen() : null
+    const pickerQuery = screen === null ? "" : this.#pickerController.anchored ? this.#pickerController.query : screen.input.value
+    const pickerSelection = screen?.selectedId ?? null
+    const pickerScrollOffset = screen?.scrollOffset ?? 0
     if (rebuilding) {
       for (const child of this.getChildren()) {
         this.remove(child)
@@ -608,6 +596,7 @@ export class RottweilerApp extends BoxRenderable {
       closeReview: () => this.#closeReview(), resizeReviewPanel: (width, height) => this.#resizeReviewPanel(width, height),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       onSubmit: async (content, submittedAttachments) => {
+        if (this.#children.activeId === null && !content.trimStart().startsWith("/")) this.#children.hideFinished()
         this.#composerSubmissionsInFlight += 1
         return await this.#submission.sendMessage(content, submittedAttachments)
       },
@@ -630,36 +619,23 @@ export class RottweilerApp extends BoxRenderable {
     this.transcript.setScrollOffset(scrollTop)
     this.toolsWorkspace.activityScroller.scrollTo(toolsScrollTop)
 
-    if (pickerWasVisible && pickerKind !== null) {
+    if (screen !== null) {
       this.#pickerController.query = pickerQuery
+      if (!this.#pickerController.anchored) this.picker.input.value = pickerQuery
       this.#pickerController.refresh()
-      if (pickerKind === "palette") {
-        if (typeof pickerSelection === "string") this.commandPalette.selectById(pickerSelection)
-        this.commandPalette.restoreViewport(pickerScrollOffset)
-      } else if (pickerKind === "mcp") {
-        if (typeof pickerSelection === "string") this.mcpBrowser.selectById(pickerSelection)
-        this.mcpBrowser.restoreViewport(pickerScrollOffset)
-      } else if (pickerKind === "settings") {
-        if (typeof pickerSelection === "string") this.settingsBrowser.selectById(pickerSelection)
-        this.settingsBrowser.restoreViewport(pickerScrollOffset)
-      } else if (pickerKind === "themes") {
-        if (typeof pickerSelection === "string") this.themeBrowser.selectById(pickerSelection)
-        this.themeBrowser.restoreViewport(pickerScrollOffset)
-      } else {
-        const selectedIndex = this.picker.select.options.findIndex(
-          (option) => option.value === pickerSelection,
-        )
-        if (selectedIndex >= 0) this.picker.select.setSelectedIndex(selectedIndex)
-        this.picker.input.value = pickerQuery
-      }
+      const restored = this.#visibleScreen()
+      if (pickerSelection !== null) restored?.selectById(pickerSelection)
+      restored?.restoreViewport(pickerScrollOffset)
     }
     this.reviewPanel.setRestorePending(this.#reviewRestore.pending)
     this.#rethemeInProgress = false
-    if (this.mcpBrowser.visible) this.mcpBrowser.input.focus()
-    else if (this.settingsBrowser.visible) this.settingsBrowser.input.focus()
-    else if (this.themeBrowser.visible) this.themeBrowser.input.focus()
-    else if (this.commandPalette.visible) this.commandPalette.input.focus()
-    else if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
+    if (!this.#pickerController.anchored) this.#visibleScreen()?.input.focus()
+  }
+
+  /** The navigation screen currently shown, if any; all share the list-detail anatomy. */
+  #visibleScreen(): ListDetailRenderable<unknown> | null {
+    return ([this.commandPalette, this.mcpBrowser, this.settingsBrowser, this.themeBrowser, this.agentsBrowser,
+      this.skillsBrowser, this.picker] as ListDetailRenderable<unknown>[]).find(screen => screen.visible) ?? null
   }
   get state(): RottweilerState {
     return this.#state
@@ -678,6 +654,7 @@ export class RottweilerApp extends BoxRenderable {
   showConversationView(): void {
     this.#setPrimaryView("conversation")
   }
+  get slashPopup() { return this.#pickerContent.slashPopup! }
   get activeSubagentId(): string | null {
     return this.#children.activeId
   }
@@ -705,6 +682,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#contributions.close()
       this.#todos.reset()
       this.#children.reset()
+      this.#skills.reset()
       this.#pickerContent.resetCommands()
       this.#commandCatalogTruncationNotified = false
       this.#providers.catalogSettled()
@@ -751,16 +729,8 @@ export class RottweilerApp extends BoxRenderable {
       isRecord(eventRecord.meta) && typeof eventRecord.meta.request_id === "string"
         ? eventRecord.meta.request_id
         : null
-    if (event.type === "subagents_listed") {
-      const listed = event as Extract<EngineEvent, { type: "subagents_listed" }>
-      if (
-        listed.session_id !== this.#sessionId ||
-        !this.#projectionRequests.matches("subagents", commandRequestId)
-      ) return
-      this.#projectionRequests.clear("subagents")
-      this.#children.acceptCatalog(listed.subagents)
-      return
-    }
+    if (event.type === "subagents_listed") { this.#children.acceptListed(event, commandRequestId); return }
+    if (event.type === "extensions_listed") { this.#skills.accept(event); return }
     if (event.type === "subagent_progress" && !this.#children.acceptProgress(event)) return
     if (event.type === "session_forked") {
       if (
@@ -937,9 +907,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#pickerContent.requestCommands()
       this.#pickerContent.requestModes()
     }
-    if (event.type === "subagent_spawned" || event.type === "subagent_finished") {
-      this.#children.requestSubagents()
-    }
+    this.#children.afterEvent(event, next)
     this.#providers.afterEvent(event, eventRecord, commandRequestId, next)
 
     if (
@@ -1010,16 +978,15 @@ export class RottweilerApp extends BoxRenderable {
     this.#outputViewerInvocationId = !this.#children.sourceReady ? null : updateOutputViewer(
       this.outputViewer, this.#document, this.#children.readTarget, presented, this.#outputViewerInvocationId,
     )
-    this.subagentTray.update(state)
-    this.contextPanel.update(presented)
+    this.agentsStrip.update(this.#children.stripInput(this.#pickerContent.paletteBinding("open_subagent_picker"), this.#pickerContent.paletteBinding("background_subagent")))
+    this.contextPanel.update(presented, id => this.#children.subagentDescriptor(id)?.agent || null)
     this.#applyPrimaryViewVisibility()
-    this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
     this.interactionPanel.update(this.#children.interactionState(presented), !viewingSubagent)
     this.reviewPanel.update(state, !viewingSubagent && this.#reviewOpen)
     this.composer.setQueuedMessages(
       viewingSubagent || this.#primaryView === "tools" ? [] : state.queuedMessages,
     )
-    const subagentReadOnly = this.#children.historical !== null || this.#children.isActiveSubagentRunning()
+    const subagentReadOnly = this.#children.composerHidden
     const subagentBecameWritable = this.#activeSubagentReadOnly && !subagentReadOnly
     this.#activeSubagentReadOnly = subagentReadOnly
     const composerVisible =
@@ -1028,6 +995,7 @@ export class RottweilerApp extends BoxRenderable {
       !subagentReadOnly
     if (!composerVisible) this.composer.editor.blur()
     this.composer.visible = composerVisible
+    this.composer.setBackgroundAvailable(this.#children.foregroundId !== null)
     this.composer.setActivityHints(this.interactionPanel.visible && !this.interactionPanel.usesComposer
       ? "interaction" : this.#input.isInterruptible() ? "running" : "idle")
     this.interactionPanel.resizeForTerminal(
@@ -1104,7 +1072,7 @@ export class RottweilerApp extends BoxRenderable {
   openSettingsPicker(): void { this.#settings.openSettingsPicker() }
 
   openPermissionPicker(): void { this.#permissions.openPermissionPicker() }
-  openPendingRuleReview(tool: ToolProjection): void { this.#permissions.openPendingRuleReview(tool) }
+  openAlwaysAllowReview(tool: ToolProjection): void { this.#permissions.openAlwaysAllowReview(tool) }
 
   openBudgetPicker(): void { this.#settings.openBudgetPicker() }
 
@@ -1131,8 +1099,7 @@ export class RottweilerApp extends BoxRenderable {
 
   openSessionPicker(): void { this.#sessions.openSessionPicker() }
 
-  openSubagentPicker(): void { this.#children.openSubagentPicker() }
-  openSubagentActionPicker(subagentId = this.#children.activeId): void { this.#children.openSubagentActionPicker(subagentId) }
+  openSubagentPicker(): void { this.#agents.open() }
 
   #setPrimaryView(view: PrimaryView): void {
     if (this.#primaryView === view) {
@@ -1159,7 +1126,6 @@ export class RottweilerApp extends BoxRenderable {
     this.composer.setQueuedMessages(
       toolsVisible || this.#children.activeId !== null ? [] : this.#state.queuedMessages,
     )
-    this.subagentTray.setPresentationEnabled(!this.contextPanel.visible)
     this.#allocations.presented()
   }
 
@@ -1238,10 +1204,9 @@ export class RottweilerApp extends BoxRenderable {
 
   closePicker(reason: PickerCloseReason = "dismiss"): void {
     this.#clientRestore.discard()
-    if (this.mcpBrowser.visible) this.mcpBrowser.close()
-    if (this.settingsBrowser.visible) this.settingsBrowser.close()
-    if (this.themeBrowser.visible) this.themeBrowser.close()
-    if (this.commandPalette.visible) this.commandPalette.close()
+    for (const screen of [this.mcpBrowser, this.settingsBrowser, this.themeBrowser, this.agentsBrowser, this.skillsBrowser, this.commandPalette]) {
+      if (screen.visible) screen.close()
+    }
     this.#pickerController.close(reason)
   }
 
@@ -1261,7 +1226,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#providers.pickerClosed()
     this.#mcp.pickerClosed()
     this.#settings.pickerClosed()
-    this.#children.pickerClosed()
+    const restoreAgentsBrowser = this.#agents.restoresList(kind, reason)
     this.#contributions.pickerClosed()
     this.#sessions.pickerClosed()
     if (restoreMcpBrowser) {
@@ -1270,8 +1235,8 @@ export class RottweilerApp extends BoxRenderable {
     } else if (restoreSettingsBrowser) {
       this.#pickerController.kind = "settings"
       this.settingsBrowser.visible = true
-    }
-    this.#input.modalClosed(restoreMcpBrowser || restoreSettingsBrowser)
+    } else if (restoreAgentsBrowser) this.#agents.open()
+    this.#input.modalClosed(restoreMcpBrowser || restoreSettingsBrowser || restoreAgentsBrowser)
     if (!this.#state.replay.active) this.#input.focusForInputMode()
     if (this.#input.bindings.preset === "vim") {
       this.statusLine.setKeybindingMode(
@@ -1301,6 +1266,8 @@ export class RottweilerApp extends BoxRenderable {
     if (this.mcpBrowser.visible) this.#mcp.resize(width, height)
     else if (this.settingsBrowser.visible) this.#settings.resize(width, height)
     else if (this.themeBrowser.visible) this.#themes.resize(width, height)
+    else if (this.agentsBrowser.visible) this.#agents.resize(width, height)
+    else if (this.skillsBrowser.visible) this.#skills.resize(width, height)
     else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height, height - this.composer.dockHeight - this.statusLine.height)
     else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
   }

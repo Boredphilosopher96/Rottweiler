@@ -363,3 +363,66 @@ async fn tool_composition_defers_all_external_credential_backend_reads() {
             .contains("search-secret-canary")
     );
 }
+
+#[test]
+fn child_registries_receive_the_skill_tool_only_when_skills_exist() {
+    use super::super::tool_composition::register_child_skill_tool;
+
+    let root = tempdir().expect("workspace");
+    let home = tempdir().expect("home");
+    let private = tempdir().expect("private");
+    let build = |lock: &str| {
+        build_tools(BuildToolsInput {
+            toolchain_runtime_read_roots: &[],
+            index_pool: Arc::new(rw_tools::WorkspaceIndexPool::default()),
+            workspace_roots: &[root.path().to_path_buf()],
+            trusted_lsp_roots: &[false],
+            question_asker: Arc::new(UnboundQuestionAsker),
+            offline: true,
+            global_proxy: None,
+            deferred_global_proxy: None,
+            command_fixture_mode: CommandFixtureMode::Offline,
+            execution_lease: Arc::new(
+                ExecutionLease::acquire(private.path().join(lock)).expect("execution lease"),
+            ),
+            command_safety: &Arc::new(CommandSafetyClassifier::default()),
+            websearch_config: &WebSearchConfig::default(),
+            websearch_headers: &BTreeMap::new(),
+            deferred_websearch_headers: None,
+            native_websearch_possible: false,
+            background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+            background_manager: None,
+        })
+        .expect("tool composition")
+    };
+    let discover = || {
+        Arc::new(rw_ext::ExtensionCatalog::discover(
+            &rw_ext::ExtensionDiscoveryConfig::new(root.path(), home.path()),
+        ))
+    };
+
+    let mut without = build("without.lock");
+    register_child_skill_tool(&mut without, &discover()).expect("no skills");
+    assert!(
+        without
+            .registry
+            .resolve(rw_tools::SKILL_TOOL_NAME)
+            .is_none()
+    );
+
+    let skill = home.path().join(".claude/skills/review");
+    std::fs::create_dir_all(&skill).expect("skill directory");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: review\ndescription: Review code\n---\nReview carefully.\n",
+    )
+    .expect("skill manifest");
+    let mut with = build("with.lock");
+    register_child_skill_tool(&mut with, &discover()).expect("skill tool");
+    assert!(with.registry.resolve(rw_tools::SKILL_TOOL_NAME).is_some());
+    let restricted = with.registry.subset(["read"]).expect("agent allow-list");
+    assert!(
+        restricted.resolve(rw_tools::SKILL_TOOL_NAME).is_none(),
+        "an agent allow-list without `skill` excludes it"
+    );
+}

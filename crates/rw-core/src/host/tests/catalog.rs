@@ -76,7 +76,7 @@ async fn list_commands_routes_to_the_explicit_sessions_assembled_registry() {
                 .all(|command| command.name != format!("only.{other}"))
         );
         assert!(commands.iter().any(|command| command.name == "permissions"));
-        assert!(commands.iter().any(|command| command.name == "add-dir"));
+        assert!(commands.iter().any(|command| command.name == "dirs"));
     }
 }
 
@@ -277,4 +277,85 @@ fn wire_command_catalog_preserves_each_runtime_source() {
     for (command, expected) in commands.iter().zip(sources) {
         assert_eq!(command.source, expected);
     }
+}
+
+#[tokio::test]
+async fn list_extensions_returns_the_sessions_inventory_as_a_read() {
+    let (host, _factory) = host(1);
+    let bound = BoundClient {
+        client_id: ClientId("skills-driver".to_owned()),
+    };
+    let session_id = SessionId("skills-session".to_owned());
+    host.dispatch(
+        bound.clone(),
+        ClientCommand::ResumeSession {
+            meta: meta("skills-driver", "resume-skills"),
+            session_id: session_id.clone(),
+            last_seen_sequence: None,
+            role: ClientRole::Driver,
+        },
+    )
+    .await;
+    let reply = host
+        .dispatch(
+            bound,
+            ClientCommand::ListExtensions {
+                meta: meta("skills-driver", "list-extensions"),
+                session_id: session_id.clone(),
+            },
+        )
+        .await;
+    let rw_types::CommandReply::Read {
+        outcome: CommandOutcome::Accepted {},
+        events,
+    } = serde_json::from_slice(&reply.bytes).expect("typed read reply")
+    else {
+        panic!("accepted read")
+    };
+    let (listed, entries, truncated) = events
+        .into_iter()
+        .find_map(|event| match event {
+            EngineEvent::ExtensionsListed {
+                session_id,
+                entries,
+                truncated,
+                ..
+            } => Some((session_id, entries, truncated)),
+            _ => None,
+        })
+        .expect("extension inventory");
+    assert_eq!(listed, session_id);
+    assert!(!truncated);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name.as_deref(), Some("skill.skills-session"));
+    assert_eq!(entries[0].scope, rw_types::ExtensionArtifactScope::User);
+    assert_eq!(entries[0].status, rw_types::ExtensionArtifactStatus::Loaded);
+}
+
+#[test]
+fn wire_command_catalog_preserves_declarative_scope() {
+    let descriptors = [
+        ExtensionCommandDescriptor::new("builtin", "no scope"),
+        ExtensionCommandDescriptor::new("user-skill", "user skill")
+            .with_source(rw_types::CommandSource::Skill)
+            .with_scope(rw_types::ExtensionArtifactScope::User),
+        ExtensionCommandDescriptor::new("project-skill", "project skill")
+            .with_source(rw_types::CommandSource::Skill)
+            .with_scope(rw_types::ExtensionArtifactScope::Project),
+    ];
+
+    let (commands, truncated) = wire_command_catalog(descriptors.iter());
+
+    assert!(!truncated);
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| command.scope)
+            .collect::<Vec<_>>(),
+        [
+            None,
+            Some(rw_types::ExtensionArtifactScope::User),
+            Some(rw_types::ExtensionArtifactScope::Project),
+        ]
+    );
 }

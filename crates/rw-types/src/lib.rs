@@ -78,14 +78,14 @@ pub use protocol::{
     ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindSourcePosition,
     RewindTarget, RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId,
-    SessionActionAvailability, SessionActionKind, SessionDescriptor, SessionId, SessionIdError,
-    SessionMode, SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
-    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus,
-    SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES, ToolCapability, ToolOutputStream,
-    TouchedFile, TouchedFileStatus, TranscriptFormat, TurnAccounting, TurnId, TurnStatus,
-    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
-    default_provider_api_key_credential_id,
+    SessionActionAvailability, SessionActionKind, SessionActivity, SessionDescriptor, SessionId,
+    SessionIdError, SessionMode, SessionReview, SessionReviewFile, ShellId, StoredAttachment,
+    SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult,
+    SubagentStatus, SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES, ToolCapability,
+    ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat, TurnAccounting, TurnId,
+    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceChange,
+    WorkspaceChangeKind, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus, default_provider_api_key_credential_id,
 };
 
 /// Version of the protocol emitted by these types.
@@ -95,6 +95,11 @@ pub use protocol::{
     DeferredSessionAction, MAX_CONTROL_INSTRUCTIONS_BYTES, MAX_QUEUED_SESSION_CONTROLS,
     QueuedControlStatus, QueuedSessionControl, SessionControlOutcome, SessionControlSettlement,
     validate_queued_controls,
+};
+
+pub use protocol::{
+    ExtensionArtifactKind, ExtensionArtifactScope, ExtensionArtifactStatus, ExtensionInventory,
+    ExtensionInventoryEntry, MAX_EXTENSION_INVENTORY_ENTRIES,
 };
 
 pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};

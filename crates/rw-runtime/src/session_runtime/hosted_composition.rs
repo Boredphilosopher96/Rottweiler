@@ -770,6 +770,9 @@ pub(crate) async fn compose_hosted_actor(
     if extension_catalog.workflows().len() > 0 {
         available_tools.push("workflow".to_owned());
     }
+    if extension_catalog.skills().len() > 0 {
+        available_tools.push(rw_tools::SKILL_TOOL_NAME.to_owned());
+    }
     agents
         .resolve_tool_names(available_tools)
         .map_err(|error| miette!("agent tools could not resolve: {error}"))?;
@@ -838,6 +841,7 @@ pub(crate) async fn compose_hosted_actor(
             max_depth: options.config.engine.subagent_max_depth,
             max_concurrency: options.config.engine.subagent_max_concurrency,
             max_turns: options.max_turns,
+            wake_on_completion: options.config.agents.wake_on_completion,
             ..SubagentLimits::default()
         },
         factory,
@@ -882,6 +886,8 @@ pub(crate) async fn compose_hosted_actor(
             )))
             .map_err(|error| miette!("workflow tool could not register: {error}"))?;
     }
+    super::skill_library::register_skill_tool(&mut registry, &extension_catalog)
+        .map_err(|error| miette!("skill tool could not register: {error}"))?;
     let runtime_tools = Arc::new(registry);
     orchestrator.bind_tools(Arc::clone(&runtime_tools));
     recover_subagent_tree(

@@ -31,7 +31,6 @@ use crate::engine::AgentLoopError;
 use crate::engine::MAX_CAPTURED_SHELL_OUTPUT_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES;
 use crate::engine::MAX_PLUGIN_NOTIFICATION_TITLE_BYTES;
-use crate::engine::RoutedEvent;
 use crate::engine::SessionSnapshot;
 use crate::engine::dispatch::admission::dispatch_protocol;
 use crate::engine::dispatch::messages::dispatch_message;
@@ -49,7 +48,6 @@ use crate::engine::turn::emit;
 pub(super) use message_input::prepare_user_message;
 use rw_ext::ModeRegistry;
 use rw_tools::ToolContext;
-use rw_types::EngineEvent;
 use rw_types::SequenceId;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -331,14 +329,12 @@ pub(super) async fn handle_actor_command(
             command_meta,
             content,
             attachments,
-            observed_turn,
             respond,
         } => {
             dispatch_message(
                 command_meta,
                 content,
                 attachments,
-                observed_turn,
                 respond,
                 DispatchContext {
                     state,
@@ -416,58 +412,6 @@ pub(super) async fn handle_actor_command(
                 })
             };
             let _ = respond.send(result);
-        }
-        ActorCommand::RecordSubagentSpawned {
-            subagent_id,
-            child_session_id,
-            task,
-            respond,
-        } => {
-            let result = emit(
-                state,
-                events,
-                &config.event_sink,
-                PendingEvent::SubagentSpawned {
-                    subagent_id,
-                    child_session_id,
-                    task,
-                },
-            )
-            .await
-            .map(|_| ());
-            let _ = respond.send(result);
-        }
-        ActorCommand::RecordSubagentFinished { result, respond } => {
-            let subagent_id = result.subagent_id.clone();
-            let result = emit(
-                state,
-                events,
-                &config.event_sink,
-                PendingEvent::SubagentFinished {
-                    subagent_id,
-                    result,
-                },
-            )
-            .await
-            .map(|_| ());
-            let _ = respond.send(result);
-        }
-        ActorCommand::PublishSubagentProgress(slot) => {
-            if let Some(admitted) = slot.take() {
-                let progress = admitted.event;
-                progress.event.deliver(|preview| {
-                    let _ = events.send(RoutedEvent {
-                        target: None,
-                        event: EngineEvent::SubagentProgress {
-                            parent_session_id: state.session_id.clone(),
-                            subagent_id: progress.subagent_id,
-                            child_session_id: progress.child_session_id,
-                            child_sequence: progress.child_sequence.map(SequenceId),
-                            event: preview,
-                        },
-                    });
-                });
-            }
         }
         ActorCommand::UiCatalog { respond } => {
             let _ = respond.send(config.ui.catalog());

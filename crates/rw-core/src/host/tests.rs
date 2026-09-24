@@ -253,11 +253,12 @@ impl StubFactory {
                 } else {
                     session_id.clone()
                 },
-                title: "New session".to_owned(),
+                title: "Untitled".to_owned(),
                 workspace_name: session_id.0.clone(),
                 model: ModelAlias("fast".to_owned()),
                 driver_client_id: None,
                 shell_active: false,
+                activity: None,
             },
             handle,
         )
@@ -621,7 +622,27 @@ impl HostQueryService for StubQueries {
             description: "Show help".to_owned(),
             usage: "/help".to_owned(),
             source: rw_types::CommandSource::default(),
+            scope: None,
         }])
+    }
+
+    async fn extension_inventory(
+        &self,
+        session: &SessionDescriptor,
+    ) -> Result<rw_types::ExtensionInventory, HostError> {
+        Ok(rw_types::ExtensionInventory {
+            entries: vec![rw_types::ExtensionInventoryEntry {
+                kind: rw_types::ExtensionArtifactKind::Skill,
+                name: Some(format!("skill.{}", session.session_id.0)),
+                description: "Review a change".to_owned(),
+                scope: rw_types::ExtensionArtifactScope::User,
+                location: ".agents".to_owned(),
+                source_path: "/home/user/.agents/skills/review/SKILL.md".to_owned(),
+                status: rw_types::ExtensionArtifactStatus::Loaded,
+                notes: Vec::new(),
+            }],
+            truncated: false,
+        })
     }
 
     async fn model_catalog(
@@ -735,7 +756,7 @@ impl HostQueryService for StubQueries {
         Ok(WorkspaceStatus {
             workspace_name: session.workspace_name.clone(),
             branch: None,
-            changed_paths: Vec::new(),
+            changes: Vec::new(),
             truncated: false,
         })
     }

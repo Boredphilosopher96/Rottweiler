@@ -13,6 +13,8 @@ fn claude_import_is_dry_run_apply_idempotent_and_secret_free() {
         "run $0 then $1",
     )
     .expect("command");
+    fs::create_dir_all(source.path().join(".claude/memory")).expect("memory");
+    fs::write(source.path().join(".claude/memory/notes.md"), "remember").expect("memory note");
     fs::write(source.path().join(".mcp.json"), r#"{"mcpServers":{"ok":{"command":"/usr/bin/true","env":{"TOKEN":"literal-secret","SAFE":"${SAFE}"}}}}"#).expect("mcp");
     fs::write(
             source.path().join(".claude/settings.json"),
@@ -36,10 +38,14 @@ fn claude_import_is_dry_run_apply_idempotent_and_secret_free() {
     apply.dry_run = false;
     run(&apply).expect("apply");
     run(&apply).expect("idempotent");
-    let command =
-        fs::read_to_string(apply.target_root.join(".agents/commands/test.md")).expect("command");
-    assert!(command.contains("description: Imported command test"));
-    assert!(command.ends_with("run $1 then $2"));
+    assert!(!apply.target_root.join(".agents/commands").exists());
+    assert!(run(&apply).expect("report").items.iter().any(|item| {
+        item.target == ".claude/commands" && item.status == ImportStatus::DiscoveredInPlace
+    }));
+    assert_eq!(
+        fs::read_to_string(apply.target_root.join(".agents/memory/notes.md")).expect("memory"),
+        "remember"
+    );
     assert_eq!(
         fs::read_to_string(apply.target_root.join("AGENTS.md")).expect("instructions"),
         "guidance"
@@ -58,8 +64,13 @@ fn claude_import_is_dry_run_apply_idempotent_and_secret_free() {
         &rw_ext::ExtensionDiscoveryConfig::new(&apply.target_root, user.path())
             .with_project_trusted(true),
     );
-    assert!(catalog.command("test").is_some());
+    assert!(catalog.command("test").is_none());
     assert_eq!(catalog.shell_hooks().len(), 1);
+    let in_place = rw_ext::ExtensionCatalog::discover(
+        &rw_ext::ExtensionDiscoveryConfig::new(source.path(), user.path())
+            .with_project_trusted(true),
+    );
+    assert!(in_place.command("test").is_some());
     let executable = rw_runtime::executable_config::discover_executable_configs(
         user.path(),
         &apply.target_root,
@@ -216,10 +227,10 @@ fn symlink_hardlink_and_oversized_sources_fail_closed() {
     use std::os::unix::fs::symlink;
     let source = tempdir().expect("source");
     let target = tempdir().expect("target");
-    fs::create_dir_all(source.path().join(".claude/commands")).expect("commands");
+    fs::create_dir_all(source.path().join(".claude/memory")).expect("memory");
     let outside = source.path().join("outside");
     fs::write(&outside, "secret").expect("outside");
-    symlink(&outside, source.path().join(".claude/commands/link.md")).expect("link");
+    symlink(&outside, source.path().join(".claude/memory/link.md")).expect("link");
     let options = ImportOptions {
         source: ImportSource::Claude,
         source_root: source.path().to_path_buf(),
@@ -227,12 +238,12 @@ fn symlink_hardlink_and_oversized_sources_fail_closed() {
         dry_run: true,
     };
     assert!(run(&options).is_err());
-    fs::remove_file(source.path().join(".claude/commands/link.md")).expect("remove");
-    fs::hard_link(&outside, source.path().join(".claude/commands/hard.md")).expect("hard link");
+    fs::remove_file(source.path().join(".claude/memory/link.md")).expect("remove");
+    fs::hard_link(&outside, source.path().join(".claude/memory/hard.md")).expect("hard link");
     assert!(run(&options).is_err());
-    fs::remove_file(source.path().join(".claude/commands/hard.md")).expect("remove hard link");
+    fs::remove_file(source.path().join(".claude/memory/hard.md")).expect("remove hard link");
     fs::write(
-        source.path().join(".claude/commands/big.md"),
+        source.path().join(".claude/memory/big.md"),
         vec![b'x'; MAX_FILE_BYTES + 1],
     )
     .expect("big");
@@ -279,7 +290,7 @@ fn unsafe_candidate_directory_is_not_silently_skipped() {
     let outside = tempdir().expect("outside");
     let target = tempdir().expect("target");
     fs::create_dir(source.path().join(".claude")).expect("claude");
-    symlink(outside.path(), source.path().join(".claude/commands")).expect("candidate symlink");
+    symlink(outside.path(), source.path().join(".claude/memory")).expect("candidate symlink");
     assert!(
         run(&ImportOptions {
             source: ImportSource::Claude,

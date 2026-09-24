@@ -307,18 +307,12 @@ function applyKnownEvent(
               ? activeSession.model.slice(0, activeSession.model.indexOf("/"))
               : null,
           }),
-        sessions: event.sessions.map((session) => ({
-          sessionId: session.session_id,
-          ...(session.title ? { title: session.title } : {}),
-          workspaceName: session.workspace_name,
-          model: session.model,
-          driverClientId: session.driver_client_id ?? null,
-          shellActive: session.shell_active,
-        })),
+        sessions: event.sessions.map(projectSession),
         sessionSearch: null,
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
     case "subagents_listed":
+    case "extensions_listed":
       return {
         ...state,
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
@@ -340,6 +334,7 @@ function applyKnownEvent(
           description: command.description,
           usage: command.usage,
           source: command.source ?? "builtin",
+          scope: command.scope ?? null,
         })),
         commandsTruncated: event.truncated,
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
@@ -395,6 +390,7 @@ function applyKnownEvent(
           vision: model.capabilities.vision,
           thinking: model.capabilities.thinking,
           toolCalling: model.capabilities.tool_calling,
+          contextTokens: model.capabilities.max_context_tokens,
         })),
         modelAliases: (event.aliases ?? []).map((alias) => ({
           alias: alias.alias,
@@ -547,7 +543,7 @@ function applyKnownEvent(
         workspaceStatus: {
           workspaceName: event.status.workspace_name,
           branch: event.status.branch ?? null,
-          changedPaths: event.status.changed_paths,
+          changes: event.status.changes,
           truncated: event.status.truncated,
         },
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
@@ -866,7 +862,7 @@ function applyKnownEvent(
         args: event.args,
         status: "awaiting_approval",
         capabilities: event.capabilities,
-        rationale: event.rationale,
+        rationale: event.rationale ?? null,
         diff: event.diff ?? null,
         diffSource: event.diff == null ? existing?.diffSource ?? null : { sequence: event.meta.sequence_id, selector: { type: "tool_diff" } }, chunks: existing?.chunks ?? EMPTY_TOOL_OUTPUT,
         display: existing?.display ?? null, source: existing?.source ?? null,
@@ -1136,6 +1132,8 @@ function applyKnownEvent(
     case "context_item_evicted":
       return state
   }
+  const unhandled: never = event
+  return unhandled
 }
 
 function recordInvalid(state: RottweilerState): RottweilerState {

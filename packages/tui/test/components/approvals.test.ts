@@ -13,6 +13,7 @@ import { createInitialState, type RottweilerState } from "../../src/state"
 import { toolOutputBuffer } from "../../src/state/display-buffer"
 import { emptySessionReader } from "../fixtures/history"
 import { permissionState } from "./fixtures"
+import { options, select, statusText } from "../picker-screen"
 
 describe("approvals components", () => {
   let renderer: TestRenderer | undefined
@@ -63,8 +64,8 @@ describe("approvals components", () => {
     })
     renderer.root.add(app)
     await setup.renderOnce()
-    expect(app.interactionPanel.prompt.plainText).toContain("Edit file src/main.rs")
-    expect(app.interactionPanel.prompt.plainText).not.toContain("Arguments:")
+    expect(app.interactionPanel.title).toBe(" Edit src/main.rs? ")
+    expect(app.interactionPanel.prompt.plainText).toBe("Apply change")
     app.interactionPanel.select.selectCurrent()
 
     expect(commands).toContainEqual({
@@ -116,11 +117,11 @@ describe("approvals components", () => {
       toolCallId: "click-approval",
       invocationId: "click-approval",
       turnId: "1",
-      name: "write",
-      args: { path: "src/clicked.rs" },
+      name: "bash",
+      args: { command: "cargo build" },
       status: "awaiting_approval" as const,
-      capabilities: ["write_filesystem" as const],
-      rationale: "Create the selected file",
+      capabilities: ["execute" as const],
+      rationale: "Not in the safe command list",
       diff: null,
       diffSource: null, chunks: toolOutputBuffer([]),
       display: null, source: null,
@@ -158,11 +159,11 @@ describe("approvals components", () => {
     app.interactionPanel.select.setSelectedIndex(0)
     await setup.renderOnce()
 
-    // Each described option occupies two terminal rows. Click the second row's
-    // label (Allow session), not the currently highlighted default.
+    // Approval options are single rows. Click the second row (the session
+    // choice), not the currently highlighted default.
     await setup.mockMouse.click(
       app.interactionPanel.select.x + 4,
-      app.interactionPanel.select.y + 2,
+      app.interactionPanel.select.y + 1,
     )
     expect(commands.filter((command) => command.type === "approve_tool")).toEqual([
       expect.objectContaining({
@@ -172,20 +173,7 @@ describe("approvals components", () => {
         decision: "allow_session",
       }),
     ])
-
-    commands.length = 0
-    app.interactionPanel.select.setSelectedIndex(2)
     app.interactionPanel.select.focus()
-    setup.mockInput.pressEnter()
-    await Bun.sleep(0)
-    expect(commands.filter((command) => command.type === "approve_tool")).toEqual([
-      expect.objectContaining({
-        type: "approve_tool",
-        tool_call_id: "click-approval",
-        invocation_id: "click-approval",
-        decision: "allow_project",
-      }),
-    ])
 
     commands.length = 0
     app.interactionPanel.select.setSelectedIndex(0)
@@ -216,7 +204,7 @@ describe("approvals components", () => {
     ])
   })
 
-  test("offers session-wide tool rules and auto-safe mode as approval escape hatches", async () => {
+  test("offers keyed plain-language choices and a reviewed always-allow scope", async () => {
     const setup = await createTestRenderer({ width: 112, height: 28, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
@@ -228,7 +216,7 @@ describe("approvals components", () => {
       args: { command: "cargo test" },
       status: "awaiting_approval" as const,
       capabilities: ["execute" as const],
-      rationale: "Run focused tests",
+      rationale: "Not in the safe command list",
       diff: null,
       diffSource: null, chunks: toolOutputBuffer([]),
       display: null, source: null,
@@ -251,74 +239,118 @@ describe("approvals components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.interactionPanel.select.options.map((option) => option.value)).toEqual([
-      "allow_once",
-      "allow_session",
-      "allow_project",
-      "review_permission_rule",
-      "auto_safe_mode",
-      "deny",
+    expect(app.interactionPanel.title).toBe(" Run `cargo test`? ")
+    expect(app.interactionPanel.prompt.plainText).toBe("Not in the safe command list")
+    expect(app.interactionPanel.select.options.map((option) => [option.name, option.value])).toEqual([
+      ["y  Yes", "allow_once"],
+      ["a  Yes, and don't ask again for `cargo test` this session", "allow_session"],
+      ["p  Always allow in this project…", "always_allow"],
+      ["n  No, and tell the agent what to do differently", "deny"],
     ])
-    const always = app.interactionPanel.select.options.findIndex(
-      (option) => option.value === "review_permission_rule",
-    )
-    expect(app.interactionPanel.select.options[always]).toMatchObject({
-      name: "Review a permission rule…",
-      description: "Review an explicit session pattern",
-    })
-    app.interactionPanel.select.setSelectedIndex(always)
-    app.interactionPanel.select.selectCurrent()
-    expect(commands).toEqual([])
-    expect(app.picker.title).toContain("Review rule")
-    expect(app.picker.select.options.map(item => item.name)).toContain("Enter an explicit allow pattern…")
-    expect(app.picker.visible).toBeTrue()
-    expect(commands.some(command => command.type === "approve_tool" || command.type === "add_session_permission_rule")).toBeFalse()
-    const pattern = app.picker.select.options.findIndex(option => option.value === "add")
-    app.picker.select.setSelectedIndex(pattern)
-    app.picker.select.selectCurrent()
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("permission required")
+    expect(frame).not.toContain("Review a permission rule")
+
+    // `p` opens the scope review; nothing is approved or saved yet.
+    setup.mockInput.pressKey("p")
     await setup.renderOnce()
-    expect(app.picker.input.value).toBe("")
-    expect(app.picker.title).toContain("this session")
-    expect(app.picker.height).toBe(app.composer.y)
+    expect(commands).toEqual([])
+    expect(app.picker.screenTitle).toBe("ALWAYS ALLOW")
+    expect(options(app.picker).map(item => item.name)).toEqual([
+      "Only `cargo test`",
+      "Anything matching bash(cargo *)…",
+    ])
+    expect(app.picker.selectedItem?.detail).toContain("Allows exactly this invocation in this project")
+    select(app.picker, 0)
+    app.picker.activateSelected()
+    await Bun.sleep(0)
+    expect(commands).toEqual([expect.objectContaining({
+      type: "approve_tool", tool_call_id: "escape-hatch", decision: "allow_project",
+    })])
+    expect(app.picker.visible).toBeFalse()
+
+    // The pattern is a suggestion the user reviews and may edit before saving;
+    // saving it also allows the waiting invocation.
+    commands.length = 0
+    app.interactionPanel.select.focus()
+    setup.mockInput.pressKey("p")
+    await setup.renderOnce()
+    select(app.picker, 1)
+    app.picker.activateSelected()
+    await setup.renderOnce()
+    expect(app.picker.screenTitle).toBe("PERMISSIONS › Always allow matching tools")
+    expect(app.picker.input.value).toBe("bash(cargo *)")
+    expect(statusText(app.picker)).toContain("Applies to this session only")
+    expect(commands).toEqual([])
+    app.picker.input.value = ""
     await setup.mockInput.typeText("bash(cargo test*)")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
-    expect(commands).toContainEqual(expect.objectContaining({ type: "add_session_permission_rule", pattern: "bash(cargo test*)", action: "allow" }))
-    expect(commands.some(command => command.type === "approve_tool")).toBeFalse()
-    expect(app.state.tools[tool.invocationId]?.status).toBe("awaiting_approval")
+    expect(commands).toEqual([
+      expect.objectContaining({ type: "add_session_permission_rule", pattern: "bash(cargo test*)", action: "allow" }),
+      expect.objectContaining({ type: "approve_tool", tool_call_id: "escape-hatch", decision: "allow_once" }),
+    ])
+  })
 
-    commands.length = 0
-    const autoSafe = app.interactionPanel.select.options.findIndex(
-      (option) => option.value === "auto_safe_mode",
-    )
-    app.interactionPanel.select.setSelectedIndex(autoSafe)
-    app.interactionPanel.select.selectCurrent()
+  test("offers Auto for workspace edits only while it would stop the prompts", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 28, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const tool = {
+      toolCallId: "edit-approval",
+      invocationId: "edit-approval",
+      turnId: "1",
+      name: "edit",
+      args: { path: "calc.py" },
+      status: "awaiting_approval" as const,
+      capabilities: ["write_filesystem" as const],
+      rationale: null,
+      diff: null,
+      diffSource: null, chunks: toolOutputBuffer([]),
+      display: null, source: null,
+      isError: null,
+      callIndex: 0,
+      timing: { kind: "unknown" as const },
+    }
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      initialState: {
+        ...createInitialState(),
+        permissions: permissionState("strict"),
+        tools: { [tool.invocationId]: tool },
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.interactionPanel.title).toBe(" Edit calc.py? ")
+    expect(app.interactionPanel.prompt.visible).toBeFalse()
+    expect(app.interactionPanel.select.options.map((option) => option.value)).toEqual([
+      "allow_once", "auto_safe_mode", "always_allow", "deny",
+    ])
+    setup.mockInput.pressKey("a")
     await Bun.sleep(0)
     expect(commands).toEqual([
-      expect.objectContaining({
-        type: "send_message",
-        content: "/permissions mode auto-safe",
-        attachments: [],
-      }),
-      expect.objectContaining({
-        type: "approve_tool",
-        tool_call_id: "escape-hatch",
-        invocation_id: "escape-hatch",
-        decision: "allow_once",
-      }),
+      expect.objectContaining({ type: "send_message", content: "/permissions mode auto-safe", attachments: [] }),
+      expect.objectContaining({ type: "approve_tool", tool_call_id: "edit-approval", decision: "allow_once" }),
     ])
 
-    app.setState({ ...app.state, permissions: permissionState("auto-safe") })
+    // Under Auto an edit only asks when it leaves the workspace; switching
+    // modes would not help, and a diff-bound exact approval is never reused.
+    app.setState({
+      ...app.state,
+      permissions: permissionState("auto-safe"),
+      tools: { [tool.invocationId]: { ...tool, rationale: "Writes outside the workspace" } },
+    })
     await setup.renderOnce()
-    expect(app.interactionPanel.select.options.map((option) => option.value))
-      .not.toContain("auto_safe_mode")
-    expect(app.interactionPanel.select.options.map((option) => option.value))
-      .toContain("review_permission_rule")
-
-    app.setState({ ...app.state, permissions: null })
-    await setup.renderOnce()
-    expect(app.interactionPanel.select.options.map((option) => option.value))
-      .toContain("auto_safe_mode")
+    expect(app.interactionPanel.select.options.map((option) => option.value)).toEqual([
+      "allow_once", "always_allow", "deny",
+    ])
+    expect(app.interactionPanel.prompt.plainText).toBe("Writes outside the workspace")
   })
 
   test("makes unsandboxed bash approvals conspicuous and bounds multiline commands", async () => {
@@ -338,7 +370,7 @@ describe("approvals components", () => {
           },
           status: "awaiting_approval",
           capabilities: ["execute", "write_filesystem", "network"],
-          rationale: "UNSANDBOXED EXECUTION: this command bypasses native isolation",
+          rationale: "Runs outside the sandbox, without filesystem or network isolation",
           diff: null,
           diffSource: null, chunks: toolOutputBuffer([]),
           display: null, source: null,
@@ -359,14 +391,13 @@ describe("approvals components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.interactionPanel.title).toContain("UNSANDBOXED")
-    expect(app.interactionPanel.prompt.plainText).toContain("Run terminal command")
+    expect(app.interactionPanel.title).toBe(" Run this command outside the sandbox? ")
     expect(app.interactionPanel.prompt.plainText).toContain("$ docker build .")
     expect(app.interactionPanel.prompt.plainText).toContain("line 6")
     expect(app.interactionPanel.prompt.plainText).toContain("… 2 more lines")
     expect(app.interactionPanel.prompt.plainText).not.toContain("line 7")
     expect(app.interactionPanel.prompt.plainText).not.toContain("Arguments:")
-    expect(app.interactionPanel.prompt.plainText).toContain("UNSANDBOXED EXECUTION")
+    expect(app.interactionPanel.prompt.plainText).toContain("Runs outside the sandbox")
   })
 
   test("keeps approval waiting loud and surfaces a rejected approval round trip", async () => {
@@ -412,11 +443,11 @@ describe("approvals components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.banner.plainText).toContain("Waiting for approval · Terminal command")
+    // The dock and status line carry the pending decision; no duplicate banner row.
+    expect(app.banner.plainText).not.toContain("Waiting for approval")
     expect(app.statusLine.plainText).toContain("approval · Terminal command")
-    expect(app.interactionPanel.prompt.plainText).toContain("Run terminal command")
-    expect(app.interactionPanel.prompt.plainText).not.toContain("Arguments:")
-    expect(app.interactionPanel.prompt.plainText).not.toContain("execute")
+    expect(app.interactionPanel.title).toBe(" Run `cargo test`? ")
+    expect(app.interactionPanel.prompt.plainText).toBe("Run tests")
 
     app.interactionPanel.select.selectCurrent()
     await Bun.sleep(0)

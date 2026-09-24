@@ -20,10 +20,7 @@ pub(super) fn start_workspace_initialization(
     call_id: String,
     signals: mpsc::UnboundedSender<TurnSignal>,
 ) {
-    let name = match depth {
-        InitDepth::Root => "init",
-        InitDepth::Deep => "deep-init",
-    };
+    let name = "init";
     let errors = signals.clone();
     let workspace = config.workspace_root.clone();
     let session_id = config.session_id.clone();

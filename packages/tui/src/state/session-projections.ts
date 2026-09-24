@@ -1,6 +1,5 @@
-import {
-  type RottweilerState
-} from "./model"
+import type { SessionActivity, SessionDescriptor } from "../protocol"
+import type { RottweilerState, SessionActivityProjection } from "./model"
 
 export function providerQualifiedRoute(
   value: string | null | undefined,
@@ -11,14 +10,7 @@ export function providerQualifiedRoute(
   return { provider: value.slice(0, separator), model: value }
 }
 
-export function projectSession(session: {
-  readonly session_id: string
-  readonly title?: string
-  readonly workspace_name: string
-  readonly model: string
-  readonly driver_client_id?: string | null
-  readonly shell_active: boolean
-}): RottweilerState["sessions"][number] {
+export function projectSession(session: SessionDescriptor): RottweilerState["sessions"][number] {
   return {
     sessionId: session.session_id,
     ...(session.title ? { title: session.title } : {}),
@@ -26,6 +18,17 @@ export function projectSession(session: {
     model: session.model,
     driverClientId: session.driver_client_id ?? null,
     shellActive: session.shell_active,
+    activity: session.activity == null ? null : projectSessionActivity(session.activity),
+  }
+}
+
+function projectSessionActivity(activity: SessionActivity): SessionActivityProjection {
+  const cost = activity.cost_micros_usd == null ? null : Number(activity.cost_micros_usd)
+  return {
+    updatedUnixMs: Number(activity.updated_unix_ms),
+    turnCount: Number(activity.turn_count),
+    firstPrompt: activity.first_prompt ?? null,
+    costMicrosUsd: cost !== null && Number.isFinite(cost) && cost > 0 ? cost : null,
   }
 }
 

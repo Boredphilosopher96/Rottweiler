@@ -19,7 +19,8 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
                 "action": "spawn",
                 "task": format!("inspect isolated branch {index}"),
                 "agent": "explore",
-                "isolation": "worktree"
+                "isolation": "worktree",
+                "background": false
             }),
         });
     }
@@ -112,7 +113,8 @@ fn subagent_control_plane_never_requests_permission_under_strict_policy() {
                         "action": "spawn",
                         "task": "inspect without invoking tools",
                         "agent": "explore",
-                        "isolation": "shared"
+                        "isolation": "shared",
+                        "background": false
                     }),
                 },
                 ProviderEvent::Finished {
@@ -403,7 +405,7 @@ fn print_mode_slash_command_finishes_without_waiting_for_a_turn() {
     let output = base_command(&run.workspace, &run.home)
         .args([
             "-p",
-            "/status",
+            "/help",
             "--output-format",
             "stream-json",
             "--in-memory-replay-script",
@@ -427,7 +429,7 @@ fn print_mode_slash_command_finishes_without_waiting_for_a_turn() {
     let events = parse_stream(&output.stdout);
     assert!(events.iter().any(|event| matches!(
         event,
-        EngineEvent::CommandFinished { name, .. } if name == "status"
+        EngineEvent::CommandFinished { name, .. } if name == "help"
     )));
     assert!(!events.iter().any(|event| matches!(
         event,
@@ -562,12 +564,12 @@ fn supervised_tui_crosses_the_real_host_for_commands_and_tool_approval() {
     assert!(
         report["commandResult"]
             .as_str()
-            .is_some_and(|value| value.contains("**Idle**"))
+            .is_some_and(|value| value.contains("Remembered approvals: none"))
     );
     assert!(
-        report["approvalBanner"].as_str().is_some_and(|value| {
-            value.contains("Waiting for approval") && value.contains("Write file")
-        }),
+        report["approvalStatus"]
+            .as_str()
+            .is_some_and(|value| value.contains("approval · Write file")),
         "approval observation: {}",
         report["approvalObservation"]
     );
@@ -752,7 +754,7 @@ fn m3_context_cost_compaction_and_prompt_dump_use_the_headless_protocol() {
     assert!(!changed_text.contains("FIRST_USER_PROMPT_TOKEN"));
     assert!(changed_text.contains("FIRST_CONTEXT_TOKEN"));
 
-    let cost = run_m3_command(&run, &session_id, "/cost", &empty_script);
+    let cost = run_m3_command(&run, &session_id, "/usage", &empty_script);
     assert!(
         cost.status.success(),
         "cost stderr: {}",

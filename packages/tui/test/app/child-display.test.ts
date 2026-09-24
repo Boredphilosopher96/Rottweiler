@@ -1,3 +1,4 @@
+import { enterSelectedAgent } from "../fixtures/agents"
 import { expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
@@ -52,7 +53,7 @@ test("selected child restores metadata, canonical text and pending controls with
   try {
     app.setState({ ...app.state, connection: { ...app.state.connection, phase: "connected" } })
     await new Promise<void>(resolve => setImmediate(resolve))
-    app.openSubagentPicker(); app.picker.select.selectCurrent()
+    app.openSubagentPicker(); enterSelectedAgent(app)
     await waitForHistory(setup, () => setup.captureCharFrame().includes("Restored canonical child text"))
     expect(app.activeSubagentId).toBe("agent")
     expect(app.interactionPanel.visible).toBe(true)

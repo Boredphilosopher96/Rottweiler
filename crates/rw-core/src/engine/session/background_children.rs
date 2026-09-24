@@ -22,13 +22,8 @@ impl BackgroundChildren {
             lifecycle: Mutex::new(()),
         })
     }
-}
-#[async_trait]
-impl SubagentEventSink for BackgroundChildren {
-    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
-        self.progress.budget.clone()
-    }
-    async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
+
+    async fn persist(&self, event: SubagentLifecycleEvent, wake: bool) -> Result<(), ToolError> {
         // At most one durable lifecycle body waits in the actor signal queue;
         // retained-child admission bounds producers and their owned results.
         let _order = self.lifecycle.lock().await;
@@ -69,13 +64,32 @@ impl SubagentEventSink for BackgroundChildren {
                 )
             }
         };
-        persist_event(&self.signals, pending)
+        let meta = persist_event(&self.signals, pending)
             .await
             .map_err(failure)?;
         if let Some(child) = finished {
             self.progress.finish(&child);
+            if wake {
+                // The actor has recorded this result; it starts a turn only if the
+                // result is still undelivered once the parent is idle.
+                let _ = self.signals.send(TurnSignal::WakeForChildResult {
+                    source: meta.sequence_id,
+                });
+            }
         }
         Ok(())
+    }
+}
+#[async_trait]
+impl SubagentEventSink for BackgroundChildren {
+    fn progress_budget(&self) -> rw_tools::ChildProgressBudget {
+        self.progress.budget.clone()
+    }
+    async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
+        self.persist(event, false).await
+    }
+    async fn background_finished(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
+        self.persist(event, true).await
     }
     async fn progress(&self, event: SubagentProgressEvent) -> Result<(), ToolError> {
         self.progress
@@ -92,7 +106,10 @@ fn failure(error: impl std::fmt::Display) -> ToolError {
 }
 
 impl super::SessionHandle {
-    pub(in crate::engine) fn background_subagent_event_sink(&self) -> Arc<dyn SubagentEventSink> {
+    /// Session-owned lifecycle route for children whose results reach this
+    /// parent outside a waiting tool call; a background completion wakes it.
+    #[must_use]
+    pub fn background_subagent_event_sink(&self) -> Arc<dyn SubagentEventSink> {
         Arc::clone(&self.background_children)
     }
 }

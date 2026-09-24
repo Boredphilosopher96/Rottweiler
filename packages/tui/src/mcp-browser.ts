@@ -14,6 +14,7 @@ export type McpBrowserAction =
   | { readonly kind: "addHttp" }
   | { readonly kind: "addStdio" }
   | { readonly kind: "retry" }
+  | { readonly kind: "panels" }
 
 export type McpCatalog =
   | { readonly kind: "loading" }
@@ -33,6 +34,8 @@ interface McpStatePresentation {
 
 interface McpBrowserModelInput {
   readonly catalog: McpCatalog
+  /** Offer approved extension panels alongside server management. */
+  readonly panels?: boolean
   readonly review: RottweilerState["mcpApprovalReview"]
   readonly query: string
   readonly selectedId: string | null
@@ -42,11 +45,12 @@ export function createMcpBrowserModel(
   input: McpBrowserModelInput,
 ): ListDetailPresentation<McpBrowserAction> {
   if (input.catalog.kind === "loading") {
+    const rows = input.panels === true ? [panelsRow()] : []
     return {
       title: "MCP   0 servers · 0 ready · 0 tools   /mcp",
       query: "",
-      rows: [],
-      selectedId: null,
+      rows,
+      selectedId: rows[0]?.id ?? null,
       status: "Loading MCP connections",
       emptyCopy: "Loading MCP connections",
       notice: null,
@@ -62,6 +66,7 @@ export function createMcpBrowserModel(
     addHttpRow(),
     addStdioRow(),
     ...servers.map((server) => serverRow(server, input.review)),
+    ...(input.panels === true ? [panelsRow()] : []),
   ]
   const rows = candidates.filter((row) => matchesQuery(row, query))
   const selectedId = retainedSelection(rows, input.selectedId)
@@ -77,7 +82,7 @@ export function createMcpBrowserModel(
     query,
     rows,
     selectedId,
-    status: `${actionHint(selected?.action)}${input.catalog.kind === "error" ? " · Ctrl-R retry" : ""} · Esc close`,
+    status: `${actionHint(selected?.action)}${input.catalog.kind === "error" ? " · select Retry to reload" : ""} · Esc close`,
     emptyCopy: query.length === 0 ? "No MCP servers configured" : "No matching MCP connections",
     notice,
   }
@@ -190,6 +195,21 @@ function addStdioRow(): ListDetailItemRow<McpBrowserAction> {
   }
 }
 
+function panelsRow(): ListDetailItemRow<McpBrowserAction> {
+  return {
+    kind: "item",
+    id: "mcp.panels",
+    label: "Extension panels…",
+    matchSpans: [],
+    detail: {
+      title: "Extension panels",
+      meta: "Approved extension views",
+      description: "Open approved extension views and actions.",
+    },
+    action: { kind: "panels" },
+  }
+}
+
 function retryRow(): ListDetailItemRow<McpBrowserAction> {
   return {
     kind: "item",
@@ -224,6 +244,7 @@ function actionHint(action: McpBrowserAction | undefined): string {
     case "addHttp":
     case "addStdio": return "Enter add"
     case "retry": return "Enter retry"
+    case "panels": return "Enter open"
     default: return "No selection"
   }
 }

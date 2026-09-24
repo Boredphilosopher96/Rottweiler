@@ -1,12 +1,8 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`audit journey setup through resume at 110x32: approval 1`] = `
-"Waiting for approval · Edit file                                                                              
-                                                                                                              
-● rottweiler  openai/coding                                                                                   
-  ⌄ edit  src/main.rs                                                                       ? approval needed 
-  │ Why · Apply the reviewed correction                                                                       
-  │ Awaiting approval…                                                                                        
+"                                                                                                              
+● Edit src/main.rs                                                                        ? awaiting approval 
                                                                                                               
                                                                                                               
                                                                                                               
@@ -16,34 +12,38 @@ exports[`audit journey setup through resume at 110x32: approval 1`] = `
                                                                                                               
                                                                                                               
                                                                                                               
-╭─ Permission · y once / a session / n deny · Tab to message ────────────────────────────────────────────────╮
-│ Edit file src/main.rs                                                                                      │
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+╭─ Edit src/main.rs? ────────────────────────────────────────────────────────────────────────────────────────╮
 │ Apply the reviewed correction                                                                              │
-│  ▶ Allow once                                                                                              │
-│    Run only this invocation                                                                                │
-│    Allow session                                                                                           │
-│    Remember for this session                                                                               │
-│    Allow project                                                                                           │
-│    Remember this exact invocation in this project                                                          │
-│    Review a permission rule…                                                                               │
-│    Review an explicit session pattern                                                                      │
+│  ▶ y  Yes                                                                                                  │
+│    p  Always allow in this project…                                                                        │
+│    n  No, and tell the agent what to do differently                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                                                         │ 
- │ Tab decision/message · Enter choose · Ctrl+P commands                                                    │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                                                     │ 
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   coding  approval · Edit file    ctx —  $—  —                                                      
+  EXECUTE   coding  ctx —  approval · Edit file                                                               
 "
 `;
 
 exports[`audit journey setup through resume at 110x32: interrupted with child completion and compaction 1`] = `
 "                                                                                                              
-● rottweiler  interrupted · USD 0.0010                                                                        
   The edit is ready for review.                                                                               
                                                                                                               
-  ⌄ edit  src/main.rs                                                                                       ✓ 
-  │ Updated src/main.rs                                                                                       
-  ▸ bash  cargo test                                                                              ✓ Completed 
+● Edit src/main.rs                                                                                          ✓ 
+● Bash cargo test                                                                                           ✓ 
+                                                                                                              
+Interrupted                                                                                                   
                                                                                                               
 Context compacted · 12000 tokens reclaimed                                                                    
                                                                                                               
@@ -62,52 +62,52 @@ Context compacted · 12000 tokens reclaimed
                                                                                                               
                                                                                                               
                                                                                                               
-│ ✓ Review the tests · starting · unpriced                                                                    
-│ ╰ Ctrl+G inspect · click a row to open                                                                      
+│ ✓ agent · Review the tests · completed                                                                      
+│ ╰ Ctrl+G agents · hidden after your next message                                                            
  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                                                         │ 
- │ Ctrl+P commands   Alt+M model   / @ !   Ctrl+E editor    ⏎  send                                         │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model · Ctrl+E editor                            │ 
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   coding    ctx —  $—  —                                                                            
+  EXECUTE   coding  ctx —                                                                                     
 "
 `;
 
 exports[`audit journey setup through resume at 80x24: approval 1`] = `
-"Waiting for approval · Edit file                                                
+"                                                                                
+● Edit src/main.rs                                          ? awaiting approval 
                                                                                 
-● rottweiler  openai/coding                                                     
-  ⌄ edit  src/main.rs                                         ? approval needed 
-  │ Why · Apply the reviewed correction                                         
-  │ Awaiting approval…                                                          
                                                                                 
-╭─ Permission · y once / a session / n deny · Tab to message ──────────────────╮
-│ Edit file src/main.rs                                                        │
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+╭─ Edit src/main.rs? ──────────────────────────────────────────────────────────╮
 │ Apply the reviewed correction                                                │
-│  ▶ Allow once                                                                │
-│    Run only this invocation                                                  │
-│    Allow session                                                             │
-│    Remember for this session                                                 │
-│    Allow project                                                             │
-│    Remember this exact invocation in this project                            │
-│    Review a permission rule…                                                 │
-│    Review an explicit session pattern                                        │
+│  ▶ y  Yes                                                                    │
+│    p  Always allow in this project…                                          │
+│    n  No, and tell the agent what to do differently                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  ╭────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                           │ 
- │ Tab decision/message · Enter choose · Ctrl+P commands                      │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                       │ 
  ╰────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   coding  approval · Edit file    ctx —  $—  —                        
+  EXECUTE   coding  ctx —  approval · Edit file                                 
 "
 `;
 
 exports[`audit journey setup through resume at 80x24: interrupted with child completion and compaction 1`] = `
 "                                                                                
-● rottweiler  interrupted · USD 0.0010                                          
   The edit is ready for review.                                                 
                                                                                 
-  ⌄ edit  src/main.rs                                                         ✓ 
-  │ Updated src/main.rs                                                         
-  ▸ bash  cargo test                                                ✓ Completed 
+● Edit src/main.rs                                                            ✓ 
+● Bash cargo test                                                             ✓ 
+                                                                                
+Interrupted                                                                     
                                                                                 
 Context compacted · 12000 tokens reclaimed                                      
                                                                                 
@@ -118,12 +118,12 @@ Context compacted · 12000 tokens reclaimed
                                                                                 
                                                                                 
                                                                                 
-│ ✓ Review the tests · starting · unpriced                                      
-│ ╰ Ctrl+G inspect · click a row to open                                        
+│ ✓ agent · Review the tests · completed                                        
+│ ╰ Ctrl+G agents · hidden after your next message                              
  ╭────────────────────────────────────────────────────────────────────────────╮ 
  │ Describe a task…                                                           │ 
- │ Ctrl+P commands   Alt+M model   / @ !   Ctrl+E editor    ⏎  send           │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model              │ 
  ╰────────────────────────────────────────────────────────────────────────────╯ 
-  EXECUTE   coding    ctx —  $—  —                                              
+  EXECUTE   coding  ctx —                                                       
 "
 `;

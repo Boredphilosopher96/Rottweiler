@@ -1,15 +1,15 @@
 use super::{
     Answer, BudgetLevel, BudgetScope, BudgetUnit, ClientId, CommandAckMeta, CommandDescriptor,
     CommandOutcome, CompactionReason, ContextItemId, ContextSnapshot, Cost, CostSnapshot,
-    EngineError, EventMeta, McpApprovalReview, McpServerDescriptor, ModeDescriptor, ModeId,
-    ModelAlias, ModelAliasDescriptor, ModelContextTransfer, ModelDescriptor,
-    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, ProviderAuthAttemptId,
-    ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, Question, QuestionId,
-    ReviewFileDecision, RuntimeServiceDescriptor, SequenceId, SessionDescriptor, SessionId,
-    SessionReview, ShellId, StoredAttachment, SubagentDescriptor, SubagentId, SubagentResult,
-    ToolCapability, ToolOutputStream, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
+    EngineError, EventMeta, ExtensionInventoryEntry, McpApprovalReview, McpServerDescriptor,
+    ModeDescriptor, ModeId, ModelAlias, ModelAliasDescriptor, ModelContextTransfer,
+    ModelDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump,
+    ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, Question,
+    QuestionId, ReviewFileDecision, RuntimeServiceDescriptor, SequenceId, SessionDescriptor,
+    SessionId, SessionReview, ShellId, StoredAttachment, SubagentDescriptor, SubagentId,
+    SubagentResult, ToolCapability, ToolOutputStream, TurnId, TurnStatus, UnifiedDiff,
+    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
 };
 use crate::{ProviderCallActuals, ProviderCallIdentity, ToolCallId, ToolInvocationId, ToolOutput};
 use rw_memory_derive::PrepareAllocation as Allocation;
@@ -222,6 +222,15 @@ pub enum EngineEvent {
         meta: CommandAckMeta,
         session_id: SessionId,
         settings: Vec<UserSettingDescriptor>,
+    },
+    /// Declarative extension inventory for one session.
+    ExtensionsListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        #[schemars(length(max = 512))]
+        entries: Vec<ExtensionInventoryEntry>,
+        /// More entries existed than the inventory bound.
+        truncated: bool,
     },
     McpServersListed {
         meta: CommandAckMeta,
@@ -491,7 +500,9 @@ pub enum EngineEvent {
         name: String,
         args: Value,
         capabilities: Vec<ToolCapability>,
-        rationale: String,
+        /// Short user-facing reason for the prompt; `None` when the action
+        /// itself is the explanation.
+        rationale: Option<String>,
         diff: Option<UnifiedDiff>,
     },
     /// Redacted mutation preview retained independently of whether the active
@@ -558,10 +569,6 @@ pub enum EngineEvent {
     ContextUsageUpdated {
         meta: EventMeta,
         turn_id: TurnId,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        #[ts(as = "Option<_>", optional)]
-        #[schemars(length(max = 8))]
-        completion_sources: Vec<SequenceId>,
         #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]
@@ -831,6 +838,7 @@ impl EngineEvent {
             | Self::ModesListed { meta, .. }
             | Self::ModelsListed { meta, .. }
             | Self::SettingsListed { meta, .. }
+            | Self::ExtensionsListed { meta, .. }
             | Self::McpServersListed { meta, .. }
             | Self::RuntimeServicesListed { meta, .. }
             | Self::McpServerApprovalReviewed { meta, .. }
@@ -962,6 +970,7 @@ impl EngineEvent {
             | Self::ModesListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
+            | Self::ExtensionsListed { .. }
             | Self::McpServersListed { .. }
             | Self::RuntimeServicesListed { .. }
             | Self::McpServerApprovalReviewed { .. }
@@ -1079,6 +1088,7 @@ impl EngineEvent {
             | Self::ModesListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
+            | Self::ExtensionsListed { .. }
             | Self::McpServersListed { .. }
             | Self::RuntimeServicesListed { .. }
             | Self::McpServerApprovalReviewed { .. }

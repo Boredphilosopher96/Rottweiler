@@ -34,7 +34,7 @@ pub(super) const SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions(
     id TEXT NOT NULL UNIQUE CHECK(length(CAST(id AS BLOB))<=128),
     title TEXT NOT NULL CHECK(length(CAST(title AS BLOB))<=4096),
     updated_unix_ms INTEGER NOT NULL,
-    cost_micros INTEGER NOT NULL,
+    first_prompt TEXT CHECK(first_prompt IS NULL OR length(CAST(first_prompt AS BLOB))<=4096),
     turn_count INTEGER NOT NULL,
     explicit_title INTEGER NOT NULL CHECK(explicit_title IN (0,1)),
     search_complete INTEGER NOT NULL CHECK(search_complete IN (0,1)),

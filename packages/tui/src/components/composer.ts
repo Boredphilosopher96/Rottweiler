@@ -25,11 +25,20 @@ import { ImageAttachmentRenderable } from "./image"
 
 const COMPOSER_PLACEHOLDER = "Describe a task…"
 
+/** Keycaps compiled from the active keybindings; null when an action is unbound. */
+export interface ComposerHintKeys {
+  readonly palette: string | null
+  readonly model: string | null
+  readonly editor: string | null
+  readonly pasteImage: string | null
+  /** Detaches the child a foreground spawn or wait is blocked on. */
+  readonly background?: string | null
+}
+
 export interface ComposerOptions {
   readonly editor: EditorAdapter
   readonly imagePaste: ImagePasteAdapter
-  readonly pasteImageKeycap?: string
-  readonly externalEditorKeycap?: string
+  readonly hintKeys?: ComposerHintKeys
   readonly onSubmit: (
     content: string,
     attachments: readonly Attachment[],
@@ -71,6 +80,7 @@ export class ComposerRenderable extends BoxRenderable {
   #imagePasteAvailable = false
   #inputMode: "normal" | "insert" | null = null
   #activity: "idle" | "running" | "interaction" = "idle"
+  #backgroundAvailable = false
   #dockHeight = 4
   #history: string[] = []
   #historyIndex: number | null = null
@@ -160,7 +170,7 @@ export class ComposerRenderable extends BoxRenderable {
     })
     this.hintText = new TextRenderable(ctx, {
       id: "composer-hints",
-      content: composerHints(theme, options, false, null),
+      content: composerHints(theme, options, false, null, "idle", ctx.width - 6),
       fg: theme.textMuted,
       height: 1,
       flexShrink: 0,
@@ -278,25 +288,26 @@ export class ComposerRenderable extends BoxRenderable {
   setActivityHints(activity: "idle" | "running" | "interaction"): void {
     if (this.#activity === activity) return
     this.#activity = activity
-    this.hintText.content = composerHints(this.#theme, this.#options, this.#imagePasteAvailable, this.#inputMode, activity)
+    this.#refreshHints()
+  }
+
+  /** Shows the background hint only while a foreground child blocks the parent. */
+  setBackgroundAvailable(available: boolean): void {
+    if (this.#backgroundAvailable === available) return
+    this.#backgroundAvailable = available
+    this.#refreshHints()
   }
 
   setImagePasteAvailable(available: boolean): void {
     if (this.#imagePasteAvailable === available) return
     this.#imagePasteAvailable = available
-    this.hintText.content = composerHints(this.#theme, this.#options, available, this.#inputMode, this.#activity)
+    this.#refreshHints()
   }
 
   setKeybindingMode(mode: "normal" | "insert" | null): void {
     if (this.#inputMode === mode) return
     this.#inputMode = mode
-    this.hintText.content = composerHints(
-      this.#theme,
-      this.#options,
-      this.#imagePasteAvailable,
-      mode,
-      this.#activity,
-    )
+    this.#refreshHints()
   }
 
   currentFileMention(): ComposerFileMention | null {
@@ -556,7 +567,15 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   resizeForTerminal(_height: number): void {
+    this.#refreshHints()
     this.#refreshHeight()
+  }
+
+  #refreshHints(): void {
+    this.hintText.content = composerHints(
+      this.#theme, this.#options, this.#imagePasteAvailable, this.#inputMode, this.#activity, this.ctx.width - 6,
+      this.#backgroundAvailable,
+    )
   }
 
   #contentChanged(): void {
@@ -665,26 +684,41 @@ export class ComposerRenderable extends BoxRenderable {
 
 function composerHints(
   theme: RottweilerTheme,
-  options: Pick<ComposerOptions, "pasteImageKeycap" | "externalEditorKeycap">,
+  options: Pick<ComposerOptions, "hintKeys">,
   imagePasteAvailable: boolean,
   inputMode: "normal" | "insert" | null,
   activity: "idle" | "running" | "interaction" = "idle",
+  columns = Number.POSITIVE_INFINITY,
+  backgroundAvailable = false,
 ): ReturnType<typeof t> {
-  if (activity !== "idle") return t`${inputMode === null ? "" : `${inputMode.toUpperCase()}  `}${fg(theme.textMuted)(activity === "interaction"
-    ? "Tab decision/message · Enter choose · Ctrl+P commands"
-    : "Enter queue message · Ctrl+C stop · Esc Esc stop · Ctrl+P commands")}`
-  const editor = options.externalEditorKeycap === undefined
-    ? ""
-    : `   ${options.externalEditorKeycap} editor`
-  const image = !imagePasteAvailable || options.pasteImageKeycap === undefined
-    ? ""
-    : `   ${options.pasteImageKeycap} image`
+  const keys = options.hintKeys
+  const palette = keys?.palette == null ? [] : [`${keys.palette} palette`]
+  const background = backgroundAvailable && keys?.background != null ? [`${keys.background} background`] : []
+  const parts = activity === "running"
+    ? [...background, "Esc Esc interrupt", "type to queue", ...palette]
+    : activity === "interaction"
+      ? ["Tab decision/message", "Enter choose", ...palette]
+      : [
+          "/ commands", "@ files", "! shell", ...palette,
+          ...(keys?.model == null ? [] : [`${keys.model} model`]),
+          ...(keys?.editor == null ? [] : [`${keys.editor} editor`]),
+          ...(!imagePasteAvailable || keys?.pasteImage == null ? [] : [`${keys.pasteImage} image`]),
+        ]
   const mode = inputMode === null
     ? ""
     : bg(inputMode === "normal" ? theme.success : theme.primary)(
         fg(theme.background)(` ${inputMode.toUpperCase()} `),
       )
-  return t`${mode}${inputMode === null ? "" : fg(theme.textMuted)("  ")}${fg(theme.textMuted)("Ctrl+P commands   Alt+M model   / @ !")}${editor === "" ? "" : fg(theme.textMuted)(editor)}${image === "" ? "" : fg(theme.textMuted)(image)}${fg(theme.textMuted)("   ")}${bg(theme.backgroundElement)(fg(theme.borderActive)(" ⏎ "))}${fg(theme.textMuted)(" send")}`
+  // Drop whole trailing hints rather than truncating one mid-word.
+  let available = columns - (inputMode === null ? 0 : inputMode.length + 4)
+  const shown: string[] = []
+  for (const part of parts) {
+    const cost = part.length + (shown.length === 0 ? 0 : 3)
+    if (cost > available) break
+    shown.push(part)
+    available -= cost
+  }
+  return t`${mode}${inputMode === null ? "" : fg(theme.textMuted)("  ")}${fg(theme.textMuted)(shown.join(" · "))}`
 }
 
 function estimateWrappedRows(value: string, columns: number): number {

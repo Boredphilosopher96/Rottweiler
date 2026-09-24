@@ -654,7 +654,7 @@ async fn lazy_unavailable_runtime_rejects_first_prompt_before_history() {
         .await
         .expect("admission reply");
     assert!(matches!(reply, rw_core::CommandOutcome::Rejected { error }
-        if error.code == "no_model_selected" && error.message.contains("/models")));
+        if error.code == "no_model_selected" && error.message.contains("/model ")));
     assert_eq!(
         actor.dump_prompt(None).await.expect("history").turns,
         before.turns

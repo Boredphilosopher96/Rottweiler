@@ -238,7 +238,7 @@ async fn session_lifecycle_hooks_run_on_start_and_actor_shutdown() {
     ))
     .await
     .expect("actor");
-    handle.send_message("/status").await.expect("status");
+    handle.send_message("/help").await.expect("help");
     assert_eq!(
         calls.lock().expect("lifecycle calls").as_slice(),
         &["start"]

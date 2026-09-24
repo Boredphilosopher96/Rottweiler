@@ -94,7 +94,7 @@ impl FolderTrustController for RuntimeFolderTrustController {
                     }
                     let token = trust_confirmation_token(&assessments);
                     Ok(format!(
-                        "{}\nreview the exact inventory and confirm with `/trust grant {token}`\n",
+                        "{}\nreview the exact inventory and confirm with `/permissions trust grant {token}`\n",
                         render_trust_assessments(&assessments)
                     ))
                 }
@@ -111,7 +111,7 @@ impl FolderTrustController for RuntimeFolderTrustController {
                     let expected = trust_confirmation_token(&assessments);
                     if confirmation != expected {
                         return Err(AgentLoopError::InvalidConfiguration(
-                            "folder trust confirmation is stale or does not match the current root inventories; run `/trust grant` again"
+                            "folder trust confirmation is stale or does not match the current root inventories; run `/permissions trust grant` again"
                                 .to_owned(),
                         ));
                     }

@@ -52,7 +52,7 @@ describe("state catalog", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       session_id: "session",
-      commands: [{ source: "builtin", name: "fixture", description: "Fixture", usage: "" }],
+      commands: [{ source: "builtin", scope: null, name: "fixture", description: "Fixture", usage: "" }],
       truncated: true,
     })
     expect(state.commandsTruncated).toBeTrue()
@@ -148,6 +148,22 @@ describe("state catalog", () => {
       ],
     })
     expect(state.model).toBe("active-model")
+    expect(state.sessions.map(session => session.activity)).toEqual([null, null])
+  })
+
+  test("projects recorded session activity from decimal wire values", () => {
+    const state = reduce(createInitialState(), {
+      type: "sessions_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "client", request_id: "sessions", emitted_at: "2026-01-01T00:00:00Z" },
+      sessions: [{
+        title: "Fixture", session_id: "recorded", workspace_name: "Rottweiler", model: "fast",
+        driver_client_id: null, shell_active: false,
+        activity: { updated_unix_ms: "1767225600000", turn_count: "4", first_prompt: "Plan the refactor", cost_micros_usd: "0" },
+      }],
+    })
+    expect(state.sessions[0]?.activity).toEqual({
+      updatedUnixMs: 1_767_225_600_000, turnCount: 4, firstPrompt: "Plan the refactor", costMicrosUsd: null,
+    })
   })
 
   test("model catalog refresh does not overwrite a newer durable model event", () => {

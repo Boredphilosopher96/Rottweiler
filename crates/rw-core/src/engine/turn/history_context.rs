@@ -53,7 +53,6 @@ pub(in crate::engine) async fn assemble_view(
 ) -> Result<HistoryRead<CurrentContext>, AgentLoopError> {
     let through = view.through();
     let page = read_view(&view).await?;
-    let notices = view.completion_notices().await?;
     let reserved = view.reserve_working_set()?;
     tasks
         .spawn_blocking(
@@ -74,14 +73,14 @@ pub(in crate::engine) async fn assemble_view(
                     .flatten()
                     .cloned()
                     .collect::<Vec<_>>();
-                let assembled = super::context::assemble_session_context_with_notices(
+                let assembled = super::context::assemble_session_context(
                     &config,
                     &working,
                     &page.turns,
                     &page.sources,
                     &queued,
                     &surgery,
-                    (&page.pruned_tool_outputs, &notices),
+                    &page.pruned_tool_outputs,
                 )?;
                 Ok(page.retain(working).map(|page| CurrentContext {
                     through,
