@@ -685,6 +685,7 @@ needs = ["impl", "tests"]
                 )
                 .await?;
                 Ok(SessionActorConfig {
+                    model_preferences: None,
                     ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
                     ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
                     budget_session_id: launch.handle.session_id.clone(),
@@ -821,6 +822,7 @@ async fn production_actor_dispatches_command_node_through_typed_registry() {
             )
             .await?;
             Ok(SessionActorConfig {
+                model_preferences: None,
                 ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
                 ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
                 budget_session_id: launch.handle.session_id.clone(),

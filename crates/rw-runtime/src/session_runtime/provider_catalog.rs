@@ -27,7 +27,8 @@ pub(crate) async fn load_effective_pricing_table() -> Result<PricingTable> {
             .await
             .map_err(|error| miette!("cached model metadata is invalid: {error}"))
     } else {
-        Ok(PricingTable::default())
+        PricingTable::bundled()
+            .map_err(|error| miette!("bundled model metadata is invalid: {error}"))
     }
 }
 
@@ -41,6 +42,9 @@ pub async fn discover_model_catalog(refresh: bool) -> Result<ModelCatalogSnapsho
     let effective = loader.load().into_diagnostic()?;
     for warning in effective.warnings() {
         tracing::warn!("{}", warning.message());
+    }
+    if refresh {
+        refresh_stale_metadata().await;
     }
     let pricing = load_effective_pricing_table().await?;
     let cache_path = credentials_path
@@ -75,6 +79,60 @@ pub(super) struct ReloadingHostedCatalogSource {
     pub(super) base_config: Config,
     pub(super) user_config_path: PathBuf,
     pub(super) project_config_path: PathBuf,
+}
+
+// Refresh only on model discovery, never on the startup readiness path. Requests
+// share a process-wide retry interval and retain an offline fallback on failure.
+async fn refresh_stale_metadata() {
+    use std::time::{Duration, Instant};
+    static LAST_ATTEMPT: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+    let Ok(mut last) = LAST_ATTEMPT.try_lock() else {
+        return;
+    };
+    if last.is_some_and(|instant| instant.elapsed() < Duration::from_hours(1)) {
+        return;
+    }
+    let Ok(path) = default_models_path() else {
+        return;
+    };
+    let fresh = rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < Duration::from_hours(24))
+    })
+    .await
+    .unwrap_or(false);
+    if fresh {
+        return;
+    }
+    *last = Some(Instant::now());
+    let _ = rw_core::refresh_model_catalog_with_download_timeout(
+        rw_providers::DEFAULT_MODELS_DEV_URL,
+        None,
+        Some(Duration::from_secs(3)),
+    )
+    .await;
+}
+
+impl ReloadingHostedCatalogSource {
+    async fn refreshed_factory(&self) -> Result<ProviderFactory, ModelCatalogError> {
+        // Injected roots must never discover or replace a different user's metadata.
+        // Their supplied factory remains the fallback until a scoped file exists.
+        let scoped_path = self.user_config_path.with_file_name("models.toml");
+        if default_models_path().is_ok_and(|path| path == scoped_path) {
+            refresh_stale_metadata().await;
+        }
+        let factory = self.factory.clone();
+        let user_config_path = self.user_config_path.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            super::provider_activation::refreshed_activation_factory(&factory, &user_config_path)
+        })
+        .await
+        .map_err(|_| ModelCatalogError("model metadata reload failed".into()))?
+        .map_err(|_| ModelCatalogError("model metadata is unavailable".into()))
+    }
 }
 
 /// Persists both full and provider-scoped live catalogs so authenticated model
@@ -142,7 +200,8 @@ impl ModelCatalogSource for ReloadingHostedCatalogSource {
         .map_err(|_| {
             ModelCatalogError("effective provider configuration is unavailable".to_owned())
         })?;
-        self.factory
+        self.refreshed_factory()
+            .await?
             .discover_model_catalog(&config)
             .await
             .map_err(|error| ModelCatalogError(error.to_string()))
@@ -165,7 +224,8 @@ impl ModelCatalogSource for ReloadingHostedCatalogSource {
         .map_err(|_| {
             ModelCatalogError("effective provider configuration is unavailable".to_owned())
         })?;
-        self.factory
+        self.refreshed_factory()
+            .await?
             .discover_provider_model_catalog(&config, provider)
             .await
             .map_err(|error| ModelCatalogError(error.to_string()))
@@ -180,4 +240,81 @@ pub(super) fn merge_reloaded_provider_config(mut base: Config, loaded: Config) -
         base.models = loaded.models;
     }
     base
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use rw_core::ModelDriver;
+    use rw_types::config::ProviderConfig;
+
+    fn pricing(context: u64) -> PricingTable {
+        PricingTable {
+            source_url: "https://example.test/models".into(),
+            snapshot_date: "2026-09-13".into(),
+            revision: context.to_string(),
+            models: std::collections::BTreeMap::from([(
+                "local/test".into(),
+                rw_providers::ModelPricing {
+                    max_context_tokens: Some(context),
+                    supports_tools: true,
+                    ..Default::default()
+                },
+            )]),
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_metadata_refresh_updates_only_the_new_runtime_generation()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let user_config_path = root.path().join("config.toml");
+        let factory = ProviderFactory::system(root.path().join("credentials.toml"), pricing(1000));
+        let mut config = Config::default();
+        config.providers.insert(
+            "local".into(),
+            ProviderConfig {
+                kind: "openai_compatible".into(),
+                base_url: Some("http://127.0.0.1:12345/v1".into()),
+                ..Default::default()
+            },
+        );
+        config.models.default = "local/test".into();
+        config.models.aliases =
+            std::collections::BTreeMap::from([("local/test".into(), vec!["local/test".into()])]);
+        config.models.thinking.clear();
+        let source = ReloadingHostedCatalogSource {
+            factory: factory.clone(),
+            base_config: config.clone(),
+            user_config_path: user_config_path.clone(),
+            project_config_path: root.path().join("project.toml"),
+        };
+        let old = source.refreshed_factory().await?.build(&config)?;
+        assert_eq!(
+            old.context_metadata("local/test").max_context_tokens,
+            Some(1000)
+        );
+        std::fs::write(root.path().join("models.toml"), pricing(2000).to_toml()?)?;
+        let discovered = source.refreshed_factory().await?.build(&config)?;
+        let activated = super::super::provider_activation::refreshed_activation_factory(
+            &factory,
+            &user_config_path,
+        )?
+        .build(&config)?;
+        assert_eq!(
+            discovered.context_metadata("local/test").max_context_tokens,
+            Some(2000)
+        );
+        assert_eq!(
+            activated.context_metadata("local/test").max_context_tokens,
+            Some(2000)
+        );
+        assert_eq!(
+            old.context_metadata("local/test").max_context_tokens,
+            Some(1000)
+        );
+        std::fs::write(root.path().join("models.toml"), "invalid metadata")?;
+        assert!(source.refreshed_factory().await.is_err());
+        Ok(())
+    }
 }

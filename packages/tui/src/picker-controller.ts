@@ -1,3 +1,4 @@
+import type { TextPromptOptions } from "./components/picker"
 import type { FuzzyPickerRenderable, PickerItem } from "./components"
 import { ClientAllocationError, type ClientAllocationOwner, type ClientAllocationLease } from "./client-allocation"
 import { retainedJsonBytes } from "./retained-json"
@@ -7,20 +8,20 @@ interface PickerPayload { allocation: ClientAllocationLease; references: number 
 function releasePayload(value: PickerPayload): void { if (--value.references === 0) value.allocation.release() }
 
 export type PickerKind =
-  | "palette" | "keyboardHelp" | "commands" | "files" | "attachments" | "mcp"
+  | "palette" | "keyboardHelp" | "files" | "attachments" | "mcp"
   | "mcpActions" | "mcpInput" | "mcpRemoveConfirm"
   | "modes" | "models" | "providers" | "providerAuth" | "providerApiKey"
-  | "providerRecovery"
+  | "providerRecovery" | "providerSetup"
   | "permissions" | "permissionMode" | "permissionYoloConfirm" | "trust"
   | "permissionInput"
   | "queuedMessages"
   | "exportFormat" | "exportPath" | "exportOverwrite"
   | "workspaceRoots"
   | "budgets" | "budgetPresets" | "budgetInput"
-  | "sessions" | "sessionActions" | "sessionRename" | "settings" | "settingChoices"
+  | "sessions" | "sessionRename" | "settings" | "settingChoices"
   | "agents" | "agentActions"
   | "timeline" | "timelineActions"
-  | "themes" | "uiPanels"
+  | "themes" | "uiPanels" | "context" | "contextActions" | "cost" | "errors"
 
 export type PickerCloseReason = "dismiss" | "scope_change"
 
@@ -167,6 +168,11 @@ export class PickerController {
     if (failed !== null) releasePayload(failed)
   }
 
+  openTextPrompt(options: TextPromptOptions): void {
+    this.#clearPayload(() => this.#options.picker().openTextPrompt(options))
+    this.position(false)
+  }
+
   showLoading(title: string, message: string): void {
     this.#clearPayload(() => this.#options.picker().showLoading(title, message, this.#anchored))
     this.position(this.#anchored)
@@ -202,14 +208,14 @@ export class PickerController {
       picker.left = 0
       picker.width = "100%"
     } else {
-      const top = Math.min(2, Math.max(0, terminalHeight - 2))
+      const top = 0
       picker.constrainModalHeight(
-        Math.max(1, terminalHeight - top - this.#options.statusHeight()),
+        Math.max(1, terminalHeight - this.#options.composerDockHeight() - this.#options.statusHeight()),
       )
       picker.bottom = undefined
       picker.top = top
-      picker.left = "15%"
-      picker.width = "70%"
+      picker.left = 0
+      picker.width = "100%"
     }
   }
 }

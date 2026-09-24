@@ -1234,3 +1234,171 @@ async fn hook_ask_requires_fresh_approval_for_allowed_and_remembered_requests() 
     );
     assert_eq!(approver.0.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn interactive_auto_asks_for_unknown_actions_but_headless_auto_stays_closed() {
+    let gate = PermissionGate::new(PermissionDecision::Ask);
+    gate.set_runtime_mode(Some(PermissionModeDescriptor::AutoSafe))
+        .expect("interactive auto");
+    assert_eq!(gate.snapshot().default, PermissionDecision::Ask);
+    let approve = Decision(ApprovalDecision::AllowOnce);
+    let reject = CountingDeny(AtomicUsize::new(0));
+    for sandbox in ["sandboxed", "unsandboxed"] {
+        let mut command = request(
+            "cargo test",
+            vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+        );
+        command.arguments["sandbox"] = json!(sandbox);
+        assert_eq!(
+            authorize_with_behavior(&gate, command.clone(), ToolBehavior::Shell, &approve).await,
+            PermissionOutcome::Allowed,
+            "interactive Auto must allow the user to approve {sandbox} commands"
+        );
+        assert_eq!(
+            authorize_with_behavior(&gate, command.clone(), ToolBehavior::Shell, &reject).await,
+            PermissionOutcome::Denied
+        );
+        let headless = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe);
+        assert_eq!(
+            authorize_with_behavior(&headless, command, ToolBehavior::Shell, &approve).await,
+            PermissionOutcome::Denied,
+            "an unattended Auto policy must not delegate risky actions to approval"
+        );
+    }
+    assert_eq!(reject.0.load(Ordering::SeqCst), 2);
+    gate.add_session_rule(PermissionRule {
+        pattern: "bash(cargo test*)".to_owned(),
+        action: PermissionDecision::Deny,
+    })
+    .expect("explicit deny");
+    assert_eq!(
+        authorize_with_behavior(
+            &gate,
+            request("cargo test", vec![ToolCapability::Execute]),
+            ToolBehavior::Shell,
+            &approve,
+        )
+        .await,
+        PermissionOutcome::Denied,
+        "Auto must preserve explicit denials"
+    );
+}
+
+#[tokio::test]
+async fn interactive_auto_allows_workspace_edits_but_preserves_denied_paths() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate =
+        PermissionGate::new(PermissionDecision::Ask).with_workspace_roots([workspace.path()]);
+    gate.set_runtime_mode(Some(PermissionModeDescriptor::AutoSafe))
+        .expect("interactive auto");
+    gate.add_session_rule(PermissionRule {
+        pattern: "write(denied.txt)".to_owned(),
+        action: PermissionDecision::Deny,
+    })
+    .expect("deny rule");
+    let reject = CountingDeny(AtomicUsize::new(0));
+    for (path, expected) in [
+        ("allowed.txt", PermissionOutcome::Allowed),
+        ("denied.txt", PermissionOutcome::Denied),
+    ] {
+        let write = PermissionRequest {
+            invocation_id: rw_types::ToolInvocationId("auto-edit".to_owned()),
+            id: "auto-edit".to_owned(),
+            tool_name: "write".to_owned(),
+            arguments: json!({"path": path, "content": "fixture"}),
+            capabilities: vec![ToolCapability::WriteFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            authorize_registered_file_mutation(&gate, write, &reject).await,
+            expected
+        );
+    }
+    assert_eq!(reject.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn interactive_auto_honors_reviewed_rules_without_expanding_their_authority() {
+    let gate = PermissionGate::new(PermissionDecision::Ask);
+    gate.set_runtime_mode(Some(PermissionModeDescriptor::AutoSafe))
+        .expect("interactive auto");
+    gate.add_session_rule(PermissionRule {
+        pattern: "bash(cargo test*)".to_owned(),
+        action: PermissionDecision::Allow,
+    })
+    .expect("reviewed allow rule");
+    let reject = CountingDeny(AtomicUsize::new(0));
+    for command in ["cargo test", "cargo test --lib", "cargo test --workspace"] {
+        assert_eq!(
+            authorize_with_behavior(
+                &gate,
+                request(command, vec![ToolCapability::Execute]),
+                ToolBehavior::Shell,
+                &reject,
+            )
+            .await,
+            PermissionOutcome::Allowed
+        );
+    }
+    assert_eq!(reject.0.load(Ordering::SeqCst), 0);
+    for command in [
+        "cargo build",
+        "cargo test && curl example.com",
+        "cargo test $(id)",
+    ] {
+        assert_eq!(
+            authorize_with_behavior(
+                &gate,
+                request(command, vec![ToolCapability::Execute]),
+                ToolBehavior::Shell,
+                &reject,
+            )
+            .await,
+            PermissionOutcome::Denied
+        );
+    }
+    for (argument, value) in [
+        ("sandbox", json!("unsandboxed")),
+        ("network_domains", json!(["example.com"])),
+    ] {
+        let mut command = request("cargo test", vec![ToolCapability::Execute]);
+        command.arguments[argument] = value;
+        assert_eq!(
+            authorize_with_behavior(&gate, command, ToolBehavior::Shell, &reject).await,
+            PermissionOutcome::Denied
+        );
+    }
+    assert_eq!(reject.0.load(Ordering::SeqCst), 5);
+    gate.add_session_rule(PermissionRule {
+        pattern: "bash(cargo test --workspace)".to_owned(),
+        action: PermissionDecision::Deny,
+    })
+    .expect("explicit deny rule");
+    assert_eq!(
+        authorize_with_behavior(
+            &gate,
+            request("cargo test --workspace", vec![ToolCapability::Execute]),
+            ToolBehavior::Shell,
+            &Decision(ApprovalDecision::AllowOnce),
+        )
+        .await,
+        PermissionOutcome::Denied
+    );
+    let headless = PermissionGate::for_headless_mode(PermissionModeDescriptor::AutoSafe);
+    headless
+        .add_session_rule(PermissionRule {
+            pattern: "bash(cargo test*)".to_owned(),
+            action: PermissionDecision::Allow,
+        })
+        .expect("headless rule");
+    assert_eq!(
+        authorize_with_behavior(
+            &headless,
+            request("cargo test", vec![ToolCapability::Execute]),
+            ToolBehavior::Shell,
+            &Decision(ApprovalDecision::AllowOnce),
+        )
+        .await,
+        PermissionOutcome::Denied
+    );
+}

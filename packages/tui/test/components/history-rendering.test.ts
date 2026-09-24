@@ -111,11 +111,11 @@ describe("semantic history rendering", () => {
   test("active permission mode appears beside agent mode without unknown-state noise", async () => {
     const { app, setup } = await fixture([], { ...createInitialState(), permissions: permissionState("auto-safe") })
     expect(app.statusLine.plainText).toContain("EXECUTE")
-    expect(app.statusLine.plainText).toContain("auto-safe")
+    expect(app.statusLine.plainText).toContain("approvals Auto")
     app.setState({ ...app.state, permissions: null })
     await setup.flush()
     expect(app.statusLine.plainText).toContain("EXECUTE")
-    expect(app.statusLine.plainText).not.toContain("auto-safe")
+    expect(app.statusLine.plainText).not.toContain("approvals Auto")
   })
 
   test("committed reasoning stays readable and collapses without taking composer focus", async () => {
@@ -163,6 +163,6 @@ describe("semantic history rendering", () => {
     await setup.flush()
     expect(app.transcript.mountedCards.get("1")).toBe(row)
     expect(row?.markdown.content).toContain("Retained tool output")
-    expect(row?.header.plainText).toContain("read · done")
+    expect(row?.header.plainText).toContain("read  README.md")
   })
 })

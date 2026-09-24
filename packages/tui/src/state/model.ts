@@ -166,6 +166,7 @@ export interface SubagentProjection {
   readonly activity: string | null
   readonly summary: string | null
   readonly touchedFileCount: number
+  readonly cost?: Cost
   readonly diffArtifactId: string | null
 }
 
@@ -397,11 +398,17 @@ export interface RottweilerState {
   readonly compaction: CompactionProjection
   readonly budgets: readonly BudgetProjection[]
   readonly errors: readonly EngineError[]
+  readonly errorHistory: readonly import("./errors").ErrorHistoryEntry[]
+  readonly commandCatalogLoaded: boolean
+  readonly mcpCatalogLoaded: boolean
   readonly protocol: ProtocolProjection
   readonly sessions: readonly SessionChoice[]
   readonly sessionSearch: SessionSearchProjection | null
   readonly review: SessionReviewProjection | null
   readonly lastFork: SessionForkProjection | null
+  readonly queuedControls: readonly import("../protocol").QueuedSessionControl[]
+  readonly lastControlSettlement: import("../protocol").SessionControlSettlement | null
+  readonly availableActions: readonly import("../protocol").SessionActionAvailability[]
   readonly commands: readonly CommandChoice[]
   readonly commandsTruncated: boolean
   readonly modes: readonly ModeChoice[]
@@ -471,6 +478,9 @@ export function createInitialState(): RottweilerState {
     },
     budgets: [],
     errors: [],
+    errorHistory: [],
+    commandCatalogLoaded: false,
+    mcpCatalogLoaded: false,
     protocol: {
       duplicateEvents: 0,
       invalidEvents: 0,
@@ -479,6 +489,9 @@ export function createInitialState(): RottweilerState {
     sessionSearch: null,
     review: null,
     lastFork: null,
+    queuedControls: [],
+    lastControlSettlement: null,
+    availableActions: [],
     commands: [],
     commandsTruncated: false,
     modes: [],

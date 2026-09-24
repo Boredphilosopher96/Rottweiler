@@ -245,7 +245,7 @@ fn every_subagent_schema_variant_requires_its_action_and_own_fields() {
     let schema =
         serde_json::to_value(schemars::schema_for!(SpawnAgentAction)).expect("action schema");
     let variants = schema["oneOf"].as_array().expect("action variants");
-    assert_eq!(variants.len(), 4);
+    assert_eq!(variants.len(), 7);
     for variant in variants {
         assert!(
             variant["required"]
@@ -270,4 +270,163 @@ fn every_subagent_schema_variant_requires_its_action_and_own_fields() {
         );
         assert!(serde_json::from_value::<SpawnAgentAction>(json!({"action":action})).is_err());
     }
+}
+
+#[tokio::test]
+async fn background_start_lists_and_delivers_results_after_the_invocation_returns() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let factory = Arc::new(FakeFactory::default());
+    let owner = orchestrator(SubagentLimits::default(), factory.clone());
+    let metadata = Arc::new(RecordingMetadataStore::default());
+    owner.bind_metadata_store(metadata.clone());
+    let mut agents =
+        rw_ext::compose_agent_registry(&rw_ext::ExtensionCatalog::default()).expect("agents");
+    agents
+        .resolve_tool_names(std::iter::empty())
+        .expect("tools");
+    let tool = SpawnAgentTool::new(
+        owner.clone(),
+        Arc::new(agents),
+        Arc::new(|| Ok(Arc::new(SelectedModel) as Arc<dyn crate::ModelDriver>)),
+    );
+    let sink = Arc::new(RecordingSubagentSink::default());
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_session_id(SessionId("parent".into()))
+        .with_model_alias("openai_codex/gpt-5.6-sol")
+        .with_background_subagent_event_sink(sink.clone());
+    let started = tokio::time::timeout(
+        Duration::from_millis(100),
+        tool.execute(
+            &context,
+            json!({"action":"start","task":"delay:250","agent":"explore","isolation":"shared"}),
+        ),
+    )
+    .await
+    .expect("start must not await child completion")
+    .expect("start");
+    let id = started.data["subagent_id"].clone();
+    assert_eq!(started.data["completed"], false);
+    let listed = tool
+        .execute(&context, json!({"action":"list"}))
+        .await
+        .expect("list");
+    assert_eq!(listed.data["children"][0]["activity"], "running");
+    assert!(tool.session_activity(&SessionId("parent".into())).is_some());
+    let stranger = ToolContext::new(workspace.path())
+        .expect("stranger")
+        .with_session_id(SessionId("other-parent".into()));
+    assert!(
+        tool.execute(&stranger, json!({"action":"wait","subagent_id":id}))
+            .await
+            .is_err()
+    );
+    context.cancellation.cancel();
+    // Ending the invoking turn does not cancel the session-owned child.
+    let next_turn = ToolContext::new(workspace.path())
+        .expect("next turn")
+        .with_session_id(SessionId("parent".into()));
+    let result = tool
+        .execute(&next_turn, json!({"action":"wait","subagent_id":id}))
+        .await
+        .expect("result");
+    assert_eq!(result.data["status"], "completed");
+    assert_eq!(sink.lifecycles.lock().expect("lifecycle").len(), 2);
+    tool.end_session(&SessionId("parent".into()))
+        .await
+        .expect("close children");
+    assert!(
+        owner
+            .list_for_parent(&SessionId("parent".into()))
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn background_children_cancel_and_settle_on_session_close() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let factory = Arc::new(FakeFactory::default());
+    let owner = orchestrator(SubagentLimits::default(), factory.clone());
+    let mut agents =
+        rw_ext::compose_agent_registry(&rw_ext::ExtensionCatalog::default()).expect("agents");
+    agents
+        .resolve_tool_names(std::iter::empty())
+        .expect("tools");
+    let tool = SpawnAgentTool::new(
+        owner.clone(),
+        Arc::new(agents),
+        Arc::new(|| Ok(Arc::new(SelectedModel) as Arc<dyn crate::ModelDriver>)),
+    );
+    let sink = Arc::new(RecordingSubagentSink::default());
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_session_id(SessionId("parent".into()))
+        .with_model_alias("openai_codex/gpt-5.6-sol")
+        .with_background_subagent_event_sink(sink.clone());
+    assert!(
+        tool.execute(
+            &context,
+            json!({"action":"start","task":"unsafe","agent":"general","isolation":"shared"})
+        )
+        .await
+        .is_err()
+    );
+    tool.execute(
+        &context,
+        json!({"action":"start","task":"delay:10000","agent":"explore","isolation":"shared"}),
+    )
+    .await
+    .expect("start");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tool.end_session(&SessionId("parent".into())),
+    )
+    .await
+    .expect("shutdown bounded")
+    .expect("shutdown settles child");
+    assert!(
+        owner
+            .list_for_parent(&SessionId("parent".into()))
+            .is_empty()
+    );
+    let events = sink.lifecycles.lock().expect("events");
+    assert!(
+        matches!(events.last(), Some(SubagentLifecycleEvent::Finished { result, .. }) if result.status == SubagentStatus::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn parent_shutdown_attempts_every_child_when_one_suspension_fails() {
+    let factory = Arc::new(FakeFactory {
+        fail_close: true,
+        ..FakeFactory::default()
+    });
+    let owner = orchestrator(SubagentLimits::default(), factory.clone());
+    let observer: Arc<dyn SubagentObserver> = Arc::new(RecordingObserver::default());
+    for _ in 0..2 {
+        owner
+            .start(
+                SessionId("parent".into()),
+                request("delay:10000"),
+                observer.clone(),
+                CancellationToken::default(),
+            )
+            .await
+            .expect("child");
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            owner.suspend_parent(&SessionId("parent".into()))
+        )
+        .await
+        .expect("all children settle promptly")
+        .is_err()
+    );
+    assert_eq!(
+        factory.suspended.load(Ordering::SeqCst),
+        2,
+        "a failed sibling cannot skip remaining cleanup"
+    );
+    assert_eq!(factory.active.load(Ordering::SeqCst), 0);
 }

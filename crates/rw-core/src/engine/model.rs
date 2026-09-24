@@ -88,6 +88,11 @@ pub trait ModelDriver: Send + Sync {
         !alias.trim().is_empty()
     }
 
+    /// Whether first-use configuration must resolve before admitting a prompt.
+    fn needs_initial_preparation(&self) -> bool {
+        false
+    }
+
     /// Small, inexpensive alias used for non-blocking session titles. Drivers
     /// return `None` unless they can route this background request safely.
     fn title_model_alias(&self) -> Option<String> {

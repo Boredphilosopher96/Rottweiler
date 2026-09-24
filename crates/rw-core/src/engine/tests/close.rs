@@ -619,3 +619,75 @@ async fn successful_close_waits_for_actor_configuration_destruction() {
     closing.await.expect("physically closed");
     handle.close().await.expect("repeat close");
 }
+
+#[tokio::test]
+async fn failed_parent_proof_still_cancels_every_session_child_owner() {
+    struct ChildOwner {
+        name: &'static str,
+        cancelled: Arc<AtomicBool>,
+        fail: bool,
+    }
+    #[async_trait]
+    impl Tool for ChildOwner {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: self.name.into(),
+                description: "child owner fixture".into(),
+                input_schema: json!({}),
+                capabilities: CapabilityManifest::default(),
+            }
+        }
+        async fn execute(&self, _: &ToolContext, _: Value) -> Result<ToolResult, ToolError> {
+            unreachable!()
+        }
+        async fn settle_effects(&self) -> Result<(), ToolError> {
+            Ok(())
+        }
+        async fn end_session(&self, _: &SessionId) -> Result<(), ToolError> {
+            self.cancelled.store(true, Ordering::Release);
+            if self.fail {
+                Err(ToolError::EffectsUnsettled(
+                    "first child owner failed".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for panic in [false, true] {
+        let root = tempfile::tempdir().expect("root");
+        let cancelled = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let mut tools = ToolRegistry::new();
+        for (index, name) in ["child_a", "child_b"].into_iter().enumerate() {
+            tools
+                .register(Arc::new(ChildOwner {
+                    name,
+                    cancelled: Arc::clone(&cancelled[index]),
+                    fail: index == 0,
+                }))
+                .expect("register child owner");
+        }
+        let handle = crate::engine::tests::fixtures::history::spawn(config(
+            root.path(),
+            Arc::new(FailedModel {
+                entered: Notify::new(),
+                panic,
+            }),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            HookDispatcher::new(),
+        ))
+        .await
+        .expect("actor");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), handle.close())
+                .await
+                .expect("bounded cleanup")
+                .is_err()
+        );
+        assert!(cancelled.iter().all(|child| child.load(Ordering::Acquire)));
+    }
+}

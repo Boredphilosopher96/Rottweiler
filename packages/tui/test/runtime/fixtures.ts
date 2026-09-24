@@ -26,7 +26,7 @@ export class MemoryFiles implements RuntimeFileSystem {
     return value
   }
 
-  async writePrivateTextAtomic(path: string, content: string): Promise<void> {
+  async writePrivateTextAtomic(path: string, content: string, _parentPolicy: "create" | "existing"): Promise<void> {
     this.writes.push({ path, content })
     this.reads.set(path, content)
   }

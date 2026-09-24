@@ -901,13 +901,21 @@ impl PermissionGate {
         if configured == PermissionDecision::Deny {
             return PermissionDecision::Deny;
         }
+        if configured == PermissionDecision::Allow
+            && matches!(self.policy, PermissionPolicy::Configured(_))
+        {
+            return PermissionDecision::Allow;
+        }
         let memory = lock_read(&self.memory);
         if safe_listed
             || is_read_only(request, behavior)
             || is_auto_safe_workspace_write(request, semantics, &memory.workspace_roots)
         {
             PermissionDecision::Allow
+        } else if matches!(self.policy, PermissionPolicy::Configured(_)) {
+            PermissionDecision::Ask
         } else {
+            // A launch-fixed unattended policy cannot open an approval prompt.
             PermissionDecision::Deny
         }
     }
@@ -925,8 +933,9 @@ fn root_yolo_footgun(is_root: bool, roots: &[PathBuf]) -> bool {
 
 const fn permission_mode_default(mode: PermissionModeDescriptor) -> PermissionDecision {
     match mode {
-        PermissionModeDescriptor::Strict => PermissionDecision::Ask,
-        PermissionModeDescriptor::AutoSafe => PermissionDecision::Deny,
+        PermissionModeDescriptor::Strict | PermissionModeDescriptor::AutoSafe => {
+            PermissionDecision::Ask
+        }
         PermissionModeDescriptor::Yolo => PermissionDecision::Allow,
     }
 }

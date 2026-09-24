@@ -296,7 +296,7 @@ pub(super) async fn run_turn(
             signals: &signals,
             cancellation: &cancellation,
         };
-        let (mut working, mut assembled) = match context_worker
+        let (mut working, mut assembled, mut completion_sources) = match context_worker
             .assemble(
                 reservation,
                 Selection {
@@ -377,7 +377,7 @@ pub(super) async fn run_turn(
                         break;
                     }
                 };
-                (working, assembled) = match context_worker
+                (working, assembled, completion_sources) = match context_worker
                     .assemble(
                         Reservation::Retained(Box::new(working)),
                         Selection {
@@ -424,6 +424,7 @@ pub(super) async fn run_turn(
             &signals,
             PendingEvent::ContextUsage {
                 turn,
+                completion_sources: completion_sources.clone(),
                 used_tokens: snapshot.used_tokens,
                 usable_tokens: snapshot.usable_tokens,
                 reserved_tokens: snapshot.reserved_tokens,
@@ -823,6 +824,7 @@ pub(super) async fn run_turn(
             &signals,
             PendingEvent::ContextUsage {
                 turn,
+                completion_sources: completion_sources.clone(),
                 used_tokens: context_metrics.0,
                 usable_tokens: context_metrics.1,
                 reserved_tokens: context_metrics.2,

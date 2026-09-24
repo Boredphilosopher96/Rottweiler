@@ -207,6 +207,7 @@ impl StubFactory {
             )
             .expect("session marker command");
         let handle = crate::engine::tests::fixtures::history::spawn(SessionActorConfig {
+            model_preferences: None,
             ui: std::sync::Arc::new(crate::ui::EmptyUiRegistry),
             ui_tool_source: std::sync::Arc::new(crate::ui::UnavailableUiToolSource),
             budget_session_id: session_id.clone(),

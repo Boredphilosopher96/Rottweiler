@@ -23,6 +23,7 @@ export interface ListDetailItemRow<Action> {
   readonly kind: "item"
   readonly id: string
   readonly label: string
+  readonly disabled?: boolean
   readonly matchSpans: readonly (readonly [start: number, end: number])[]
   readonly detail: {
     readonly title: string
@@ -340,8 +341,8 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       : Math.max(1, terminalWidth - inset * 2)
     const top = primarySurface ? 0 : terminalHeight >= 14 ? 2 : 0
     const height = primarySurface
-      ? Math.max(6, Math.min(terminalHeight, primaryHeight ?? terminalHeight - 5))
-      : Math.max(6, Math.min(25, terminalHeight - top - 5))
+      ? Math.max(1, Math.min(terminalHeight, primaryHeight ?? terminalHeight - 5))
+      : Math.max(1, Math.min(25, terminalHeight - top - 5))
     this.left = inset
     this.top = top
     this.width = width
@@ -449,7 +450,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     const selected = this.#rows.find(
       (row): row is ListDetailItemRow<Action> => row.kind === "item" && row.id === this.#selectedId,
     )
-    if (selected === undefined || this.#handlers === null) return false
+    if (selected === undefined || selected.disabled === true || this.#handlers === null) return false
     this.#handlers.onSelect(selected.action)
     return true
   }
@@ -571,12 +572,12 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
           row,
           selected,
           this.#listWidth,
-        ) ?? styledLabel(
+        ) ?? (row.disabled === true ? new StyledText([fg(this.#theme.textMuted)(`  ${truncateToCells(row.label, Math.max(0, this.#listWidth - 2))}`)]) : styledLabel(
           truncateToCells(row.label, Math.max(0, this.#listWidth - 2)),
           row.matchSpans,
           selected,
           this.#theme,
-        )
+        ))
         view.bg = selected ? this.#theme.backgroundPanel : this.#surfaceBackground
       }
     }

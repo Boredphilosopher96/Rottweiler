@@ -595,3 +595,63 @@ async fn safe_listed_git_status_really_runs_inside_the_sandbox() {
         .collect::<String>();
     assert!(!output.contains("HOST_SECRET_CANARY"), "{output:?}");
 }
+
+#[test]
+fn search_safe_list_and_execution_preserve_argv_and_reject_command_authority() {
+    use crate::bash::safety::{audited_rg, safe_search_arguments};
+    for (name, command) in [
+        ("grep", "grep -nF 'two words' 'file with spaces'"),
+        ("grep", "grep -e '' -- '-strange name'"),
+        ("find", "find 'root dir' -name '*.rs' -type f -print"),
+        ("rg", "rg -n -g '*.rs' 'two words' 'root dir'"),
+    ] {
+        let expected = shell_words::split(command).expect("argv");
+        assert!(safe_search_arguments(name, &expected[1..]));
+        if name == "rg" && audited_rg().is_none() {
+            continue;
+        }
+        assert_eq!(classify_safe_command(command), CommandSafety::SafeListed);
+        let actual = safe_builtin_invocation(command).expect("hardened argv");
+        let prefix = if name == "rg" { 2 } else { 1 };
+        assert_eq!(&actual[prefix..], &expected[1..]);
+        assert!(std::path::Path::new(&actual[0]).is_absolute());
+        if name == "rg" {
+            assert_eq!(actual[1], "--no-config");
+        }
+    }
+    for command in [
+        "rg --pre=evil text",
+        "rg --pre evil text",
+        "rg --hostname-bin evil text",
+        "rg --search-zip text",
+        "rg -nz text",
+        "rg --unknown text",
+        "grep --unknown text",
+        "find . -delete",
+        "find . -exec evil '{}' ';'",
+        "find . -execdir evil '{}' '+'",
+        "find . -ok evil '{}' ';'",
+        "find . -fprint output",
+        "find . -fls output",
+        "./grep text file",
+        "/tmp/rg text",
+        "PATH=. grep text file",
+        "env rg text",
+        "grep text file && evil",
+        "grep text file | evil",
+        "grep text file > output",
+        "rg $(evil)",
+        "cargo check",
+        "npm test",
+    ] {
+        assert_eq!(
+            classify_safe_command(command),
+            CommandSafety::RequiresApproval,
+            "{command}"
+        );
+        assert!(safe_builtin_invocation(command).is_none(), "{command}");
+    }
+    let command = "cat 'a;b' 'a&&b' '' 'a b'";
+    let actual = safe_builtin_invocation(command).expect("literal arguments");
+    assert_eq!(&actual[1..], &["a;b", "a&&b", "", "a b"]);
+}

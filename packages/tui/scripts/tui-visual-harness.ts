@@ -1,3 +1,4 @@
+import { readyCatalog } from "../test/fixtures/catalog"
 import { conversationItem, sessionReaderFor } from "../test/fixtures/history"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -36,6 +37,7 @@ try {
   await treeSitter.initialize()
   const app = createRottweilerApp(setup.renderer, { sessionReader: sessionReaderFor([conversationItem(1, "user", "Add reconnect-safe streaming. The cursor double-advances after a dropped SSE connection.")]),
     initialState: scenarioState(scenarioInput),
+    onCommand: readyCatalog(() => app),
     requestId: () => "visual-proof-request",
     treeSitterClient: treeSitter,
     ...(scenarioInput === "tools" ? { nowMs: () => TOOLS_FIXTURE_NOW_MS } : {}),
@@ -62,21 +64,24 @@ try {
     await setup.flush()
   } else if (scenarioInput === "theme-browser") {
     actions.push("typed /the into the production composer input")
-    await setup.mockInput.typeText("/the")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("theme")
     actions.push("pressed Enter to activate the /theme slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     await setup.flush()
   } else if (scenarioInput === "settings-browser") {
     actions.push("typed /sett into the production composer input")
-    await setup.mockInput.typeText("/sett")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("settings")
     actions.push("pressed Enter to activate the /settings slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     await setup.flush()
   } else if (scenarioInput === "mcp-browser") {
     actions.push("typed /mc into the production composer input")
-    await setup.mockInput.typeText("/mc")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("mcp")
     actions.push("pressed Enter to activate the /mcp slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
@@ -87,7 +92,8 @@ try {
     await setup.flush()
   } else if (scenarioInput === "session-review") {
     actions.push("typed /rev into the production composer input")
-    await setup.mockInput.typeText("/rev")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("review")
     actions.push("pressed Enter to activate the /review slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
@@ -112,7 +118,20 @@ try {
   await writeEvidence(outputDirectory, scenarioInput, styledFrame, characterFrame, actions, assertions)
 
   const failed = [...assertions.filter((assertion) => !assertion.passed)]
-  if (scenarioInput === "settings-browser") {
+  if (scenarioInput === "command-palette") {
+    actions.push("resized the production renderer to 80 by 24 columns")
+    setup.resize(80, 24)
+    await setup.flush()
+    const frame = setup.captureCharFrame()
+    const assertions = [
+      exactValueAssertion("narrow palette fills primary width", app.commandPalette.width, 80),
+      exactValueAssertion("narrow palette reaches composer", app.commandPalette.height, app.composer.y),
+      { name: "narrow details collapse", passed: !app.commandPalette.detailPane.visible, expected: "collapsed", actual: String(app.commandPalette.detailPane.visible) },
+      { name: "narrow palette hides prior conversation", passed: !frame.includes("▌ you") && !frame.includes("● rottweiler"), expected: "occluded", actual: frame },
+    ]
+    await writeEvidence(outputDirectory, "command-palette-narrow", setup.captureSpans(), frame, actions, assertions)
+    failed.push(...assertions.filter(assertion => !assertion.passed))
+  } else if (scenarioInput === "settings-browser") {
     actions.push("resized the production renderer to 72 by 18 columns")
     setup.resize(72, 18)
     await setup.flush()
@@ -191,7 +210,7 @@ function scenarioAssertions(scenario: VisualScenario): readonly string[] {
     case "command-palette":
       return ["COMMAND PALETTE", "context", "Compact context", "Manage context"]
     case "approval":
-      return ["Permission required", "Terminal command", "Allow once"]
+      return ["Permission · y once / a session / n deny", "Terminal command", "Allow once"]
     case "tools":
       return [
         "● rottweiler  running tools",
@@ -266,22 +285,22 @@ function visualAssertions(
     const lines = characterFrame.split("\n")
     return [
       ...assertions,
-      positionAssertion(lines, "query starts at the design column", 3, 3, "context"),
+      positionAssertion(lines, "query starts at the design column", 1, 1, "context"),
       positionAssertion(lines, "list/detail divider is fixed at column 55", 5, 55, "│"),
-      positionAssertion(lines, "filtered count and source counts are derived", 25, 3, "4 of 30 commands · 30 built-in · 0 extensions"),
+      positionAssertion(lines, "filtered count and source counts are derived", 25, 1, "5 of 33 commands"),
       frameWidthAssertion(lines),
       {
         name: "selected description appears only in detail",
-        passed: occurrenceCount(characterFrame, "Inspect assembled context") === 1,
+        passed: occurrenceCount(characterFrame, "Inspect, pin, or evict context items") === 1,
         expected: "1 occurrence",
-        actual: `${occurrenceCount(characterFrame, "Inspect assembled context")} occurrences`,
+        actual: `${occurrenceCount(characterFrame, "Inspect, pin, or evict context items")} occurrences`,
       },
-      colorAssertion(styledFrame, "query uses normal text", 3, 3, kennelTheme.text),
-      colorAssertion(styledFrame, "selection marker uses primary", 5, 3, kennelTheme.primary, kennelTheme.backgroundPanel),
-      colorAssertion(styledFrame, "unmatched title text stays readable", 5, 5, kennelTheme.text, kennelTheme.backgroundPanel),
-      colorAssertion(styledFrame, "matched title text uses primary", 5, 6, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "query uses normal text", 1, 1, kennelTheme.text),
+      colorAssertion(styledFrame, "selection marker uses primary", 3, 1, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "unmatched title text stays readable", 3, 3, kennelTheme.text, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "matched title text uses primary", 3, 10, kennelTheme.primary, kennelTheme.backgroundPanel),
       colorAssertion(styledFrame, "divider uses subtle border", 5, 55, kennelTheme.borderSubtle),
-      colorAssertion(styledFrame, "detail metadata is muted", 6, 57, kennelTheme.textMuted),
+      colorAssertion(styledFrame, "detail metadata is muted", 1, 57, kennelTheme.textMuted),
     ]
   }
   if (scenario === "tools") {
@@ -516,13 +535,13 @@ function commandPaletteLayoutAssertions(
 ): readonly VisualAssertion[] {
   const palette = app.commandPalette
   return [
-    exactValueAssertion("modal begins at column 1", palette.x, 1),
-    exactValueAssertion("modal begins at row 2", palette.y, 2),
-    exactValueAssertion("modal is 108 cells wide", palette.width, 108),
-    exactValueAssertion("modal is 25 rows tall", palette.height, 25),
-    exactValueAssertion("list pane is 52 cells wide", palette.listPane.width, 52),
+    exactValueAssertion("palette begins at column 0", palette.x, 0),
+    exactValueAssertion("palette begins at row 0", palette.y, 0),
+    exactValueAssertion("palette fills primary width", palette.width, 110),
+    exactValueAssertion("palette reaches composer", palette.height, app.composer.y),
+    exactValueAssertion("list pane is 54 cells wide", palette.listPane.width, 54),
     exactValueAssertion("divider is one cell wide", palette.divider.width, 1),
-    exactValueAssertion("detail pane is 51 cells wide", palette.detailPane.width, 51),
+    exactValueAssertion("detail pane is 53 cells wide", palette.detailPane.width, 53),
     {
       name: "query value remains intact",
       passed: palette.input.value === "context",

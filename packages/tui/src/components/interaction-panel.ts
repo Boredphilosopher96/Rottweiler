@@ -2,6 +2,7 @@ import { TextRenderable } from "./text"
 import {
   BoxRenderable,
   DiffRenderable,
+  ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
   type RenderContext,
@@ -34,11 +35,13 @@ export interface InteractionCallbacks {
 
 export type InteractionApprovalAction =
   | ApprovalDecision
-  | "allow_tool_session"
+  | "review_permission_rule"
   | "auto_safe_mode"
 
 export class InteractionPanelRenderable extends BoxRenderable {
   readonly prompt: TextRenderable
+  readonly planScroller: ScrollBoxRenderable
+  readonly planDetails: TextRenderable
   readonly select: SelectRenderable
   #diff: DiffRenderable | null = null
   #activeTool: ToolProjection | null = null
@@ -130,7 +133,33 @@ export class InteractionPanelRenderable extends BoxRenderable {
       event.preventDefault()
       event.stopPropagation()
     }
+    this.planScroller = new ScrollBoxRenderable(ctx, {
+      id: "plan-details-scroll", width: "100%", height: 0, visible: false,
+      scrollY: true, scrollX: false, flexShrink: 0,
+      contentOptions: { flexDirection: "column", width: "100%" },
+    })
+    this.planDetails = new TextRenderable(ctx, {
+      content: "", width: "100%", fg: theme.text, wrapMode: "word", flexShrink: 0,
+    })
+    this.planScroller.add(this.planDetails)
+    this.select.onKeyDown = (key) => {
+      if (this.select.focused && this.#activeTool !== null && !key.ctrl && !key.meta && !key.shift
+        && !key.super && !key.option && !key.hyper) {
+        const action = ({ y: "allow_once", a: "allow_session", n: "deny" } as Record<string, string>)[key.name]
+        const index = this.select.options.findIndex(option => option.value === action)
+        if (action !== undefined && index >= 0) {
+          this.select.setSelectedIndex(index)
+          this.select.selectCurrent()
+          key.preventDefault(); key.stopPropagation(); return
+        }
+      }
+      if (this.#activePlan === null || (key.name !== "pageup" && key.name !== "pagedown")) return
+      this.planScroller.scrollBy((key.name === "pageup" ? -1 : 1) * Math.max(1, this.planScroller.viewport.height - 1))
+      key.preventDefault()
+      key.stopPropagation()
+    }
     this.add(this.prompt)
+    this.add(this.planScroller)
     this.add(this.select)
   }
 
@@ -177,6 +206,8 @@ export class InteractionPanelRenderable extends BoxRenderable {
   }
 
   update(state: RottweilerState, allowPermissionChanges = true): void {
+    this.planScroller.visible = false
+    this.planScroller.height = 0
     if (state.replay.active) {
       this.#activeTool = null
       this.#activeQuestion = null
@@ -213,6 +244,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
   }
 
   #showTool(tool: ToolProjection, permissionMode: PermissionModeDescriptor | null, allowPermissionChanges: boolean): void {
+    const focus = !this.visible || this.#activeTool?.invocationId !== tool.invocationId
     const selected = this.#retainSelection(["approval", tool.invocationId, tool.turnId, tool.name, tool.args, tool.capabilities, tool.rationale, tool.diff, permissionMode, allowPermissionChanges])
     this.#activeTool = tool
     this.#activeQuestion = null
@@ -220,7 +252,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.visible = true
     this.select.visible = true
     const bash = bashApproval(tool)
-    this.title = bash?.unsandboxed === true ? " UNSANDBOXED approval required " : " Permission required "
+    this.title = bash?.unsandboxed === true ? " UNSANDBOXED approval required " : " Permission · y once / a session / n deny · Tab to message "
     const diff = readUnifiedDiff(tool.diff)
     const truncated = diff?.truncated === true
     const subject = approvalSubject(tool, bash)
@@ -240,10 +272,10 @@ export class InteractionPanelRenderable extends BoxRenderable {
         { name: "Allow once", description: "Run only this invocation", value: "allow_once" },
         { name: "Allow session", description: "Remember for this session", value: "allow_session" },
         { name: "Allow project", description: "Remember this exact invocation in this project", value: "allow_project" },
-        ...(allowPermissionChanges ? [{ name: `Always allow ${toolDisplayName(tool.name)}`, description: "This session · any arguments", value: "allow_tool_session" }] : []),
+        ...(allowPermissionChanges ? [{ name: "Review a permission rule…", description: "Review an explicit session pattern", value: "review_permission_rule" }] : []),
         ...(!allowPermissionChanges || permissionMode === "auto-safe" || permissionMode === "yolo"
           ? []
-          : [{ name: "Stop asking for safe actions", description: "Switch this session to auto-safe mode", value: "auto_safe_mode" }]),
+          : [{ name: "Stop asking for safe actions", description: "Use Auto approvals · ask for other actions", value: "auto_safe_mode" }]),
         { name: "Deny", description: "Do not run the tool", value: "deny" },
       ]
     this.select.setSelectedIndex(Math.min(selected, Math.max(0, this.select.options.length - 1)))
@@ -276,11 +308,12 @@ export class InteractionPanelRenderable extends BoxRenderable {
       this.#removeDiff()
     }
     this.#layout()
-    this.select.focus()
+    if (focus) this.select.focus()
   }
 
   #showQuestion(question: QuestionProjection): void {
     this.#activeTool = null
+    const focus = !this.visible || this.#activeQuestion?.questionId !== question.questionId
     const selected = this.#retainSelection(["question", question.questionId, question.turnId, question.question])
     this.#activeQuestion = question
     this.#activePlan = null
@@ -298,13 +331,14 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#layout(freeText ? 4 : 0)
     if (!freeText) {
       this.select.setSelectedIndex(Math.min(selected, Math.max(0, this.select.options.length - 1)))
-      this.select.focus()
+      if (focus) this.select.focus()
     }
   }
 
   #showPlan(plan: PlanArtifact): void {
     this.#activeTool = null
     this.#activeQuestion = null
+    const changed = this.#activePlan !== plan
     const selected = this.#retainSelection(["plan", plan])
     this.#activePlan = plan
     this.#removeDiff()
@@ -312,14 +346,25 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.borderColor = this.#theme.info
     this.select.visible = true
     this.title = " Plan approval required "
-    this.prompt.content = `${plan.title}\n${plan.summary_md}\n${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`
+    this.prompt.content = `${plan.title} · PgUp/PgDn to review`
+    this.planDetails.content = [
+      plan.summary_md,
+      ...plan.steps.flatMap((step, index) => [
+        `${index + 1}. ${step.description}`,
+        ...(step.files_touched.length === 0 ? [] : [`   Files: ${step.files_touched.join(", ")}`]),
+        `   Verify: ${step.verification}`,
+      ]),
+      ...(plan.open_questions.length === 0 ? [] : ["Open questions", ...plan.open_questions.map(question => `• ${question}`)]),
+    ].join("\n")
+    this.planScroller.visible = true
+    if (changed) this.planScroller.scrollTo(0)
     this.select.options = [
       { name: "Approve plan", description: "Pin this artifact and enter Execute", value: "approve" },
       { name: "Reject plan", description: "Stay in Plan mode", value: "reject" },
     ]
     this.#layout()
     this.select.setSelectedIndex(Math.min(selected, Math.max(0, this.select.options.length - 1)))
-    this.select.focus()
+    if (changed) this.select.focus()
   }
 
   #selected(index: number): void {
@@ -334,7 +379,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
         selected === "allow_once" ||
           selected === "allow_session" ||
           selected === "allow_project" ||
-          selected === "allow_tool_session" ||
+          selected === "review_permission_rule" ||
           selected === "auto_safe_mode"
           ? selected
           : "deny"
@@ -373,11 +418,27 @@ export class InteractionPanelRenderable extends BoxRenderable {
       return
     }
 
+    if (this.#activePlan !== null) {
+      const detailRows = this.planDetails.plainText.split("\n").reduce((rows, line) =>
+        rows + Math.max(1, Math.ceil(line.length / Math.max(1, (this.width || this.ctx.width) - 4))), 0)
+      const panelHeight = Math.min(18, 7 + detailRows, Math.max(0, this.#terminalHeight - 2 - reservedRows))
+      this.height = panelHeight
+      this.border = panelHeight >= 3
+      const rows = Math.max(0, panelHeight - (this.border ? 2 : 0))
+      this.prompt.visible = rows > 0
+      this.prompt.height = Math.min(1, rows)
+      const selectRows = Math.min(4, Math.max(0, rows - 1))
+      this.select.height = selectRows
+      this.planScroller.height = Math.max(0, rows - 1 - selectRows)
+      return
+    }
     const promptDesired = Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
     const selectDesired = this.select.visible
       ? Math.min(8, Math.max(1, this.select.options.length * 2))
       : 0
-    const diffDesired = this.#diff === null ? 0 : 8
+    const diffDesired = this.#diff === null ? 0 : Math.min(8, Math.max(1,
+      (this.#activeTool?.diff?.unified_diff ?? "").trimEnd().split("\n").filter(line =>
+        !line.startsWith("---") && !line.startsWith("+++") && !line.startsWith("diff --git") && !line.startsWith("index ")).length))
     const desiredHeight = 2 + promptDesired + selectDesired + diffDesired
     // Reserve one transcript row and the one-row status line. On extremely
     // short terminals, collapse decorative interaction content before it can
@@ -415,7 +476,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       if (hasSelect && remaining > 0) {
         selectRows = Math.min(selectDesired, Math.max(1, Math.ceil(remaining * 0.4)))
       }
-      diffRows = Math.max(0, remaining - selectRows)
+      diffRows = Math.min(diffDesired, Math.max(0, remaining - selectRows))
     } else if (hasSelect) {
       selectRows = Math.min(selectDesired, remaining)
     }

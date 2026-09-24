@@ -1,5 +1,5 @@
 import type { ClientAllocationOwner } from "../client-allocation"
-import type { EngineEvent } from "../protocol"
+import type { EngineEvent, CompatibleProviderSetup } from "../protocol"
 import { FuzzyPickerRenderable, type PickerItem } from "../components"
 import { PickerController } from "../picker-controller"
 import { type ExternalUrlAdapter, type TextClipboardAdapter } from "../platform"
@@ -30,6 +30,7 @@ interface ProviderUiHost {
   readonly state: RottweilerState
   readonly activeSubagentId: string | null
   readonly draft: string
+  readonly submissionPending: boolean
   readonly picker: FuzzyPickerRenderable<unknown>
   readonly pickerController: PickerController
   readonly requests: ProjectionRequestBroker
@@ -45,10 +46,12 @@ export class ProviderUiController {
   #disposed = false
   #modelsRequested = false
   #providerOnboardingOffered = false
+  #automaticOnboarding: "models" | "providers" | null = null
   #providerOnboardingModelsResponseReceived = false
   #providerOnboardingSessionsResponseReceived = false
   #providerPickerOnboarding = false
   #modelProviderFilter: string | null = null
+  #activationProvider: string | null = null
   #providerApiKeyProvider: string | null = null
   #providerRecoveryProvider: RottweilerState["providers"][number] | null = null
   #providerAuthAction: { readonly provider: string; readonly attemptId: string } | null = null
@@ -66,6 +69,7 @@ export class ProviderUiController {
   get modelProviderFilter(): string | null { return this.#modelProviderFilter }
   get onboarding(): boolean { return this.#providerPickerOnboarding }
   pickerClosed(): void {
+    this.#automaticOnboarding = null
     this.#providerApiKeyProvider = null
     this.#providerRecoveryProvider = null
   }
@@ -75,6 +79,7 @@ export class ProviderUiController {
   }
   resetSession(): void {
     this.#credentialAction = null
+    this.#activationProvider = null
     this.catalogSettled()
     this.pickerClosed()
     this.resetAuthentication()
@@ -92,25 +97,69 @@ export class ProviderUiController {
       !this.#providerOnboardingModelsResponseReceived ||
       !this.#providerOnboardingSessionsResponseReceived
     ) return
-    // A cold catalog has not checked credentials or reachability. Only offer
-    // setup automatically when no provider is configured; explicit discovery
-    // and inference still report missing credentials and unavailable models.
+    // Resume setup when a provider exists but no usable model is selected.
     const configured = state.providers.some((provider) => provider.configured)
     if (
-      !configured &&
       state.model === null &&
       !this.#providerOnboardingOffered &&
       !state.replay.active &&
       this.#host.activeSubagentId === null &&
       this.#host.draft.length === 0 &&
+      !this.#host.submissionPending &&
+      !state.hasActivity &&
       this.#host.pickerController.kind === null
     ) {
       this.#providerOnboardingOffered = true
-      this.openProviderPicker(true)
+      if (configured && state.models.some(model => model.available !== false)) {
+        this.openModelPicker()
+        this.#automaticOnboarding = "models"
+      } else {
+        this.openProviderPicker(true)
+        this.#automaticOnboarding = "providers"
+      }
     }
   }
 
+
+  openCompatibleProviderSetup(): void {
+    if (this.#host.state.replay.active || this.#host.activeSubagentId !== null) return
+    this.#host.pickerController.begin("providerSetup")
+    const prompt = (title: string, placeholder: string, maxBytes: number, onSubmit: (value: string) => void, empty: "allow" | "reject" = "reject") => {
+      this.#host.pickerController.openTextPrompt({ title, placeholder, maxBytes, onSubmit, empty })
+    }
+    const model = (configuration: Omit<CompatibleProviderSetup, "initial_model">) => {
+      prompt("Initial model ID · optional", "Local server without /models? Enter its exact model ID; otherwise leave empty", 256, (value) => {
+        const setup: CompatibleProviderSetup = { ...configuration, initial_model: value.trim() || null }
+        this.#host.pickerController.show("Connect compatible endpoint", [{
+          id: "provider-setup.save", label: "Save provider and connect",
+          description: `${setup.provider} · ${setup.adapter} · ${setup.endpoint} · ${setup.auth === "api_key" ? "API key next" : "no authentication"}${setup.initial_model === null ? "" : ` · ${setup.initial_model}`}`,
+          value: setup,
+        }], item => {
+          this.#host.closePicker()
+          this.#host.requests.command({ type: "configure_compatible_provider", configuration: item.value })
+        })
+      }, "allow")
+    }
+    const endpoint = (provider: string, adapter: CompatibleProviderSetup["adapter"]) => {
+      prompt("Full inference endpoint URL", adapter === "chat" ? "https://gateway.example/v1/chat/completions" : "https://gateway.example/v1/responses", 2048, value => {
+        const endpoint = value.trim()
+        this.#host.pickerController.show<CompatibleProviderSetup["auth"]>("Authentication", [
+          { id: "provider-setup.api-key", label: "API key", description: "Stored through the secure credential channel", value: "api_key" },
+          { id: "provider-setup.no-auth", label: "No authentication", description: "Allowed only for a local loopback endpoint", value: "none" },
+        ], item => model({ provider, adapter, endpoint, auth: item.value }))
+      })
+    }
+    prompt("Provider name", "my-gateway", 128, value => {
+      const provider = value.trim()
+      this.#host.pickerController.show<CompatibleProviderSetup["adapter"]>("API format", [
+        { id: "provider-setup.chat", label: "Chat completions", description: "OpenAI-compatible chat API", value: "chat" },
+        { id: "provider-setup.responses", label: "Responses", description: "OpenAI-compatible Responses API", value: "responses" },
+      ], item => endpoint(provider, item.value))
+    })
+  }
+
   openModelPicker(provider: string | null = null): void {
+    this.#automaticOnboarding = null
     this.#modelProviderFilter = provider
     this.#host.pickerController.begin("models")
     if (!this.#modelsRequested) {
@@ -121,6 +170,7 @@ export class ProviderUiController {
   }
 
   openProviderPicker(onboarding = false): void {
+    this.#automaticOnboarding = null
     this.#modelProviderFilter = null
     this.#providerPickerOnboarding = onboarding
     this.#host.pickerController.begin("providers")
@@ -196,7 +246,11 @@ export class ProviderUiController {
           true
         )
       }
-      this.openProviderPicker()
+      if (result.activated) {
+        this.#activationProvider = provider
+        this.#host.requests.markProviderActivationModels()
+        this.openModelPicker(provider)
+      } else this.openProviderPicker()
       for (const warning of result.warnings.slice(0, 16)) {
         this.#host.projectError("provider_credential_warning", warning)
       }
@@ -226,7 +280,9 @@ export class ProviderUiController {
       if (!this.#currentCredential(operation)) return
       this.#storedProviderKeys.delete(provider)
       this.requestModels(true)
-      this.openProviderPicker()
+      this.#activationProvider = provider
+      this.#host.requests.markProviderActivationModels()
+      this.openModelPicker(provider)
     } catch {
       if (!this.#currentCredential(operation)) return
       this.#host.projectError(
@@ -303,6 +359,8 @@ export class ProviderUiController {
   }
   afterEvent(event: EngineEvent, eventRecord: Readonly<Record<string, unknown>>, commandRequestId: string | null, next: RottweilerState): void {
     if (event.type === "models_listed") {
+      if (next.model !== null && next.models.some(model => model.available !== false && (model.id === next.model || model.aliases.includes(next.model!)))
+        && this.#automaticOnboarding !== null && this.#host.pickerController.kind === this.#automaticOnboarding) this.#host.closePicker()
       const activationCatalog = this.#host.requests.consumeProviderActivationModels(
         commandRequestId,
       )
@@ -311,9 +369,13 @@ export class ProviderUiController {
         !next.replay.active &&
         this.#host.activeSubagentId === null
       ) {
-        const availableModels = next.models.filter((model) => model.available !== false)
-        if (availableModels.length === 1) {
-          const model = availableModels[0]!
+        const availableModels = next.models.filter((model) =>
+          model.available !== false && model.provider === this.#activationProvider)
+        this.#activationProvider = null
+        // Catalog order belongs to the provider. Prefer a tool-capable model for
+        // a fresh coding session; connecting another provider keeps the selection.
+        const model = availableModels.find(model => model.toolCalling) ?? availableModels[0]
+        if (next.model === null && model !== undefined) {
           this.#host.requests.command({
             type: "switch_model",
             model: model.id,
@@ -375,6 +437,8 @@ export class ProviderUiController {
         this.#host.requests.command({ type: "begin_provider_auth", provider })
       } else if (eventRecord.auth_kind === "api_key") {
         this.openProviderApiKeyPrompt(provider)
+      } else if (eventRecord.auth_kind === "none") {
+        void this.#retryProviderActivation(provider)
       }
     }
     if (event.type === "provider_auth_finished") {
@@ -396,12 +460,14 @@ export class ProviderUiController {
         ? eventRecord.message
         : "provider connection did not become ready"
       if (eventRecord.success === true) {
+        this.#activationProvider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
         this.requestModels(true)
         this.#host.requests.markProviderActivationModels()
+        this.openModelPicker(this.#activationProvider)
       } else {
         this.#host.projectError("provider_activation_failed", message, true)
+        this.openProviderPicker()
       }
-      this.openProviderPicker()
     }
   }
   render(kind: "models" | "providers" | "providerRecovery" | "providerAuth" | "providerApiKey"): void {
@@ -438,31 +504,17 @@ export class ProviderUiController {
             description: modelAliasDescription(alias, models),
             value: { kind: "alias" as const, alias },
           })),
-          ...(models.length === 0
-            ? []
-            : [{
-              id: "models.section.models",
-              label: "Models",
-              description: "",
-              value: null,
-              selectable: false,
-              sectionHeader: true,
-            }]),
-          ...models.map((model) => ({
-            id: model.id,
-            label: `${model.current ? "● " : ""}${model.displayName}`,
-            description: [
-              model.provider,
-              modelAvailabilityLabel(model),
-              model.toolCalling ? "tools" : "",
-              model.vision ? "vision" : "",
-              model.thinking ? "thinking" : "",
-              "pinned route",
-            ]
-              .filter(Boolean)
-              .join(" · "),
-            value: { kind: "model" as const, model },
-          })),
+          ...[...new Set(models.map(model => model.provider))].flatMap(provider => [
+            { id: `models.section.${provider}`, label: providerName(provider), description: "",
+              value: null, selectable: false, sectionHeader: true },
+            ...models.filter(model => model.provider === provider).map(model => ({
+              id: model.id,
+              label: `${model.current ? "● " : ""}${model.displayName}`,
+              description: [modelAvailabilityLabel(model), model.toolCalling ? "tools" : "",
+                model.vision ? "vision" : "", model.thinking ? "thinking" : ""].filter(Boolean).join(" · "),
+              value: { kind: "model" as const, model },
+            })),
+          ]),
         ]
         const modelError = this.#host.projectionErrors.models
         if (modelError === undefined && this.#modelsRequested && modelItems.length === 0) {
@@ -485,14 +537,17 @@ export class ProviderUiController {
           )
           break
         }
+        modelItems.push({ id: "models.connect", label: "Connect another provider",
+          description: "Set up authentication and discover models", value: null })
         this.#host.pickerController.show(
           this.#modelProviderFilter === null
-            ? "Models"
-            : `Models · ${this.#modelProviderFilter}`,
+            ? `Models${this.#host.state.modelCatalogCached ? " · cached" : ""}`
+            : `Models · ${this.#modelProviderFilter}${this.#host.state.modelCatalogCached ? " · cached" : ""}`,
           modelItems,
           (item) => {
             const selection = item.value as ModelPickerChoice | null
             if (selection === null) {
+              if (item.id === "models.connect") { this.openProviderPicker(); return }
               if (item.id === "models.error") {
                 this.requestModels()
                 return
@@ -554,6 +609,7 @@ export class ProviderUiController {
           this.#host.pickerController.showLoading("Providers", "Loading provider connections")
           break
         }
+        providerItems.push({ id: "providers.compatible", label: "Connect compatible endpoint…", description: "Custom OpenAI-compatible endpoint or local model server", value: null })
         if (providerError !== undefined) {
           providerItems.unshift({
             id: "providers.error",
@@ -580,6 +636,7 @@ export class ProviderUiController {
           (item) => {
             const provider = item.value as RottweilerState["providers"][number] | null
             if (provider === null) {
+              if (item.id === "providers.compatible") { this.openCompatibleProviderSetup(); return }
               if (item.id === "providers.error") {
                 this.requestModels()
                 return

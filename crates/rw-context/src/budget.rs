@@ -198,13 +198,15 @@ impl OverflowPolicy {
         let reserved_tokens = self.reserved_tokens();
         let threshold_tokens = self.context_window_tokens.saturating_sub(reserved_tokens);
         let would_overflow = total_tokens >= threshold_tokens;
+        let soft_threshold = self.context_window_tokens - self.context_window_tokens.div_ceil(5);
         OverflowDecision {
             total_tokens,
             reserved_tokens,
             threshold_tokens,
             remaining_before_threshold: threshold_tokens.saturating_sub(total_tokens),
             would_overflow,
-            should_compact: self.automatic_compaction && would_overflow,
+            should_compact: self.automatic_compaction
+                && total_tokens >= threshold_tokens.min(soft_threshold),
         }
     }
 }
@@ -305,6 +307,22 @@ mod tests {
         let at_boundary = policy.calculate(80_000);
         assert!(at_boundary.should_compact);
         assert_eq!(at_boundary.reserved_tokens, 20_000);
+    }
+
+    #[test]
+    fn automatic_compaction_precedes_physical_overflow_at_eighty_percent() {
+        let policy = OverflowPolicy {
+            context_window_tokens: 200_000,
+            max_output_tokens: 20_000,
+            reserved_tokens_override: None,
+            automatic_compaction: true,
+        };
+        assert!(!policy.calculate(159_999).should_compact);
+        let soft = policy.calculate(160_000);
+        assert!(soft.should_compact);
+        assert!(!soft.would_overflow);
+        assert_eq!(soft.threshold_tokens, 180_000);
+        assert!(policy.calculate(180_000).would_overflow);
     }
 
     #[test]

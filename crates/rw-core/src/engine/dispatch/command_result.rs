@@ -71,6 +71,35 @@ pub(super) async fn apply(
                 let _ = respond.send(Err(error));
                 return;
             }
+            let deferred = match &output.action {
+                SessionCommandAction::SwitchMode { mode } => {
+                    Some(rw_types::DeferredSessionAction::SwitchMode { mode: mode.clone() })
+                }
+                SessionCommandAction::Compact { instructions } => {
+                    Some(rw_types::DeferredSessionAction::Compact {
+                        instructions: instructions.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if super::deferred_controls::must_queue(state)
+                && let Some(action) = deferred
+            {
+                if let Err(error) = super::deferred_controls::enqueue(
+                    state,
+                    config,
+                    events,
+                    command_meta.clone(),
+                    action,
+                )
+                .await
+                {
+                    let _ = respond.send(Err(error));
+                    return;
+                }
+                output.action = SessionCommandAction::None;
+                output.message = "Queued until the current work finishes.".into();
+            }
             let mut unrestorable_paths = Vec::new();
             let mut submitted_prompt = None;
             let mut deferred_command_completion = false;
@@ -139,6 +168,7 @@ pub(super) async fn apply(
                         events,
                         item_id.clone(),
                         true,
+                        None,
                     )
                     .await
                     {
@@ -154,6 +184,7 @@ pub(super) async fn apply(
                         events,
                         item_id.clone(),
                         false,
+                        None,
                     )
                     .await
                     {

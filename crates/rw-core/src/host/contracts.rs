@@ -406,6 +406,14 @@ pub trait HostQueryService: Send + Sync + 'static {
             "provider authentication is unavailable on this host".to_owned(),
         ))
     }
+    async fn configure_compatible_provider(
+        &self,
+        _configuration: &rw_types::CompatibleProviderSetup,
+    ) -> Result<(), HostError> {
+        Err(HostError::Query(
+            "compatible provider setup is unavailable on this host".into(),
+        ))
+    }
     async fn configure_builtin_provider(
         &self,
         _profile: BuiltinProviderProfile,

@@ -1,5 +1,5 @@
 import { TextRenderable } from "./text"
-import { statusContext } from "../state/context-usage"
+import { contextWarning, statusContext } from "../state/context-usage"
 import {
   bg,
   bold,
@@ -13,6 +13,7 @@ import {
   formatStatusSessionCost,
   presentError
 } from "../render"
+import { permissionModeLabel } from "../ui-presentation"
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { humanLabel, permissionRuntimeMode, toolDisplayName } from "./panel-labels"
@@ -78,8 +79,10 @@ export class StatusLineRenderable extends TextRenderable {
     const mode = state.replay.active ? "REPLAY" : (state.mode ?? "—").toUpperCase()
     const modeColor = state.replay.active ? this.#theme.info : this.#theme.primary
     const modePill = bg(modeColor)(fg(this.#theme.background)(` ${mode} `))
+    const missingModel = state.model === null ? "model not selected"
+      : state.modelCatalogLoaded && !state.modelCatalogCached ? "choose model" : "checking model"
     const model = statusModel === null
-      ? `model not selected${this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`}`
+      ? `${missingModel}${this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`}`
       : compactStatusModel(statusModel)
     const approval = waitingApproval === undefined
       ? ""
@@ -92,10 +95,18 @@ export class StatusLineRenderable extends TextRenderable {
     const changed = changedCount === 0 ? "" : `  ${changedCount} changed`
     const runningAgents = Object.values(state.subagents)
       .filter((subagent) => subagent.status === "running").length
-    const extension = pluginStatus === undefined ? "" : `  Extension · ${humanLabel(pluginStatus[1])}`
-    const contextLabel = context === null ? "" : context.replace(/^(ctx)\s*/, "")
+    const queuedControls = state.queuedControls.length === 0
+      ? state.lastControlSettlement !== null && state.lastControlSettlement.outcome !== "applied" ? `  queued control ${state.lastControlSettlement.outcome} · open queue` : ""
+      : `  ${state.queuedControls.length} queued controls`
+    const extension = queuedControls + (pluginStatus === undefined ? "" : `  Extension · ${humanLabel(pluginStatus[1])}`)
+    const usage = statusContext(state)
+    const percent = usage?.context_window_known && Number(usage.usable_tokens) > 0
+      ? Number(usage.used_tokens) / Number(usage.usable_tokens) * 100 : 0
+    const contextColor = percent >= 85 ? this.#theme.error : percent >= 70 ? this.#theme.warning : this.#theme.text
+    const contextWarning = percent >= 85 ? " · near limit" : percent >= 70 ? " · filling" : ""
+    const contextLabel = context === null ? "" : context.replace(/^(ctx)\s*/, "") + contextWarning
     const agentLabel = runningAgents === 1 ? " agent" : " agents"
-    this.content = t`${bold(modePill)}${permissionMode === null ? "" : fg(this.#theme.textMuted)(`  ${permissionMode}`)}  ${fg(this.#theme.textMuted)(model)}${approval === "" ? "" : fg(this.#theme.warning)(approval)}${contextLabel === "" ? "" : fg(this.#theme.border)("    ctx ")}${contextLabel === "" ? "" : fg(this.#theme.text)(contextLabel)}${fg(this.#theme.text)(cost)}${branch === "" ? "" : fg(this.#theme.secondary)(branch)}${changed === "" ? "" : fg(this.#theme.warning)(changed)}${runningAgents === 0 ? "" : fg(this.#theme.info)(`    ${runningAgents}`)}${runningAgents === 0 ? "" : fg(this.#theme.textMuted)(agentLabel)}${extension === "" ? "" : fg(this.#theme.textMuted)(extension)}`
+    this.content = t`${bold(modePill)}${permissionMode === null ? "" : fg(this.#theme.textMuted)(`  approvals ${permissionModeLabel(permissionMode)}`)}  ${fg(this.#theme.textMuted)(model)}${approval === "" ? "" : fg(this.#theme.warning)(approval)}${contextLabel === "" ? "" : fg(this.#theme.border)("    ctx ")}${contextLabel === "" ? "" : fg(contextColor)(contextLabel)}${fg(this.#theme.text)(cost)}${branch === "" ? "" : fg(this.#theme.secondary)(branch)}${changed === "" ? "" : fg(this.#theme.warning)(changed)}${runningAgents === 0 ? "" : fg(this.#theme.info)(`    ${runningAgents}`)}${runningAgents === 0 ? "" : fg(this.#theme.textMuted)(agentLabel)}${extension === "" ? "" : fg(this.#theme.textMuted)(extension)}`
   }
 }
 
@@ -168,6 +179,10 @@ export class StateBannerRenderable extends TextRenderable {
       this.content = state.connection.gap === null
         ? connectionMessage(state.connection.phase)
         : "Restoring missed updates…"
+    } else if (contextWarning(statusContext(state)) !== null) {
+      this.visible = true
+      this.fg = this.#theme.warning
+      this.content = contextWarning(statusContext(state))!
     } else if (latestPluginNotification !== undefined) {
       this.visible = true
       this.fg = this.#theme.info

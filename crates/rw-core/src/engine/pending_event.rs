@@ -97,6 +97,10 @@ pub(super) enum PendingEvent {
         operation_id: String,
         unrestorable_paths: Vec<UnrestorablePath>,
     },
+    SessionControlQueueChanged {
+        controls: Vec<rw_types::QueuedSessionControl>,
+        settlement: Option<rw_types::SessionControlSettlement>,
+    },
     MessageQueued {
         position: u64,
         content: String,
@@ -203,6 +207,7 @@ pub(super) enum PendingEvent {
     },
     ContextUsage {
         turn: u64,
+        completion_sources: Vec<rw_types::SequenceId>,
         used_tokens: u64,
         usable_tokens: u64,
         reserved_tokens: u64,
@@ -429,6 +434,14 @@ impl PendingEvent {
                 operation_id,
                 unrestorable_paths,
             },
+            Self::SessionControlQueueChanged {
+                controls,
+                settlement,
+            } => EngineEvent::SessionControlQueueChanged {
+                meta,
+                controls,
+                settlement,
+            },
             Self::MessageQueued {
                 position,
                 content,
@@ -638,6 +651,7 @@ impl PendingEvent {
             },
             Self::ContextUsage {
                 turn,
+                completion_sources,
                 used_tokens,
                 usable_tokens,
                 reserved_tokens,
@@ -650,6 +664,7 @@ impl PendingEvent {
                 correction_millionths,
             } => EngineEvent::ContextUsageUpdated {
                 meta,
+                completion_sources,
                 turn_id: wire_turn_id(turn),
                 used_tokens,
                 usable_tokens,

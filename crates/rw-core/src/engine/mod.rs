@@ -94,9 +94,9 @@ pub use projection::{
 };
 use session::ActorState;
 pub use session::{
-    InitialSessionContext, PluginSessionBinding, PluginSessionCapability, SessionActor,
-    SessionActorConfig, SessionActorRecovery, SessionHandle, SessionSubscription,
-    StartupNotification,
+    InitialSessionContext, ModelSelectionPreferences, PluginSessionBinding,
+    PluginSessionCapability, SessionActor, SessionActorConfig, SessionActorRecovery, SessionHandle,
+    SessionSubscription, StartupNotification,
 };
 pub use session_extension::{
     NoopSessionExtensionController, SessionExtensionController, SessionExtensionSnapshot,
@@ -516,6 +516,7 @@ pub enum MessageDisposition {
 /// Read-only actor state for tests and future persistence adapters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSnapshot {
+    pub available_actions: Vec<rw_types::SessionActionAvailability>,
     pub conversation_turns: u64,
     pub resolved_model: Option<String>,
     pub queued_messages: Vec<String>,

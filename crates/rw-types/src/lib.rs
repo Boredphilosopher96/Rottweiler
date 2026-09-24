@@ -17,6 +17,7 @@ pub mod config;
 pub mod context_source;
 pub mod conversation_input;
 pub use context_source::ContextBlockId;
+pub mod client_navigation;
 mod error;
 pub mod extension_contract;
 pub mod extension_control;
@@ -62,31 +63,39 @@ pub use protocol::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
     CommandAckMeta, CommandDescriptor, CommandExecution, CommandMeta, CommandOutcome, CommandReply,
-    CommandSource, CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot,
-    ContextItemState, ContextSnapshot, Cost, CostSnapshot, DiffArtifact, DiffArtifactRef,
-    EngineError, EngineErrorCategory, EngineEvent, EngineEventDelivery, EventMeta,
-    MAX_CLIENT_CONTROLS, MAX_CLIENT_READS, MAX_CLIENT_URGENT_CONTROLS, MAX_COMMAND_BODY_BYTES,
-    MAX_COMMAND_REPLY_BYTES, MAX_CONTROL_RETAINED_BYTES, MAX_SESSION_ID_BYTES,
-    MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES, MAX_URGENT_CONTROL_RETAINED_BYTES, McpApprovalReview,
-    McpEnvironmentEntry, McpServerDescriptor, McpServerState, ModeDescriptor, ModeId, ModelAlias,
-    ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot,
-    ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion, PermissionApprovalDescriptor,
-    PermissionApprovalScope, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
-    PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
-    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
+    CommandSource, CompactionReason, CompatibleProviderAdapter, CompatibleProviderAuth,
+    CompatibleProviderSetup, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
+    ContextSnapshot, Cost, CostSnapshot, DiffArtifact, DiffArtifactRef, EngineError,
+    EngineErrorCategory, EngineEvent, EngineEventDelivery, EventMeta, MAX_CLIENT_CONTROLS,
+    MAX_CLIENT_READS, MAX_CLIENT_URGENT_CONTROLS, MAX_COMMAND_BODY_BYTES, MAX_COMMAND_REPLY_BYTES,
+    MAX_CONTROL_RETAINED_BYTES, MAX_SESSION_ID_BYTES, MAX_URGENT_CONTROL_REPLY_RETAINED_BYTES,
+    MAX_URGENT_CONTROL_RETAINED_BYTES, McpApprovalReview, McpEnvironmentEntry, McpServerDescriptor,
+    McpServerState, ModeDescriptor, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
+    ModelCapabilities, ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor,
+    ModelSwitchQuestion, PermissionApprovalDescriptor, PermissionApprovalScope,
+    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep,
+    PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind,
+    ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindSourcePosition,
-    RewindTarget, RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor,
-    SessionId, SessionIdError, SessionMode, SessionReview, SessionReviewFile, ShellId,
-    StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
-    SubagentResult, SubagentStatus, SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES,
-    ToolCapability, ToolOutputStream, TouchedFile, TouchedFileStatus, TranscriptFormat,
-    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceRootDescriptor, WorkspaceStatus,
+    RewindTarget, RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId,
+    SessionActionAvailability, SessionActionKind, SessionDescriptor, SessionId, SessionIdError,
+    SessionMode, SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
+    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus,
+    SubscriptionTokenAccounting, TRANSIENT_ENGINE_EVENT_TYPES, ToolCapability, ToolOutputStream,
+    TouchedFile, TouchedFileStatus, TranscriptFormat, TurnAccounting, TurnId, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    default_provider_api_key_credential_id,
 };
 
 /// Version of the protocol emitted by these types.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+pub use protocol::{
+    DeferredSessionAction, MAX_CONTROL_INSTRUCTIONS_BYTES, MAX_QUEUED_SESSION_CONTROLS,
+    QueuedControlStatus, QueuedSessionControl, SessionControlOutcome, SessionControlSettlement,
+    validate_queued_controls,
+};
 
 pub use rw_operation_contract::{OperationLifetime, ProgressAmount, ToolProgress};
 

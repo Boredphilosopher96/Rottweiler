@@ -419,7 +419,7 @@ async fn running_turn_rejects_context_surgery_without_losing_durable_state() {
     assert!(
         error
             .to_string()
-            .contains("context surgery requires an idle session")
+            .contains("Stop the current turn or wait for it to finish.")
     );
     let snapshot = handle
         .context_snapshot()

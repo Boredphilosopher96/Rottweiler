@@ -50,6 +50,7 @@ export function readSessionState(state: RottweilerState, sessionId: string, snap
       ? { ...session, ...(snapshot.title === null ? {} : { title: snapshot.title }), model: snapshot.model_alias, driverClientId: snapshot.driver_client_id, shellActive: snapshot.shell !== null }
       : session),
     hasActivity: snapshot.completed_turns !== "0" || snapshot.active_turn !== null,
+    queuedControls: snapshot.queued_controls ?? [],
     queuedMessages: snapshot.queued_messages.map(message => ({ position: message.position, content: message.preview })),
     shell: { shellId: snapshot.shell?.shell_id ?? null, active: snapshot.shell !== null, status: null, capturedOutput: null },
     latestShell: snapshot.shell === null ? null : {
@@ -70,7 +71,7 @@ export function metadataEvent(event: EngineEvent): boolean {
   switch (event.type) {
     case "session_created": case "plugin_status_changed": case "driver_changed": case "session_title_updated": case "model_changed":
     case "mode_changed": case "user_shell_state_changed": case "message_queued": case "queued_message_removed":
-    case "queued_messages_cleared": case "budget_status_changed": case "turn_started": case "turn_finished":
+    case "session_control_queue_changed": case "queued_messages_cleared": case "budget_status_changed": case "turn_started": case "turn_finished":
     case "conversation_turn_committed": case "conversation_rewound": case "compaction_started": case "compaction_finished": case "compaction_failed": return true
     default: return false
   }
@@ -81,7 +82,7 @@ export function preserveMetadata(before: RottweilerState, after: RottweilerState
   const cut = parseU64(before.recovery.metadataThrough)
   if (cut !== null && BigInt(sequence) <= cut) return {
     ...after, mode: before.mode, model: before.model, provider: before.provider, driverClientId: before.driverClientId,
-    pluginStatuses: before.pluginStatuses, sessions: before.sessions, turns: before.turns, queuedMessages: before.queuedMessages, shell: before.shell,
+    queuedControls: before.queuedControls, lastControlSettlement: before.lastControlSettlement, pluginStatuses: before.pluginStatuses, sessions: before.sessions, turns: before.turns, queuedMessages: before.queuedMessages, shell: before.shell,
     latestShell: before.latestShell, compaction: before.compaction, budgets: before.budgets,
     recovery: { ...after.recovery, compaction: before.recovery.compaction },
   }

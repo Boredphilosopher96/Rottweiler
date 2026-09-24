@@ -111,7 +111,7 @@ describe("Rottweiler layout", () => {
     }
   })
 
-  test("uses one constrained bottom-dock input for approvals, choices, and plans", async () => {
+  test("keeps the composer beside constrained approvals, choices, and plans", async () => {
     const setup = await createTestRenderer({ width: 72, height: 10, useThread: false })
     renderer = setup.renderer
     const base = createInitialState()
@@ -122,12 +122,13 @@ describe("Rottweiler layout", () => {
       await setup.renderOnce()
       expect(app.interactionPanel.visible).toBeTrue()
       expect(app.interactionPanel.capturesInput).toBeTrue()
-      expect(app.composer.visible).toBeFalse()
+      expect(app.composer.visible).toBeTrue()
       expect(renderer?.currentFocusedRenderable).toBe(app.interactionPanel.select)
       expect(app.main.y + app.main.height).toBeLessThanOrEqual(app.interactionPanel.y)
       expect(app.interactionPanel.y + app.interactionPanel.height).toBeLessThanOrEqual(
-        app.statusLine.y,
+        app.composer.y,
       )
+      expect(app.composer.y + app.composer.height).toBeLessThanOrEqual(app.statusLine.y)
       expect(app.interactionPanel.height).toBeLessThanOrEqual(8)
     }
 
@@ -216,7 +217,7 @@ describe("Rottweiler layout", () => {
     expect(app.composer.y + app.composer.height).toBeLessThanOrEqual(app.statusLine.y)
   })
 
-  test("keeps anchored autocomplete above the composer on short terminals", async () => {
+  test("keeps slash discovery above the composer on short terminals", async () => {
     for (const height of [8, 10, 12]) {
       const setup = await createTestRenderer({ width: 45, height, useThread: false })
       renderer = setup.renderer
@@ -235,8 +236,8 @@ describe("Rottweiler layout", () => {
       await setup.mockInput.typeText("/")
       await setup.renderOnce()
 
-      expect(app.picker.y).toBeGreaterThanOrEqual(0)
-      expect(app.picker.y + app.picker.height).toBeLessThanOrEqual(app.composer.y)
+      expect(app.commandPalette.y).toBeGreaterThanOrEqual(0)
+      expect(app.commandPalette.y + app.commandPalette.height).toBeLessThanOrEqual(app.composer.y)
       renderer.destroy()
       renderer = undefined
     }

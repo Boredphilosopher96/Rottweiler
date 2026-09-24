@@ -754,7 +754,7 @@ Known USD, credit, and subscription-token bounds remain distinct. Unknown pricin
 
 **Validation required:** Two independent engine processes competing for one remainder; cancellation during admission/start/terminal writes; crashes; ambiguous failures; exact and conflicting retries; actual usage corrections; mixed billing units; and attribution-specific accounting transfer.
 
-Admission totals use a fixed-depth time index over the validated UTC calendar key. A transaction updates separate session and root totals using checked 128-bit integers stored as fixed-width bytes. This preserves all u64 provider charges without SQLite signed-integer overflow or floating-point rounding. Queries exclude future receipts and include unfinished reservations from earlier days. Neither receipt count nor session age changes the maximum lookup depth. Admission requires exact attempt accounting. A database that cannot establish it is rejected before writes.
+Admission totals use a fixed-depth time index over the validated UTC calendar key. A transaction updates separate session and root totals using checked 128-bit integers stored as fixed-width bytes. This preserves all u64 provider charges without SQLite signed-integer overflow or floating-point rounding. Queries exclude future receipts and include unfinished reservations from earlier days. Neither receipt count nor session age changes the maximum lookup depth. Strict admission requires exact attempt accounting for the applicable scope. Opening a turn-only database atomically creates the provider ledger and projects historical turn timestamps as dated unknown charges, preserving the original rows without inventing provider receipts. Startup and uncapped calls remain available. A bounded call with an explicit cap rejects unknown history in its session or UTC day; history from earlier days does not block a fresh session under a daily cap. Reopening does not project the legacy history again. Structurally invalid or incomplete schemas remain errors.
 
 ## ADR-035: Register dormant plugins and own activation through settlement
 
@@ -863,3 +863,29 @@ Publication is atomic. A completed candidate is reused only when its build ident
 Linux native gates share an uploaded candidate. macOS startup measurements build on the measurement host to control executable provenance, and every gate in that job uses that candidate. The canonical Linux sandbox container is a separate build environment with its own engine and fixture.
 
 Raw samples retain candidate and measurement-host identities. Product ceilings, sample counts, and source test-renderer workloads belong to their respective contracts. A failed build or size check stops dependent runtime gates. See [CI ownership](design/ci-reliability.md).
+
+## ADR-042: Interactive recovery and proactive context management
+
+The [interaction contract](design/interaction-contract.md) defines setup,
+approval, navigation, and shutdown behavior. Interactive Auto approves audited
+safe actions and workspace writes, then asks for other actions; explicit deny
+rules, read-only agent modes, and fixed headless policy remain authoritative.
+Approval labels are Ask, Auto, and Off without changing persisted wire values.
+
+Provider activation preserves an existing model selection. An unselected coding
+session selects an available tool-capable model from that provider's catalog.
+The first concrete selection seeds only an unset user default. Model availability
+always comes from live discovery; a release-pinned models.dev snapshot supplies
+metadata offline, with bounded proxy-aware refresh during discovery.
+
+Automatic compaction starts at the earlier of 80% of the model context window
+and the reserved-output boundary. This supersedes ADR-010's overflow-only trigger;
+its pruning, summary format, pins, replay, and physical-overflow calculation stay
+unchanged. The status line warns at 70% and 85% of usable input context. Abrupt
+large inputs can cross multiple thresholds in one update; warnings are not proof
+that arbitrary input will fit.
+
+Ctrl+C stops active inference. Two consecutive idle presses within 900 ms exit.
+Foreground shells retain their terminal's signal semantics. `/exit`, SIGINT,
+SIGTERM, and SIGHUP use cooperative session cleanup, with a 30-second host proof
+and 35-second client/supervisor grace. Explicit detach retains its lifetime contract.

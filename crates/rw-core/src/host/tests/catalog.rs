@@ -39,20 +39,27 @@ async fn list_commands_routes_to_the_explicit_sessions_assembled_registry() {
         else {
             panic!("accepted read")
         };
-        let (session_id, commands, truncated) = events
+        let (session_id, commands, available_actions, truncated) = events
             .into_iter()
             .find_map(|event| match event {
                 EngineEvent::CommandDescriptorsListed {
                     session_id,
                     commands,
+                    available_actions,
                     truncated,
                     ..
-                } => Some((session_id, commands, truncated)),
+                } => Some((session_id, commands, available_actions, truncated)),
                 _ => None,
             })
             .expect("command catalog");
         assert_eq!(session_id, SessionId(name.to_owned()));
         assert!(!truncated);
+        assert_eq!(available_actions.len(), 8);
+        assert!(
+            available_actions
+                .iter()
+                .all(|action| action.unavailable_reason.is_none())
+        );
         assert!(
             commands
                 .iter()
@@ -71,6 +78,62 @@ async fn list_commands_routes_to_the_explicit_sessions_assembled_registry() {
         assert!(commands.iter().any(|command| command.name == "permissions"));
         assert!(commands.iter().any(|command| command.name == "add-dir"));
     }
+}
+
+#[tokio::test]
+async fn observer_catalog_explains_why_session_controls_are_unavailable() {
+    let (host, _factory) = host(1);
+    let session_id = SessionId("observer-actions".into());
+    let driver = BoundClient {
+        client_id: ClientId("driver".into()),
+    };
+    host.dispatch(
+        driver,
+        ClientCommand::ResumeSession {
+            meta: meta("driver", "resume-actions"),
+            session_id: session_id.clone(),
+            last_seen_sequence: None,
+            role: ClientRole::Driver,
+        },
+    )
+    .await;
+    let reply = host
+        .dispatch(
+            BoundClient {
+                client_id: ClientId("observer".into()),
+            },
+            ClientCommand::ListCommands {
+                meta: meta("observer", "list-actions"),
+                session_id,
+            },
+        )
+        .await;
+    let rw_types::CommandReply::Read {
+        outcome: CommandOutcome::Accepted {},
+        events,
+    } = serde_json::from_slice(&reply.bytes).expect("typed reply")
+    else {
+        panic!("accepted catalog")
+    };
+    let actions = events
+        .into_iter()
+        .find_map(|event| match event {
+            EngineEvent::CommandDescriptorsListed {
+                available_actions, ..
+            } => Some(available_actions),
+            _ => None,
+        })
+        .expect("catalog");
+    assert_eq!(actions.len(), 8);
+    assert!(actions.iter().all(
+        |action| if action.action == rw_types::SessionActionKind::Review {
+            action.unavailable_reason.is_none()
+        } else {
+            !action.queued
+                && action.unavailable_reason.as_deref()
+                    == Some("Take control of this session first.")
+        }
+    ));
 }
 
 #[tokio::test]

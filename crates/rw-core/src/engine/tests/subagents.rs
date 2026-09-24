@@ -300,3 +300,300 @@ async fn malformed_single_lifecycle_errors_without_hanging_or_persisting_duplica
     drop(coordinator);
     assert_eq!(actor.await.expect("actor"), 2);
 }
+
+#[tokio::test]
+async fn background_lifecycle_survives_parent_turn_and_is_durable_when_idle() {
+    use super::fixtures::{
+        models::PendingModel,
+        support::{TestEventSinkExt, config},
+    };
+    use rw_types::{EngineEvent, config::PermissionDecision};
+    let root = tempfile::tempdir().expect("workspace");
+    let model = Arc::new(PendingModel);
+    let handle = super::fixtures::history::spawn(config(
+        root.path(),
+        model,
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        crate::engine::builtin_hook_dispatcher().expect("hooks"),
+    ))
+    .await
+    .expect("actor");
+    let sink = handle.background_subagent_event_sink();
+    let mut events = handle.subscribe().expect("events");
+    let result = fixture_subagent_result("background");
+    handle
+        .send_message("parent work")
+        .await
+        .expect("parent continues");
+    loop {
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("turn deadline")
+            .expect("event");
+        if matches!(event.as_ref(), EngineEvent::TurnStarted { .. }) {
+            break;
+        }
+    }
+    sink.lifecycle(SubagentLifecycleEvent::Spawned {
+        subagent_id: result.subagent_id.clone(),
+        child_session_id: result.session_id.clone(),
+        task: "background work".into(),
+    })
+    .await
+    .expect("spawn");
+    handle.interrupt().await.expect("parent interruption");
+    loop {
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("parent finish deadline")
+            .expect("event");
+        if matches!(event.as_ref(), EngineEvent::TurnFinished { .. }) {
+            break;
+        }
+    }
+    sink.lifecycle(SubagentLifecycleEvent::Finished {
+        subagent_id: result.subagent_id.clone(),
+        result: Box::new(result.clone()),
+    })
+    .await
+    .expect("completion after parent turn");
+    assert!(
+        sink.lifecycle(SubagentLifecycleEvent::Finished {
+            subagent_id: result.subagent_id.clone(),
+            result: Box::new(result),
+        })
+        .await
+        .is_err(),
+        "completion is not duplicated"
+    );
+    let history = handle
+        .event_sink
+        .test_events_after(None)
+        .await
+        .expect("durable history");
+    let parent_end = history
+        .iter()
+        .position(|event| matches!(event, EngineEvent::TurnFinished { .. }))
+        .expect("parent turn");
+    let child_end = history
+        .iter()
+        .position(|event| matches!(event, EngineEvent::SubagentFinished { .. }))
+        .expect("child result");
+    assert!(child_end > parent_end);
+    handle
+        .close()
+        .await
+        .expect("session closes despite retained lifecycle sink");
+    assert!(
+        sink.lifecycle(SubagentLifecycleEvent::Spawned {
+            subagent_id: SubagentId("late".into()),
+            child_session_id: SessionId("late-child".into()),
+            task: "late".into(),
+        })
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn active_child_activity_refuses_rewind_before_changing_source() {
+    use super::fixtures::{
+        models::PendingModel,
+        support::{config, protocol_meta},
+    };
+    use rw_tools::{CapabilityManifest, Tool, ToolContext, ToolDescriptor, ToolError, ToolResult};
+    use rw_types::{
+        ClientCommand, ClientRole, CommandOutcome, RewindTarget, TurnId, config::PermissionDecision,
+    };
+    struct ActiveChild;
+    #[async_trait::async_trait]
+    impl Tool for ActiveChild {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: "spawn_agent".into(),
+                description: "active-child fixture".into(),
+                input_schema: serde_json::json!({}),
+                capabilities: CapabilityManifest::default(),
+            }
+        }
+        async fn settle_effects(&self) -> Result<(), ToolError> {
+            Ok(())
+        }
+        fn observes_session_resources(&self) -> bool {
+            true
+        }
+        fn session_activity(&self, _: &SessionId) -> Option<String> {
+            Some("A child agent is running".into())
+        }
+        async fn execute(
+            &self,
+            _: &ToolContext,
+            _: serde_json::Value,
+        ) -> Result<ToolResult, ToolError> {
+            unreachable!()
+        }
+    }
+    let root = tempfile::tempdir().expect("workspace");
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(ActiveChild)).expect("child tool");
+    let handle = super::fixtures::history::spawn(config(
+        root.path(),
+        Arc::new(PendingModel),
+        Arc::new(tools),
+        PermissionDecision::Allow,
+        crate::engine::builtin_hook_dispatcher().expect("hooks"),
+    ))
+    .await
+    .expect("actor");
+    let session_id = SessionId("fixture-session".into());
+    handle
+        .dispatch(ClientCommand::AttachSession {
+            meta: protocol_meta("driver", "attach"),
+            session_id: session_id.clone(),
+            last_seen_sequence: None,
+            role: ClientRole::Driver,
+        })
+        .await
+        .expect("attach");
+    let snapshot = handle.snapshot().await.expect("child activity projection");
+    for action in [
+        rw_types::SessionActionKind::Rewind,
+        rw_types::SessionActionKind::Review,
+        rw_types::SessionActionKind::Fork,
+        rw_types::SessionActionKind::AddWorkspaceRoot,
+        rw_types::SessionActionKind::MutateContext,
+    ] {
+        let entry = snapshot
+            .available_actions
+            .iter()
+            .find(|entry| entry.action == action)
+            .expect("idle-only action");
+        assert!(!entry.queued);
+        assert!(
+            entry
+                .unavailable_reason
+                .as_ref()
+                .is_some_and(|reason| reason.contains("child"))
+        );
+    }
+    let result = handle
+        .dispatch(ClientCommand::Rewind {
+            meta: protocol_meta("driver", "rewind"),
+            session_id,
+            target: RewindTarget::Turn {
+                turn_id: TurnId("1".into()),
+            },
+        })
+        .await
+        .expect("rewind");
+    assert!(
+        matches!(result, CommandOutcome::Rejected { error } if error.code == "invalid_rewind_target" && error.message.contains("idle"))
+    );
+    handle.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn two_background_children_do_not_block_parent_and_results_enter_next_request() {
+    use super::fixtures::{
+        models::M3Model,
+        support::{collect_turn, config, stop_script},
+    };
+    use rw_types::config::PermissionDecision;
+    let root = tempfile::tempdir().expect("workspace");
+    let model = Arc::new(M3Model::new([
+        stop_script("parent continues", &[]),
+        stop_script("results received", &[]),
+        stop_script("still bounded", &[]),
+    ]));
+    let handle = super::fixtures::history::spawn(config(
+        root.path(),
+        model.clone(),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        crate::engine::builtin_hook_dispatcher().expect("hooks"),
+    ))
+    .await
+    .expect("actor");
+    let sink = handle.background_subagent_event_sink();
+    let mut events = handle.subscribe().expect("events");
+    let children = [
+        fixture_subagent_result("first"),
+        fixture_subagent_result("second"),
+    ];
+    for result in &children {
+        sink.lifecycle(SubagentLifecycleEvent::Spawned {
+            subagent_id: result.subagent_id.clone(),
+            child_session_id: result.session_id.clone(),
+            task: "concurrent work".into(),
+        })
+        .await
+        .expect("spawn");
+    }
+    handle
+        .send_message("continue while both children work")
+        .await
+        .expect("send");
+    collect_turn(&mut events).await;
+    assert_eq!(
+        model.requests().len(),
+        1,
+        "parent completes before either child"
+    );
+    for result in children {
+        sink.lifecycle(SubagentLifecycleEvent::Finished {
+            subagent_id: result.subagent_id.clone(),
+            result: Box::new(result),
+        })
+        .await
+        .expect("finish");
+    }
+    assert_eq!(
+        model.requests().len(),
+        1,
+        "completion never wakes idle inference"
+    );
+    let inventory = handle
+        .context_snapshot()
+        .await
+        .expect("current child inventory");
+    let notice = inventory
+        .items
+        .iter()
+        .find(|item| item.item_id.0.starts_with("child_completion:"))
+        .expect("child notice");
+    assert!(
+        handle
+            .pin_context(notice.item_id.clone())
+            .await
+            .expect_err("immutable notice")
+            .to_string()
+            .contains("only conversation-resident context items")
+    );
+
+    for _ in 0..2 {
+        handle
+            .send_message("use the child results")
+            .await
+            .expect("send");
+        collect_turn(&mut events).await;
+        let requests = model.requests();
+        let request = requests.last().expect("request");
+        assert_child_notice_context(request);
+    }
+    handle.close().await.expect("close");
+}
+
+fn assert_child_notice_context(request: &rw_providers::ProviderRequest) {
+    let count = request.turns.iter().flat_map(|turn| &turn.blocks).filter(|block| matches!(block, rw_types::Block::Text { text } if text.contains("untrusted result excerpt"))).count();
+    assert_eq!(
+        count, 2,
+        "one bounded notice per completed source on every request"
+    );
+    let user_position = request.turns.iter().rposition(|turn| turn.blocks.iter().any(|block| matches!(block, rw_types::Block::Text { text } if text == "use the child results"))).expect("current user message");
+    let notice_position = request.turns.iter().position(|turn| turn.blocks.iter().any(|block| matches!(block, rw_types::Block::Text { text } if text.contains("untrusted result excerpt")))).expect("notice");
+    assert!(
+        user_position < notice_position,
+        "result observations follow the request they inform"
+    );
+}

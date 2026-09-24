@@ -18,6 +18,9 @@ interface SubmissionHost {
   readonly ui: Pick<RottweilerApp,
     | "closePicker"
     | "composer"
+    | "openErrorsPicker"
+    | "openContextPicker"
+    | "openCostPicker"
     | "openMcpPicker"
     | "openModelPicker"
     | "openPermissionPicker"
@@ -53,7 +56,7 @@ export class SubmissionController {
   #lastComposerValue = ""
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
-  #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | "agents" | null = null
+  #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | "agents" | "context" | "cost" | "errors" | null = null
   constructor(readonly host: SubmissionHost) {}
   get notice(): string | null { return this.#composerNotice }
   set notice(value: string | null) { this.#composerNotice = value }
@@ -211,6 +214,11 @@ export class SubmissionController {
     if (sessionAction?.type === "rewindTimeline") {
       this.host.ui.closePicker()
       this.host.ui.openTimelinePicker()
+      return true
+    }
+    if (sessionAction?.type === "context" || sessionAction?.type === "cost" || sessionAction?.type === "errors") {
+      this.#postSubmitPicker = sessionAction.type
+      this.host.ui.closePicker()
       return true
     }
     if (sessionAction?.type === "models") {
@@ -517,7 +525,10 @@ export class SubmissionController {
   openPostSubmitPicker(): void {
     const picker = this.#postSubmitPicker
     this.#postSubmitPicker = null
-    if (picker === "models") this.host.ui.openModelPicker()
+    if (picker === "context") this.host.ui.openContextPicker()
+    else if (picker === "errors") this.host.ui.openErrorsPicker()
+    else if (picker === "cost") this.host.ui.openCostPicker()
+    else if (picker === "models") this.host.ui.openModelPicker()
     else if (picker === "providers") this.host.ui.openProviderPicker()
     else if (picker === "themes") this.host.ui.openThemePicker()
     else if (picker === "settings") this.host.ui.openSettingsPicker()

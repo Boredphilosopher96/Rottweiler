@@ -19,6 +19,14 @@ pub(in crate::engine) fn recovered_pending_event(
         EngineEvent::TurnStarted { turn_id, .. } => PendingEvent::TurnStarted {
             turn: parse_turn_id(turn_id)?,
         },
+        EngineEvent::SessionControlQueueChanged {
+            controls,
+            settlement,
+            ..
+        } => PendingEvent::SessionControlQueueChanged {
+            controls: controls.clone(),
+            settlement: settlement.clone(),
+        },
         EngineEvent::MessageQueued {
             position,
             content,
@@ -333,6 +341,7 @@ pub(in crate::engine) fn recovered_pending_event(
         },
         EngineEvent::ContextUsageUpdated {
             turn_id,
+            completion_sources,
             used_tokens,
             usable_tokens,
             reserved_tokens,
@@ -345,6 +354,7 @@ pub(in crate::engine) fn recovered_pending_event(
             correction_millionths,
             ..
         } => PendingEvent::ContextUsage {
+            completion_sources: completion_sources.clone(),
             turn: parse_turn_id(turn_id)?,
             used_tokens: *used_tokens,
             usable_tokens: *usable_tokens,

@@ -1,3 +1,5 @@
+import { toolHeaderContent } from "../../render/tool-header"
+export { compactToolPresentation } from "../../render/tool-header"
 import { TextRenderable } from "../text"
 import type { ToolOutputText } from "../../state/output-reader"
 import type { ClientDiagnostics } from "../../client-diagnostics"
@@ -259,6 +261,7 @@ export function reasoningTitle(content: string): string {
 }
 
 export class ToolBlockRenderable extends BoxRenderable {
+  #headerSignature = ""
   readonly header: TextRenderable
   readonly body: TextRenderable
   readonly truncationMarker: TextRenderable
@@ -270,7 +273,6 @@ export class ToolBlockRenderable extends BoxRenderable {
   readonly #bodyContainer: BoxRenderable
   #commandSignature = ""
   #diffSignature = ""
-  #headerSignature = ""
   #collapsed: boolean
   #retainedTool: ToolProjection | null = null
   get #tool(): ToolProjection {
@@ -442,41 +444,11 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#lastRender = { tool, width: this.#availableWidth, collapsed: this.#collapsed, elapsed, rootsGeneration }
     this.#syncCommand(tool)
     this.#syncDiff(tool)
-    const glyph = tool.status === "awaiting_approval" ? "?" : tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
-    const compact = compactToolPresentation(tool)
-    const result =
-      tool.status === "finished" && this.#collapsed
-        ? compact.summary
-        : ""
-    const statusColor =
-      tool.status === "awaiting_approval"
-        ? this.#theme.warning
-        : tool.isError === true
-          ? this.#theme.error
-          : tool.status === "finished"
-            ? this.#theme.success
-            : this.#theme.info
-    const outcome = tool.status === "awaiting_approval"
-      ? `${glyph} approval needed`
-      : result === ""
-        ? `${glyph}${elapsed}`
-        : `${glyph} ${result}${elapsed}`
-    const rowWidth = Math.max(20, this.#availableWidth - 3)
-    const toolName = truncateToCells(tool.name.replaceAll("_", "-"), 12)
-    const subjectBudget = Math.max(0, rowWidth - toolName.length - outcome.length - 7)
-    const subject = truncateToCells(
-      result !== "" && compact.subject !== "" && result.toLowerCase().includes(compact.subject.toLowerCase())
-        ? ""
-        : compact.subject,
-      subjectBudget,
-    )
-    const name = `${toolName}${subject === "" ? "" : "  "}`
-    const prefix = `${this.#collapsed ? "▸" : "⌄"} ${name}${subject}`
-    const spacing = " ".repeat(Math.max(2, rowWidth - prefix.length - outcome.length))
-    const headerSignature = JSON.stringify([this.#collapsed, name, subject, spacing, outcome])
+    const header = toolHeaderContent(tool, this.#collapsed, this.#availableWidth, this.#theme, elapsed)
+    const headerSignature = JSON.stringify(header)
     if (headerSignature !== this.#headerSignature) {
       this.#headerSignature = headerSignature
-      this.header.content = t`${fg(this.#theme.textMuted)(`${this.#collapsed ? "▸" : "⌄"} `)}${fg(this.#theme.secondary)(name)}${subject === "" ? "" : fg(this.#theme.text)(subject)}${spacing}${fg(statusColor)(outcome)}`
+      this.header.content = header
     }
     this.header.fg = this.#theme.text
     if (this.#commandContainer !== null) this.#commandContainer.visible = !this.#collapsed
@@ -794,24 +766,6 @@ export function readToolDiff(tool: ToolProjection): { path: string; unifiedDiff:
       unifiedDiff: presentableUnifiedDiff(tool.diff.path, tool.diff.unified_diff),
     }
     : null
-}
-
-export function compactToolPresentation(tool: ToolProjection): { subject: string; summary: string } {
-  const presentation = presentTool(tool)
-  const arguments_ = isRecord(tool.args) ? tool.args : null
-  const fallbackSubject = [
-    arguments_?.command,
-    arguments_?.path,
-    arguments_?.file_path,
-    arguments_?.pattern,
-    arguments_?.query,
-  ].find((value): value is string => typeof value === "string" && value.trim() !== "") ?? ""
-  const subject = truncateToCells(
-    (presentation.subject || fallbackSubject).replace(/\s+/g, " ").trim(),
-    80,
-  )
-  const summary = truncateToCells(presentation.summary.replace(/\s+/g, " ").trim(), 56)
-  return { subject, summary }
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

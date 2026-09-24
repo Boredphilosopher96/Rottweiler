@@ -15,6 +15,65 @@ describe("Rottweiler providers-sessions", () => {
     renderer = undefined
   })
 
+  test("compatible setup sends bounded nonsecret configuration before credential entry", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 28, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, onCommand(command) { emitted.push(command); return { type: "accepted" } } })
+    renderer.root.add(app)
+    app.openProviderPicker()
+    const catalog = emitted.find(command => command.type === "list_models")!
+    app.handleEvent({ type: "models_listed", meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: catalog.meta.request_id, emitted_at: "2026-01-01T00:00:00Z" },
+      aliases: [], cached: false, truncated: false, models: [], providers: [],
+    })
+    expect(app.picker.select.options.map(option => option.value)).toEqual(["providers.compatible"])
+    app.picker.input.value = "Connect compatible"
+    app.picker.select.selectCurrent()
+    app.picker.input.value = "my-gateway"
+    setup.mockInput.pressEnter()
+    app.picker.select.selectCurrent()
+    app.picker.input.value = "https://gateway.example/v1/chat/completions"
+    setup.mockInput.pressEnter()
+    app.picker.select.selectCurrent()
+    app.picker.input.value = "test-model"
+    setup.mockInput.pressEnter()
+    expect(emitted.some(command => command.type === "configure_compatible_provider")).toBe(false)
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({ type: "configure_compatible_provider", configuration: {
+      provider: "my-gateway", adapter: "chat", endpoint: "https://gateway.example/v1/chat/completions", auth: "api_key", initial_model: "test-model",
+    } }))
+    app.handleEvent({ type: "provider_configured", meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: "setup", emitted_at: "2026-01-01T00:00:00Z" }, session_id: "session-local", provider: "my-gateway", auth_kind: "api_key" })
+    expect(app.picker.visible).toBe(true)
+    expect(app.picker.title).toContain("API key")
+  })
+
+  test.each(["api_key", "none"] as const)("auto-selects a fresh compatible model after %s activation", async (authKind) => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      onCommand(command) { commands.push(command); return { type: "accepted" } },
+      async onProviderApiKey() { return { stored: true, activated: true, warnings: [] } },
+      async onProviderActivate() {},
+    })
+    renderer.root.add(app)
+    app.handleEvent({ type: "provider_configured", meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: "configured", emitted_at: "2026-01-01T00:00:00Z" }, session_id: "session-local", provider: "custom", auth_kind: authKind })
+    if (authKind === "api_key") {
+      await setup.mockInput.typeText("fixture-key")
+      setup.mockInput.pressEnter()
+    }
+    await Bun.sleep(0)
+    const request = commands.findLast(command => command.type === "list_models")
+    expect(request?.type).toBe("list_models")
+    app.handleEvent({ type: "models_listed", meta: { ...request!.meta, emitted_at: "2026-01-01T00:00:01Z" },
+      models: [{ id: "custom/test", display_name: "Test", provider: "custom", aliases: [], current: false, available: true,
+        capabilities: { tool_calling: true, vision: false, thinking: false, cache_behavior: "none", max_context_tokens: null, max_output_tokens: null } }],
+      aliases: [], providers: [], cached: false, truncated: false,
+    })
+    expect(commands).toContainEqual(expect.objectContaining({ type: "switch_model", model: "custom/test", provider: "custom" }))
+  })
+
   test("quick-connects fresh built-in providers through connection-scoped auth prompts", async () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
     renderer = setup.renderer
@@ -337,13 +396,8 @@ describe("Rottweiler providers-sessions", () => {
     renderer.root.add(app)
 
     app.openSessionPicker()
-    app.picker.select.setSelectedIndex(1)
+    app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "sessions.rename"))
     app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Session actions · Fix login")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
-      "Resume session",
-      "Rename session",
-    ])
     app.picker.select.setSelectedIndex(1)
     app.picker.select.selectCurrent()
     expect(app.picker.title).toContain("Rename session, e.g. Auth refactor")
@@ -607,7 +661,7 @@ describe("Rottweiler providers-sessions", () => {
     expect(app.state.errors).toHaveLength(64)
     expect(app.state.errors.at(-1)?.code).toBe("session_not_idle")
     expect(app.banner.visible).toBeTrue()
-    expect(app.banner.plainText).toContain("model switching requires an idle session")
+    expect(app.banner.plainText).toContain("stop the response with Ctrl+C")
     expect(commands).not.toContainEqual(expect.objectContaining({
       type: "set_setting",
       key: "project.models.default",

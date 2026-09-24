@@ -14,6 +14,16 @@ path = "crates/rw-types/src/protocol/shared.rs"
 symbols = ["SessionId::validate", "RequestId::is_valid", "MAX_REQUEST_ID_BYTES", "CommandSource", "SessionMode::as_str"]
 
 [[owner]]
+id = "interactive-navigation-contract"
+path = "crates/rw-types/src/client_navigation.rs"
+symbols = ["INTERACTIVE_COMMANDS"]
+
+[[owner]]
+id = "session-action-availability-contract"
+path = "crates/rw-types/src/protocol/actions.rs"
+symbols = ["SessionActionKind", "SessionActionAvailability"]
+
+[[owner]]
 id = "client-command-contract"
 path = "crates/rw-types/src/protocol/commands.rs"
 symbols = ["ClientCommand::session_id", "ClientCommand::execution", "CommandReply", "MAX_COMMAND_REPLY_BYTES", "MAX_CLIENT_READS"]
@@ -246,6 +256,8 @@ id = "client-protocol-typescript"
 owners = [
   "client-protocol-contract",
   "client-command-contract",
+  "interactive-navigation-contract",
+  "session-action-availability-contract",
   "engine-event-contract",
   "attachment-contract",
   "mcp-server-id-contract",

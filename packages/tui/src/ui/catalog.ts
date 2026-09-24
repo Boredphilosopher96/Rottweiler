@@ -1,3 +1,4 @@
+import { resourceLimitCopy } from "../render/resource-copy"
 import { MAX_UI_DESCRIPTOR_BYTES, MAX_UI_PANELS_BYTES, type UiCatalogEntry, type UiPresentation } from "../protocol"
 import type { SessionReader } from "../session-reader"
 import type { ClientCache, CacheLease } from "../history/cache"
@@ -38,7 +39,7 @@ export class UiCatalogController {
   get snapshot(): CatalogSnapshot {
     const catalog = this.#catalog?.value, panels = this.#panels?.value
     return { sessionId: this.#session, entries: catalog?.kind === "ui_catalog" ? catalog.catalog.entries : [],
-      panels: panels?.kind === "ui_panels" ? panels.panels : [], loading: this.#refreshing, error: this.#error }
+      panels: panels?.kind === "ui_panels" ? panels.panels : [], loading: this.#refreshing, error: resourceLimitCopy(this.#error ?? undefined) ?? this.#error }
   }
   open(session: string, mode: "catalog" | "panels"): void {
     this.close()

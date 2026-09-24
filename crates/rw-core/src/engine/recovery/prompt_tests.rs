@@ -8,9 +8,10 @@ use rw_ext::ModeRegistry;
 use rw_store::session::journal::SegmentedJournal;
 use rw_types::{Role, SequenceId};
 
-fn usage(turn: u64) -> PendingEvent {
+pub(super) fn usage(turn: u64) -> PendingEvent {
     PendingEvent::ContextUsage {
         turn,
+        completion_sources: Vec::new(),
         used_tokens: 10,
         usable_tokens: 100,
         reserved_tokens: 0,

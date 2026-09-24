@@ -173,6 +173,36 @@ describe("standard TUI keyboard safety", () => {
     expect(legacyMacNavigationAction(legacyCommandRight, "linux")).toBeNull()
   })
 
+  test("Ctrl+C stops a turn, leaves shell input alone, and confirms idle exit", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 24, useThread: false, exitOnCtrlC: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    let exits = 0
+    const base = createInitialState()
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader,
+      initialState: { ...base, turns: { active: { turnId: "active", status: "running", usage: null, cost: null, timing: { kind: "unknown" } } } },
+      onCommand(command) { commands.push(command); return { type: "accepted" } },
+      onExit() { exits++ },
+    })
+    renderer.root.add(app)
+    setup.mockInput.pressKey("c", { ctrl: true })
+    await Bun.sleep(0)
+    expect(commands.at(-1)?.type).toBe("interrupt")
+    expect(exits).toBe(0)
+    app.setState({ ...base, shell: { ...base.shell, active: true } })
+    setup.mockInput.pressKey("c", { ctrl: true })
+    setup.mockInput.pressKey("c", { ctrl: true })
+    expect(exits).toBe(0)
+    expect(commands.filter(command => command.type === "interrupt")).toHaveLength(1)
+    app.setState(base)
+    setup.mockInput.pressKey("c", { ctrl: true })
+    await Bun.sleep(10)
+    expect(exits).toBe(0)
+    setup.mockInput.pressKey("c", { ctrl: true })
+    await Bun.sleep(10)
+    expect(exits).toBe(1)
+  })
+
   test("uses double Escape to interrupt an active response", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
@@ -301,6 +331,7 @@ describe("standard TUI keyboard safety", () => {
     expect(await app.composer.submit()).toBeTrue()
     app.composer.value = "second prompt"
     expect(await app.composer.submit()).toBeTrue()
+    app.closePicker()
     app.composer.value = "draft in progress"
     app.composer.focus()
 
@@ -334,6 +365,7 @@ describe("standard TUI keyboard safety", () => {
     expect(await app.composer.submit()).toBeTrue()
     app.composer.value = "/cost"
     expect(await app.composer.submit()).toBeTrue()
+    app.closePicker()
     app.composer.value = "draft in progress"
     app.composer.focus()
 

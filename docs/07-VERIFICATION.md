@@ -196,6 +196,25 @@ Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard 
 
 ### OpenTUI test surface
 
+The audit journey goldens exercise setup, model selection, prompt submission,
+approval with steering, edit/test output, interruption, child completion,
+compaction, session resume, and idle exit at 110×32 and 80×24. These deterministic
+client fixtures do not claim live account authentication. The required native UX
+CI job consumes verified macOS and Linux candidates. At both screen sizes, it
+starts with an empty home, configures a loopback-compatible provider through the
+visible TUI, checks automatic model/default selection and bundled context limits,
+gets a first response, and exits. No provider configuration or model metadata is
+pre-seeded; metadata refresh is confined to a rejecting local proxy. A separate
+native journey uses a loopback provider to request real approved file edits and
+terminal tests, interrupt a response, run two background children, compact, and
+resume the session at both sizes. Acceptance requires actual workspace effects
+and durable journal records, rather than injecting client events. The M4 gate
+also holds a loopback provider stream open while `/exit`, SIGTERM, and SIGHUP
+close the supervised application at both screen sizes. It requires provider disconnection,
+retirement of observed descendants, and removal of owned runtime directories
+within the 35-second client/supervisor grace period. Foreground shell interruption
+and idle double-Ctrl+C exit retain distinct acceptance cases.
+
 OpenTUI exposes a public `@opentui/core/testing` entry point.
 Source TUI suites require an explicit `ROTTWEILER_OPENTUI_LIBRARY` from
 `python3 scripts/build-opentui-native.py` before the test or measurement starts.
@@ -257,6 +276,12 @@ privileged Linux security gate exercises the syscall policy and mount topology.
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 600 MiB RSS | soak test, nightly |
 | Release size | Platform product budgets from `contracts/release-contract.json` | `scripts/release_contract.py validate-build`; generated Rust and TypeScript projections |
+
+Engine size optimization is deferred: all platforms use the existing 50 MiB
+engine packaging ceiling as their exclusive build limit. CI and local candidate
+builds consume that same contract; helper, JavaScript bundle, archive extraction,
+and expanded archive limits remain enforced. Size is still recorded in candidate
+receipts so a later optimization budget can be based on measured artifacts.
 
 The required manually dispatched protected-performance, nightly, and release
 headless gates enforce the platform ceilings above at p99 over 500 fresh

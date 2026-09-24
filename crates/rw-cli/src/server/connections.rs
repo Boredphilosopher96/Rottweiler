@@ -25,6 +25,7 @@ impl Requests {
         state: ServerState,
         shutdown: Arc<AtomicBool>,
         permit: Arc<OwnedSemaphorePermit>,
+        connection_finished: Arc<Notify>,
     ) -> tokio::sync::oneshot::Receiver<Response<HttpBody>> {
         let (send, receive) = tokio::sync::oneshot::channel();
         let Ok(request_permit) = Arc::clone(&self.permits).try_acquire_owned() else {
@@ -45,8 +46,21 @@ impl Requests {
         }
         tasks.spawn(async move {
             let _permit = (permit, request_permit);
-            let Ok(response) = handle_request(request, state, shutdown).await;
+            let notifier = Arc::clone(&state.shutdown_notifier);
+            let Ok(response) = handle_request(request, state, Arc::clone(&shutdown)).await;
             let _ = send.send(response);
+            if shutdown.load(Ordering::Acquire) {
+                // Delivery into Hyper is not proof that a live connection will
+                // flush it: peer loss can race the service future's retirement.
+                // Give healthy clients their response, then stop independently
+                // of transport ownership once admitted cleanup has completed.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    connection_finished.notified(),
+                )
+                .await;
+                notifier.notify_one();
+            }
         });
         receive
     }
@@ -110,9 +124,11 @@ pub(super) async fn serve_owned(
                     let shutdown_state = connection_state.clone();
                     let connection_shutdown = Arc::new(AtomicBool::new(false));
                     let request_shutdown = Arc::clone(&connection_shutdown);
+                    let connection_finished = Arc::new(Notify::new());
+                    let request_finished = Arc::clone(&connection_finished);
                     let service = service_fn(move |request| {
                         let response = requests.start(request, connection_state.clone(),
-                            Arc::clone(&request_shutdown), Arc::clone(&permit));
+                            Arc::clone(&request_shutdown), Arc::clone(&permit), Arc::clone(&request_finished));
                         async move {
                             Ok::<_, Infallible>(response.await.unwrap_or_else(|_| {
                                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "engine request failed")
@@ -129,6 +145,7 @@ pub(super) async fn serve_owned(
                     {
                         tracing::debug!(reason = %error, "engine client connection closed");
                     }
+                    connection_finished.notify_one();
                     if connection_shutdown.load(Ordering::Acquire) {
                         shutdown_state.shutdown_notifier.notify_one();
                     }

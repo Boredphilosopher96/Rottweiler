@@ -38,6 +38,13 @@ pub trait SessionHistoryView: Send + Sync {
     fn through(&self) -> Option<SequenceId>;
     fn conversation(&self) -> ConversationCut;
 
+    /// Small source-bound child notices; implementations without child history return none.
+    async fn completion_notices(
+        &self,
+    ) -> Result<HistoryRead<Vec<super::CompletionNotice>>, AgentLoopError> {
+        Ok(HistoryRead::new(Vec::new(), ()))
+    }
+
     /// Read only immutable selectors, bounded independently of historical bodies.
     async fn conversation_sources(
         &self,

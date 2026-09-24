@@ -1,16 +1,9 @@
+import { INTERACTIVE_COMMANDS } from "../../../protocol/types"
 import type { RottweilerState } from "./state"
 
 export type CommandChoice = RottweilerState["commands"][number]
 
-export const TUI_SLASH_COMMANDS: readonly CommandChoice[] = [
-  { name: "new", description: "Start a new conversation", usage: "/new" },
-  { name: "models", description: "Switch the active model", usage: "/models" },
-  { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
-  { name: "agents", description: "Inspect and manage child agents", usage: "/agents" },
-  { name: "theme", description: "Preview and change the interface theme", usage: "/theme" },
-  { name: "settings", description: "Change safe user settings", usage: "/settings" },
-  { name: "exit", description: "Close Rottweiler", usage: "/exit" },
-]
+export const TUI_SLASH_COMMANDS: readonly CommandChoice[] = INTERACTIVE_COMMANDS
 
 const TUI_HANDLED_SLASH_COMMAND_NAMES = new Set([
   ...TUI_SLASH_COMMANDS.map((command) => command.name),
@@ -25,7 +18,7 @@ export function isTuiHandledSlashCommand(name: string): boolean {
   return TUI_HANDLED_SLASH_COMMAND_NAMES.has(name)
 }
 
-/** Engine descriptors augment the small set of commands owned by the TUI. */
+/** Live registry descriptors augment the generated interactive catalog. */
 export function mergeSlashCommandChoices(
   liveCommands: readonly CommandChoice[],
 ): readonly CommandChoice[] {
@@ -47,11 +40,15 @@ export type SessionAction =
   | { readonly type: "settings" }
   | { readonly type: "permissions" }
   | { readonly type: "mcp" }
+  | { readonly type: "context" | "cost" | "errors" }
   | { readonly type: "invalid"; readonly message: string }
 
 export function parseSessionAction(content: string): SessionAction | null {
   const tokens = content.trim().split(/\s+/)
   const command = tokens[0]
+  if (command === "/context" && tokens.length === 1) return { type: "context" }
+  if (command === "/errors" && tokens.length === 1) return { type: "errors" }
+  if (command === "/cost" && tokens.length === 1) return { type: "cost" }
   if (command === "/new") {
     return tokens.length === 1
       ? { type: "new" }

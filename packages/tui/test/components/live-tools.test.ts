@@ -208,7 +208,7 @@ describe("live-tools components", () => {
         diff_hash: "diff",
         truncated: false,
       },
-      display: prepareToolDisplay({ type: "text", text: "1 change applied" }, null, null, false), source: null,
+      display: prepareToolDisplay({ type: "text", text: "1 change applied" }, null, running.args, false), source: null,
       isError: false,
     })
     await setup.renderOnce()

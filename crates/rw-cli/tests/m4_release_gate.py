@@ -16,6 +16,7 @@ import re
 import select
 import shutil
 import signal
+import shlex
 import socket
 import statistics
 import stat
@@ -40,6 +41,10 @@ from release_contract import load_contract
 
 TUI_ROLE = load_contract(pathlib.Path(__file__).resolve().parents[3] / "contracts/release-contract.json").js_host_roles["tui"]
 from m4_socket_latency import measure_socket_channels
+from m4_shutdown_gate import active_shutdown_gate
+from m4_onboarding_gate import onboarding_gate
+from m4_journey_gate import native_journey_gate
+from m4_terminal_screen import TerminalScreen
 from m4_gate_support import (
     BLOCKED_TURN_MARKER,
     DRIVER_READY_MARKER,
@@ -622,16 +627,17 @@ def supervisor_reattach_gate(
             "re-rendered the complete durable prompt/response transcript"
         )
         owned_children = descendant_pids(process.pid)
-        os.write(process.fd, b"\x03")
+        # Idle exit requires two keypresses within the confirmation window.
+        os.write(process.fd, b"\x03\x03")
         try:
             wait_status = wait_for_pty_exit(process, timeout=8)
         except TimeoutError:
-            raise RuntimeError("normal TUI Ctrl-C did not stop the installed-bundle supervisor")
+            raise RuntimeError("double idle TUI Ctrl-C did not stop the installed-bundle supervisor")
 
         exit_code = os.waitstatus_to_exitcode(wait_status)
         if exit_code != 0:
             raise RuntimeError(
-                f"normal TUI Ctrl-C exited the installed-bundle supervisor with {exit_code}"
+                f"double idle TUI Ctrl-C exited the installed-bundle supervisor with {exit_code}"
             )
         cleanup_deadline = time.monotonic() + 5
         while time.monotonic() < cleanup_deadline:
@@ -648,7 +654,7 @@ def supervisor_reattach_gate(
         closed_normally = True
         print(
             "M4 installed-bundle lifecycle: colocated rw/TUI/native resolved without an "
-            "override; normal Ctrl-C reaped supervisor children and private runtime leaves"
+            "override; double idle Ctrl-C reaped supervisor children and private runtime leaves"
         )
     finally:
         if not closed_normally:
@@ -769,15 +775,19 @@ def shell_handover_gate(
     # See supervisor_reattach_gate: trust is explicit and scoped to this
     # generated fixture process; product defaults remain fail-closed.
     process = spawn_pty(rw, shell_env, workspace, ["--dangerously-trust"])
+    screen = TerminalScreen(100, 30)
     try:
-        read_until(process, FIRST_PAINT_MARKER, timeout=8)
-        read_until(process, DRIVER_READY_MARKER, timeout=8)
+        read_until(process, FIRST_PAINT_MARKER, timeout=8, screen=screen)
+        read_until(process, DRIVER_READY_MARKER, timeout=8, screen=screen)
         first_engine = wait_for_engine_child(process.pid, rw)
         baseline_requests = origin_request_count()
-        os.write(process.fd, f"!{child_script}".encode())
-        read_until(process, b"m4-shell-child.py", timeout=3)
+        # Use the interpreter that is already running this gate. A shell's
+        # sanitized PATH may resolve python3 to an unconfigured platform shim.
+        command = f"!{shlex.quote(sys.executable)} {shlex.quote(str(child_script))}"
+        os.write(process.fd, command.encode())
+        read_until(process, b"m4-shell-child.py", timeout=3, screen=screen)
         os.write(process.fd, TERMINAL_SUBMIT)
-        read_until(process, SHELL_READY_MARKER.encode(), timeout=8)
+        read_until(process, SHELL_READY_MARKER.encode(), timeout=8, screen=screen)
 
         # The child and parent-side PTY broker must survive an engine crash.
         # Completion later remints against the rotated token and confirms the
@@ -786,13 +796,13 @@ def shell_handover_gate(
         second_engine = wait_for_engine_child(process.pid, rw, exclude=first_engine)
         if second_engine == first_engine:
             raise RuntimeError("supervisor did not replace the crashed engine")
-        read_until(process, DRIVER_READY_MARKER, timeout=8)
+        read_until(process, DRIVER_READY_MARKER, timeout=8, screen=screen)
 
         # The compiled TUI is suspended and the child owns input. An attempted
         # agent prompt must be consumed by the foreground child, not start a
         # provider turn while the durable shell-active gate is set.
         os.write(process.fd, BLOCKED_TURN_MARKER.encode() + b"\n")
-        child_input = read_until(process, SHELL_STDIN_MARKER.encode(), timeout=3)
+        child_input = read_until(process, SHELL_STDIN_MARKER.encode(), timeout=3, screen=screen)
         if BLOCKED_TURN_MARKER.encode() not in child_input:
             raise RuntimeError("foreground child did not own the attempted agent input")
         time.sleep(0.05)
@@ -807,17 +817,17 @@ def shell_handover_gate(
         os.write(process.fd, b"\x03")
         read_until_all(
             process,
-            (
-                SHELL_INTERRUPT_MARKER.encode(),
-                SHELL_EXIT_MARKER.encode(),
-            ),
+            (SHELL_INTERRUPT_MARKER.encode(),),
             timeout=5,
+            phase="shell_completed_render",
+            screen=screen,
+            rendered_markers=(SHELL_EXIT_MARKER,),
         )
         # Normal agent execution resumes only after durable shell completion.
         os.write(process.fd, PROMPT_MARKER.encode())
-        read_until(process, PROMPT_MARKER.encode(), timeout=3)
+        read_until(process, PROMPT_MARKER.encode(), timeout=3, screen=screen)
         os.write(process.fd, TERMINAL_SUBMIT)
-        read_until(process, RESPONSE_MARKER.encode(), timeout=8)
+        read_until(process, RESPONSE_MARKER.encode(), timeout=8, screen=screen)
         # A completed first turn also triggers the product's fast-model title
         # generation. Wait for both intentional provider calls so the gate
         # does not race that asynchronous follow-up.
@@ -994,10 +1004,11 @@ def ssh_loopback_gate(
             "canonical durable user/assistant transcript through StreamLocal forwarding"
         )
         descriptor, remote_engine_pid = wait_for_detached_remote(session_id)
-        os.write(remote.fd, b"\x03")
+        # Confirm idle exit without relying on the interval between PTY writes.
+        os.write(remote.fd, b"\x03\x03")
         exit_code = os.waitstatus_to_exitcode(wait_for_pty_exit(remote, 8))
         if exit_code != 0:
-            raise RuntimeError(f"attached remote close exited with {exit_code}")
+            raise RuntimeError(f"double idle Ctrl-C remote close exited with {exit_code}")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if not process_exists(remote_engine_pid) and not descriptor.parent.exists():
@@ -1005,12 +1016,12 @@ def ssh_loopback_gate(
             time.sleep(0.01)
         else:
             raise RuntimeError(
-                "normal remote close leaked its engine or runtime directory: "
+                "double idle Ctrl-C remote close leaked its engine or runtime directory: "
                 f"pid={remote_engine_pid} runtime={descriptor.parent}"
             )
         remote_closed_normally = True
         print(
-            "M4 SSH lifecycle: normal attached Ctrl-C stopped the local TUI, tunnel, "
+            "M4 SSH lifecycle: double idle Ctrl-C stopped the local TUI, tunnel, "
             "remote engine, and owned remote runtime directory"
         )
     finally:
@@ -1242,12 +1253,20 @@ def run_gate(args: argparse.Namespace, evidence: GateEvidence) -> int:
                 evidence.update(phase="uds_queries", metrics=metrics)
                 metrics.update(socket_latency_gate(rw, root, workspace, port, args.samples, evidence))
             if not args.skip_supervisor:
+                evidence.update(phase="fresh_onboarding", metrics=metrics)
+                onboarding_gate(rw, root, isolated_env)
                 evidence.update(phase="provider_discovery", metrics=metrics)
                 model_discovery_gate(rw, root, workspace, port)
                 evidence.update(phase="supervisor_reattach", metrics=metrics)
                 supervisor_reattach_gate(rw, tui, root, workspace, port)
                 evidence.update(phase="supervisor_parent_death")
                 supervisor_parent_death_gate(rw, tui, root, workspace, port)
+                evidence.update(phase="native_tool_journey")
+                native_journey_gate(rw, root, isolated_env,
+                                    evidence.output.parent / (evidence.output.stem + "-journeys")
+                                    if evidence.output is not None else None)
+                evidence.update(phase="active_shutdown")
+                active_shutdown_gate(rw, root, workspace, isolated_env)
             if not args.skip_shell:
                 evidence.update(phase="shell_handover")
                 shell_handover_gate(rw, tui, root, workspace, port)

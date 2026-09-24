@@ -1,4 +1,5 @@
 import { TextRenderable } from "./text"
+import { boundedSubagents, subagentsForTray } from "./subagent-tray"
 import { statusContext } from "../state/context-usage"
 import {
   BoxRenderable,
@@ -10,6 +11,7 @@ import {
   type RenderContext
 } from "@opentui/core"
 import {
+  formatCost,
   formatStatusContext,
   formatStatusSessionCost
 } from "../render"
@@ -46,7 +48,7 @@ export class ContextPanelRenderable extends BoxRenderable {
   readonly #theme: RottweilerTheme
   #agentIds: readonly string[] = []
   #changedPaths: readonly string[] = []
-  #activeAgentCount = 0
+  #agentCount = 0
   #activeMcpCount = 0
   #activeServiceCount = 0
   #retryTodos = false
@@ -247,19 +249,15 @@ export class ContextPanelRenderable extends BoxRenderable {
     const previous = this.#previousInputs
     if (previous !== null && inputs.every((value, index) => value === previous[index])) return
     this.#previousInputs = inputs
-    const activeAgents = state.subagentOrder
-      .map((subagentId) => state.subagents[subagentId])
-      .filter((subagent): subagent is NonNullable<typeof subagent> =>
-        subagent !== undefined && subagent.status === "running")
-    this.#agentIds = activeAgents.map((subagent) => subagent.subagentId)
-    this.#activeAgentCount = activeAgents.length
+    const agents = boundedSubagents(subagentsForTray(state))
+    const running = agents.filter(agent => agent.status === "running").length
+    this.#agentIds = agents.map(agent => agent.subagentId)
+    this.#agentCount = agents.length
     this.agentsTitle.content = panelHeading(
-      this.#theme,
-      "AGENTS",
-      activeAgents.length === 0 ? "" : `${activeAgents.length} running`,
+      this.#theme, "AGENTS", agents.length === 0 ? "" : `${running} running${agents.length > running ? ` · ${agents.length - running} finished` : ""}`,
     )
-    this.agents.options = activeAgents.map((subagent) => ({
-      name: `${subagentStatusGlyph(subagent.status)} ${subagent.subagentId}  ${subagent.activity ?? subagent.task}`,
+    this.agents.options = agents.map(subagent => ({
+      name: `${subagentStatusGlyph(subagent.status)} ${subagent.subagentId}  ${subagent.activity ?? subagent.task}${subagent.cost === undefined ? "" : ` · ${formatCost(subagent.cost)}`}`,
       description: "",
       value: subagent.subagentId,
     }))
@@ -353,11 +351,11 @@ export class ContextPanelRenderable extends BoxRenderable {
   #layoutSectionHeights(): void {
     const rows = Math.max(1, this.height || this.ctx.height)
     this.gap = 0
-    let showAgents = this.#activeAgentCount > 0
+    let showAgents = this.#agentCount > 0
     let showSession = this.#showSession
     let showMcp = this.#activeMcpCount > 0
     let showServices = this.#activeServiceCount > 0
-    let agentRows = showAgents ? Math.min(3, this.#activeAgentCount) : 0
+    let agentRows = showAgents ? Math.min(3, this.#agentCount) : 0
     let todoRows = Math.max(1, Math.min(4, this.todos.options.length))
     let changedRows = Math.max(1, Math.min(4, this.changedFiles.options.length))
     let sessionRows = showSession ? 3 : 0

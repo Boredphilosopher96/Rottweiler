@@ -65,6 +65,10 @@ async fn cancelled_worktree_lease_rebinds_and_accepts_follow_up() {
         .expect("create worktree child");
     let record = session.worktree_record().expect("durable lease");
     session.cancel().await.expect("cancel child only");
+    session
+        .suspend()
+        .await
+        .expect("suspend preserves worktree lease");
     isolation
         .rebind(&record, CancellationToken::default())
         .await
@@ -523,6 +527,16 @@ async fn recovered_dirty_child_closes_with_the_full_durable_artifact() {
         .recover_record(recovery_record("child", "child-session"))
         .await
         .expect("recover child");
+    assert_eq!(
+        orchestrator
+            .wait(&SubagentHandle {
+                subagent_id: SubagentId("child".into()),
+                session_id: SessionId("child-session".into()),
+            })
+            .await
+            .expect("wait reads recovered durable result"),
+        result
+    );
     orchestrator
         .close(&parent, &SubagentId("child".to_owned()))
         .await

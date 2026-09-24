@@ -22,6 +22,7 @@ mod initial_memory;
 mod interaction_policy;
 mod local_session;
 mod model_effects;
+mod model_preferences;
 mod model_selection;
 pub(crate) mod native_model_generations;
 pub(crate) mod native_registry_recipe;

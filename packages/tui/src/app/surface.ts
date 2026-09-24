@@ -41,6 +41,7 @@ interface SurfaceHost {
     | "mcpBrowser"
     | "openAttachmentPicker"
     | "openFilePicker"
+    | "openPendingRuleReview"
     | "outputViewer"
     | "picker"
     | "primaryView"
@@ -74,6 +75,7 @@ interface SurfaceHost {
   openToolOutput(id: string): void
   openChangedFileDiff(path: string): void
   closeReview(): void
+  resizeNavigation(): void
   resizeReviewPanel(width: number, height: number): void
   projectError(code: string, message: string, retryable?: boolean): void
   onSubmit(content: string, attachments: readonly Attachment[]): Promise<boolean>
@@ -148,13 +150,8 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       host.syntaxStyle,
       {
         onApproval: (tool, action) => {
-          if (action === "allow_tool_session") {
-            host.requests.command({
-              type: "add_session_permission_rule",
-              pattern: `${tool.name}(*)`,
-              action: "allow",
-            })
-            host.submission.approve(tool, "allow_once")
+          if (action === "review_permission_rule") {
+            host.ui.openPendingRuleReview(tool)
           } else if (action === "auto_safe_mode") {
             void host.submission.sendMessage("/permissions mode auto-safe", [])
             host.submission.approve(tool, "allow_once")
@@ -196,7 +193,9 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
     host.ui.picker.top = 2
     host.ui.picker.left = "15%"
     host.ui.picker.width = "70%"
-    host.ui.commandPalette = new ListDetailRenderable<PaletteAction>(host.context, theme)
+    host.ui.commandPalette = new ListDetailRenderable<PaletteAction>(host.context, theme, {
+      surfaceLayout: "primary", surfaceBackground: theme.background, splitMinWidth: 90,
+    })
     host.ui.mcpBrowser = new ListDetailRenderable<McpBrowserAction>(host.context, theme, {
       surfaceLayout: "primary",
       splitListWidth: 72,
@@ -251,6 +250,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onSubmissionSettled: host.onSubmissionSettled,
       onInputSettled: host.onInputSettled,
       onHeightChange: (height) => {
+        if (host.ui.composer !== undefined && host.ui.statusLine !== undefined) host.resizeNavigation()
         host.ui.interactionPanel.resizeForTerminal(
           host.height,
           host.ui.interactionPanel.usesComposer ? height : 0,

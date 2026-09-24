@@ -109,7 +109,7 @@ describe("state streaming", () => {
     expect(state.compaction).toMatchObject({
       active: false,
       attempt: null,
-      text: "",
+      text: "## Fresh summary",
       thinking: "",
       reclaimedTokens: "1200",
     })
@@ -321,4 +321,12 @@ describe("state streaming", () => {
     expect(state.turns["1"]).toBeUndefined()
     expect(state.turns[`${total}`]?.status).toBe("completed")
   })
+})
+
+test("guard and hook failures stay visible after an unrelated command finishes", () => {
+  let state = createInitialState()
+  state = reduce(state, { type: "guard_triggered", meta: meta("1"), turn_id: "1", guard: "loop", message: "Repeated tool call" })
+  state = reduce(state, { type: "hook_failed", meta: meta("2"), event: "post_tool", hook_id: "format", fail_closed: true, message: "Formatter failed" })
+  state = reduce(state, { type: "command_finished", meta: meta("3"), name: "help", message: "Help", unrestorable_paths: [] })
+  expect(state.errors.map(error => error.code)).toEqual(["guard_triggered", "hook_failed"])
 })

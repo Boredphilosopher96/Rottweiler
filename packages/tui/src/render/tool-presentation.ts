@@ -22,10 +22,10 @@ export function displayPath(path: string): string {
   return root === undefined ? path : path.slice(root.length + 1)
 }
 
-export function presentTool(tool: ToolProjection): ToolPresentation {
+export function presentTool<T extends Pick<ToolProjection, "args" | "status" | "display">>(tool: T): ToolPresentation {
   const presentation = tool.display ?? {
     subject: formatToolSubject(tool.args),
-    summary: tool.status === "awaiting_approval" ? "Awaiting approval" : "Running",
+    summary: tool.status === "awaiting_approval" ? "Awaiting approval" : tool.status === "finished" ? "Completed" : "Running",
     details: "",
   }
   const subject = displayPath(presentation.subject)

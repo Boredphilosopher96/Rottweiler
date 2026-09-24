@@ -242,7 +242,7 @@ export class ClientRestoreController {
         case "timeline": this.host.sessions.openTimelinePicker(picker.selectedId?.match(/^timeline\.turn\.([0-9]+)$/)?.[1]); break
         case "themes": this.host.ui.openThemePicker(); break
       }
-      this.host.pickerController.begin(picker.kind, picker.anchored, picker.query)
+      this.host.pickerController.begin(picker.kind === "commands" ? "palette" : picker.kind, picker.kind === "commands" ? false : picker.anchored, picker.query)
       const surface = this.clientPickerSurface()
       if (surface !== null) surface.input.value = picker.query
       else this.host.ui.picker.input.value = picker.query

@@ -17,9 +17,10 @@ use crate::registry::{CancellationToken, ToolError, ToolOutputSink};
 use super::{BashSandboxMode, CommandExecutor, CommandOutcome, CommandRequest, CommandScratch};
 
 use super::safety::{
-    CommandSafety, CommandSafetyClassifier, audited_bat, audited_system_git,
+    CommandSafety, CommandSafetyClassifier, audited_bat, audited_rg, audited_system_git,
     audited_system_read_command, built_in_safe_segment, classify_safe_command, safe_bat_arguments,
     safe_command_segments, safe_git_diff_arguments, safe_git_status_arguments,
+    safe_search_arguments,
 };
 
 use super::execution_lease::ExecutionLease;
@@ -770,9 +771,21 @@ pub(super) fn hardened_safe_argv(command: &str) -> Option<Vec<String>> {
     let supplied = shell_words::split(command).ok()?;
     match supplied.first().map(String::as_str) {
         Some("git") => hardened_git_argv(command),
-        Some(name @ ("cat" | "ls")) => {
+        Some(name @ ("cat" | "ls" | "grep" | "find")) => {
+            if matches!(name, "grep" | "find") && !safe_search_arguments(name, &supplied[1..]) {
+                return None;
+            }
             let executable = audited_system_read_command(name)?;
             let mut argv = vec![executable.to_string_lossy().into_owned()];
+            argv.extend(supplied.into_iter().skip(1));
+            Some(argv)
+        }
+        Some("rg") if safe_search_arguments("rg", &supplied[1..]) => {
+            let executable = audited_rg()?;
+            let mut argv = vec![
+                executable.to_string_lossy().into_owned(),
+                "--no-config".into(),
+            ];
             argv.extend(supplied.into_iter().skip(1));
             Some(argv)
         }

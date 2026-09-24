@@ -35,7 +35,14 @@ pub struct StartupNotification {
     pub message: String,
 }
 
+/// Durable preference writes owned by a completed queued model selection.
+#[async_trait::async_trait]
+pub trait ModelSelectionPreferences: Send + Sync {
+    async fn persist(&self, model: &str) -> Result<(), AgentLoopError>;
+}
+
 pub struct SessionActorConfig {
+    pub model_preferences: Option<Arc<dyn ModelSelectionPreferences>>,
     pub ui: Arc<dyn crate::ui::UiRegistry>,
     pub ui_tool_source: Arc<dyn crate::ui::UiToolSource>,
     pub session_id: SessionId,
@@ -101,6 +108,7 @@ impl fmt::Debug for SessionActorConfig {
 impl SessionActorConfig {
     pub(in crate::engine) fn with_model_alias(&self, model_alias: String) -> Self {
         Self {
+            model_preferences: self.model_preferences.clone(),
             ui: Arc::clone(&self.ui),
             ui_tool_source: Arc::clone(&self.ui_tool_source),
             session_id: self.session_id.clone(),

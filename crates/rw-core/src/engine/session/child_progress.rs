@@ -51,6 +51,17 @@ impl HostedChildProgress {
         event: SubagentProgressEvent,
         commands: &mpsc::Sender<ActorCommand>,
     ) -> Result<(), AgentLoopError> {
+        self.publish_with(event, |slot| {
+            commands
+                .try_send(ActorCommand::PublishSubagentProgress(slot))
+                .is_ok()
+        })
+    }
+    pub(super) fn publish_with(
+        &self,
+        event: SubagentProgressEvent,
+        send: impl FnOnce(Arc<ChildProgressSlot>) -> bool,
+    ) -> Result<(), AgentLoopError> {
         let active = self
             .active
             .lock()
@@ -60,12 +71,22 @@ impl HostedChildProgress {
             .filter(|(session, _)| *session == event.child_session_id)
             .map(|(_, slot)| slot)
             .ok_or_else(|| invalid("child progress has no matching active spawn"))?;
-        slot.publish(event, |slot| {
-            commands
-                .try_send(ActorCommand::PublishSubagentProgress(slot))
-                .is_ok()
-        })
-        .map_err(invalid)
+        slot.publish(event, send).map_err(invalid)
+    }
+    pub(super) fn validate_finish(
+        &self,
+        child: &SubagentId,
+        session: &SessionId,
+    ) -> Result<(), AgentLoopError> {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.get(child).is_some_and(|(id, _)| id == session) {
+            Ok(())
+        } else {
+            Err(invalid("child completion has no matching active spawn"))
+        }
     }
     pub(super) fn finish(&self, child: &SubagentId) {
         self.active

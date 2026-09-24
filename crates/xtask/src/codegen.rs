@@ -52,13 +52,13 @@ use rw_types::{
     ProviderAuthKind, ProviderCallActuals, ProviderCallIdentity, ProviderDescriptor,
     ProviderNextAction, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
     ReviewFileDecision, ReviewFileStatus, RewindSourcePosition, RewindTarget, Role,
-    RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
-    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
-    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus,
-    TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability, ToolInvocationId, ToolOutput,
-    ToolOutputPart, ToolOutputStream, ToolProgress, TouchedFile, TouchedFileStatus,
-    TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionActionAvailability,
+    SessionActionKind, SessionDescriptor, SessionId, SessionReview, SessionReviewFile, ShellId,
+    StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
+    SubagentResult, SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability,
+    ToolInvocationId, ToolOutput, ToolOutputPart, ToolOutputStream, ToolProgress, TouchedFile,
+    TouchedFileStatus, TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
     WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
@@ -520,6 +520,16 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(SessionDescriptor);
     declaration!(rw_types::extension_control::SessionNavigationTarget);
     declaration!(CommandDescriptor);
+    declaration!(SessionActionKind);
+    declaration!(rw_types::CompatibleProviderSetup);
+    declaration!(rw_types::CompatibleProviderAdapter);
+    declaration!(rw_types::CompatibleProviderAuth);
+    declaration!(rw_types::DeferredSessionAction);
+    declaration!(rw_types::QueuedControlStatus);
+    declaration!(rw_types::QueuedSessionControl);
+    declaration!(rw_types::SessionControlOutcome);
+    declaration!(rw_types::SessionControlSettlement);
+    declaration!(SessionActionAvailability);
     declaration!(CommandSource);
     declaration!(ModelCacheBehavior);
     declaration!(ModelCapabilities);
@@ -637,6 +647,15 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::transcript::TranscriptSubagentStatus);
     declaration!(rw_types::transcript::TranscriptContent);
 
+    let interactive_commands = rw_types::client_navigation::INTERACTIVE_COMMANDS.iter()
+        .map(|(name, description, arguments)| json!({
+            "name": name, "description": description,
+            "usage": if arguments.is_empty() { format!("/{name}") } else { format!("/{name} {arguments}") },
+            "source": "builtin",
+        })).collect::<Vec<_>>();
+    output.push_str("\nexport const INTERACTIVE_COMMANDS = ");
+    output.push_str(&serde_json::to_string(&interactive_commands)?);
+    output.push_str(" as const;\n");
     output.push_str(&generate_engine_event_delivery()?);
     output.push_str(&execution::generate()?);
     Ok(output

@@ -470,7 +470,7 @@ evidence that a mode is usable in local or hosted production composition.
 
 ### Subagent orchestrator (`rw-core`)
 
-Subagent = a full child session with its own event log, restricted tool registry, its own context budget. Parent holds a handle; child events are re-broadcast to the parent's *client* tagged with the child id (TUI shows nested progress) — **display-only, never persisted in the parent's log**. The parent log contains exactly: the `spawn_agent` tool call, `SubagentSpawned`, and `SubagentFinished` + tool result, all in tool-call index order per the determinism rule — parallel children completing in any order cannot perturb it. `rw replay` re-derives nested progress only from child ids authenticated by those durable spawn events; child logs use the same no-symlink event-log boundary and replay has explicit depth, session-count, event-count, per-event, and aggregate-byte ceilings. Worktree isolation delegates to `git worktree` via `rw-sandbox` path rules.
+Subagent = a full child session with its own event log, restricted tool registry, its own context budget. Parent holds a handle; child events are re-broadcast to the parent's *client* tagged with the child id (TUI shows nested progress) — **display-only, never persisted in the parent's log**. Blocking `spawn` and `follow_up` lifecycle events and results retain tool-call index ordering. Background `start` records durable startup before returning a handle; its completion is committed through a bounded session-owned actor queue, independently of the originating tool or turn. Lifecycle delivery uses the session effect channel with one outstanding durable acknowledgement and remains available through cleanup after the last client handle is dropped. The journal sequence records observed asynchronous completion order for replay; `wait` publishes the bounded result in the requesting tool call's ordinary ordered result slot. `list` reads bounded retained child identities and activity. Child progress remains coalesced and display-only. An idle parent is not automatically invoked when a child finishes. The next context assembly, including the next iteration of an active parent turn, includes up to eight recent child completion notices. Each notice contains a source-bound identity, status, and at most 512 UTF-8 bytes of untrusted result text, with a 2 KiB total notice ceiling; full results remain available through `wait`. Notices occupy a bounded separate context selection, never append duplicate conversation turns, and participate in token budgeting. Each context-usage event records the exact selected terminal source sequences so historical prompts exclude completions that arrived after assembly. Compaction preserves this bounded recent selection; context clearing removes it, and rewind removes notices and pending spawns belonging to discarded turns. Canonical recovery rebuilds the selectors from durable lifecycle events. Completion remains associated with its spawning invocation across unrelated parent-turn rewinds. Session cleanup cancels every running retained child, waits for durable completion, then stops live child actors while preserving continuation metadata and worktree leases. Only explicit child close permanently removes continuation identity. `rw replay` re-derives nested progress only from child ids authenticated by those durable spawn events; child logs use the same no-symlink event-log boundary and replay has explicit depth, session-count, event-count, per-event, and aggregate-byte ceilings. Worktree isolation delegates to `git worktree` via `rw-sandbox` path rules.
 
 ### Router (`rw-providers`)
 
@@ -887,3 +887,43 @@ startup and writes never scan or materialize lifetime request metadata. Profile
 JSON is admitted at 4 MiB encoded and 16 MiB decoded before typed allocation.
 Direct profile decoding charges actual object/array structure and typed fields;
 scalar values do not each receive an unrelated map allocation charge.
+
+### Session action availability and deferred controls
+
+The command catalog includes a bounded `available_actions` projection for model
+selection, agent mode selection, manual compaction, rewind, review, fork,
+workspace-root additions, and context mutations. Only the first three controls
+queue; idle-only actions report active turns, shells, children, and pending
+selection/control ownership. Context inspection remains available while pin and
+eviction controls use the mutation projection. The actor computes these
+entries from its readiness policy; the host adds the requesting client's driver
+restriction for mutations; read-only review remains available to observers when idle. A non-null `unavailable_reason` disables an action while retaining
+its details. `queued` identifies controls that will wait for the current work.
+The palette refreshes this advisory projection on opening and session control
+changes; admission always rechecks authority and inputs. Missing metadata in an
+older reply means unknown availability, never implicit permission.
+
+A separate queue owns at most eight typed controls, preserving their original
+request and client identities. It is not part of the prompt-message queue.
+Compaction instructions are redacted and bounded to 4 KiB; model, provider, and
+mode identities have explicit bounds. A durable `session_control_queue_changed`
+event records the bounded queue and any correlated applied, failed, or cancelled
+settlement. The session snapshot exposes pending controls for reconnect.
+
+At an idle boundary, the actor processes controls in order before queued prompt
+messages. Each control passes the normal admission and model preparation path
+again. Model switches retain ownership through a context-transfer question and
+its resulting preparation or compaction. Manual compaction settles only after
+its actual completion result. Hosted model controls save their project and user
+defaults through an actor-owned preference sink before reporting applied. A
+save failure reports that the active model changed but its default was not saved.
+Losing the driver lease or closing the session
+cancels pending controls. Cancellation of a model switch also retires its own
+context-transfer question through the same durable settlement.
+
+Recovery selects the last authoritative queue snapshot. A control that was
+already marked running is cancelled rather than executed again: a crash may
+have occurred after its effect committed but before its settlement. Pending
+controls revalidate their owner and live state before execution. Recovery pauses
+and unfinished model-transfer questions prevent both control draining and
+queued prompt execution.

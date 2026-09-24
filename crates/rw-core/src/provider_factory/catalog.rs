@@ -316,6 +316,9 @@ pub(super) fn provider_auth_kind(config: &Config, provider: &str) -> ProviderAut
     let Some(entry) = config.providers.get(provider) else {
         return ProviderAuthKind::None;
     };
+    if entry.auth_scheme == Some(rw_types::config::ProviderAuthScheme::None) {
+        return ProviderAuthKind::None;
+    }
     let oauth_configured = entry.oauth_token_env.is_some()
         || entry.oauth_authorization_endpoint.is_some()
         || entry.oauth_access_token_credential.is_some()
@@ -682,4 +685,56 @@ pub(super) fn total_usage_tokens(usage: rw_providers::TokenUsage) -> u64 {
         .saturating_add(usage.cache_read_tokens)
         .saturating_add(usage.cache_write_tokens)
         .saturating_add(usage.reasoning_tokens)
+}
+
+/// Only the adapter's explicit no-catalog result permits configured local routes.
+/// Authentication errors, timeouts, and live catalog omissions never call this path.
+pub(super) fn configured_local_catalog(
+    config: &Config,
+    provider: &str,
+) -> Result<rw_providers::DiscoveredProviderCatalog, String> {
+    let local = config.providers.get(provider).is_some_and(|entry| {
+        matches!(
+            AdapterKind::from_config_kind(&entry.kind),
+            Some(AdapterKind::OpenAiCompatibleChat | AdapterKind::OpenAiCompatibleResponses)
+        ) && entry
+            .base_url
+            .as_deref()
+            .and_then(|value| url::Url::parse(value).ok())
+            .is_some_and(|endpoint| super::is_loopback(&endpoint))
+    });
+    if !local {
+        return Err("provider does not expose live model discovery".into());
+    }
+    let ids: std::collections::BTreeSet<_> = config
+        .models
+        .aliases
+        .values()
+        .flatten()
+        .filter_map(|candidate| candidate.split_once('/'))
+        .filter(|(owner, model)| {
+            *owner == provider && !model.is_empty() && *model != "catalog-discovery"
+        })
+        .map(|(_, model)| model.to_owned())
+        .collect();
+    if ids.is_empty() {
+        return Err(
+            "Local endpoint has no model catalog. Add an initial model during provider setup."
+                .into(),
+        );
+    }
+    Ok(rw_providers::DiscoveredProviderCatalog {
+        provider: provider.into(),
+        models: ids
+            .into_iter()
+            .take(MAX_CATALOG_MODELS)
+            .map(|id| rw_providers::DiscoveredModel {
+                id: id.clone(),
+                display_name: Some(format!("{id} (configured)")),
+                description: None,
+                capabilities: None,
+                pricing: None,
+            })
+            .collect(),
+    })
 }

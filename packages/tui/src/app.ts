@@ -1,3 +1,4 @@
+import { appendSessionError } from "./state/errors"
 import { ReviewController } from "./app/review-controller"
 import { reviewRoots } from "./recycle-review"
 import { ProjectionAllocations } from "./state/allocation"
@@ -70,6 +71,7 @@ import {
   projectSessionTitleUpdate,
   reduceRottweilerState,
   type RottweilerState,
+  type ToolProjection,
 } from "./state"
 import { createSyntaxStyle, kennelTheme, systemThemeFor, themeByName, type RottweilerTheme } from "./theme"
 import { durableSequenceId, isRecord } from "./transport"
@@ -304,6 +306,7 @@ export class RottweilerApp extends BoxRenderable {
       openSubagentPicker: () => this.openSubagentPicker(), openReview: () => this.openReview(),
       openCommandPicker: () => this.openCommandPicker(), openModelPicker: () => this.openModelPicker(),
       openModePicker: () => this.openModePicker(),
+      onExit: () => this.#options.onExit?.(),
     }, compileKeybindings(options.keybindings))
     this.#theme = theme
     this.#systemThemeMode = options.systemThemeMode ?? null
@@ -343,7 +346,7 @@ export class RottweilerApp extends BoxRenderable {
       picker: () => this.picker,
       terminalHeight: () => this.height === 0 ? this.ctx.height : this.height,
       statusHeight: () => Math.max(1, this.statusLine.height || 1),
-      composerDockHeight: () => this.composer.dockHeight,
+      composerDockHeight: () => this.composer.visible ? this.composer.dockHeight : 0,
       focusComposer: () => this.composer.focus(),
       renderPicker: () => this.#pickerContent.renderPicker(),
       withRefreshGuard: (kind, refresh) => {
@@ -391,6 +394,7 @@ export class RottweilerApp extends BoxRenderable {
       get state() { return app.#state },
       get activeSubagentId() { return app.#children.activeId },
       get draft() { return app.composer.value },
+      get submissionPending() { return app.composer.submitting },
       get picker() { return app.picker },
       pickerController: this.#pickerController,
       requests: this.#projectionRequests,
@@ -600,6 +604,7 @@ export class RottweilerApp extends BoxRenderable {
       get outputViewerInvocationId() { return app.#outputViewerInvocationId },
       set outputViewerInvocationId(value) { app.#outputViewerInvocationId = value },
       openToolOutput: id => this.#openToolOutput(id), openChangedFileDiff: path => this.#openChangedFileDiff(path),
+      resizeNavigation: () => this.#resizeNavigation(this.width || this.ctx.width, this.height || this.ctx.height),
       closeReview: () => this.#closeReview(), resizeReviewPanel: (width, height) => this.#resizeReviewPanel(width, height),
       projectError: (code, message, retryable) => this.#projectClientError(code, message, retryable),
       onSubmit: async (content, submittedAttachments) => {
@@ -693,7 +698,8 @@ export class RottweilerApp extends BoxRenderable {
 
   /** Update command routing only after the runtime owns the new driver lease. */
   setSessionId(sessionId: string): void {
-    if (sessionId !== this.#sessionId) {
+    const changed = sessionId !== this.#sessionId
+    if (changed) {
       this.closePicker("scope_change")
       this.#projectionRequests.clearForSessionChange()
       this.#contributions.close()
@@ -717,6 +723,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#state.replay.active && this.#state.replay.sessionId !== sessionId) {
       this.setState(enterReplayMode(createInitialState(), sessionId))
     }
+    if (changed) this.setState({ ...this.#state, errors: [], errorHistory: [] })
   }
 
   resetConnectionProjections(): void {
@@ -792,6 +799,13 @@ export class RottweilerApp extends BoxRenderable {
     // Advance protocol state immediately so reconnect cursors and durable handoff
     // observe every accepted event even when its presentation waits for a frame.
     this.#state = next
+    if (this.#pickerController.kind === "palette" && (
+      event.type === "turn_started" || event.type === "turn_finished"
+      || event.type === "user_shell_state_changed" || event.type === "driver_changed"
+      || event.type === "model_changed" || event.type === "mode_changed"
+      || event.type === "question_asked" || event.type === "question_answered"
+      || (event.type === "command_finished" && event.name !== "add-dir") || event.type === "error" || event.type === "session_control_queue_changed"
+    )) this.#pickerContent.requestCommands()
     this.#presentation.enqueue(
       deferPresentationForEvent(event) ? { kind: "display", next } : { kind: "effect", event, eventRecord, commandRequestId, previous, next },
       deferPresentationForEvent(event),
@@ -1011,13 +1025,14 @@ export class RottweilerApp extends BoxRenderable {
     const composerVisible =
       !state.replay.active &&
       !this.outputViewer.visible &&
-      !subagentReadOnly &&
-      (!this.interactionPanel.visible || this.interactionPanel.usesComposer)
+      !subagentReadOnly
     if (!composerVisible) this.composer.editor.blur()
     this.composer.visible = composerVisible
+    this.composer.setActivityHints(this.interactionPanel.visible && !this.interactionPanel.usesComposer
+      ? "interaction" : this.#input.isInterruptible() ? "running" : "idle")
     this.interactionPanel.resizeForTerminal(
       this.height === 0 ? this.ctx.height : this.height,
-      this.interactionPanel.usesComposer && composerVisible ? this.composer.dockHeight : 0,
+      composerVisible ? this.composer.dockHeight : 0,
     )
     const focusOwner = this.#input.visibleFocusOwner()
     if (this.#input.modalPickerVisible()) {
@@ -1067,6 +1082,9 @@ export class RottweilerApp extends BoxRenderable {
 
   }
 
+  openContextPicker(): void { this.#pickerContent.context.open("context") }
+  openErrorsPicker(): void { this.#pickerContent.errors.open() }
+  openCostPicker(): void { this.#pickerContent.context.open("cost") }
   openCommandPicker(): void { this.#pickerContent.openCommandPicker() }
   openKeyboardHelpPicker(): void { this.#pickerContent.openKeyboardHelpPicker() }
   openFilePicker(query = "", anchored = false): void { this.#pickerContent.openFilePicker(query, anchored) }
@@ -1086,6 +1104,7 @@ export class RottweilerApp extends BoxRenderable {
   openSettingsPicker(): void { this.#settings.openSettingsPicker() }
 
   openPermissionPicker(): void { this.#permissions.openPermissionPicker() }
+  openPendingRuleReview(tool: ToolProjection): void { this.#permissions.openPendingRuleReview(tool) }
 
   openBudgetPicker(): void { this.#settings.openBudgetPicker() }
 
@@ -1271,14 +1290,18 @@ export class RottweilerApp extends BoxRenderable {
     this.composer.resizeForTerminal(height)
     this.interactionPanel.resizeForTerminal(
       height,
-      this.interactionPanel.usesComposer && this.composer.visible ? this.composer.dockHeight : 0,
+      this.composer.visible ? this.composer.dockHeight : 0,
     )
     this.outputViewer.resizeForTerminal(height)
     this.#resizeReviewPanel(width, height)
+    this.#resizeNavigation(width, height)
+  }
+
+  #resizeNavigation(width: number, height: number): void {
     if (this.mcpBrowser.visible) this.#mcp.resize(width, height)
     else if (this.settingsBrowser.visible) this.#settings.resize(width, height)
     else if (this.themeBrowser.visible) this.#themes.resize(width, height)
-    else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height)
+    else if (this.commandPalette.visible) this.commandPalette.resizeForTerminal(width, height, height - this.composer.dockHeight - this.statusLine.height)
     else if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
   }
 
@@ -1434,10 +1457,7 @@ export class RottweilerApp extends BoxRenderable {
     if (outcome?.type !== "rejected") {
       return
     }
-    this.setState({
-      ...this.#state,
-      errors: [...this.#state.errors.slice(-63), outcome.error],
-    })
+    this.setState(appendSessionError(this.#state, outcome.error))
   }
 
   #projectInvalidSlashCommand(message: string): void {
@@ -1445,36 +1465,14 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #projectClientError(code: string, message: string, retryable = false): void {
-    this.setState({
-      ...this.#state,
-      errors: [
-        ...this.#state.errors.slice(-63),
-        {
-          category: "protocol",
-          code,
-          message,
-          retryable,
-        },
-      ],
-    })
+    this.setState(appendSessionError(this.#state, { category: "protocol", code, message, retryable }))
   }
 
   async #transitionToFork(childSessionId: string): Promise<void> {
     try {
       await this.#options.onSessionSelect?.(childSessionId)
     } catch {
-      this.setState({
-        ...this.#state,
-        errors: [
-          ...this.#state.errors.slice(-63),
-          {
-            category: "protocol",
-            code: "fork_attach_failed",
-            message: "the fork was created, but the TUI could not attach its child session",
-            retryable: true,
-          },
-        ],
-      })
+      this.#projectClientError("fork_attach_failed", "The fork was created, but the TUI could not attach its child session", true)
     }
   }
 

@@ -19,9 +19,9 @@ import { TimelineController, readTimelineDraft, type TimelineChoice } from "../h
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { isRecord } from "../transport"
-import { boundedUiText, queuedMessageLabel, timelineTurnLabel } from "../ui-presentation"
+import { queuedMessageLabel, timelineTurnLabel } from "../ui-presentation"
 
-type SessionPickerKind = "timeline" | "timelineActions" | "queuedMessages" | "exportFormat" | "exportOverwrite" | "exportPath" | "sessions" | "sessionActions" | "sessionRename"
+type SessionPickerKind = "timeline" | "timelineActions" | "queuedMessages" | "exportFormat" | "exportOverwrite" | "exportPath" | "sessions" | "sessionRename"
 interface SessionUiHost {
   readonly sessionReader: SessionReader
   readonly historyCache: ClientCache<HistoryCacheValue>
@@ -59,6 +59,7 @@ interface PendingRewindIntent {
 }
 
 type QueuedMessagePickerAction =
+  | { readonly kind: "info" }
   | { readonly kind: "remove"; readonly position: string }
   | { readonly kind: "clear" }
 
@@ -66,13 +67,9 @@ type SessionProjection = RottweilerState["sessions"][number]
 
 type SessionListAction =
   | { readonly kind: "new" }
+  | { readonly kind: "rename_list" }
   | { readonly kind: "session"; readonly session: SessionProjection }
   | { readonly kind: "retry" }
-
-type SessionPickerAction =
-  | { readonly kind: "match"; readonly source: SessionSearchMatch }
-  | { readonly kind: "resume"; readonly session: SessionProjection }
-  | { readonly kind: "rename"; readonly session: SessionProjection }
 
 type ExportFormat = "markdown" | "html" | "json"
 
@@ -109,6 +106,7 @@ export class SessionUiController {
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #exportNoticeTimer: ReturnType<typeof setTimeout> | null = null
   #sessionActionId: string | null = null
+  #renameSelection = false
   #timelineTurn: TimelineChoice | null = null
   #pendingRewindIntent: PendingRewindIntent | null = null
   #pendingExport: PendingExport | null = null
@@ -126,7 +124,7 @@ export class SessionUiController {
     return pending
   }
   pickerClosed(): void {
-    this.#sessionActionId = null; this.clearSessionSearchTimer()
+    this.#sessionActionId = null; this.#renameSelection = false; this.clearSessionSearchTimer()
     this.#timeline?.dispose(); this.#timeline = null; this.#timelineTurn = null
   }
   reset(): void { this.#navigation = null; this.#timelineTurn = null; this.clearRewind(); this.#pendingExport = null; this.#pendingSessionCreateRequestId = null; this.pickerClosed(); this.clearExportNotice() }
@@ -247,7 +245,7 @@ export class SessionUiController {
     const choice = EXPORT_FORMAT_CHOICES.find((item) => item.format === format)
     if (choice === undefined) return
     this.#host.pickerController.kind = "exportPath"
-    this.#host.picker.openTextPrompt({ title: "Save to path, e.g. ~/transcript.md", placeholder: `~/rottweiler-export.${choice.extension}`, onSubmit: (value) => {
+    this.#host.pickerController.openTextPrompt({ title: "Save to path, e.g. ~/transcript.md", placeholder: `~/rottweiler-export.${choice.extension}`, onSubmit: (value) => {
         this.#host.closePicker()
         const outputPath = expandLeadingHome(value.trim())
         void this.#submitSessionExport(format, outputPath, false)
@@ -338,6 +336,7 @@ export class SessionUiController {
   }
 
   openSessionPicker(): void {
+    this.#renameSelection = false
     this.#sessionActionId = null
     this.#host.picker.input.value = ""
     this.#host.pickerController.begin("sessions")
@@ -401,18 +400,12 @@ export class SessionUiController {
     }
   }
 
-  #openSessionActionPicker(session: SessionProjection): void {
-    this.#sessionActionId = session.sessionId
-    this.#host.pickerController.kind = "sessionActions"
-    this.#host.picker.input.value = ""
-    this.#host.pickerController.refresh()
-  }
-
   #openSessionRenamePrompt(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
     this.#host.pickerController.kind = "sessionRename"
-    this.#host.picker.openTextPrompt({ title: "Rename session, e.g. Auth refactor", placeholder: session.title ?? session.workspaceName, onSubmit: (title) => {
+    this.#host.pickerController.openTextPrompt({ title: "Rename session, e.g. Auth refactor", placeholder: session.title ?? session.workspaceName, onSubmit: (title) => {
         const sessionId = this.#sessionActionId
+        this.#renameSelection = false
         this.#host.pickerController.kind = "sessions"
         this.#host.pickerController.query = ""
         if (sessionId !== null) {
@@ -610,7 +603,9 @@ export class SessionUiController {
           break
         }
         const queuedMessages = this.#host.state.queuedMessages
-        if (queuedMessages.length === 0) {
+        const controls = this.#host.state.queuedControls
+        const settlement = this.#host.state.lastControlSettlement
+        if (queuedMessages.length === 0 && controls.length === 0 && settlement === null) {
           this.#host.pickerController.showStatus(
             "Queued messages",
             "No queued messages",
@@ -619,6 +614,17 @@ export class SessionUiController {
           break
         }
         const items: PickerItem<QueuedMessagePickerAction>[] = [
+          ...(settlement === null ? [] : [{
+            id: "queued.control.latest", label: `Last control · ${settlement.outcome}`,
+            description: settlement.message, value: { kind: "info" } as const,
+          }]),
+          ...controls.map(control => ({
+            id: `queued.control.${control.request.client_id}.${control.request.request_id}`,
+            label: control.action.type === "switch_model" ? `Switch model · ${control.action.model}`
+              : control.action.type === "switch_mode" ? `Agent mode · ${control.action.mode}` : "Compact context",
+            description: control.status === "running" ? "Applying · may need your input" : "Queued · runs before the next message",
+            value: { kind: "info" } as const,
+          })),
           ...queuedMessages.map((message) => ({
             id: `queued.message.${message.position}`,
             label: queuedMessageLabel(message.content),
@@ -634,7 +640,8 @@ export class SessionUiController {
                 value: { kind: "clear" } as const,
               }]),
         ]
-        this.#host.pickerController.show("Queued messages · select to remove", items, (item) => {
+        this.#host.pickerController.show("Queued work · select a message to remove", items, (item) => {
+          if (item.value.kind === "info") return
           if (item.value.kind === "clear") {
             this.#host.closePicker()
             this.#host.requests.command({ type: "clear_queued_messages" })
@@ -712,8 +719,8 @@ export class SessionUiController {
         const sessionItems: PickerItem<SessionListAction>[] = [
           {
             id: "sessions.new",
-            label: "New session",
-            description: "Start a clean conversation in this workspace",
+            label: this.#renameSelection ? "Back to sessions" : "New session",
+            description: this.#renameSelection ? "Resume a conversation" : "Start a clean conversation in this workspace",
             value: { kind: "new" },
           },
           ...(sessionError === undefined
@@ -731,15 +738,23 @@ export class SessionUiController {
             searchText: `${this.#host.state.sessionSearch?.query ?? ""} ${session.sessionId} ${session.title ?? ""} ${session.workspaceName} ${session.model}`,
             value: { kind: "session", session } as const,
           })),
+          ...(this.#renameSelection ? [] : [{ id: "sessions.rename", label: "Rename a session",
+            description: "Choose a session title to change without switching", value: { kind: "rename_list" } as const }]),
         ]
         this.#host.pickerController.show(
-          this.#host.state.sessionSearch?.truncated === true
-            ? "Sessions · results truncated"
-            : "Sessions",
+          this.#renameSelection ? "Rename a session" : this.#host.state.sessionSearch?.truncated === true
+            ? "Sessions · results truncated" : "Sessions",
           sessionItems,
           (item) => {
             if (item.value.kind === "new") {
+              if (this.#renameSelection) { this.openSessionPicker(); return }
               void this.createSession()
+              return
+            }
+            if (item.value.kind === "rename_list") {
+              this.#renameSelection = true
+              this.#host.pickerController.query = ""
+              this.#host.pickerController.refresh()
               return
             }
             if (item.value.kind === "retry") {
@@ -751,51 +766,14 @@ export class SessionUiController {
               }
               return
             }
-            this.#openSessionActionPicker(item.value.session)
+            if (this.#renameSelection) { this.#openSessionRenamePrompt(item.value.session); return }
+            const sessionId = item.value.session.sessionId
+            const match = this.#host.state.sessionSearch?.matches.find(source => source.session_id === sessionId)
+            if (match !== undefined) void this.#search.open(match)
+            else { this.#host.closePicker(); void this.#host.selectSession(sessionId) }
           },
         )
         break
-      case "sessionActions": {
-        const session = this.#host.state.sessions.find(
-          (candidate) => candidate.sessionId === this.#sessionActionId,
-        )
-        if (session === undefined) {
-          this.#host.closePicker()
-          break
-        }
-        const match = this.#host.state.sessionSearch?.matches.find(source => source.session_id === session.sessionId)
-        const items: PickerItem<SessionPickerAction>[] = [
-          ...(match === undefined ? [] : [{ id: "match", label: "Open matching message",
-            description: "Jump to the exact source found in this conversation", value: { kind: "match", source: match } as const }]),
-          {
-            id: "resume",
-            label: "Resume session",
-            description: "Switch to this session",
-            value: { kind: "resume", session },
-          },
-          {
-            id: "rename",
-            label: "Rename session",
-            description: "Change its picker title without switching",
-            value: { kind: "rename", session },
-          },
-        ]
-        this.#host.pickerController.show(
-          `Session actions · ${boundedUiText(session.title ?? session.workspaceName, 64)}`,
-          items,
-          (item) => {
-            if (item.value.kind === "match") {
-              void this.#search.open(item.value.source)
-            } else if (item.value.kind === "resume") {
-              this.#host.closePicker()
-              void this.#host.selectSession(item.value.session.sessionId)
-            } else {
-              this.#openSessionRenamePrompt(item.value.session)
-            }
-          },
-        )
-        break
-      }
       case "sessionRename":
         break
     }

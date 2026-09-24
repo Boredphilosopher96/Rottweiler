@@ -5,7 +5,7 @@ import {
 } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { createRottweilerApp } from "../../src/app"
-import { SubagentPanelRenderable, SubagentTrayRenderable } from "../../src/components"
+import { ContextPanelRenderable, SubagentPanelRenderable, SubagentTrayRenderable } from "../../src/components"
 import {
   type EngineEvent
 } from "../../src/protocol"
@@ -296,6 +296,28 @@ describe("subagents components", () => {
     expect([...tray.rows.keys()]).toEqual(Array.from({ length: 6 }, (_, index) => `child-${index}`))
     expect(tray.more.plainText).toBe("… 3 more · Ctrl+G")
     expect(tray.footer.plainText).toBe("╰ Ctrl+G inspect · click a row to open")
+  })
+
+  test("retains finished children after the parent turn leaves the live tail", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 14, useThread: false })
+    renderer = setup.renderer
+    const tray = new SubagentTrayRenderable(renderer, kennelTheme, () => {})
+    const state: RottweilerState = { ...createInitialState(), subagentOrder: ["done"], subagents: {
+      done: { projectionId: "done", subagentId: "done", parentTurnId: "1", task: "Inspect code",
+        spawnedAtMs: 1, status: "completed", childSessionId: "child", lastChildSequence: "3",
+        activity: null, summary: "Done", touchedFileCount: 0, diffArtifactId: null,
+        cost: { kind: "monetary", amount_micros: "12500", currency: "USD" } },
+    } }
+    tray.update(state)
+    const panel = new ContextPanelRenderable(renderer, kennelTheme, {})
+    panel.update(state)
+    renderer.root.add(tray)
+    await setup.renderOnce()
+    expect(panel.agents.options[0]?.name).toContain("USD 0.0125")
+    expect(panel.agentsTitle.plainText).toContain("1 finished")
+    panel.destroy()
+    expect(tray.visible).toBeTrue()
+    expect(tray.rows.get("done")?.plainText).toContain("completed")
   })
 
   test("bounds a composed subagent tray row to its measured content width", async () => {

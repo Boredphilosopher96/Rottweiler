@@ -1,3 +1,4 @@
+import { readyCatalog } from "../fixtures/catalog"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
@@ -40,7 +41,7 @@ describe("Rottweiler semantic timeline", () => {
     let request = 0
     const app = createRottweilerApp(renderer, {
       sessionReader: reader, requestId: () => `timeline-${request++}`,
-      onCommand(command) { commands.push(command); return { type: "accepted" } }, ...options,
+      onCommand(command) { commands.push(command); return readyCatalog(() => app)(command) }, ...options,
     })
     renderer.root.add(app)
     return { app, commands, ...testRenderer }
@@ -59,7 +60,8 @@ describe("Rottweiler semantic timeline", () => {
     const result = await setup(emptySessionReader, { initialState: {
       ...createInitialState(), commands: [{ name: "rewind", description: "Rewind the conversation", usage: "/rewind" }],
     } })
-    await result.mockInput.typeText("/rew")
+    await result.mockInput.typeText("/")
+    await result.mockInput.typeText("rew")
     result.mockInput.pressEnter()
     await waitForHistory(result, () => result.app.picker.status.plainText.includes("No user turns"))
     expect(result.app.composer.value).toBe("")

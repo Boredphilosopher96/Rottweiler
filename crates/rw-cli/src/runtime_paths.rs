@@ -27,6 +27,7 @@ pub(super) struct RuntimeDirectoryGuard {
     pub(super) inode: u64,
     pub(super) owner: u32,
     pub(super) armed: bool,
+    cursor_writer_stopped: bool,
 }
 
 pub(super) fn create_guarded_server_runtime(
@@ -66,7 +67,13 @@ impl RuntimeDirectoryGuard {
             inode: metadata.ino(),
             owner,
             armed: true,
+            cursor_writer_stopped: false,
         })
+    }
+
+    /// Only the supervising owner may assert this after all client children are reaped.
+    pub(super) fn cursor_writer_stopped(&mut self) {
+        self.cursor_writer_stopped = true;
     }
 
     pub(super) fn preserve(&mut self) {
@@ -93,7 +100,7 @@ impl RuntimeDirectoryGuard {
     }
 
     pub(super) fn cleanup(&mut self) -> io::Result<()> {
-        use std::os::unix::fs::FileTypeExt as _;
+        use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 
         if !self.armed {
             return Ok(());
@@ -132,6 +139,12 @@ impl RuntimeDirectoryGuard {
                 Some("auth.token" | "runtime.json" | "last-seen")
             ) {
                 metadata.is_file() && !metadata.file_type().is_symlink()
+            } else if self.cursor_writer_stopped && is_cursor_temporary(&name) {
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.uid() == self.owner
+                    && metadata.nlink() == 1
+                    && metadata.permissions().mode() & 0o777 == 0o600
             } else {
                 false
             };
@@ -149,6 +162,27 @@ impl RuntimeDirectoryGuard {
         self.armed = false;
         Ok(())
     }
+}
+
+fn is_cursor_temporary(name: &std::ffi::OsStr) -> bool {
+    let Some(id) = name
+        .to_str()
+        .and_then(|name| name.strip_prefix(".last-seen."))
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let bytes = id.as_bytes();
+    bytes.len() == 36
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
+            }
+        })
 }
 
 impl Drop for RuntimeDirectoryGuard {

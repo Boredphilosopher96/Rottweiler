@@ -48,7 +48,7 @@ export class McpUiController {
 
   #prompt(options: TextPromptOptions): void {
     const scope = this.#promptScope
-    this.#host.picker.openTextPrompt({ ...options, onSubmit: value => {
+    this.#host.pickerController.openTextPrompt({ ...options, onSubmit: value => {
       if (scope === this.#promptScope) options.onSubmit(value)
     } })
   }

@@ -305,12 +305,14 @@ impl ProcessBackend for MockBackend {
             (Scenario::EngineCleanExit, 0, true) => {
                 ("engine-1", Some(ExitStatus::from_raw(0)), false)
             }
+            (Scenario::EngineCleanExit, 1, false) => {
+                ("tui-1", Some(ExitStatus::from_raw(0)), false)
+            }
             (Scenario::EngineCrash | Scenario::EngineStartupFailure, 0, true) => {
                 ("engine-1", Some(ExitStatus::from_raw(1 << 8)), false)
             }
             (
                 Scenario::EngineCrash
-                | Scenario::EngineCleanExit
                 | Scenario::ShutdownSignal
                 | Scenario::ReadinessFailure
                 | Scenario::EngineWaitError,
@@ -533,7 +535,11 @@ async fn clean_engine_exit_reaps_tui_without_restarting_the_app() {
         ["spawn:engine", "ready:engine", "spawn:tui"]
     );
     assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
-    assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
+    assert!(
+        !lifecycle
+            .iter()
+            .any(|event| event.starts_with("signal:tui-1:"))
+    );
     assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
     assert!(!lifecycle.contains(&"backoff".to_owned()));
 }
@@ -719,6 +725,27 @@ async fn wedged_child_is_killed_after_bounded_shutdown_grace() {
     terminate_and_reap_with_grace(&mut child, "fixture", Duration::from_millis(1))
         .await
         .expect("bounded reap");
+    assert_eq!(
+        *signals.lock().expect("signals"),
+        [ProcessSignal::Terminate, ProcessSignal::Kill]
+    );
+}
+
+#[tokio::test]
+async fn natural_tui_exit_deadline_preserves_child_for_bounded_forced_cleanup() {
+    let signals = Arc::new(Mutex::new(Vec::new()));
+    let mut tui = Some(IgnoringTermChild {
+        killed: AtomicBool::new(false),
+        signals: Arc::clone(&signals),
+    });
+    finish_tui_naturally(&mut tui, Duration::from_millis(1))
+        .await
+        .expect("natural grace");
+    assert!(signals.lock().expect("signals").is_empty());
+    let mut child = tui.take().expect("unreaped child remains owned");
+    terminate_and_reap_with_grace(&mut child, "TUI", Duration::from_millis(1))
+        .await
+        .expect("forced settlement");
     assert_eq!(
         *signals.lock().expect("signals"),
         [ProcessSignal::Terminate, ProcessSignal::Kill]

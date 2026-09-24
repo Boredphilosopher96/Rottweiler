@@ -31,6 +31,19 @@ impl DiffArtifactAuthority for TestArtifactSource {
 }
 #[async_trait]
 impl SubagentArtifactSource for TestArtifactSource {
+    async fn completed_result(
+        &self,
+        parent: &SessionId,
+        child: &SubagentId,
+    ) -> Result<Option<SubagentResult>, OrchestrationError> {
+        Ok(self
+            .results
+            .lock()
+            .map_err(|_| OrchestrationError::Session("fixture source poisoned".into()))?
+            .get(&(parent.clone(), child.clone()))
+            .cloned())
+    }
+
     async fn verify_result(
         &self,
         parent: &SessionId,

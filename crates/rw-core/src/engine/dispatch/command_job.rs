@@ -88,6 +88,15 @@ pub(super) async fn start(
     };
     let bound = bound.with_origin(origin.clone());
     let name = bound.name().to_owned();
+    if let Some(action) = super::action_availability::slash_action(&name)
+        && let Some((_, reason)) =
+            super::action_availability::ActionState::from_actor(context.state, context.config)
+                .unavailable(action)
+    {
+        let _ = reply.send(Err(AgentLoopError::InvalidConfiguration(reason.into())));
+        return;
+    }
+
     let host_tools = bound.host_tools();
     let mut snapshot = super::command_snapshot::capture(context.state, context.config);
     let owner = Arc::clone(context.config);
@@ -385,10 +394,12 @@ impl PendingCommand {
     pub(in crate::engine) fn allows(
         &self,
         origin: &rw_types::extension_invocation::ExtensionInvocationId,
-        config: &Arc<SessionActorConfig>,
+        config: &SessionActorConfig,
         driver: Option<&ClientId>,
     ) -> bool {
-        &self.origin == origin && Arc::ptr_eq(&self.owner, config) && self.driver.as_ref() == driver
+        &self.origin == origin
+            && std::ptr::eq(self.owner.as_ref(), config)
+            && self.driver.as_ref() == driver
     }
     pub(super) fn queue_navigation(
         &mut self,

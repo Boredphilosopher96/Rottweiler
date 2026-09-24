@@ -208,6 +208,7 @@ impl SubagentOrchestrator {
                     model: request.model.clone(),
                     session: Arc::clone(&session),
                     state: SessionState::Active,
+                    cancellation: Some(cancellation.clone()),
                     result: Some(result_rx),
                     isolation: request.isolation,
                     parent_session_id: parent_session_id.clone(),
@@ -354,14 +355,26 @@ impl SubagentOrchestrator {
         &self,
         handle: &SubagentHandle,
     ) -> Result<SubagentResult, OrchestrationError> {
-        let mut receiver = self
-            .inner
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&handle.subagent_id)
-            .and_then(|record| record.result.clone())
-            .ok_or_else(|| OrchestrationError::NoPendingResult(handle.subagent_id.0.clone()))?;
+        let (receiver, parent) = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = sessions
+                .get(&handle.subagent_id)
+                .filter(|record| record.handle.session_id == handle.session_id)
+                .ok_or_else(|| OrchestrationError::UnknownSubagent(handle.subagent_id.0.clone()))?;
+            (record.result.clone(), record.parent_session_id.clone())
+        };
+        let Some(mut receiver) = receiver else {
+            return self
+                .inner
+                .diff_artifact_authority
+                .completed_result(&parent, &handle.subagent_id)
+                .await?
+                .ok_or_else(|| OrchestrationError::NoPendingResult(handle.subagent_id.0.clone()));
+        };
         loop {
             if let Some(result) = receiver.borrow().clone() {
                 return result.map_err(OrchestrationError::Session);
@@ -427,6 +440,7 @@ impl SubagentOrchestrator {
                     maximum: self.inner.limits.max_concurrency,
                 })?;
             record.state = SessionState::Active;
+            record.cancellation = Some(cancellation.clone());
             (
                 record.handle.clone(),
                 record.parent_session_id.clone(),
@@ -489,6 +503,9 @@ impl SubagentOrchestrator {
             .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))
             .and_then(|record| {
                 ensure_child_owner(caller_parent_session_id, subagent_id, record)?;
+                if let Some(cancellation) = &record.cancellation {
+                    cancellation.cancel();
+                }
                 Ok(Arc::clone(&record.session))
             })?;
         bounded_cancel(&session, self.inner.limits).await
@@ -768,6 +785,7 @@ impl SubagentOrchestrator {
                     model: record.policy.model_alias.clone(),
                     session,
                     state: SessionState::Inactive,
+                    cancellation: None,
                     result: None,
                     isolation: record.isolation,
                     parent_session_id: record.parent_session_id,

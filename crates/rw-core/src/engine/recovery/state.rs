@@ -153,6 +153,8 @@ pub struct RecoveryControl {
     pub workspace_generation: u64,
     pub workspace_root_count: usize,
     pub workspace_digest: [u8; 32],
+    #[serde(default)]
+    pub deferred_controls: Option<SequenceId>,
     pub queued: Vec<QueuedSource>,
     pub input_claims: rw_types::input_claims::InputClaimState,
     pub questions: Vec<QuestionSource>,
@@ -178,6 +180,7 @@ impl Default for RecoveryControl {
             workspace_generation: 0,
             workspace_root_count: 0,
             workspace_digest: *blake3::hash(b"").as_bytes(),
+            deferred_controls: None,
             queued: Vec::new(),
             input_claims: rw_types::input_claims::InputClaimState::default(),
             questions: Vec::new(),
@@ -230,6 +233,8 @@ pub struct RecoveryHead {
     pub accounting: crate::engine::SessionAccountingState,
     pub latest_budget: Option<SequenceId>,
     pub plugin_statuses: std::collections::BTreeMap<String, SequenceId>,
+    #[serde(default)]
+    pub(super) completions: super::completions::CompletionSources,
     pub(super) extension_root: Option<SequenceId>,
     pub(super) compacting: Option<ConversationCut>,
     pub(super) context_cut: u64,
@@ -258,12 +263,14 @@ impl RecoveryHead {
             accounting: crate::engine::SessionAccountingState::default(),
             latest_budget: None,
             plugin_statuses: std::collections::BTreeMap::default(),
+            completions: super::completions::CompletionSources::default(),
             compacting: None,
             context_cut: 0,
             maintenance: None,
         }
     }
     pub(super) fn validate(&self) -> Result<(), RecoveryError> {
+        self.completions.validate(self.next_sequence)?;
         if self.maintenance.is_none() {
             self.control
                 .input_claims

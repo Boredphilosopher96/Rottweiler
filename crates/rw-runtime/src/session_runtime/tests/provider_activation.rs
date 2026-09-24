@@ -120,6 +120,7 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
     .await
     .expect("actor history");
     let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: session_id.clone(),

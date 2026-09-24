@@ -52,8 +52,31 @@ pub(super) fn reduce(
         .map_err(RecoveryError::Invalid)?;
     let body_source = super::context_selection::validate(head, event, rows)?;
     let materialized = super::input::materialize_claimed_event(source, checked)?;
+    // Lifecycle payloads are deliberately excluded from the actor's recovered
+    // PendingEvent projection. Observe their borrowed identities here so the
+    // canonical context retains selectors without cloning full child results.
+    match materialized.as_ref() {
+        EngineEvent::SubagentSpawned { subagent_id, .. } => {
+            let turn = head
+                .control
+                .active
+                .as_ref()
+                .map_or(head.control.next_turn.saturating_sub(1), |active| {
+                    active.turn
+                });
+            head.completions.spawned(subagent_id.0.clone(), turn)?;
+        }
+        EngineEvent::SubagentFinished { subagent_id, .. } => {
+            head.completions.finished(&subagent_id.0, sequence);
+        }
+        _ => {}
+    }
     let Some(kind) = recovered_pending_event(&materialized)? else {
-        head.next_sequence += 1;
+        head.next_sequence = sequence
+            .0
+            .checked_add(1)
+            .ok_or(RecoveryError::Invalid("sequence overflow"))?;
+        head.validate()?;
         return Ok(());
     };
     match kind {
@@ -176,6 +199,18 @@ pub(super) fn reduce(
                 },
             )?;
             rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
+        }
+        PendingEvent::SessionControlQueueChanged {
+            controls,
+            settlement,
+        } => {
+            rw_types::validate_queued_controls(&controls).map_err(RecoveryError::Invalid)?;
+            if let Some(question) = settlement.and_then(|settled| settled.cancelled_question) {
+                head.control
+                    .questions
+                    .retain(|pending| pending.id != question.0);
+            }
+            head.control.deferred_controls = Some(sequence);
         }
         PendingEvent::MessageQueued {
             position, content, ..
@@ -380,6 +415,7 @@ pub(super) fn reduce(
             head.compacting = None;
         }
         PendingEvent::ModelContextCleared { .. } => {
+            head.completions = super::completions::CompletionSources::default();
             head.maintenance = Some(Maintenance::Clear {
                 sequence,
                 from: head.conversation,
@@ -426,6 +462,7 @@ pub(super) fn reduce(
             turn,
             estimated_input_tokens,
             provider_input_tokens,
+            completion_sources,
             ..
         } => {
             let mut budget = Budgeter::from_snapshot(head.budget)
@@ -442,7 +479,22 @@ pub(super) fn reduce(
                 .get::<RecoveryHead>(key(super::state::PROMPTS, 0, turn))?
                 .is_none()
             {
+                if completion_sources.len() > super::MAX_COMPLETION_NOTICES
+                    || completion_sources
+                        .iter()
+                        .any(|source| source.0 >= sequence.0)
+                    || completion_sources.windows(2).any(|pair| pair[0] >= pair[1])
+                {
+                    return Err(RecoveryError::Invalid("prompt child notice selectors"));
+                }
                 let mut prompt = head.clone();
+                prompt.completions.retained = completion_sources
+                    .into_iter()
+                    .map(|sequence| super::completions::CompletionSource {
+                        sequence,
+                        spawned_turn: 0,
+                    })
+                    .collect();
                 prompt.next_sequence = sequence
                     .0
                     .checked_add(1)
@@ -520,7 +572,9 @@ pub(super) fn reduce(
                 head.plugin_statuses.insert(plugin_id, sequence);
             }
         }
-        PendingEvent::UserMessageRetained { .. }
+        PendingEvent::SubagentSpawned { .. }
+        | PendingEvent::SubagentFinished { .. }
+        | PendingEvent::UserMessageRetained { .. }
         | PendingEvent::ToolApprovalResolved { .. }
         | PendingEvent::ToolOutput { .. }
         | PendingEvent::PermissionRequested { .. }
@@ -528,8 +582,6 @@ pub(super) fn reduce(
         | PendingEvent::HookFailure { .. }
         | PendingEvent::CommandFinished { .. }
         | PendingEvent::GuardTriggered { .. }
-        | PendingEvent::SubagentSpawned { .. }
-        | PendingEvent::SubagentFinished { .. }
         | PendingEvent::PluginMessageInjected { .. }
         | PendingEvent::UiNotification { .. } => {}
     }

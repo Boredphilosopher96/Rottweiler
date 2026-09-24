@@ -11,7 +11,8 @@ use std::collections::VecDeque;
 pub(super) const TOON_WORKING_BYTES: usize = 32 * 1024 * 1024;
 // The bounded profiles and temporary source membership set are admitted before
 // scanning any source. Body walks borrow their already-admitted source values.
-const PROFILE_BASE_BYTES: usize = 64 * 1024;
+// Includes bounded child notice copies, normalization, selectors and token scratch.
+const PROFILE_BASE_BYTES: usize = 320 * 1024;
 const PROFILE_BYTES_PER_SOURCE: usize = 512;
 pub(in crate::engine) struct ContextWorkPlan {
     allowance: Box<dyn HistoryWorkingAllowance>,

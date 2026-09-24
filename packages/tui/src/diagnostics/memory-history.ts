@@ -120,9 +120,6 @@ export async function exerciseHistory(app: RottweilerApp, fixture: MemoryFixture
   app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "memory-probe"))
   app.picker.select.selectCurrent()
   await render()
-  const matchIndex = app.picker.select.options.findIndex(option => option.value === "match")
-  requireThat(matchIndex >= 0, "source search hit has no exact jump action")
-  app.picker.select.setSelectedIndex(matchIndex); app.picker.select.selectCurrent()
   while (app.transcript.captureHistoryViewport()?.anchor?.id !== "5001") {
     if (performance.now() >= deadline) throw new Error("search result did not reveal its exact semantic row")
     await Bun.sleep(1); await render()

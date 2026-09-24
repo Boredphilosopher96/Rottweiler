@@ -290,7 +290,7 @@ describe("runtime subscriptions", () => {
     temporaryDirectory = await mkdtemp(join(tmpdir(), "rw-tui-runtime-"))
     const cursorPath = join(temporaryDirectory, "last-seen")
 
-    await systemRuntimeFiles.writePrivateTextAtomic(cursorPath, "42\n")
+    await systemRuntimeFiles.writePrivateTextAtomic(cursorPath, "42\n", "create")
 
     expect(await readFile(cursorPath, "utf8")).toBe("42\n")
     expect((await stat(cursorPath)).mode & 0o777).toBe(0o600)

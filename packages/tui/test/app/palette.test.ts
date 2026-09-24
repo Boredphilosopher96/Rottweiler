@@ -1,3 +1,4 @@
+import { readyCatalog } from "../fixtures/catalog"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import {
@@ -21,14 +22,12 @@ describe("Rottweiler palette", () => {
     renderer.root.add(app)
 
     await setup.mockInput.typeText("/")
-    const slash = app.picker.select.options.map((option) => option.value)
-    expect(slash).toContain("providers")
-    expect(slash).toContain("agents")
-    expect(slash).toContain("theme")
-    expect(slash).toContain("settings")
-    expect(slash).toContain("exit")
-    expect(slash).not.toContain("help")
-    expect(slash).not.toContain("status")
+    const slash = app.commandPalette.itemIds
+    expect(slash).toContain("provider.list")
+    expect(slash).toContain("agent.children")
+    expect(slash).toContain("theme.list")
+    expect(slash).toContain("settings.open")
+    expect(slash).toContain("app.exit")
 
     app.closePicker()
     app.openCommandPicker()
@@ -57,12 +56,13 @@ describe("Rottweiler palette", () => {
 
     expect(app.picker.visible).toBeFalse()
     expect(app.commandPalette.visible).toBeTrue()
-    expect(app.commandPalette.x).toBe(1)
-    expect(app.commandPalette.y).toBe(2)
-    expect(app.commandPalette.width).toBe(108)
-    expect(app.commandPalette.height).toBe(25)
-    expect(app.commandPalette.detail.plainText).toContain("Compact the conversation context")
-    expect(app.commandPalette.footer.plainText).toContain("built-in")
+    expect(app.commandPalette.x).toBe(0)
+    expect(app.commandPalette.y).toBe(0)
+    expect(app.commandPalette.width).toBe(110)
+    expect(app.commandPalette.height).toBe(app.composer.y)
+    app.commandPalette.selectById("compact.run")
+    expect(app.commandPalette.detail.plainText).toContain("Checking availability")
+    expect(app.commandPalette.footer.plainText).toContain("commands")
 
     await setup.mockInput.typeText("status")
     expect(app.commandPalette.detail.plainText).toContain("Display running and queue state")
@@ -136,7 +136,7 @@ describe("Rottweiler palette", () => {
     renderer.root.add(app)
     app.openCommandPicker()
 
-    expect(app.commandPalette.footer.plainText).toContain("1 extension")
+    expect(app.commandPalette.footer.plainText).toContain("commands")
     expect(app.commandPalette.footer.plainText).toContain("results are truncated")
   })
 
@@ -145,6 +145,7 @@ describe("Rottweiler palette", () => {
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
       sessionReader: emptySessionReader,
+      onCommand: readyCatalog(() => app),
       initialState: {
         ...createInitialState(),
         commands: [{ name: "deploy", description: "Deploy project", usage: "/deploy" }],
@@ -192,15 +193,16 @@ describe("Rottweiler palette", () => {
     const headers = app.commandPalette.sectionLabels
     expect(headers).toEqual([
       "Conversation",
-      "Agents & models",
+      "Models & agents",
+      "Context & usage",
       "Workspace",
       "Safety",
-      "Appearance & settings",
-      "Help & system",
-      "Commands",
+      "Settings & help",
     ])
     expect(app.commandPalette.itemIds).not.toContain("interrupt.run")
-    expect(app.commandPalette.selectedId).toBe("compact.run")
+    expect(app.commandPalette.selectedId).toBe("rewind.run")
+    expect(app.commandPalette.activateSelected()).toBeFalse()
+    expect(app.commandPalette.detail.plainText).toContain("Checking availability")
 
     await setup.mockInput.typeText("model")
     expect(app.commandPalette.sectionLabels).toEqual([])

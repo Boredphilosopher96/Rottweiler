@@ -15,64 +15,28 @@ describe("Rottweiler composer-commands", () => {
     renderer = undefined
   })
 
-  test("opens slash autocomplete and gives the shared picker complete wrapped navigation", async () => {
+  test("slash and Ctrl+P open the same command palette without consuming attachments", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
-    const commands = Array.from({ length: 15 }, (_, index) => ({
-      name: `command-${index}`,
-      description: `Command ${index}`,
-      usage: `/command-${index}`,
-    }))
-    const app = createRottweilerApp(renderer, {
-      sessionReader: emptySessionReader,
-      initialState: { ...createInitialState(), commands },
-      onCommand: () => ({ type: "accepted" }),
-    })
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
+    app.composer.addAttachment({ name: "notes.txt", media_type: "text/plain", data: { type: "text", content: "Keep me" } })
     await setup.mockInput.typeText("/")
-    expect(app.picker.visible).toBeTrue()
-    expect(app.picker.select.getSelectedIndex()).toBe(0)
-    await setup.renderOnce()
-    const commandSpans = setup.captureSpans().lines.flatMap((line) => line.spans)
-    const selectedTitle = commandSpans.find((span) => span.text.includes("/new"))
-    const selectedCaption = commandSpans.find((span) => span.text.includes("Start a new conversation"))
-    const nextCommand = commandSpans.find((span) => span.text.includes("/models"))
-    expect(selectedTitle).toBeDefined()
-    expect(selectedCaption).toBeDefined()
-    expect(nextCommand).toBeDefined()
-    expect(selectedTitle?.fg.toInts()).toEqual(selectedCaption?.fg.toInts())
-    expect(selectedCaption?.fg.toInts()).not.toEqual(nextCommand?.fg.toInts())
-    const optionCount = app.picker.select.options.length
-
-    setup.mockInput.pressKey("p", { ctrl: true })
-    expect(app.picker.select.getSelectedIndex()).toBe(optionCount - 1)
-    setup.mockInput.pressKey("n", { ctrl: true })
-    expect(app.picker.select.getSelectedIndex()).toBe(0)
-    setup.mockInput.pressKey("\x1b[6~")
-    expect(app.picker.select.getSelectedIndex()).toBe(10)
-    setup.mockInput.pressKey("\x1b[5~")
-    expect(app.picker.select.getSelectedIndex()).toBe(0)
-    setup.mockInput.pressKey("END")
-    expect(app.picker.select.getSelectedIndex()).toBe(optionCount - 1)
-    setup.mockInput.pressKey("HOME")
-    expect(app.picker.select.getSelectedIndex()).toBe(0)
-    setup.mockInput.pressArrow("up")
-    expect(app.picker.select.getSelectedIndex()).toBe(optionCount - 1)
-    setup.mockInput.pressArrow("down")
-    expect(app.picker.select.getSelectedIndex()).toBe(0)
-
-    const engineCommandIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "command-0",
-    )
-    expect(engineCommandIndex).toBeGreaterThanOrEqual(0)
-    app.picker.select.setSelectedIndex(engineCommandIndex)
-    setup.mockInput.pressEnter()
-    await Bun.sleep(0)
-    expect(app.picker.visible).toBeFalse()
+    expect(app.commandPalette.visible).toBeTrue()
     expect(app.composer.value).toBe("")
+    expect(app.composer.attachments).toHaveLength(1)
+    const slashIds = app.commandPalette.itemIds
+    app.closePicker()
+    setup.mockInput.pressKey("p", { ctrl: true })
+    expect(app.commandPalette.itemIds).toEqual(slashIds)
+    expect(app.composer.attachments).toHaveLength(1)
+    app.closePicker()
+    await setup.mockInput.pasteBracketedText("/compact preserve the API")
+    expect(app.commandPalette.visible).toBeFalse()
+    expect(app.composer.value).toBe("/compact preserve the API")
   })
 
-  test("positions the first slash palette above the composer and keeps that layout on reopen", async () => {
+  test("positions the shared slash palette across the primary surface on reopen", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
@@ -80,18 +44,18 @@ describe("Rottweiler composer-commands", () => {
 
     // Exercise the real first-input path before OpenTUI has completed a prior frame.
     await setup.mockInput.typeText("/")
-    const firstConfiguredTop = app.picker.top
+    const firstConfiguredTop = app.commandPalette.top
     expect(firstConfiguredTop).toBeGreaterThanOrEqual(0)
     await setup.renderOnce()
-    const first = { y: app.picker.y, height: app.picker.height }
+    const first = { y: app.commandPalette.y, height: app.commandPalette.height }
     expect(first.y + first.height).toBeLessThanOrEqual(app.composer.y)
 
     app.closePicker()
     app.composer.value = ""
     await setup.mockInput.typeText("/")
     await setup.renderOnce()
-    expect({ y: app.picker.y, height: app.picker.height }).toEqual(first)
-    expect(app.picker.y + app.picker.height).toBeLessThanOrEqual(app.composer.y)
+    expect({ y: app.commandPalette.y, height: app.commandPalette.height }).toEqual(first)
+    expect(app.commandPalette.y + app.commandPalette.height).toBeLessThanOrEqual(app.composer.y)
   })
 
   test("keeps the composer pasteable while recovery rejects a submit and accepts its retry", async () => {
@@ -138,7 +102,7 @@ describe("Rottweiler composer-commands", () => {
     expect(app.composer.value).toBe("")
   })
 
-  test("moves anchored slash selection to the closest match as the query changes", async () => {
+  test("filters the shared slash palette as the query changes", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
@@ -154,13 +118,14 @@ describe("Rottweiler composer-commands", () => {
     renderer.root.add(app)
 
     await setup.mockInput.typeText("/")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("new")
+    expect(app.commandPalette.visible).toBeTrue()
     await setup.mockInput.typeText("sta")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("status")
+    expect(app.commandPalette.selectedId).toBe("status.show")
     app.closePicker()
     app.composer.value = ""
-    await setup.mockInput.typeText("/pro")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("providers")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("pro")
+    expect(app.commandPalette.itemIds).toContain("provider.list")
   })
 
   test("exposes /theme and opens the live theme picker from slash autocomplete", async () => {
@@ -169,8 +134,9 @@ describe("Rottweiler composer-commands", () => {
     const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader })
     renderer.root.add(app)
 
-    await setup.mockInput.typeText("/the")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("theme")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("theme")
+    expect(app.commandPalette.selectedId).toBe("theme.list")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
 
@@ -199,8 +165,9 @@ describe("Rottweiler composer-commands", () => {
     })
     renderer.root.add(app)
 
-    await setup.mockInput.typeText("/sta")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("status")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("sta")
+    expect(app.commandPalette.selectedId).toBe("status.show")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
 
@@ -356,9 +323,10 @@ describe("Rottweiler composer-commands", () => {
     })
     renderer.root.add(app)
 
-    await setup.mockInput.typeText("/ex")
-    expect(app.picker.select.getSelectedOption()?.value).toBe("exit")
-    expect(app.picker.select.options.some((option) => option.value === "quit")).toBeFalse()
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("exit")
+    expect(app.commandPalette.selectedId).toBe("app.exit")
+    expect(app.commandPalette.itemIds).not.toContain("slash.quit")
     emitted.length = 0
     setup.mockInput.pressEnter()
     await Bun.sleep(0)

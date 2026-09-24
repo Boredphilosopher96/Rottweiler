@@ -120,6 +120,7 @@ pub(crate) async fn compose_hosted_actor(
     }
     validate_session_id(&options.session_id.0)?;
     let extension_credentials_path = options.credentials_path.clone();
+    let model_preferences_path = options.credentials_path.with_file_name("config.toml");
     let workspace = std::fs::canonicalize(&options.workspace).into_diagnostic()?;
     if workspace != options.workspace {
         return Err(miette!("hosted workspace must already be canonical"));
@@ -959,6 +960,12 @@ pub(crate) async fn compose_hosted_actor(
         .map_err(display_agent_error)?;
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);
     let handle = SessionActor::spawn(SessionActorConfig {
+        model_preferences: Some(Arc::new(super::model_preferences::HostedModelPreferences {
+            loader: rw_store::config::ConfigLoader::new(
+                model_preferences_path,
+                workspace.join(".rottweiler/config.toml"),
+            ),
+        })),
         ui: plugin_runtime.ui.clone(),
         ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
             reader: Arc::clone(&options.transcripts),

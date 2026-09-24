@@ -142,13 +142,13 @@ pub(super) async fn control(
         }
         ExtensionControl::PinContext { item_id } => {
             super::context_surgery::apply_registered_context_surgery(
-                state, config, events, item_id, true,
+                state, config, events, item_id, true, origin,
             )
             .await?;
         }
         ExtensionControl::EvictContext { item_id } => {
             super::context_surgery::apply_registered_context_surgery(
-                state, config, events, item_id, false,
+                state, config, events, item_id, false, origin,
             )
             .await?;
         }

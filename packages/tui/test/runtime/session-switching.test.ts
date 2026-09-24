@@ -94,7 +94,7 @@ describe("runtime session-switching", () => {
     })
     expect(app.state.subagentOrder).toEqual([])
     await client.subscriptions[1]?.onEvent({
-      type: "command_descriptors_listed",
+      type: "command_descriptors_listed", available_actions: [],
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "ui",
@@ -107,7 +107,7 @@ describe("runtime session-switching", () => {
     })
     expect(app.state.commands).toEqual([])
     await client.subscriptions[1]?.onEvent({
-      type: "command_descriptors_listed",
+      type: "command_descriptors_listed", available_actions: [],
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "ui",

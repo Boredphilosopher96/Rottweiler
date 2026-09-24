@@ -354,6 +354,7 @@ impl RuntimeWorkspaceRootController {
             root_authorization: WorkspaceRootAuthorization::Hosted(roots.clone()),
         });
         Ok(SessionActorConfig {
+            model_preferences: None,
             ui: plugins.runtime.ui.clone(),
             ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
                 reader: Arc::clone(&self.transcripts),

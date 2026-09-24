@@ -174,6 +174,8 @@ async fn hosted_model_initialization_is_idle_until_first_prepare_and_streams_aft
         initialize,
     );
 
+    assert!(model.needs_initial_preparation());
+    assert!(!unavailable_hosted_model("fast").has_model_alias("fast"));
     assert_eq!(calls.load(Ordering::Acquire), 0);
     assert!(model.has_provider_for_alias("openai/live-model", "openai"));
     assert!(!model.has_provider_for_alias("openai/live-model", "github_copilot"));
@@ -187,6 +189,7 @@ async fn hosted_model_initialization_is_idle_until_first_prepare_and_streams_aft
         .prepare_model("openai/live-model")
         .await
         .expect("first model use should initialize the provider runtime");
+    assert!(!model.needs_initial_preparation());
     assert_eq!(calls.load(Ordering::Acquire), 1);
     let events = model
         .stream(
@@ -342,6 +345,7 @@ async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
     .await
     .expect("actor history");
     let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: session_id.clone(),
@@ -572,4 +576,88 @@ async fn healthy_runtime_activation_keeps_model_and_catalog_stable() {
             .truncated,
         "activation must not replace the catalog source"
     );
+}
+
+#[tokio::test]
+async fn lazy_unavailable_runtime_rejects_first_prompt_before_history() {
+    let model = Arc::new(RecomposableHostedModel::new_lazy(
+        unavailable_hosted_model("fast"),
+        "fast".to_owned(),
+        Arc::new(QuickCatalogSource(false)),
+        unused_hosted_activator(),
+        Arc::new(|_| {
+            Ok(ActivatedHostedProvider {
+                replacement_model: unavailable_hosted_model("fast"),
+                pre_commit: None,
+                post_commit: None,
+            })
+        }),
+    ));
+    let workspace = tempdir().expect("workspace");
+    let session_id = SessionId("no-model-admission".into());
+    let source = crate::session_runtime::test_history::open(
+        &workspace.path().join("history"),
+        &session_id,
+        Some(ClientId("driver".into())),
+        vec![],
+    )
+    .await
+    .expect("actor history");
+    let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
+        ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
+        ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
+        budget_session_id: session_id.clone(),
+        session_id: session_id.clone(),
+        workspace_root: workspace.path().to_path_buf(),
+        additional_workspace_roots: Vec::new(),
+        workspace_generation: 0,
+        initial_session_context: rw_core::InitialSessionContext::default(),
+        startup_notifications: Vec::new(),
+        model_alias: "fast".to_owned(),
+        model: model.clone(),
+        tools: Arc::new(ToolRegistry::new()),
+        permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
+        hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
+        commands: Arc::new(builtin_command_registry().expect("commands")),
+        modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
+        history: source.history,
+        event_sink: source.sink,
+        event_clock: Arc::new(SystemEventClock),
+        provider_admission: test_provider_admission(),
+        secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
+        checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
+        folder_trust: Arc::new(rw_core::NoopFolderTrustController),
+        workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+        extension_development: Arc::new(rw_core::NoopSessionExtensionController),
+        resources: Arc::new(rw_core::NoopSessionResources),
+        recovered: source.recovered,
+        max_turns: 2,
+        identical_tool_failure_limit: 2,
+        max_output_tokens: 512,
+        thinking: ThinkingLevel::Off,
+        event_capacity: 32,
+    })
+    .expect("actor");
+    let before = actor.dump_prompt(None).await.expect("initial history");
+    let reply = actor
+        .dispatch(rw_core::ClientCommand::SendMessage {
+            meta: rw_core::CommandMeta {
+                protocol_version: rw_core::PROTOCOL_VERSION,
+                client_id: ClientId("driver".into()),
+                request_id: rw_core::RequestId("first-prompt".into()),
+            },
+            session_id,
+            content: "hello".into(),
+            attachments: vec![],
+        })
+        .await
+        .expect("admission reply");
+    assert!(matches!(reply, rw_core::CommandOutcome::Rejected { error }
+        if error.code == "no_model_selected" && error.message.contains("/models")));
+    assert_eq!(
+        actor.dump_prompt(None).await.expect("history").turns,
+        before.turns
+    );
+    actor.close().await.expect("close");
 }

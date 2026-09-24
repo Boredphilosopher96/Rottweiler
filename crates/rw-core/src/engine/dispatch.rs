@@ -1,4 +1,5 @@
 mod accepted;
+mod action_availability;
 mod admission;
 mod command_generation;
 pub(super) mod command_job;
@@ -9,6 +10,7 @@ mod completed_turns;
 pub(super) mod context_job;
 mod context_surgery;
 mod controls;
+pub(in crate::engine) mod deferred_controls;
 mod initialization;
 pub(in crate::engine) mod live_state;
 mod message_input;
@@ -105,6 +107,7 @@ pub(super) async fn handle_actor_command(
                 respond,
                 Some(completion),
                 false,
+                false,
                 Some((authority, expected_revision)),
                 DispatchContext {
                     state,
@@ -131,6 +134,7 @@ pub(super) async fn handle_actor_command(
                 command,
                 respond,
                 completion,
+                false,
                 false,
                 None,
                 DispatchContext {
@@ -473,6 +477,8 @@ pub(super) async fn handle_actor_command(
         }
         ActorCommand::Snapshot { respond } => {
             let _ = respond.send(SessionSnapshot {
+                available_actions: action_availability::ActionState::from_actor(state, config)
+                    .projection(),
                 conversation_turns: state.conversation_turns,
                 resolved_model: state.resolved_model.clone(),
                 queued_messages: state.queued.iter().cloned().collect(),

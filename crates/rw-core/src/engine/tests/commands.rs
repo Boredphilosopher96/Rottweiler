@@ -791,3 +791,15 @@ async fn permissions_slash_command_edits_rules_and_revokes_opaque_approvals() {
     assert_eq!(permissions.snapshot().session_approvals, 0);
     assert!(permissions.snapshot().rules.is_empty());
 }
+
+#[test]
+fn interactive_navigation_descriptors_share_the_builtin_registry() {
+    let registry = builtin_command_registry().expect("built-ins");
+    for &(name, description, _) in rw_types::client_navigation::INTERACTIVE_COMMANDS {
+        let descriptor = registry
+            .descriptors()
+            .find(|descriptor| descriptor.name() == name)
+            .expect("registered navigation");
+        assert_eq!(descriptor.description(), description);
+    }
+}

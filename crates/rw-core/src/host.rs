@@ -1,6 +1,7 @@
 mod contracts;
 pub use contracts::*;
 mod commands;
+mod compatible_provider;
 mod control;
 mod control_admission;
 mod control_completion;

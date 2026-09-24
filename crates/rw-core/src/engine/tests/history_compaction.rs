@@ -40,6 +40,11 @@ impl SessionHistoryView for SmallView {
     fn conversation(&self) -> ConversationCut {
         self.0.conversation()
     }
+    async fn completion_notices(
+        &self,
+    ) -> Result<HistoryRead<Vec<crate::engine::recovery::CompletionNotice>>, AgentLoopError> {
+        self.0.completion_notices().await
+    }
     async fn conversation_sources(
         &self,
         range: Range<u64>,

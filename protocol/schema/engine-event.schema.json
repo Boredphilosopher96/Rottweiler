@@ -766,6 +766,13 @@
             "$ref": "#/$defs/CommandDescriptor"
           }
         },
+        "available_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionActionAvailability"
+          },
+          "maxItems": 8
+        },
         "truncated": {
           "type": "boolean"
         },
@@ -1347,6 +1354,41 @@
         "type",
         "meta",
         "driver_client_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueuedSessionControl"
+          },
+          "maxItems": 8
+        },
+        "settlement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionControlSettlement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "session_control_queue_changed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "controls"
       ]
     },
     {
@@ -2298,6 +2340,13 @@
         },
         "turn_id": {
           "$ref": "#/$defs/TurnId"
+        },
+        "completion_sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SequenceId"
+          },
+          "maxItems": 8
         },
         "used_tokens": {
           "type": "string"
@@ -3293,6 +3342,13 @@
           },
           "maxItems": 128
         },
+        "queued_controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueuedSessionControl"
+          },
+          "maxItems": 8
+        },
         "plugin_statuses": {
           "type": "array",
           "items": {
@@ -3490,6 +3546,120 @@
         "position",
         "preview",
         "truncated"
+      ]
+    },
+    "QueuedSessionControl": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "action": {
+          "$ref": "#/$defs/DeferredSessionAction"
+        },
+        "status": {
+          "$ref": "#/$defs/QueuedControlStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "request",
+        "action",
+        "status"
+      ]
+    },
+    "CommandMeta": {
+      "description": "Metadata common to commands from all client transports.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "client_id": {
+          "$ref": "#/$defs/ClientId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "client_id",
+        "request_id"
+      ]
+    },
+    "DeferredSessionAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "model": {
+              "$ref": "#/$defs/ModelAlias"
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "switch_model"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "model"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/ModeId"
+            },
+            "type": {
+              "type": "string",
+              "const": "switch_mode"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "compact"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "QueuedControlStatus": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running"
       ]
     },
     "SessionPluginStatus": {
@@ -7685,6 +7855,44 @@
         "mcp"
       ]
     },
+    "SessionActionAvailability": {
+      "description": "Availability is advisory; the engine rechecks the action on submission.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/SessionActionKind"
+        },
+        "queued": {
+          "type": "boolean"
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "unavailable_reason"
+      ]
+    },
+    "SessionActionKind": {
+      "description": "Controls whose readiness is checked by the engine and projected to clients.",
+      "type": "string",
+      "enum": [
+        "switch_model",
+        "switch_mode",
+        "compact",
+        "rewind",
+        "review",
+        "fork",
+        "add_workspace_root",
+        "mutate_context"
+      ]
+    },
     "ModeDescriptor": {
       "description": "One bounded, credential-free interaction mode exposed to clients.",
       "type": "object",
@@ -8479,6 +8687,49 @@
         "index",
         "path",
         "machine_local"
+      ]
+    },
+    "SessionControlSettlement": {
+      "type": "object",
+      "properties": {
+        "cancelled_question": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuestionId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "request": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "action": {
+          "$ref": "#/$defs/SessionActionKind"
+        },
+        "outcome": {
+          "$ref": "#/$defs/SessionControlOutcome"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "request",
+        "action",
+        "outcome",
+        "message"
+      ]
+    },
+    "SessionControlOutcome": {
+      "type": "string",
+      "enum": [
+        "applied",
+        "failed",
+        "cancelled"
       ]
     },
     "StoredAttachment": {

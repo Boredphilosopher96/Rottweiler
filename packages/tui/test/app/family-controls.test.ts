@@ -65,7 +65,7 @@ for (const kind of ["question", "approval"] as const) {
         app.composer.value = "!literal child answer"
         expect(await app.composer.submit()).toBe(true)
       } else {
-        expect(app.interactionPanel.select.options.map(option => option.value)).not.toContain("allow_tool_session")
+        expect(app.interactionPanel.select.options.map(option => option.value)).not.toContain("review_permission_rule")
         expect(app.interactionPanel.select.options.map(option => option.value)).not.toContain("auto_safe_mode")
         app.interactionPanel.select.selectCurrent()
       }

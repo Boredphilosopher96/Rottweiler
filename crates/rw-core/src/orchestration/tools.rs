@@ -53,6 +53,17 @@ impl SpawnAgentTool {
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum SpawnAgentAction {
+    Start {
+        task: String,
+        #[serde(default = "default_agent")]
+        agent: String,
+        #[serde(default)]
+        isolation: SubagentIsolation,
+    },
+    Wait {
+        subagent_id: SubagentId,
+    },
+    List {},
     Spawn {
         task: String,
         #[serde(default = "default_agent")]
@@ -86,10 +97,31 @@ impl Tool for SpawnAgentTool {
             .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
     }
 
+    async fn end_session(&self, session: &rw_types::SessionId) -> Result<(), ToolError> {
+        let startups = self.orchestrator.settle_startups().await;
+        let children = self.orchestrator.suspend_parent(session).await;
+        startups
+            .and(children)
+            .map_err(|error| ToolError::EffectsUnsettled(error.to_string()))
+    }
+
+    fn session_activity(&self, session: &rw_types::SessionId) -> Option<String> {
+        self.orchestrator
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|child| {
+                &child.parent_session_id == session && child.state == super::SessionState::Active
+            })
+            .then(|| "A child agent is still running; wait for it or interrupt it first.".into())
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "spawn_agent".to_owned(),
-            description: "Spawn a restricted full child session, or continue a completed child"
+            description: "Start a child in the background; list children and wait for results. Spawn waits immediately; follow_up continues a completed child"
                 .to_owned(),
             input_schema: serde_json::to_value(schemars::schema_for!(SpawnAgentAction))
                 .unwrap_or(Value::Null),
@@ -110,6 +142,7 @@ impl Tool for SpawnAgentTool {
             return false;
         };
         match action {
+            SpawnAgentAction::Wait { .. } | SpawnAgentAction::List {} => true,
             SpawnAgentAction::FollowUp { subagent_id, .. }
             | SpawnAgentAction::Cancel { subagent_id }
             | SpawnAgentAction::Close { subagent_id } => self
@@ -121,6 +154,9 @@ impl Tool for SpawnAgentTool {
                 .get(&subagent_id)
                 .is_some_and(|record| record.isolation == SubagentIsolation::Worktree),
             SpawnAgentAction::Spawn {
+                agent, isolation, ..
+            }
+            | SpawnAgentAction::Start {
                 agent, isolation, ..
             } => {
                 if isolation == SubagentIsolation::Worktree {
@@ -147,10 +183,11 @@ impl Tool for SpawnAgentTool {
                     .ok_or_else(|| ToolError::InvalidInput("unknown child session".to_owned()))?;
                 Ok(CapabilityManifest::default())
             }
-            SpawnAgentAction::Cancel { .. } | SpawnAgentAction::Close { .. } => {
-                Ok(self.capabilities.clone())
-            }
-            SpawnAgentAction::Spawn { agent, .. } => {
+            SpawnAgentAction::Cancel { .. }
+            | SpawnAgentAction::Close { .. }
+            | SpawnAgentAction::Wait { .. }
+            | SpawnAgentAction::List {} => Ok(self.capabilities.clone()),
+            SpawnAgentAction::Spawn { agent, .. } | SpawnAgentAction::Start { agent, .. } => {
                 self.agents
                     .load(&agent)
                     .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
@@ -167,8 +204,49 @@ impl Tool for SpawnAgentTool {
             .session_id()
             .cloned()
             .ok_or_else(|| ToolError::InvalidInput("spawn_agent requires a session".to_owned()))?;
-        let events = context.subagent_event_sink().cloned().ok_or_else(|| {
-            ToolError::InvalidInput("spawn_agent requires engine lifecycle routing".to_owned())
+        if let SpawnAgentAction::List {} = action {
+            let children = self
+                .orchestrator
+                .list_for_parent(&parent_session_id)
+                .into_iter()
+                .map(|child| {
+                    json!({
+                        "subagent_id": child.subagent_id,
+                        "session_id": child.child_session_id,
+                        "activity": child.activity,
+                    })
+                })
+                .collect::<Vec<_>>();
+            return Ok(ToolResult::new(
+                "Child agent status",
+                json!({ "children": children }),
+            ));
+        }
+        if let SpawnAgentAction::Wait { subagent_id } = &action {
+            let child = self
+                .orchestrator
+                .descriptor_for_parent(&parent_session_id, subagent_id)
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+            let handle = SubagentHandle {
+                subagent_id: child.subagent_id,
+                session_id: child.child_session_id,
+            };
+            let result = tokio::select! {
+                result = self.orchestrator.wait(&handle) => result.map_err(|error| ToolError::Command(error.to_string()))?,
+                () = context.cancellation.cancelled() => return Err(ToolError::Command("child wait interrupted; the background child remains available".into())),
+            };
+            return Ok(model_facing_subagent_tool_result(&result)
+                .with_presentation(super::presentation::RESULT.plan()?));
+        }
+        let background = matches!(&action, SpawnAgentAction::Start { .. });
+        let events = if background {
+            context.background_subagent_event_sink()
+        } else {
+            context.subagent_event_sink()
+        }
+        .cloned()
+        .ok_or_else(|| {
+            ToolError::InvalidInput("spawn_agent requires engine lifecycle routing".into())
         })?;
         let observer: Arc<dyn SubagentObserver> = Arc::new(ToolObserver { events });
         if let SpawnAgentAction::Cancel { subagent_id } | SpawnAgentAction::Close { subagent_id } =
@@ -185,7 +263,11 @@ impl Tool for SpawnAgentTool {
                     .close(&parent_session_id, subagent_id)
                     .await
                     .map_err(|error| ToolError::Command(error.to_string()))?,
-                SpawnAgentAction::Spawn { .. } | SpawnAgentAction::FollowUp { .. } => {
+                SpawnAgentAction::Spawn { .. }
+                | SpawnAgentAction::Start { .. }
+                | SpawnAgentAction::Wait { .. }
+                | SpawnAgentAction::List {}
+                | SpawnAgentAction::FollowUp { .. } => {
                     unreachable!()
                 }
             }
@@ -196,7 +278,8 @@ impl Tool for SpawnAgentTool {
                     "action": match action {
                         SpawnAgentAction::Cancel { .. } => "cancel",
                         SpawnAgentAction::Close { .. } => "close",
-                        SpawnAgentAction::Spawn { .. }
+                        SpawnAgentAction::Spawn { .. } | SpawnAgentAction::Start { .. }
+                        | SpawnAgentAction::Wait { .. } | SpawnAgentAction::List {}
                         | SpawnAgentAction::FollowUp { .. } => unreachable!(),
                     },
                     "completed": true,
@@ -229,11 +312,24 @@ impl Tool for SpawnAgentTool {
                 task,
                 agent: agent_name,
                 isolation,
+            }
+            | SpawnAgentAction::Start {
+                task,
+                agent: agent_name,
+                isolation,
             } => {
                 let loaded = self
                     .agents
                     .load(&agent_name)
                     .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+                if background
+                    && isolation == SubagentIsolation::Shared
+                    && loaded.permission_mode == SessionMode::Execute
+                {
+                    return Err(ToolError::InvalidInput(
+                        "background execution requires worktree isolation; shared background children must use a read-only agent".into(),
+                    ));
+                }
                 let inherited_model = context.model_alias().ok_or_else(|| {
                     ToolError::InvalidInput(
                         "spawn_agent requires the parent turn's selected model".to_owned(),
@@ -259,17 +355,39 @@ impl Tool for SpawnAgentTool {
                     isolation,
                     ..request
                 };
+                let cancellation = if background {
+                    rw_tools::CancellationToken::default()
+                } else {
+                    context.cancellation.clone()
+                };
+                let startup =
+                    self.orchestrator
+                        .start(parent_session_id, request, observer, cancellation);
+                let handle = if background {
+                    tokio::select! {
+                        result = startup => result.map_err(|error| ToolError::Command(error.to_string()))?,
+                        () = context.cancellation.cancelled() => return Err(ToolError::Cancelled),
+                    }
+                } else {
+                    startup
+                        .await
+                        .map_err(|error| ToolError::Command(error.to_string()))?
+                };
+                if background {
+                    return Ok(ToolResult::new(
+                        format!("Child {} started. Continue your work; use list to check status and wait to receive its result.", handle.subagent_id.0),
+                        json!({ "subagent_id": handle.subagent_id, "session_id": handle.session_id, "action": "start", "completed": false }),
+                    ).with_presentation(super::presentation::CONTROL.plan()?));
+                }
                 self.orchestrator
-                    .spawn(
-                        parent_session_id,
-                        request,
-                        observer,
-                        context.cancellation.clone(),
-                    )
+                    .wait(&handle)
                     .await
                     .map_err(|error| ToolError::Command(error.to_string()))?
             }
-            SpawnAgentAction::Cancel { .. } | SpawnAgentAction::Close { .. } => unreachable!(),
+            SpawnAgentAction::Cancel { .. }
+            | SpawnAgentAction::Close { .. }
+            | SpawnAgentAction::Wait { .. }
+            | SpawnAgentAction::List {} => unreachable!(),
         };
         Ok(model_facing_subagent_tool_result(&result)
             .with_presentation(super::presentation::RESULT.plan()?))

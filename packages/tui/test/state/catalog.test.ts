@@ -44,7 +44,7 @@ describe("state catalog", () => {
 
   test("retains command catalog truncation so the UI cannot imply completeness", () => {
     const state = reduce(createInitialState(), {
-      type: "command_descriptors_listed",
+      type: "command_descriptors_listed", available_actions: [],
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "client",

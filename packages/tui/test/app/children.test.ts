@@ -36,7 +36,7 @@ describe("Rottweiler children", () => {
     })
   })
 
-  test("uses Escape to return to the parent and double Escape to interrupt a running child", async () => {
+  test("uses Escape to return to the parent and Ctrl+C to interrupt the armed child", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
@@ -93,7 +93,7 @@ describe("Rottweiler children", () => {
       "parent context.txt",
     ])
     expect(app.banner.plainText).toContain("press Esc again to stop the child agent")
-    setup.mockInput.pressEscape()
+    setup.mockInput.pressKey("c", { ctrl: true })
     await Bun.sleep(30)
     expect(emitted.at(-1)).toMatchObject({
       type: "interrupt_subagent",

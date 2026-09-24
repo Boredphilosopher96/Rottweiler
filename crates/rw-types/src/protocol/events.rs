@@ -195,6 +195,10 @@ pub enum EngineEvent {
         meta: CommandAckMeta,
         session_id: SessionId,
         commands: Vec<CommandDescriptor>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<_>", optional)]
+        #[schemars(length(max = 8))]
+        available_actions: Vec<crate::SessionActionAvailability>,
         truncated: bool,
     },
     ModesListed {
@@ -206,7 +210,7 @@ pub enum EngineEvent {
     ModelsListed {
         meta: CommandAckMeta,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         session_id: Option<SessionId>,
         models: Vec<ModelDescriptor>,
         aliases: Vec<ModelAliasDescriptor>,
@@ -313,6 +317,12 @@ pub enum EngineEvent {
         meta: EventMeta,
         driver_client_id: ClientId,
     },
+    SessionControlQueueChanged {
+        meta: EventMeta,
+        #[schemars(length(max = 8))]
+        controls: Vec<crate::QueuedSessionControl>,
+        settlement: Option<crate::SessionControlSettlement>,
+    },
     MessageQueued {
         meta: EventMeta,
         #[serde(with = "decimal_u64")]
@@ -351,10 +361,10 @@ pub enum EngineEvent {
         meta: EventMeta,
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         usage: Option<Usage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         cost: Option<Cost>,
     },
     /// A plugin-originated user message was admitted through the bounded
@@ -548,6 +558,10 @@ pub enum EngineEvent {
     ContextUsageUpdated {
         meta: EventMeta,
         turn_id: TurnId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<_>", optional)]
+        #[schemars(length(max = 8))]
+        completion_sources: Vec<SequenceId>,
         #[serde(with = "decimal_u64")]
         #[schemars(with = "String")]
         #[ts(type = "string")]
@@ -563,7 +577,7 @@ pub enum EngineEvent {
         /// False when zero capacity means unknown rather than exhausted.
         context_window_known: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         context_window_reason: Option<String>,
         stable_prefix_hash: String,
         cache_hit_basis_points: u16,
@@ -719,7 +733,7 @@ pub enum EngineEvent {
         /// Durable per-session effort applied to this selection, including
         /// concrete provider/model routes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         thinking: Option<crate::config::ThinkingLevel>,
     },
     /// The user explicitly chose to start the selected model without prior
@@ -834,6 +848,7 @@ impl EngineEvent {
             | Self::SessionCreated { .. }
             | Self::WorkspaceRootsChanged { .. }
             | Self::DriverChanged { .. }
+            | Self::SessionControlQueueChanged { .. }
             | Self::MessageQueued { .. }
             | Self::QueuedMessageRemoved { .. }
             | Self::QueuedMessagesCleared { .. }
@@ -967,6 +982,7 @@ impl EngineEvent {
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
+            | Self::SessionControlQueueChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::QueuedMessageRemoved { meta, .. }
             | Self::QueuedMessagesCleared { meta, .. }
@@ -1083,6 +1099,7 @@ impl EngineEvent {
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
+            | Self::SessionControlQueueChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::QueuedMessageRemoved { meta, .. }
             | Self::QueuedMessagesCleared { meta, .. }

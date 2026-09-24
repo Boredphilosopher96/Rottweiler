@@ -138,6 +138,26 @@ describe("approvals components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
+    expect(app.composer.visible).toBeTrue()
+    setup.mockInput.pressTab()
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+    await setup.mockInput.typeText("any")
+    app.setState({ ...app.state })
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+    expect(commands.filter(command => command.type === "approve_tool")).toHaveLength(0)
+    expect(app.composer.value).toBe("any")
+    setup.mockInput.pressTab()
+    expect(renderer.currentFocusedRenderable).toBe(app.interactionPanel.select)
+    setup.mockInput.pressKey("y")
+    expect(commands.filter(command => command.type === "approve_tool").at(-1)).toMatchObject({ decision: "allow_once" })
+    setup.mockInput.pressKey("a")
+    expect(commands.filter(command => command.type === "approve_tool").at(-1)).toMatchObject({ decision: "allow_session" })
+    setup.mockInput.pressKey("n")
+    expect(commands.filter(command => command.type === "approve_tool").at(-1)).toMatchObject({ decision: "deny" })
+    commands.length = 0
+    app.interactionPanel.select.setSelectedIndex(0)
+    await setup.renderOnce()
+
     // Each described option occupies two terminal rows. Click the second row's
     // label (Allow session), not the currently highlighted default.
     await setup.mockMouse.click(
@@ -235,32 +255,37 @@ describe("approvals components", () => {
       "allow_once",
       "allow_session",
       "allow_project",
-      "allow_tool_session",
+      "review_permission_rule",
       "auto_safe_mode",
       "deny",
     ])
     const always = app.interactionPanel.select.options.findIndex(
-      (option) => option.value === "allow_tool_session",
+      (option) => option.value === "review_permission_rule",
     )
     expect(app.interactionPanel.select.options[always]).toMatchObject({
-      name: "Always allow Terminal command",
-      description: "This session · any arguments",
+      name: "Review a permission rule…",
+      description: "Review an explicit session pattern",
     })
     app.interactionPanel.select.setSelectedIndex(always)
     app.interactionPanel.select.selectCurrent()
-    expect(commands).toEqual([
-      expect.objectContaining({
-        type: "add_session_permission_rule",
-        pattern: "bash(*)",
-        action: "allow",
-      }),
-      expect.objectContaining({
-        type: "approve_tool",
-        tool_call_id: "escape-hatch",
-        invocation_id: "escape-hatch",
-        decision: "allow_once",
-      }),
-    ])
+    expect(commands).toEqual([])
+    expect(app.picker.title).toContain("Review rule")
+    expect(app.picker.select.options.map(item => item.name)).toContain("Enter an explicit allow pattern…")
+    expect(app.picker.visible).toBeTrue()
+    expect(commands.some(command => command.type === "approve_tool" || command.type === "add_session_permission_rule")).toBeFalse()
+    const pattern = app.picker.select.options.findIndex(option => option.value === "add")
+    app.picker.select.setSelectedIndex(pattern)
+    app.picker.select.selectCurrent()
+    await setup.renderOnce()
+    expect(app.picker.input.value).toBe("")
+    expect(app.picker.title).toContain("this session")
+    expect(app.picker.height).toBe(app.composer.y)
+    await setup.mockInput.typeText("bash(cargo test*)")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(commands).toContainEqual(expect.objectContaining({ type: "add_session_permission_rule", pattern: "bash(cargo test*)", action: "allow" }))
+    expect(commands.some(command => command.type === "approve_tool")).toBeFalse()
+    expect(app.state.tools[tool.invocationId]?.status).toBe("awaiting_approval")
 
     commands.length = 0
     const autoSafe = app.interactionPanel.select.options.findIndex(
@@ -288,7 +313,7 @@ describe("approvals components", () => {
     expect(app.interactionPanel.select.options.map((option) => option.value))
       .not.toContain("auto_safe_mode")
     expect(app.interactionPanel.select.options.map((option) => option.value))
-      .toContain("allow_tool_session")
+      .toContain("review_permission_rule")
 
     app.setState({ ...app.state, permissions: null })
     await setup.renderOnce()
@@ -412,7 +437,7 @@ describe("approvals components", () => {
           title: "Implement safely",
           summary_md: "One reviewed change.",
           steps: [{ description: "Edit", files_touched: ["src/lib.rs"], verification: "cargo test" }],
-          open_questions: [],
+          open_questions: ["Keep compatibility?"],
         },
       },
       sessionId: "session-plan",
@@ -425,6 +450,23 @@ describe("approvals components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
     expect(app.interactionPanel.visible).toBe(true)
+    expect(setup.captureCharFrame()).toContain("1. Edit")
+    expect(setup.captureCharFrame()).toContain("Files: src/lib.rs")
+    expect(setup.captureCharFrame()).toContain("Verify: cargo test")
+    setup.mockInput.pressKey("pagedown")
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("Keep compatibility?")
+    app.setState({ ...app.state, pendingPlan: {
+      ...app.state.pendingPlan!,
+      steps: Array.from({ length: 30 }, (_, index) => ({ description: `Step ${index + 1}`, files_touched: [`src/file${index}.rs`], verification: "cargo test" })),
+      open_questions: ["FINAL_PLAN_QUESTION"],
+    } })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain("FINAL_PLAN_QUESTION")
+    for (let page = 0; page < 20; page++) setup.mockInput.pressKey("\x1b[6~")
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("FINAL_PLAN_QUESTION")
+    expect(setup.captureCharFrame()).toContain("Approve plan")
     app.interactionPanel.select.selectCurrent()
     expect(commands).toContainEqual({
       type: "approve_plan",

@@ -381,7 +381,7 @@ describe("Rottweiler mcp-permissions", () => {
       "permissions.mode.yolo",
       "permissions.mode.default",
     ])
-    expect(app.picker.select.options[3]?.name).toBe("● default")
+    expect(app.picker.select.options.slice(0, 4).map((option) => option.name)).toEqual(["Ask", "Auto", "Off", "● Default"])
     expect(app.picker.status.visible).toBeFalse()
     expect(app.picker.select.visible).toBeTrue()
     const permissionCopy = app.picker.select.options

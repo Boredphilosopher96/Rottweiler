@@ -271,3 +271,24 @@ fn model_catalog_requires_explicit_collections_and_cache_state()
     }
     Ok(())
 }
+
+#[test]
+fn availability_metadata_omits_empty_values_and_accepts_older_replies()
+-> Result<(), Box<dyn std::error::Error>> {
+    let value = serde_json::json!({
+        "type": "command_descriptors_listed",
+        "meta": { "protocol_version": crate::PROTOCOL_VERSION, "client_id": "client", "request_id": "catalog", "emitted_at": "2026-09-16T00:00:00Z" },
+        "session_id": "session", "commands": [], "truncated": false
+    });
+    let event: EngineEvent = serde_json::from_value(value.clone())?;
+    assert!(
+        matches!(&event, EngineEvent::CommandDescriptorsListed { available_actions, .. } if available_actions.is_empty())
+    );
+    assert_eq!(serde_json::to_value(event)?, value);
+    let action: crate::SessionActionAvailability = serde_json::from_value(serde_json::json!({
+        "action": "switch_model", "unavailable_reason": null
+    }))?;
+    assert!(!action.queued);
+    assert!(serde_json::to_value(action)?.get("queued").is_none());
+    Ok(())
+}

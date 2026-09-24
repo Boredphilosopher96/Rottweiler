@@ -68,8 +68,7 @@ async function fixture(match: SessionSearchMatch | null, failure = false) {
 test("body-only session hit stays visible and opens its exact semantic row after normal session activation", async () => {
   const { setup, app, reads, switches } = await fixture(source)
   try {
-    expect(app.picker.select.options.map(option => option.value)).toEqual(["match", "resume", "rename"])
-    app.picker.select.selectCurrent()
+    expect(app.picker.visible).toBeFalse()
     await waitForHistory(setup, () => app.transcript.captureHistoryViewport()?.anchor?.id === "42")
     expect(switches).toEqual(["matched"])
     expect(reads.find(item => item.read.position.type === "search_match")).toMatchObject({ session: "matched", read: { position: { type: "search_match", source } } })
@@ -79,10 +78,11 @@ test("body-only session hit stays visible and opens its exact semantic row after
   } finally { app.destroy(); setup.renderer.destroy() }
 })
 
-test("title-only search retains session actions without inventing a transcript anchor", async () => {
-  const { setup, app, reads } = await fixture(null)
+test("title-only search resumes immediately without inventing a transcript anchor", async () => {
+  const { setup, app, reads, switches } = await fixture(null)
   try {
-    expect(app.picker.select.options.map(option => option.value)).toEqual(["resume", "rename"])
+    expect(app.picker.visible).toBeFalse()
+    expect(switches).toEqual(["matched"])
     expect(reads.some(item => item.read.position.type === "search_match")).toBeFalse()
   } finally { app.destroy(); setup.renderer.destroy() }
 })
@@ -90,7 +90,6 @@ test("title-only search retains session actions without inventing a transcript a
 test("a removed search source reports failure and cannot silently choose another message", async () => {
   const { setup, app, reads } = await fixture(source, true)
   try {
-    app.picker.select.selectCurrent()
     await waitForHistory(setup, () => app.state.errors.some(error => error.code === "search_navigation_failed"))
     expect(app.state.errors.at(-1)?.message).toBe("Search source was removed")
     expect(reads.filter(item => item.read.position.type === "search_match")).toHaveLength(1)

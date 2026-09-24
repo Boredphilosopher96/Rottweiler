@@ -41,3 +41,20 @@ fn usage() -> CommandExecutionError {
         "usage: /goto session <id> | sequence <number>",
     )
 }
+
+/// Headless peers receive an explicit capability refusal for client navigation.
+/// Interactive clients handle these registered actions with their own UI owner.
+pub(super) struct InteractiveClientCommand;
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for InteractiveClientCommand {
+    async fn execute(
+        &self,
+        _: &mut SessionCommandContext,
+        _: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        Err(CommandExecutionError::new(
+            "interactive_client_required",
+            "This navigation action requires an interactive client.",
+        ))
+    }
+}

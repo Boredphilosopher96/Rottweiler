@@ -109,6 +109,7 @@ async fn session_handle_rewind_restores_ten_agent_edits_to_turn_three() {
     )
     .expect("actor recovery");
     let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: session.clone(),

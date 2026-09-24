@@ -1,3 +1,4 @@
+mod background;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -311,6 +312,7 @@ pub struct ToolContext {
     pub progress: Arc<dyn ToolProgressSink>,
     question_asker: Option<Arc<dyn QuestionAsker>>,
     subagent_events: Option<Arc<dyn SubagentEventSink>>,
+    background_subagent_events: Option<Arc<dyn SubagentEventSink>>,
     mcp_tool_policy: McpToolPolicy,
 }
 
@@ -396,6 +398,7 @@ impl ToolContext {
             progress: Arc::new(NoopProgressSink),
             question_asker: None,
             subagent_events: None,
+            background_subagent_events: None,
             mcp_tool_policy: McpToolPolicy::Unrestricted,
         })
     }

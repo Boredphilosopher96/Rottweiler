@@ -386,6 +386,20 @@ impl HostQueryService for RuntimeSessionFactory {
         }
     }
 
+    async fn configure_compatible_provider(
+        &self,
+        configuration: &rw_types::CompatibleProviderSetup,
+    ) -> Result<(), HostError> {
+        let loader = self.settings_loader();
+        let configuration = configuration.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            loader.configure_compatible_provider(&configuration)
+        })
+        .await
+        .map_err(|_| HostError::Persistence("provider setup worker failed".into()))?
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
+        Ok(())
+    }
     async fn configure_builtin_provider(
         &self,
         profile: rw_core::BuiltinProviderProfile,

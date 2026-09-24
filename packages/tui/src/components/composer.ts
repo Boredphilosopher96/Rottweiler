@@ -1,3 +1,4 @@
+import { DRAFT_LIMIT_NOTICE } from "../render/resource-copy"
 import { TextRenderable } from "./text"
 import {
   BoxRenderable,
@@ -69,6 +70,7 @@ export class ComposerRenderable extends BoxRenderable {
   #shellMode = false
   #imagePasteAvailable = false
   #inputMode: "normal" | "insert" | null = null
+  #activity: "idle" | "running" | "interaction" = "idle"
   #dockHeight = 4
   #history: string[] = []
   #historyIndex: number | null = null
@@ -146,7 +148,7 @@ export class ComposerRenderable extends BoxRenderable {
     }, (codeUnits, utf8Bytes) => {
       if (utf8Bytes > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return false }
       if (this.#drafts.canRetainTextBytes(this.#scope(), utf8Bytes) && this.#drafts.canRetainText(this.#scope(), codeUnits, this.#attachments)) return true
-      this.#options.onAttachmentError?.("Draft storage is full. Shorten a draft or remove an attachment before adding more content.")
+      this.#options.onAttachmentError?.(DRAFT_LIMIT_NOTICE)
       return false
     }, this.#drafts.allocations)
     this.queueText = new TextRenderable(ctx, {
@@ -252,6 +254,8 @@ export class ComposerRenderable extends BoxRenderable {
     this.#refreshAttachments()
   }
 
+  get submitting(): boolean { return this.#submitting }
+
   get dockHeight(): number {
     return this.visible ? this.#dockHeight : 0
   }
@@ -271,10 +275,16 @@ export class ComposerRenderable extends BoxRenderable {
       : this.#placeholder
   }
 
+  setActivityHints(activity: "idle" | "running" | "interaction"): void {
+    if (this.#activity === activity) return
+    this.#activity = activity
+    this.hintText.content = composerHints(this.#theme, this.#options, this.#imagePasteAvailable, this.#inputMode, activity)
+  }
+
   setImagePasteAvailable(available: boolean): void {
     if (this.#imagePasteAvailable === available) return
     this.#imagePasteAvailable = available
-    this.hintText.content = composerHints(this.#theme, this.#options, available, this.#inputMode)
+    this.hintText.content = composerHints(this.#theme, this.#options, available, this.#inputMode, this.#activity)
   }
 
   setKeybindingMode(mode: "normal" | "insert" | null): void {
@@ -285,6 +295,7 @@ export class ComposerRenderable extends BoxRenderable {
       this.#options,
       this.#imagePasteAvailable,
       mode,
+      this.#activity,
     )
   }
 
@@ -378,7 +389,7 @@ export class ComposerRenderable extends BoxRenderable {
     if (Buffer.byteLength(content) > MAX_COMPOSER_TEXT_BYTES) { this.#options.onAttachmentError?.(COMPOSER_TEXT_LIMIT_NOTICE); return false }
     if (this.#retiring || this.isDestroyed) return false
     if (this.#drafts.set(this.#scope(), { content, attachments })) return true
-    this.#options.onAttachmentError?.("Draft storage is full. Shorten a draft or remove an attachment before adding more content.")
+    this.#options.onAttachmentError?.(DRAFT_LIMIT_NOTICE)
     return false
   }
 
@@ -657,7 +668,11 @@ function composerHints(
   options: Pick<ComposerOptions, "pasteImageKeycap" | "externalEditorKeycap">,
   imagePasteAvailable: boolean,
   inputMode: "normal" | "insert" | null,
+  activity: "idle" | "running" | "interaction" = "idle",
 ): ReturnType<typeof t> {
+  if (activity !== "idle") return t`${inputMode === null ? "" : `${inputMode.toUpperCase()}  `}${fg(theme.textMuted)(activity === "interaction"
+    ? "Tab decision/message · Enter choose · Ctrl+P commands"
+    : "Enter queue message · Ctrl+C stop · Esc Esc stop · Ctrl+P commands")}`
   const editor = options.externalEditorKeycap === undefined
     ? ""
     : `   ${options.externalEditorKeycap} editor`
@@ -669,7 +684,7 @@ function composerHints(
     : bg(inputMode === "normal" ? theme.success : theme.primary)(
         fg(theme.background)(` ${inputMode.toUpperCase()} `),
       )
-  return t`${mode}${inputMode === null ? "" : fg(theme.textMuted)("  ")}${fg(theme.textMuted)("/ commands   @ files   ! shell")}${editor === "" ? "" : fg(theme.textMuted)(editor)}${image === "" ? "" : fg(theme.textMuted)(image)}${fg(theme.textMuted)("   ")}${bg(theme.backgroundElement)(fg(theme.borderActive)(" ⏎ "))}${fg(theme.textMuted)(" send")}`
+  return t`${mode}${inputMode === null ? "" : fg(theme.textMuted)("  ")}${fg(theme.textMuted)("Ctrl+P commands   Alt+M model   / @ !")}${editor === "" ? "" : fg(theme.textMuted)(editor)}${image === "" ? "" : fg(theme.textMuted)(image)}${fg(theme.textMuted)("   ")}${bg(theme.backgroundElement)(fg(theme.borderActive)(" ⏎ "))}${fg(theme.textMuted)(" send")}`
 }
 
 function estimateWrappedRows(value: string, columns: number): number {

@@ -445,6 +445,18 @@ impl EngineHost {
             ClientCommand::ListCommands { meta, session_id } => {
                 let session = self.ready_session(&session_id).await?;
                 let descriptors = session.handle().command_descriptors();
+                let snapshot = session.handle().snapshot().await.map_err(HostError::from)?;
+                let mut available_actions = snapshot.available_actions;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    for action in &mut available_actions {
+                        if action.action == rw_types::SessionActionKind::Review {
+                            continue;
+                        }
+                        action.queued = false;
+                        action.unavailable_reason =
+                            Some("Take control of this session first.".into());
+                    }
+                }
                 let (commands, truncated) = wire_command_catalog(descriptors.iter());
                 Ok((
                     CommandOutcome::Accepted {},
@@ -453,6 +465,7 @@ impl EngineHost {
                         meta: ack_meta(&meta, &*self.clock),
                         session_id,
                         commands,
+                        available_actions,
                         truncated,
                     }],
                 ))
@@ -944,6 +957,14 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::ConfigureCompatibleProvider {
+                meta,
+                session_id,
+                configuration,
+            } => {
+                self.configure_compatible_provider(meta, session_id, configuration)
+                    .await
+            }
             ClientCommand::ConfigureBuiltinProvider {
                 meta,
                 session_id,
@@ -1351,6 +1372,12 @@ impl EngineHost {
                     ClientCommand::TakeDriver { meta, .. } => Some(meta.client_id.clone()),
                     _ => None,
                 };
+                let requested_model = match &command {
+                    ClientCommand::SwitchModel {
+                        model, provider, ..
+                    } => Some((model.0.clone(), provider.clone())),
+                    _ => None,
+                };
                 let persists_model = matches!(
                     command,
                     ClientCommand::SwitchModel { .. } | ClientCommand::AnswerQuestion { .. }
@@ -1372,10 +1399,11 @@ impl EngineHost {
                 } else {
                     None
                 };
-                let outcome = if persists_model {
-                    session.handle().dispatch_durably(command).await?
+                let (outcome, host_owns_model_persistence) = if persists_model {
+                    let owns = session.handle().dispatch_model_control(command).await?;
+                    (CommandOutcome::Accepted {}, owns)
                 } else {
-                    session.handle().dispatch(command).await?
+                    (session.handle().dispatch(command).await?, false)
                 };
                 if matches!(outcome, CommandOutcome::Accepted {}) {
                     // TakeDriver persists its lease before returning Accepted.
@@ -1393,9 +1421,14 @@ impl EngineHost {
                         }
                         session.set_driver(Some(driver));
                     }
-                    if let Some(previous_model) = previous_model {
-                        let committed_model = session.handle().snapshot().await?.model_alias;
-                        if committed_model != previous_model {
+                    if host_owns_model_persistence && let Some(previous_model) = previous_model {
+                        let committed = session.handle().snapshot().await?;
+                        let committed_model = committed.model_alias;
+                        let retry_same_selection =
+                            requested_model.as_ref().is_some_and(|(model, provider)| {
+                                model == &committed_model && provider == &committed.provider
+                            });
+                        if committed_model != previous_model || retry_same_selection {
                             let model = ModelAlias(committed_model);
                             let descriptor = {
                                 let mut descriptor = session

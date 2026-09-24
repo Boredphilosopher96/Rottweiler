@@ -1186,6 +1186,7 @@ async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::Lo
     };
     let initial_thinking = configured_session_thinking(&loaded_config.config, &model_alias);
     let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
         ui: plugin_runtime.ui.clone(),
         ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
             reader: Arc::clone(&transcripts),

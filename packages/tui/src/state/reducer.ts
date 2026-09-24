@@ -1,3 +1,4 @@
+import { appendSessionError } from "./errors"
 import { restoreChildren, coveredChildren, observeChildren } from "./children-recovery"
 import { contextUsage } from "./context-usage"
 import { compactionProgress, observeCompaction } from "./compaction-recovery"
@@ -69,6 +70,7 @@ export function reduceRottweilerState(
     case "transport_disconnected":
       return {
         ...state,
+        commandCatalogLoaded: false, mcpCatalogLoaded: false,
         providerAuth: { ...state.providerAuth, pending: null },
         connection: {
           ...state.connection,
@@ -331,6 +333,8 @@ function applyKnownEvent(
     case "command_descriptors_listed":
       return {
         ...state,
+        commandCatalogLoaded: true,
+        availableActions: event.available_actions ?? [],
         commands: event.commands.map((command) => ({
           name: command.name,
           description: command.description,
@@ -359,11 +363,14 @@ function applyKnownEvent(
         (model) => model.current === true && model.available !== false,
       )
       const currentModel = currentModels.length === 1 ? currentModels[0] : undefined
-      const hasReadyProvider = event.providers.some(
-        (provider) => provider.configured && provider.authenticated && provider.reachable,
+      const selectionResolved = event.models.some(model =>
+        model.available !== false &&
+        (model.id === state.model || model.aliases.includes(state.model ?? "")),
       )
       const freshUnresolvedSelection =
-        !hasReadyProvider &&
+        event.truncated !== true &&
+        (event.cached !== true || !event.providers.some(provider => provider.configured)) &&
+        !selectionResolved &&
         currentModel === undefined &&
         !state.hasActivity &&
         state.streamingTail === null
@@ -440,6 +447,7 @@ function applyKnownEvent(
     case "mcp_servers_listed":
       return {
         ...state,
+        mcpCatalogLoaded: true,
         mcpServers: event.servers.slice(0, 128),
         mcpApprovalReview:
           state.mcpApprovalReview !== null &&
@@ -558,6 +566,11 @@ function applyKnownEvent(
     case "session_created":
     case "driver_changed":
       return { ...state, driverClientId: event.driver_client_id }
+    case "session_control_queue_changed": {
+      const questions = { ...state.questions }
+      if (event.settlement?.cancelled_question != null) delete questions[event.settlement.cancelled_question]
+      return { ...state, questions, queuedControls: event.controls, lastControlSettlement: event.settlement ?? state.lastControlSettlement }
+    }
     case "message_queued":
       return {
         ...state,
@@ -585,7 +598,7 @@ function applyKnownEvent(
         },
       }
     case "user_message_accepted":
-      return { ...state, errors: [] }
+      return state
     case "user_message_retained":
     case "conversation_tool_results_committed":
     case "plugin_message_injected":
@@ -665,7 +678,10 @@ function applyKnownEvent(
     case "turn_started":
       return {
         ...state,
-        errors: [],
+        // Successful admission proves checkpoint recovery finished. Other
+        // failures remain visible until their own recovery or explicit dismissal.
+        errors: state.errors.filter(error => error.code !== "session_requires_recovery" ||
+          (error.category !== "internal" && error.category !== "protocol")),
         turns: retainRecentTurns(
           state.turns,
           event.turn_id,
@@ -755,6 +771,7 @@ function applyKnownEvent(
             lastChildSequence: childSequence ?? existing.lastChildSequence,
             activity,
             summary: existing.summary,
+            ...(existing.cost === undefined ? {} : { cost: existing.cost }),
             touchedFileCount: existing.touchedFileCount,
             diffArtifactId: existing.diffArtifactId,
           },
@@ -777,6 +794,7 @@ function applyKnownEvent(
           lastChildSequence: existing?.lastChildSequence ?? null,
           activity: existing?.activity ?? null,
           summary: terminal.summary,
+          cost: event.result.cost,
           touchedFileCount: terminal.touchedFileCount,
           diffArtifactId: terminal.diffArtifactId,
         },
@@ -833,7 +851,6 @@ function applyKnownEvent(
       const tools = retainRecentTools(state.tools, event.invocation_id, tool)
       return {
         ...state,
-        errors: [],
         tools,
         streamingTail: syncTailTools(state.streamingTail, event.turn_id, event.invocation_id, tools),
       }
@@ -956,7 +973,6 @@ function applyKnownEvent(
     case "question_asked":
       return {
         ...state,
-        errors: [],
         questions: {
           ...state.questions,
           [event.question_id]: {
@@ -1046,7 +1062,7 @@ function applyKnownEvent(
           summaryTurnId: event.summary_turn_id,
           reclaimedTokens: event.reclaimed_tokens,
           attempt: null,
-          text: "",
+          text: state.compaction.text,
           thinking: "",
         },
       }
@@ -1086,9 +1102,13 @@ function applyKnownEvent(
     case "user_shell_state_changed":
       return projectShellEvent(state, event)
     case "error":
-      return { ...state, errors: [...state.errors.slice(-63), event.error] }
+      return appendSessionError(state, event.error)
+    case "guard_triggered":
+      return appendSessionError(state, { category: "internal", code: "guard_triggered", message: event.message, retryable: false })
+    case "hook_failed":
+      return appendSessionError(state, { category: "extension", code: "hook_failed", message: event.message, retryable: !event.fail_closed })
     case "command_finished":
-      return { ...state, hasActivity: true, errors: [] }
+      return { ...state, hasActivity: true }
     case "context_usage_updated":
       return {
         ...state,
@@ -1100,7 +1120,7 @@ function applyKnownEvent(
           usable_tokens: event.usable_tokens,
           reserved_tokens: event.reserved_tokens,
           context_window_known: event.context_window_known,
-          ...(event.context_window_reason === undefined
+          ...(event.context_window_reason == null
             ? {}
             : { context_window_reason: event.context_window_reason }),
         },
@@ -1114,8 +1134,6 @@ function applyKnownEvent(
     case "model_context_cleared":
     case "context_item_pinned":
     case "context_item_evicted":
-    case "hook_failed":
-    case "guard_triggered":
       return state
   }
 }

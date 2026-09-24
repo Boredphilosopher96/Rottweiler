@@ -1,3 +1,4 @@
+import { resourceLimitCopy } from "./resource-copy"
 import { utf8Prefix } from "../state/display-buffer"
 import { truncateToCells } from "./text"
 
@@ -28,6 +29,8 @@ export interface PresentedError {
 type KnownError = Omit<PresentedError, "text"> & { readonly text: string }
 
 const KNOWN_ERRORS: Record<string, KnownError> = {
+  "internal:guard_triggered": warning("The response stopped at a safety or budget limit · review the last turn before continuing"),
+  "extension:hook_failed": warning("An extension action failed · check the extension before retrying"),
   "internal:agent_loop": error("The engine could not complete this response"),
   "internal:substituted": error("The engine could not complete this response"),
   "protocol:attachment_unavailable": warning("Attachments are unavailable right now · try again"),
@@ -49,6 +52,9 @@ const KNOWN_ERRORS: Record<string, KnownError> = {
   "protocol:mcp_name_invalid": error("The MCP server name is not valid"),
   "protocol:mcp_unconfigured": error("No MCP servers are configured"),
   "protocol:model_switch_pending": warning("Finish the pending model switch before choosing another model"),
+  "protocol:no_model_selected": warning("Choose a model with /models · connect a provider with /providers"),
+  "protocol:turn_running": warning("This action needs an idle session · stop the response with Ctrl+C or wait for it to finish"),
+  "protocol:session_not_idle": warning("This action needs an idle session · stop the response with Ctrl+C or wait for it to finish"),
   "protocol:model_unavailable": error("The selected model is unavailable"),
   "protocol:models_unavailable": error("No configured model routes are available"),
   "protocol:permission_projection_failed": warning("Could not load permission rules"),
@@ -104,6 +110,8 @@ function error(text: string): KnownError {
 
 /** Converts engine and transport failures into stable, safe UI copy. */
 export function presentError(input: PresentErrorInput): PresentedError {
+  const resourceMessage = resourceLimitCopy(input.message)
+  if (resourceMessage !== null) return { text: resourceMessage, severity: "warning" }
   const category = errorPreview(input.category ?? "", MAX_ERROR_TAG_BYTES)
   const code = errorPreview(input.code ?? "", MAX_ERROR_TAG_BYTES)
   if (category === "protocol" && (code === "subagent_replay_gap" || code.endsWith("_projection_failed"))) {

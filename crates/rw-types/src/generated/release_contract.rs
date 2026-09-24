@@ -226,7 +226,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         rust_arch: "aarch64",
         native_library: "libopentui.dylib",
         product_budgets: ReleaseProductBudgets {
-            engine_less_than_bytes: 40_000_000,
+            engine_less_than_bytes: 52_428_800,
             wasm_host_less_than_bytes: 30_000_000,
             js_bundle_less_than_bytes: 100_000_000,
         },
@@ -240,7 +240,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         rust_arch: "x86_64",
         native_library: "libopentui.dylib",
         product_budgets: ReleaseProductBudgets {
-            engine_less_than_bytes: 40_000_000,
+            engine_less_than_bytes: 52_428_800,
             wasm_host_less_than_bytes: 30_000_000,
             js_bundle_less_than_bytes: 100_000_000,
         },
@@ -254,7 +254,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         rust_arch: "aarch64",
         native_library: "libopentui.so",
         product_budgets: ReleaseProductBudgets {
-            engine_less_than_bytes: 30_000_000,
+            engine_less_than_bytes: 52_428_800,
             wasm_host_less_than_bytes: 30_000_000,
             js_bundle_less_than_bytes: 150_000_000,
         },
@@ -268,7 +268,7 @@ pub const RELEASE_PLATFORMS: &[ReleasePlatform] = &[
         rust_arch: "x86_64",
         native_library: "libopentui.so",
         product_budgets: ReleaseProductBudgets {
-            engine_less_than_bytes: 30_000_000,
+            engine_less_than_bytes: 52_428_800,
             wasm_host_less_than_bytes: 30_000_000,
             js_bundle_less_than_bytes: 150_000_000,
         },

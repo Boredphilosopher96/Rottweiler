@@ -1,3 +1,4 @@
+import { DRAFT_SWITCH_LIMIT_NOTICE } from "../render/resource-copy"
 import { retainedJsonBytes } from "../retained-json"
 import type { RecycleChildTarget } from "../recycle-child"
 import { SubagentCatalog } from "../subagent-catalog"
@@ -30,7 +31,7 @@ import type { KeybindingAction } from "../keybindings"
 import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker } from "../projection-requests"
 import type { CommandOutcome, EngineEvent } from "../protocol"
-import { presentError } from "../render"
+import { formatCost, presentError } from "../render"
 import { createInitialState, engineEvent, reduceRottweilerState, type RottweilerState } from "../state"
 import {
   boundSubagentState,
@@ -64,6 +65,7 @@ interface ChildUiHost {
 }
 function safeErrorMessage(error: unknown): string { return error instanceof Error && error.message.length > 0 ? error.message : "the request could not be delivered to the engine" }
 type SubagentAction =
+  | { readonly kind: "result"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "inspect"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "continue"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
@@ -83,6 +85,7 @@ export class ChildUiController {
   readonly draftStore: ComposerDraftStore
   #activeSubagentId: string | null = null
   #subagentActionId: string | null = null
+  #showResult = false
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   #parentReadTarget: SessionReadTarget | null = null
   #activeReadTarget: SessionReadTarget | null = null
@@ -300,7 +303,7 @@ export class ChildUiController {
     this.#subagentErrorBaseline = undefined
     this.#resetting = false
   }
-  pickerClosed(): void { this.#subagentActionId = null }
+  pickerClosed(): void { this.#subagentActionId = null; this.#showResult = false }
   acceptCatalog(values: readonly SubagentDescriptor[]): void {
     this.#subagentListError = null
     this.#catalog.replace(values)
@@ -344,6 +347,7 @@ export class ChildUiController {
   openSubagentActionPicker(subagentId = this.#activeSubagentId): void {
     if (subagentId === null || this.subagentDescriptor(subagentId) === undefined) return
     this.#subagentActionId = subagentId
+    this.#showResult = false
     this.#host.pickerController.begin("agentActions")
     this.#host.pickerController.refresh()
   }
@@ -445,7 +449,7 @@ export class ChildUiController {
     const accepted = this.draftStore.set(this.composerScope(), {
       content: this.#host.composer.value, attachments: this.#host.composer.attachments,
     })
-    if (!accepted) this.#host.projectError("draft_budget_full", "Draft storage is full. Shorten a draft or remove an attachment before switching.")
+    if (!accepted) this.#host.projectError("draft_budget_full", DRAFT_SWITCH_LIMIT_NOTICE)
     return accepted
   }
 
@@ -738,7 +742,7 @@ export class ChildUiController {
         items.push(...this.#subagentDescriptors.filter(subagent => !pending.some(row => row.target.session_id === subagent.child_session_id)).map((subagent) => ({
           id: subagent.subagent_id,
           label: subagent.task,
-          description: `${subagent.activity === "running" ? "Running" : "Idle"} · ${subagent.agent} · ${subagent.model} · ${subagent.isolation}`,
+          description: `${this.#host.state.subagents[subagent.subagent_id]?.status ?? subagent.activity} · ${subagent.agent} · ${subagent.model} · ${subagent.isolation}${this.#host.state.subagents[subagent.subagent_id]?.cost === undefined ? "" : ` · ${formatCost(this.#host.state.subagents[subagent.subagent_id]?.cost)}`}`,
           searchText: `${subagent.task} ${subagent.agent} ${subagent.model} ${subagent.activity}`,
           value: { agent: subagent },
         })))
@@ -765,7 +769,23 @@ export class ChildUiController {
           this.#host.closePicker()
           break
         }
+        const result = this.#host.state.subagents[subagent.subagent_id]
+        if (this.#showResult && result !== undefined) {
+          const summary = boundedUiText(result.summary ?? "No summary retained; inspect the child transcript for its full result.", 512)
+          const lines = summary.match(/.{1,64}/gu) ?? []
+          this.#host.pickerController.show(`Child result · ${result.status.replaceAll("_", " ")}`, [
+            { id: "back", label: "Back to child actions", description: `${result.touchedFileCount} changed files · ${formatCost(result.cost)}`, value: null },
+            { id: "inspect", label: "Inspect full child transcript", description: "The bounded result preview is below", value: null },
+            ...lines.map((line, index) => ({ id: `line:${index}`, label: line, description: "", value: null })),
+          ], item => {
+            if (item.id === "back") { this.#showResult = false; this.#host.pickerController.refresh() }
+            else if (item.id === "inspect") { this.#host.closePicker(); void this.enterSubagent(subagent.subagent_id) }
+          })
+          break
+        }
         const items: PickerItem<SubagentAction>[] = [
+          ...(result === undefined || result.status === "running" ? [] : [{ id: "result", label: "Inspect retained result",
+            description: `${result.status.replaceAll("_", " ")} · ${formatCost(result.cost)} · summary and changed files`, value: { kind: "result", subagent } as SubagentAction }]),
           {
             id: "inspect",
             label: "Inspect transcript",
@@ -804,6 +824,7 @@ export class ChildUiController {
         this.#host.pickerController.show(`Child actions · ${boundedUiText(subagent.task, 64)}`, items, (item) => {
           const action = item.value
           if (action.kind === "running") return
+          if (action.kind === "result") { this.#showResult = true; this.#host.pickerController.refresh(); return }
           this.#host.closePicker()
           if (action.kind === "inspect") void this.enterSubagent(action.subagent.subagent_id)
           else if (action.kind === "continue") {

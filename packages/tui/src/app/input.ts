@@ -74,6 +74,7 @@ interface InputUiHost {
   openCommandPicker(): void
   openModelPicker(): void
   openModePicker(): void
+  onExit(): void
 }
 export class InputUiController {
   readonly #host: InputUiHost
@@ -84,6 +85,7 @@ export class InputUiController {
   #interruptSubagentId: string | null = null
   #interruptEscapeTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeArmed = false
+  #exitArmedAt = 0
   constructor(host: InputUiHost, bindings: CompiledKeybindings) {
     this.#host = host
     this.#keybindings = bindings
@@ -108,6 +110,39 @@ export class InputUiController {
     if (this.#keybindings.preset === "vim") this.#vimFocus = restoring ? "picker" : this.#vimFocusBeforePicker
   }
   onGlobalKey = (key: KeyEvent) => {
+    if (key.ctrl && key.name === "c" && !key.meta) {
+      // The foreground shell owns terminal input while the renderer is suspended.
+      if (this.#host.state.shell.active) { this.#exitArmedAt = 0; return }
+      key.preventDefault()
+      key.stopPropagation()
+      if (this.isInterruptible() || this.#host.children.isActiveSubagentRunning()) {
+        this.#exitArmedAt = 0
+        const target = this.#host.children.isActiveSubagentRunning()
+          ? this.#host.children.activeId : this.#interruptSubagentId
+        this.clearInterruptEscape()
+        void this.interruptActiveResponse(target)
+      } else {
+        const now = Date.now()
+        if (this.#exitArmedAt !== 0 && now - this.#exitArmedAt < 900) {
+          this.#exitArmedAt = 0
+          this.#host.onExit()
+        } else {
+          this.#exitArmedAt = now
+          this.#host.banner.visible = true
+          this.#host.banner.fg = this.#host.theme.warning
+          this.#host.banner.content = "Press Ctrl+C again to exit · /exit also closes Rottweiler"
+        }
+      }
+      return
+    }
+    this.#exitArmedAt = 0
+    if (key.name === "tab" && !key.ctrl && !key.meta && !this.pickerVisible()
+      && this.#host.interactionPanel.visible && !this.#host.interactionPanel.usesComposer
+      && this.#host.composer.visible) {
+      if (this.#host.interactionPanel.select.focused) this.#host.composer.editor.focus()
+      else this.#host.interactionPanel.select.focus()
+      key.preventDefault(); key.stopPropagation(); return
+    }
     if (this.#host.outputViewer.handleKey(key)) {
       key.preventDefault(); key.stopPropagation(); return
     }
@@ -598,7 +633,8 @@ export class InputUiController {
     if (this.modalPickerVisible()) return "picker"
     if (this.#host.outputViewer.visible) return "output"
     if (this.#host.reviewPanel.visible) return "review"
-    if (this.#host.interactionPanel.capturesInput) return "interaction"
+    if (this.#host.interactionPanel.capturesInput && this.#host.interactionPanel.select.focused) return "interaction"
+    if (this.#host.interactionPanel.visible && this.#host.composer.editor.focused) return "composer"
     if (this.#host.state.replay.active) return "transcript"
     if (this.#host.children.isActiveSubagentRunning()) return "transcript"
     return this.#vimFocus

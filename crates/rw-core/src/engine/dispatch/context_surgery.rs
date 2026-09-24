@@ -36,7 +36,14 @@ pub(super) async fn apply_registered_context_surgery(
     events: &crate::engine::live_events::LiveEvents,
     item_id: ContextItemId,
     pinned: bool,
+    origin: Option<&rw_types::extension_invocation::ExtensionInvocationId>,
 ) -> Result<(), AgentLoopError> {
+    if let Some((_, reason)) =
+        super::action_availability::ActionState::from_actor_with_origin(state, config, origin)
+            .unavailable(rw_types::SessionActionKind::MutateContext)
+    {
+        return Err(AgentLoopError::InvalidConfiguration(reason.into()));
+    }
     if !item_id.0.starts_with("conversation:") {
         return Err(AgentLoopError::InvalidConfiguration(
             "protected_context_item: only conversation-resident context items support pin or eviction"

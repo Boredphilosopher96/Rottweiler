@@ -1,4 +1,5 @@
 import { truncateToCells } from "./render/text"
+import type { PermissionModeDescriptor } from "./protocol"
 import type { RottweilerState } from "./state"
 
 type ProviderProjection = RottweilerState["providers"][number]
@@ -220,4 +221,13 @@ export function permissionPatternLabel(pattern: string): string {
   const argumentPattern = callPattern[2] ?? ""
   if (argumentPattern.length === 0 || argumentPattern === "*") return `${tool} · any arguments`
   return `${tool} · arguments matching ${argumentPattern}`
+}
+
+export function permissionModeLabel(mode: PermissionModeDescriptor | "default"): string {
+  switch (mode) {
+    case "strict": return "Ask"
+    case "auto-safe": return "Auto"
+    case "yolo": return "Off"
+    case "default": return "Default"
+  }
 }

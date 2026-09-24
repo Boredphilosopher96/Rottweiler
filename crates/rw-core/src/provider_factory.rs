@@ -246,7 +246,9 @@ impl ProviderModelCatalogSource {
             ModelCatalogPricing::Path(path) if path.is_file() => PricingTable::load(path)
                 .await
                 .map_err(|error| ModelCatalogError(error.to_string()))?,
-            ModelCatalogPricing::Path(_) => PricingTable::default(),
+            ModelCatalogPricing::Path(_) => {
+                PricingTable::bundled().map_err(|error| ModelCatalogError(error.to_string()))?
+            }
         };
         Ok(ProviderFactory::system(
             self.credentials_path.clone(),
@@ -704,9 +706,8 @@ impl AdapterKind {
         match self {
             Self::Anthropic => Some("anthropic"),
             Self::OpenAiResponses | Self::OpenAiChat | Self::OpenAiSubscription => Some("openai"),
-            Self::GitHubCopilot | Self::OpenAiCompatibleResponses | Self::OpenAiCompatibleChat => {
-                None
-            }
+            Self::GitHubCopilot => Some("github-copilot"),
+            Self::OpenAiCompatibleResponses | Self::OpenAiCompatibleChat => None,
         }
     }
 

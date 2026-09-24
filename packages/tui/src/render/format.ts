@@ -70,15 +70,15 @@ export function formatStatusContext<T extends Pick<ContextSnapshot, "context_win
 /** Resolves a role alias back to the catalog's stable provider-qualified route. */
 export function formatStatusModel(
   model: string,
-  provider: string | null,
+  _provider: string | null,
   choices: readonly ModelChoice[],
-): string {
+): string | null {
   if (model.includes("/")) return model
   const concrete = choices.find((choice) =>
     choice.id === model || choice.aliases.includes(model),
   )
   if (concrete !== undefined) return concrete.id
-  return provider === null ? model : `${provider}/${model}`
+  return null
 }
 
 /** Uses the active non-monetary route when the accounting snapshot has no priced turn yet. */

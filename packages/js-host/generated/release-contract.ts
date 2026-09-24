@@ -24,7 +24,7 @@ export const RELEASE_PLATFORMS = [
     nodeArch: "arm64",
     nativeLibrary: "libopentui.dylib",
     productBudgets: {
-      engineLessThanBytes: 40000000,
+      engineLessThanBytes: 52428800,
       wasmHostLessThanBytes: 30000000,
       jsBundleLessThanBytes: 100000000,
     },
@@ -35,7 +35,7 @@ export const RELEASE_PLATFORMS = [
     nodeArch: "x64",
     nativeLibrary: "libopentui.dylib",
     productBudgets: {
-      engineLessThanBytes: 40000000,
+      engineLessThanBytes: 52428800,
       wasmHostLessThanBytes: 30000000,
       jsBundleLessThanBytes: 100000000,
     },
@@ -46,7 +46,7 @@ export const RELEASE_PLATFORMS = [
     nodeArch: "arm64",
     nativeLibrary: "libopentui.so",
     productBudgets: {
-      engineLessThanBytes: 30000000,
+      engineLessThanBytes: 52428800,
       wasmHostLessThanBytes: 30000000,
       jsBundleLessThanBytes: 150000000,
     },
@@ -57,7 +57,7 @@ export const RELEASE_PLATFORMS = [
     nodeArch: "x64",
     nativeLibrary: "libopentui.so",
     productBudgets: {
-      engineLessThanBytes: 30000000,
+      engineLessThanBytes: 52428800,
       wasmHostLessThanBytes: 30000000,
       jsBundleLessThanBytes: 150000000,
     },

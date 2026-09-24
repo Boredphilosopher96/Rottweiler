@@ -1,3 +1,4 @@
+import { launchSummary } from "../render/launch"
 import { TextRenderable } from "./text"
 import type { HistorySnapshot, HistoryViewport } from "../history/controller"
 import { TranscriptRowRenderable } from "./transcript/row"
@@ -189,7 +190,7 @@ export class TranscriptRenderable extends BoxRenderable {
       id: "transcript-empty-state-hint",
       content: "Describe a task, or press / for commands.",
       fg: theme.textMuted,
-      height: 3,
+      height: "auto",
       flexShrink: 0,
       wrapMode: "word",
       selectable: true,
@@ -505,7 +506,7 @@ export class TranscriptRenderable extends BoxRenderable {
       && state.streamingTail === null && !state.compaction.active
     if (this.emptyState.visible) {
       this.emptyStateHint.content = this.#history?.error ?? (this.#history?.loading
-        ? "Loading transcript…" : "Describe a task, or press / for commands.")
+        ? "Loading transcript…" : launchSummary(state, this.width))
     }
   }
 
@@ -532,6 +533,7 @@ export class TranscriptRenderable extends BoxRenderable {
   protected override onResize(_width: number, _height: number): void {
     if (this.#history?.following === false && this.#pendingAnchor === null) this.#pendingAnchor = this.#settledAnchor
     if (this.#state !== null) {
+      this.#updateEmptyState(this.#state)
       this.#updateTail(this.#state)
       this.#updateCompaction(this.#state)
     }
@@ -693,7 +695,7 @@ export class TranscriptRenderable extends BoxRenderable {
     )
     const detail = tail.finished === null
       ? state.model ?? activity.toLowerCase()
-      : turnDetail(tail.finished.cost, tail.finished.usage)
+      : `${tail.finished.status.replaceAll("_", " ")} · ${turnDetail(tail.finished.cost, tail.finished.usage)}`
     this.#tailHeader.content = t`${fg(this.#theme.accent)("● ")}${bold(fg(this.#theme.text)(this.#agentName.toLowerCase()))}${fg(this.#theme.textMuted)(`  ${detail}`)}`
     if (this.#tailReasoningTurnId !== tail.turnId) {
       this.#tailReasoning.expand(false)
@@ -718,12 +720,14 @@ export class TranscriptRenderable extends BoxRenderable {
 
   #updateCompaction(state: RottweilerState): void {
     const compaction = state.compaction
-    this.compactionCard.visible = compaction.active &&
-      (compaction.text !== "" || compaction.thinking !== "")
+    this.compactionCard.visible = compaction.active || compaction.reclaimedTokens !== null
     if (!compaction.active) {
+      this.#compactionHeader.content = compaction.reclaimedTokens === null
+        ? ""
+        : `Context compacted · ${compaction.reclaimedTokens} tokens reclaimed`
+      this.compactionMarkdown.visible = compaction.text !== ""
       this.compactionMarkdown.streaming = false
-      this.compactionMarkdown.content = ""
-      this.compactionMarkdown.visible = false
+      this.compactionMarkdown.content = terminalMarkdown(compaction.text, Math.max(20, (this.width || this.ctx.width) - 4), "complete")
       this.#compactionReasoning.update("", false, Math.max(20, this.width || this.ctx.width))
       this.#compactionAttempt = null
       return

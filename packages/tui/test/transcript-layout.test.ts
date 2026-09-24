@@ -278,6 +278,26 @@ describe("retained transcript layout", () => {
     )
   }, 20_000)
 
+  test("labels every live turn ending and retains compaction completion", async () => {
+    renderer = await createTestRenderer({ width: 80, height: 24, useThread: false })
+    const initial = createInitialState()
+    const app = createRottweilerApp(renderer.renderer, { sessionReader: emptySessionReader, initialState: initial })
+    renderer.renderer.root.add(app)
+    for (const status of ["completed", "failed", "interrupted", "max_turns", "doom_loop", "budget_exceeded"] as const) {
+      app.setState({ ...initial, streamingTail: createStreamingTail({
+        turnId: "turn", text: "Response", thinking: "", citations: [], toolInvocationIds: [],
+        finished: { status, usage: { input_tokens: "1", output_tokens: "1", cache_read_tokens: "0", cache_write_tokens: "0", reasoning_tokens: "0" },
+          cost: { kind: "monetary", currency: "USD", amount_micros: "12400" } },
+      }) })
+      await renderer.renderOnce()
+      expect(renderer.captureCharFrame()).toContain(`${status.replaceAll("_", " ")} · USD 0.0124`)
+    }
+    app.setState({ ...initial, compaction: { ...initial.compaction, reclaimedTokens: "12000", text: "Retained decisions and next steps" } })
+    await settleMarkdownHighlights([app.transcript], renderer)
+    expect(renderer.captureCharFrame()).toContain("Context compacted · 12000 tokens reclaimed")
+    expect(renderer.captureCharFrame()).toContain("Retained decisions and next steps")
+  })
+
   test("retains one Markdown renderer while compaction text and thoughts stream", async () => {
     renderer = await createTestRenderer({ width: 80, height: 24, useThread: false })
     const initial = createInitialState()

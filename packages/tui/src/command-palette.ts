@@ -126,7 +126,6 @@ export function createCommandPaletteModel<Action>(
     .sort((left, right) => right.score - left.score || left.index - right.index)
 
   const visibleEntries = ranked.map(({ entry }) => entry)
-  const selectedId = retainCommandPaletteSelection(visibleEntries, options.selectedId)
   const rows: CommandPaletteRow<Action>[] = []
   if (query.length === 0) {
     for (const section of options.sections) {
@@ -139,6 +138,8 @@ export function createCommandPaletteModel<Action>(
     rows.push(...ranked.map(toItemRow))
   }
 
+  const orderedEntries = rows.filter((row): row is CommandPaletteItemRow<Action> => row.kind === "item")
+  const selectedId = retainCommandPaletteSelection(orderedEntries, options.selectedId)
   const selected = selectedId === null
     ? undefined
     : options.entries.find((entry) => entry.id === selectedId)
@@ -165,8 +166,8 @@ export function createCommandPaletteModel<Action>(
         },
     counts,
     status: query.length === 0
-      ? `${total} ${plural(total, "command")} · ${builtIn} built-in · ${extension} ${plural(extension, "extension")}`
-      : `${visibleEntries.length} of ${total} ${plural(total, "command")} · ${builtIn} built-in · ${extension} ${plural(extension, "extension")}`,
+      ? `${total} ${plural(total, "command")}`
+      : `${visibleEntries.length} of ${total} ${plural(total, "command")}`,
     notice: catalogNotice(options.catalog),
   }
 }

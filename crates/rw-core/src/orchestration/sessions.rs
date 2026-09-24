@@ -208,6 +208,10 @@ impl SubagentSession for WorktreeSubagentSession {
         Some(self.lease.durable_record())
     }
 
+    async fn suspend(&self) -> Result<(), OrchestrationError> {
+        self.inner.suspend().await
+    }
+
     async fn close(
         &self,
         durable_artifact: Option<&DiffArtifact>,

@@ -48,13 +48,13 @@ impl ModelDriver for UnavailableHostedModel {
         __invocation: rw_core::provider_admission::ProviderInvocation,
     ) -> std::result::Result<BoxEventStream, AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(format!(
-            "the interactive engine is ready, but its provider is unavailable: {}",
-            self.reason
+            "the interactive engine is ready, but model {} is unavailable: {}",
+            self.alias, self.reason
         )))
     }
 
-    fn has_model_alias(&self, alias: &str) -> bool {
-        alias == self.alias
+    fn has_model_alias(&self, _alias: &str) -> bool {
+        false
     }
 
     fn compaction_config(&self) -> rw_core::CompactionConfig {

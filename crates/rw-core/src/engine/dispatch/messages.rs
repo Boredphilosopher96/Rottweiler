@@ -59,6 +59,7 @@ pub(super) async fn dispatch_message(
     } else if state.running.is_some()
         || state.pending_command.is_some()
         || state.pending_model_preparation.is_some()
+        || !state.deferred_controls.is_empty()
     {
         if state.queued.len() >= rw_types::session_state::MAX_SESSION_QUEUE_ITEMS {
             let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(

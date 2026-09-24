@@ -358,6 +358,11 @@ pub enum ClientCommand {
         session_id: SessionId,
         provider: String,
     },
+    ConfigureCompatibleProvider {
+        meta: CommandMeta,
+        session_id: SessionId,
+        configuration: crate::CompatibleProviderSetup,
+    },
     ConfigureBuiltinProvider {
         meta: CommandMeta,
         session_id: SessionId,
@@ -493,6 +498,7 @@ impl ClientCommand {
             | Self::ExportSession { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
+            | Self::ConfigureCompatibleProvider { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
             | Self::CompleteProviderAuth { meta, .. }
             | Self::CancelProviderAuth { meta, .. }
@@ -581,6 +587,7 @@ impl ClientCommand {
             | Self::ExportSession { session_id, .. }
             | Self::RevokePermissionApproval { session_id, .. }
             | Self::BeginProviderAuth { session_id, .. }
+            | Self::ConfigureCompatibleProvider { session_id, .. }
             | Self::ConfigureBuiltinProvider { session_id, .. }
             | Self::CompleteProviderAuth { session_id, .. }
             | Self::CancelProviderAuth { session_id, .. }
@@ -660,6 +667,7 @@ impl ClientCommand {
             | Self::ExportSession { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
+            | Self::ConfigureCompatibleProvider { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
             | Self::CompleteProviderAuth { meta, .. }
             | Self::CancelProviderAuth { meta, .. }

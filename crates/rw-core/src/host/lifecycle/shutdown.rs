@@ -22,6 +22,15 @@ pub(in crate::host) struct HostClosure {
 }
 
 impl EngineHost {
+    /// Closes session admission and waits for the shared, bounded cleanup proof.
+    /// Process signal handlers use the same owner as the protocol shutdown command.
+    ///
+    /// # Errors
+    /// Returns an error when a session or shared service cannot prove settlement.
+    pub async fn shutdown(&self) -> Result<(), HostError> {
+        self.shutdown_sessions().await
+    }
+
     pub(in crate::host) async fn shutdown_sessions(&self) -> Result<(), HostError> {
         let sender = self.closure.proof.get_or_init(|| {
             let (sender, _) = watch::channel(None);

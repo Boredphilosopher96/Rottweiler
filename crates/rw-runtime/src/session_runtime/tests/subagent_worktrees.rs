@@ -315,6 +315,7 @@ async fn actor_applies_durable_child_artifact_then_reports_conflict_without_corr
     )
     .expect("parent recovery");
     let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: parent_session.clone(),
@@ -732,6 +733,7 @@ async fn crashed_worktree_child_recovers_follows_up_and_applies_after_second_res
             sink.capture_history().await?.bootstrap().await?,
         )?;
         Ok(SessionActorConfig {
+            model_preferences: None,
             ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
             ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
             budget_session_id: session_id.clone(),

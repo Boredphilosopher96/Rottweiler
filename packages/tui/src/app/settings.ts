@@ -104,7 +104,7 @@ export class SettingsUiController {
         ? "250000"
         : "12.50"
     const scope = this.#host.pickerController.interaction
-    this.#host.picker.openTextPrompt({
+    this.#host.pickerController.openTextPrompt({
       title: prompt, placeholder: placeholder, onSubmit: (value) => {
         if (!scope?.active) return
         const selectedKey = key

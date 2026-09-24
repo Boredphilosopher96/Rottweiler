@@ -82,6 +82,7 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::RenameSession { .. }
         | ClientCommand::ExportSession { .. }
         | ClientCommand::RevokePermissionApproval { .. }
+        | ClientCommand::ConfigureCompatibleProvider { .. }
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::ContinueSubagent { .. }
         | ClientCommand::CloseSubagent { .. }

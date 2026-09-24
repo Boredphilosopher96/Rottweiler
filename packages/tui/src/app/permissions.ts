@@ -6,8 +6,9 @@ import {
   type PermissionDecision,
   type PermissionModeDescriptor,
 } from "../protocol"
-import { type RottweilerState } from "../state"
-import { permissionActionLabel, permissionPatternLabel, permissionRuleActionLabel } from "../ui-presentation"
+import { type RottweilerState, type ToolProjection } from "../state"
+import { formatToolArguments } from "../render"
+import { permissionActionLabel, permissionModeLabel, permissionPatternLabel, permissionRuleActionLabel } from "../ui-presentation"
 
 type PermissionPickerAction =
   | { readonly kind: "refresh" }
@@ -23,9 +24,9 @@ interface PermissionModeChoice {
   readonly description: string
 }
 const PERMISSION_MODE_CHOICES: readonly PermissionModeChoice[] = [
-  { mode: "strict", description: "Ask before every tool use" },
-  { mode: "auto-safe", description: "Ask only for risky actions" },
-  { mode: "yolo", description: "Never ask · dangerous" },
+  { mode: "strict", description: "Ask before edits and commands outside the safe list" },
+  { mode: "auto-safe", description: "Allow safe actions and workspace edits · ask for the rest" },
+  { mode: "yolo", description: "Skip approval prompts · explicit denials still apply" },
   { mode: "default", description: "Follow the launch policy" },
 ]
 interface PermissionUiHost {
@@ -39,11 +40,33 @@ interface PermissionUiHost {
 }
 export class PermissionUiController {
   readonly #host: PermissionUiHost
+  #review: { name: string; invocation: string } | null = null
   constructor(host: PermissionUiHost) { this.#host = host }
   openPermissionPicker(): void {
+    this.#review = null
     this.#host.pickerController.begin("permissions")
     this.#host.requests.command({ type: "list_permissions" })
     this.#host.pickerController.refresh()
+  }
+
+  openPendingRuleReview(tool: ToolProjection): void {
+    this.#review = { name: tool.name, invocation: formatToolArguments(tool.args).slice(0, 2048) }
+    this.#host.pickerController.begin("permissions")
+    this.#host.pickerController.refresh()
+  }
+
+  #renderPendingRuleReview(): void {
+    const review = this.#review!
+    this.#host.pickerController.show(`Review rule · ${review.name}`, [
+      { id: "pending", label: "Pending invocation", description: review.invocation, value: "info" },
+      { id: "scope", label: "Allow a pattern for this session", description: "Future matching calls only; this invocation still needs your decision", value: "info" },
+      { id: "shell", label: "Shell commands are checked separately", description: "Every compound command must match; network and unsandboxed access need separate permission", value: "info" },
+      { id: "add", label: "Enter an explicit allow pattern…", description: "Review tool(glob) before saving; no wildcard is added automatically", value: "add" },
+      { id: "back", label: "Return to pending approval", description: "Keep this invocation waiting for your decision", value: "back" },
+    ], item => {
+      if (item.value === "back") this.#host.closePicker()
+      else if (item.value === "add") this.#openPermissionPatternPrompt("allow")
+    })
   }
 
   openPermissionModePicker(): void {
@@ -61,8 +84,8 @@ export class PermissionUiController {
   ): void {
     this.#host.pickerController.kind = "permissionInput"
     const scope = this.#host.pickerController.interaction
-    this.#host.picker.openTextPrompt({
-      title: `Add ${action} permission rule`, placeholder: "tool(glob), e.g. bash(cargo test*)", onSubmit: (pattern) => {
+    this.#host.pickerController.openTextPrompt({
+      title: `Add ${action} rule · this session`, placeholder: "tool(glob), e.g. bash(cargo test*)", onSubmit: (pattern) => {
         if (!scope?.active) return
         this.#host.closePicker()
         this.#host.requests.command({ type: "add_session_permission_rule", pattern, action })
@@ -74,7 +97,7 @@ export class PermissionUiController {
     const current = this.#host.state.permissions?.runtime_mode ?? "default"
     return PERMISSION_MODE_CHOICES.map((choice) => ({
       id: `permissions.mode.${choice.mode}`,
-      label: choice.mode === current ? `● ${choice.mode}` : choice.mode,
+      label: choice.mode === current ? `● ${permissionModeLabel(choice.mode)}` : permissionModeLabel(choice.mode),
       description: choice.description,
       value: { kind: "mode", mode: choice.mode },
     }))
@@ -122,7 +145,7 @@ export class PermissionUiController {
         break
       case "permissionMode":
         this.#host.pickerController.show(
-          "Permission mode",
+          "Approvals",
           this.#permissionModeItems(),
           (item) => this.#selectPermissionMode(item.value.mode),
         )
@@ -133,14 +156,14 @@ export class PermissionUiController {
           [
             {
               id: "permissions.yolo.confirm",
-              label: "Yes, enable yolo",
+              label: "Yes, turn approvals off",
               description: "Never ask before tool use",
               value: true,
             },
             {
               id: "permissions.yolo.cancel",
               label: "Cancel",
-              description: "Keep the current permission mode",
+              description: "Keep the current approval policy",
               value: false,
             },
           ],
@@ -151,6 +174,7 @@ export class PermissionUiController {
         )
         break
       case "permissions":
+        if (this.#review !== null) { this.#renderPendingRuleReview(); break }
         {
           const permissions = this.#host.state.permissions
           const permissionError = this.#host.projectionErrors.permissions

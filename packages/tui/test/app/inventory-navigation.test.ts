@@ -1,3 +1,4 @@
+import { readyCatalog } from "../fixtures/catalog"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import {
@@ -210,14 +211,17 @@ describe("Rottweiler inventory-navigation", () => {
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
       sessionReader: emptySessionReader,
+      onCommand: readyCatalog(() => app),
       initialState: {
         ...createInitialState(),
         models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true }],
       },
     })
     renderer.root.add(app)
-    await setup.mockInput.typeText("/model")
-    app.picker.select.selectCurrent()
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("switch model")
+    await Bun.sleep(0)
+    app.commandPalette.activateSelected()
     await setup.renderOnce()
 
     expect(app.composer.value).toBe("")
@@ -242,15 +246,16 @@ describe("Rottweiler inventory-navigation", () => {
     app.openCommandPicker()
     await setup.renderOnce()
 
-    expect(app.commandPalette.selectedId).toBe("compact.run")
+    app.commandPalette.input.value = "command-"
+    await setup.renderOnce()
+    expect(app.commandPalette.selectedId).toBe("slash.command-0")
     expect(app.commandPalette.scrollOffset).toBe(0)
     await setup.mockMouse.scroll(app.commandPalette.listPane.x + 2, app.commandPalette.listPane.y + 1, "down")
-    expect(app.commandPalette.selectedId).toBe("compact.run")
+    expect(app.commandPalette.selectedId).toBe("slash.command-0")
     expect(app.commandPalette.scrollOffset).toBe(1)
     await setup.mockMouse.click(app.commandPalette.listPane.x + 2, app.commandPalette.listPane.y)
-    expect(app.picker.visible).toBeTrue()
-    expect(app.picker.title).toContain("Commands")
-    expect(app.composer.value).toBe("/compact")
+    expect(app.commandPalette.visible).toBeFalse()
+    expect(app.composer.value).toBe("/command-1")
   })
 
   test("centers Ctrl-P keyboard selection instead of following viewport edges", async () => {
@@ -271,16 +276,18 @@ describe("Rottweiler inventory-navigation", () => {
     app.openCommandPicker()
     await setup.renderOnce()
 
+    app.commandPalette.input.value = "command-"
+    await setup.renderOnce()
     const visible = app.commandPalette.visibleRowCount
     const maximum = app.commandPalette.rowCount - visible
     for (let index = 1; index <= visible + 2; index += 1) {
       setup.mockInput.pressArrow("down")
-      const selected = index + 1
+      const selected = index
       expect(app.commandPalette.selectedRowIndex).toBe(selected)
       expect(app.commandPalette.scrollOffset).toBe(Math.min(maximum, Math.max(0, selected - Math.floor(visible / 2))))
     }
     setup.mockInput.pressArrow("up")
-    const previous = visible + 2
+    const previous = visible + 1
     expect(app.commandPalette.selectedRowIndex).toBe(previous)
     expect(app.commandPalette.scrollOffset).toBe(
       Math.min(maximum, Math.max(0, previous - Math.floor(visible / 2))),

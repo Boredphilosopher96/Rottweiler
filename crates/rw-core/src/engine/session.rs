@@ -1,4 +1,5 @@
 mod actor;
+mod background_children;
 mod bootstrap;
 pub use bootstrap::SessionActorRecovery;
 mod child_progress;
@@ -19,8 +20,8 @@ mod recovery;
 mod state;
 mod subscription;
 pub use actor::SessionActor;
-pub use config::SessionActorConfig;
 pub use config::StartupNotification;
+pub use config::{ModelSelectionPreferences, SessionActorConfig};
 pub use handle::SessionHandle;
 pub(super) use plugin_capability::validate_plugin_id;
 pub(super) use plugin_capability::validate_plugin_text;

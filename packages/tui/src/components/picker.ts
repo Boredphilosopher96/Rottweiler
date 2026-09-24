@@ -256,7 +256,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       id: "fuzzy-picker",
       width: "100%",
       height: 12,
-      maxHeight: "80%",
+      maxHeight: "100%",
       flexDirection: "column",
       border: true,
       borderStyle: "rounded",
@@ -525,7 +525,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   }
 
   constrainModalHeight(availableRows: number): number {
-    const height = Math.max(1, Math.min(this.#desiredHeight, Math.floor(availableRows)))
+    const height = Math.max(1, Math.floor(availableRows))
     if (!this.#anchored) this.height = height
     return height
   }

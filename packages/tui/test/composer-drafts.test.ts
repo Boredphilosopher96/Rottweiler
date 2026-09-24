@@ -79,6 +79,7 @@ test("native insertion refuses before allocating an over-budget draft, including
   composer.editor.insertText("x".repeat(100_000))
   expect(composer.value).toBe("current draft")
   expect(errors).toHaveLength(1)
+  expect(errors[0]).toBe("Couldn't add more content. Shorten this draft or remove an attachment, then try again.")
   expect(owner.get("child").content).toBe("s".repeat(100))
   composer.editor.setSelection(0, 7)
   composer.editor.insertText("updated")

@@ -1,3 +1,4 @@
+import { historicalToolPresentation, toolHeaderContent } from "../../render/tool-header"
 import { TextRenderable } from "../text"
 import { bindSelectableClick } from "../selectable-click"
 import { BoxRenderable, CodeRenderable, MarkdownRenderable, t, fg, bold, type RenderContext, type SyntaxStyle, type TreeSitterClient } from "@opentui/core"
@@ -6,7 +7,7 @@ import type { RottweilerTheme } from "../../theme"
 import { ReasoningBlockRenderable } from "./blocks"
 import { commandResultMarkdown } from "../../render/command-presentation"
 import { projectCommandResult } from "../../render/command-results"
-import { formatCost } from "../../render"
+import { commandPreview, formatCost } from "../../render"
 
 const MAX_ROW_TEXT = 4096
 const USER_GUTTER = { topLeft: "▌", topRight: "▌", bottomLeft: "▌", bottomRight: "▌", horizontal: "▌", vertical: "▌", topT: "▌", bottomT: "▌", leftT: "▌", rightT: "▌", cross: "▌" } as const
@@ -146,6 +147,7 @@ export class TranscriptRowRenderable extends BoxRenderable {
     this.#diffSource = null
     this.#presentationSource = null
     this.presentationFooter.visible = false
+    const tool = content.type === "tool" ? historicalToolPresentation(content) : null
     switch (content.type) {
       case "turn_summary":
         title = `${content.status.replaceAll("_", " ")} · ${content.cost.kind === "subscription_quota" && content.cost.used == null ? "turn usage · " : ""}${formatCost(content.cost, content.usage)}`
@@ -161,7 +163,6 @@ export class TranscriptRowRenderable extends BoxRenderable {
         break
       case "tool":
         title = `${this.#expanded ? "▾" : "▸"} ${content.name} · ${content.status.type === "running" ? "running" : content.status.is_error ? "failed" : "done"}`
-        bodies.push(content.arguments)
         if (content.status.type === "finished") {
           bodies.push(content.status.output)
           this.#source = content.status.output.source
@@ -195,13 +196,18 @@ export class TranscriptRowRenderable extends BoxRenderable {
         }
         break
     }
-    const text = content.type === "command"
+    const argumentPreview = tool === null ? "" : tool.args === null
+      ? `_${tool.display?.subject}. Open complete arguments to inspect them._\n\n`
+      : tool.display?.command ? `\`\`\`bash\n${commandPreview(tool.display.command)}\n\`\`\`\n\n` : ""
+    const text = argumentPreview + (content.type === "command"
       ? content.message.complete ? commandResultMarkdown(projectCommandResult(content.name, content.message.text))
         : content.message.format === "json" || /^[\s]*[\[{]/.test(content.message.text)
           ? "_Open complete content to inspect this structured result._" : content.message.text
-      : bodies.map(body => body.format === "json" ? `\`\`\`json\n${body.text}\n\`\`\`` : body.text).join("\n\n")
+      : bodies.map(body => body.format === "json" ? `\`\`\`json\n${body.text}\n\`\`\`` : body.text).join("\n\n"))
     const clipped = text.length > MAX_ROW_TEXT
-    this.header.content = content.type === "conversation" && content.role === "assistant"
+    this.header.content = content.type === "tool"
+      ? toolHeaderContent(tool!, !this.#expanded, this.#width, this.#theme)
+      : content.type === "conversation" && content.role === "assistant"
       ? t`${fg(this.#theme.accent)("● ")}${bold(fg(this.#theme.text)("rottweiler"))}`
       : content.type === "conversation" && content.role === "user"
         ? t`${bold(fg(this.#theme.primary)("you"))}` : title

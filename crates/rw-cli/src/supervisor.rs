@@ -342,15 +342,7 @@ impl ProcessBackend for TokioProcessBackend {
     }
 
     async fn wait_shutdown_signal(&self) -> io::Result<()> {
-        let mut interrupt =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            _ = interrupt.recv() => {}
-            _ = terminate.recv() => {}
-        }
-        Ok(())
+        crate::tui_session::ShutdownSignals::new()?.wait().await
     }
 }
 
@@ -530,9 +522,10 @@ impl<B: ProcessBackend> Supervisor<B> {
                         engine.take();
                         // The authenticated ShutdownHost path exits the engine
                         // successfully. Treat that as the user's one-app close,
-                        // then let the common cleanup reap the still-rendering
-                        // TUI instead of restarting both processes.
+                        // and allow the TUI to settle cursor writes and restore
+                        // its terminal before forced cleanup is necessary.
                         if status.success() {
+                            finish_tui_naturally(&mut tui, Duration::from_secs(5)).await?;
                             return Ok(());
                         }
                         if let Some(mut child) = tui.take() {
@@ -894,6 +887,27 @@ fn read_resume_handoff(path: &Path) -> Option<SequenceId> {
     value.trim().parse::<u64>().ok().map(SequenceId)
 }
 
+async fn finish_tui_naturally<C: ManagedChild>(
+    tui: &mut Option<C>,
+    grace: Duration,
+) -> Result<(), SupervisorError> {
+    let Some(child) = tui.as_mut() else {
+        return Ok(());
+    };
+    match tokio::time::timeout(grace, child.wait()).await {
+        Ok(Ok(_)) => {
+            tui.take();
+            Ok(())
+        }
+        Ok(Err(source)) => Err(SupervisorError::Wait {
+            component: "TUI",
+            source,
+        }),
+        // Keep ownership for the common bounded TERM/KILL cleanup path.
+        Err(_) => Ok(()),
+    }
+}
+
 async fn cleanup_managed_children<C: ManagedChild>(
     engine: &mut Option<C>,
     tui: &mut Option<C>,
@@ -920,7 +934,9 @@ async fn terminate_and_reap(
     child: &mut impl ManagedChild,
     component: &'static str,
 ) -> Result<(), SupervisorError> {
-    terminate_and_reap_with_grace(child, component, Duration::from_secs(5)).await
+    // Engine cleanup has a 30s proof deadline, including active tool settlement.
+    let grace = if component == "engine" { 35 } else { 5 };
+    terminate_and_reap_with_grace(child, component, Duration::from_secs(grace)).await
 }
 
 async fn terminate_and_reap_with_grace(

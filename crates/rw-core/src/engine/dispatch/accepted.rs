@@ -393,6 +393,16 @@ pub(super) async fn apply_accepted(
                         }
                     }
                     PrecommittedAnswer::Model(pending, strategy) => {
+                        if super::deferred_controls::owns_model_selection(
+                            state,
+                            &pending.model,
+                            pending.provider.as_deref(),
+                        ) && let Some(complete) = completion.take()
+                        {
+                            // The durable control owns the remaining preparation,
+                            // compaction, and preference save after this answer.
+                            let _ = complete.send(Ok(ProtocolCompletion::DeferredControl));
+                        }
                         let prepared = PreparedModelSwitch {
                             thinking: config
                                 .model
@@ -557,6 +567,7 @@ pub(super) async fn apply_accepted(
         | ClientCommand::ListSettings { .. }
         | ClientCommand::SetSetting { .. }
         | ClientCommand::BeginProviderAuth { .. }
+        | ClientCommand::ConfigureCompatibleProvider { .. }
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::CompleteProviderAuth { .. }
         | ClientCommand::CancelProviderAuth { .. }

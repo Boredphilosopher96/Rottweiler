@@ -72,20 +72,20 @@ pub(super) async fn run(operation: impl FnOnce(Stop) -> SessionWork) -> Result<(
     }
 }
 
-struct ShutdownSignals {
+pub(super) struct ShutdownSignals {
     interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
     hangup: tokio::signal::unix::Signal,
 }
 impl ShutdownSignals {
-    fn new() -> io::Result<Self> {
+    pub(super) fn new() -> io::Result<Self> {
         Ok(Self {
             interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
             terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
             hangup: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?,
         })
     }
-    async fn wait(&mut self) -> io::Result<()> {
+    pub(super) async fn wait(&mut self) -> io::Result<()> {
         tokio::select! {
             _ = self.interrupt.recv() => Ok(()),
             _ = self.terminate.recv() => Ok(()),

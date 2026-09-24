@@ -1,3 +1,6 @@
+export type { CompatibleProviderSetup, CompatibleProviderAdapter, CompatibleProviderAuth } from "../../../protocol/types"
+export type { DeferredSessionAction, QueuedControlStatus, QueuedSessionControl, SessionControlOutcome, SessionControlSettlement } from "../../../protocol/types"
+export type { SessionActionKind, SessionActionAvailability } from "../../../protocol/types"
 export type { SessionSearchMatch, SessionSearchHit } from "../../../protocol/types"
 export type { SessionStateSnapshot, SessionActiveTurn, TranscriptTailIdentity, TranscriptTailRead, TranscriptTailResult, TranscriptTailPage, TranscriptTailText, TranscriptTailContent, TranscriptTailTool, TranscriptTailCitation, TranscriptTailPart } from "../../../protocol/types"
 export { MAX_SESSION_READ_ANCESTORS } from "../../../protocol/types"

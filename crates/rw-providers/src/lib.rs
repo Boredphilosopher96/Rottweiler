@@ -52,7 +52,7 @@ pub use http::{
 };
 pub use models_dev::{
     DEFAULT_MODELS_DEV_URL, ModelsRefreshReport, default_models_path, refresh_models_dev,
-    refresh_models_dev_with_proxy_auth,
+    refresh_models_dev_with_download_timeout, refresh_models_dev_with_proxy_auth,
 };
 pub use openai::{
     OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode,

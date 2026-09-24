@@ -17,6 +17,10 @@ use super::{
 const SHUTDOWN_PROOF_TIMEOUT: Duration = Duration::from_secs(30);
 type Proof = Result<(), Arc<str>>;
 pub(super) struct ActorControl {
+    pub(super) signals: (
+        mpsc::UnboundedSender<TurnSignal>,
+        mpsc::UnboundedReceiver<TurnSignal>,
+    ),
     pub(super) active_turn: Arc<std::sync::atomic::AtomicU64>,
     pub(super) command_descriptors: Arc<std::sync::RwLock<crate::SessionCommandCatalog>>,
     pub(super) mode_registry: Arc<std::sync::RwLock<Arc<rw_ext::ModeRegistry>>>,
@@ -136,6 +140,11 @@ async fn cleanup(
     initial_failure: Option<String>,
 ) -> Result<(), String> {
     let mut failure = initial_failure;
+    // Cancel session-owned children before any other proof can fail or panic.
+    // Their durable completion acknowledgements still use the live actor loop.
+    if let Err(error) = config.tools.end_session(&config.session_id).await {
+        failure.get_or_insert_with(|| error.to_string());
+    }
     if let Err(error) = config.model.settle_effects().await {
         failure = Some(error.to_string());
     }
@@ -193,9 +202,6 @@ async fn cleanup(
         }
     }
     if let Err(error) = config.hooks.settle_effects(HookEvent::SessionEnd).await {
-        failure.get_or_insert_with(|| error.to_string());
-    }
-    if let Err(error) = config.tools.end_session(&config.session_id).await {
         failure.get_or_insert_with(|| error.to_string());
     }
     if let Err(error) = config.event_sink.settle_effects().await {

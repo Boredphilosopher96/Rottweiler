@@ -55,7 +55,16 @@ describe("command palette presentation model", () => {
       "slash.deploy",
     ])
     expect(model.counts).toEqual({ visible: 3, total: 3, builtIn: 2, extension: 1 })
-    expect(model.status).toBe("3 commands · 2 built-in · 1 extension")
+    expect(model.status).toBe("3 commands")
+  })
+
+  test("initial selection follows visible section order even when declaration order differs", () => {
+    const model = createCommandPaletteModel({
+      entries: [...entries].reverse(), sections, query: "", selectedId: null,
+      catalog: { kind: "ready", truncated: false },
+    })
+    expect(model.selectedId).toBe("session.new")
+    expect(model.rows[1]?.id).toBe("session.new")
   })
 
   test("ranks fuzzy matches while retaining complete match spans", () => {
@@ -73,7 +82,7 @@ describe("command palette presentation model", () => {
       id: "workspace.roots",
       titleMatches: [[0, 4], [10, 14]],
     })
-    expect(model.status).toBe("1 of 3 commands · 2 built-in · 1 extension")
+    expect(model.status).toBe("1 of 3 commands")
     expect(fuzzyMatch("ns", "New session")).toMatchObject({ positions: [0, 4] })
   })
 

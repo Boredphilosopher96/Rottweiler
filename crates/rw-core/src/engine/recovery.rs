@@ -142,3 +142,9 @@ mod questions;
 
 #[cfg(test)]
 mod tool_result_tests;
+
+mod completions;
+pub use completions::{CompletionNotice, MAX_COMPLETION_NOTICE_BYTES, MAX_COMPLETION_NOTICES};
+
+#[cfg(test)]
+mod completion_tests;

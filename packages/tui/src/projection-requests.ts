@@ -66,6 +66,7 @@ export type ProjectionCommand =
   | { readonly type: "remove_queued_message"; readonly position: string }
   | { readonly type: "clear_queued_messages" }
   | { readonly type: "begin_provider_auth"; readonly provider: string }
+  | { readonly type: "configure_compatible_provider"; readonly configuration: import("./protocol").CompatibleProviderSetup }
   | { readonly type: "configure_builtin_provider"; readonly provider: string }
   | { readonly type: "complete_provider_auth" | "cancel_provider_auth"; readonly provider: string; readonly attemptId: string }
   | { readonly type: "list_commands" | "list_sessions" }
@@ -604,6 +605,7 @@ function dispatchCommand(
     case "set_mcp_server_enabled":
     case "add_session_permission_rule":
     case "begin_provider_auth":
+    case "configure_compatible_provider":
     case "configure_builtin_provider":
       return { ...command, meta, session_id: sessionId }
     case "remove_session_permission_rule":

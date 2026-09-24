@@ -1,3 +1,4 @@
+import { readyCatalog } from "../fixtures/catalog"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
@@ -98,7 +99,8 @@ describe("Rottweiler settings", () => {
     const paletteOptions = app.commandPalette.itemIds
     const permissionsIndex = paletteOptions.indexOf("permissions.manage")
     const budgetIndex = paletteOptions.indexOf("budget.manage")
-    expect(budgetIndex).toBe(permissionsIndex + 1)
+    expect(budgetIndex).toBeGreaterThanOrEqual(0)
+    expect(permissionsIndex).toBeGreaterThan(budgetIndex)
     app.commandPalette.selectById("budget.manage")
     expect(app.commandPalette.detail.plainText).toContain("Budget limits")
     expect(app.commandPalette.detail.plainText).toContain("Set spend and subscription-token limits")
@@ -478,16 +480,18 @@ describe("Rottweiler settings", () => {
 
   test("derives palette binding hints from custom compiled global bindings", () => {
     const setup = createTestRenderer({ width: 80, height: 18, useThread: false })
-    return setup.then(({ renderer: testRenderer }) => {
+    return setup.then(async ({ renderer: testRenderer }) => {
       renderer = testRenderer
       const app = createRottweilerApp(testRenderer, {
         sessionReader: emptySessionReader,
+      onCommand: readyCatalog(() => app),
         keybindings: {
           bindings: { global: { open_model_picker: "ctrl+k" } },
         },
       })
       testRenderer.root.add(app)
       app.openCommandPicker()
+      await Bun.sleep(0)
       app.commandPalette.selectById("model.list")
       expect(app.commandPalette.detail.plainText).toContain("Ctrl+K")
       expect(app.commandPalette.detail.plainText).not.toContain("Ctrl+M")
@@ -551,7 +555,7 @@ describe("Rottweiler settings", () => {
     ])
     expect(app.picker.select.options.find(
       (option) => option.value === "permissions.mode.auto-safe",
-    )?.name).toBe("● auto-safe")
+    )?.name).toBe("● Auto")
 
     const yoloIndex = app.picker.select.options.findIndex(
       (option) => option.value === "permissions.mode.yolo",

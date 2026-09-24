@@ -93,6 +93,13 @@ where
         }
     }
 
+    /// Replaces catalog metadata while retaining credential, network, and plugin owners.
+    #[must_use]
+    pub fn with_pricing_table(mut self, pricing: PricingTable) -> Self {
+        self.pricing = pricing;
+        self
+    }
+
     /// Replaces the bounded router retry policy.
     #[must_use]
     pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
@@ -684,9 +691,10 @@ where
                         result.map_err(|error| provider_discovery_status(&error).to_owned())
                     })
                     .and_then(|catalog| {
-                        catalog.ok_or_else(|| {
-                            "provider does not expose live model discovery".to_owned()
-                        })
+                        catalog.map_or_else(
+                            || super::catalog::configured_local_catalog(config, &provider_name),
+                            Ok,
+                        )
                     });
                     (provider_name, candidate, true, discovered)
                 }

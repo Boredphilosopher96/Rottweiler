@@ -116,6 +116,8 @@ pub(super) async fn run_local_tui(cli: &Cli) -> Result<()> {
         .map_err(|error| miette!(error.to_string()));
     if cli.detach && result.is_ok() {
         runtime_directory.preserve();
+    } else if result.is_ok() {
+        runtime_directory.cursor_writer_stopped();
     }
     result
 }
@@ -266,11 +268,14 @@ pub(super) async fn run_serve(
 
     let (_runtime_directory, runtime, listener) =
         create_guarded_server_runtime(paths, Some(&session_id))?;
+    let mut signals = crate::tui_session::ShutdownSignals::new().into_diagnostic()?;
     let deferred = DeferredHostedEngine::default();
     let state = server::ServerState::new(Arc::new(deferred.clone()), &runtime);
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     let serve_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
-    let preparation: Result<()> = async {
+    let mut prepared_host = None;
+    let preparation: Result<()> = tokio::select! {
+        result = async {
         ensure_configuration_root(&storage_root)?;
         let workspace = workspace_roots[0].clone();
         let provider_mode = if let Some(script) = in_memory_replay_script.as_deref() {
@@ -309,6 +314,7 @@ pub(super) async fn run_serve(
         // its bounded registries exist. Session composition and provider
         // discovery must never gate health or make the supervisor kill an
         // otherwise healthy engine after 30s.
+        prepared_host = Some(host.clone());
         let resume = session_metadata_path(&storage_root, &session_id).is_file();
         let hosted = server::HostedEngine::new(host.clone());
         host.prepare_session_after_reservation(
@@ -323,20 +329,57 @@ pub(super) async fn run_serve(
         .await
         .map_err(|error| miette!(error.to_string()))?;
         Ok(())
-    }
-    .await;
-    match preparation {
-        Ok(()) => {}
-        Err(error) => {
+        } => result,
+        signal = signals.wait() => {
             let _ = shutdown.send(true);
-            serve_task.await.into_diagnostic()??;
-            return Err(error);
+            signal.into_diagnostic()
         }
+    };
+    settle_server(preparation, prepared_host, signals, shutdown, serve_task).await
+}
+
+async fn settle_server(
+    preparation: Result<()>,
+    prepared_host: Option<rw_core::EngineHost>,
+    mut signals: crate::tui_session::ShutdownSignals,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    serve_task: tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
+    if let Err(error) = preparation {
+        let _ = shutdown.send(true);
+        if let Some(host) = prepared_host {
+            host.shutdown()
+                .await
+                .map_err(|error| miette!(error.to_string()))?;
+        }
+        let _ = serve_task.await;
+        return Err(error);
     }
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
+    if *shutdown.borrow()
+        && let Some(host) = &prepared_host
+    {
+        host.shutdown()
+            .await
+            .map_err(|error| miette!(error.to_string()))?;
+    }
+    let mut serve_task = serve_task;
+    let result = tokio::select! {
+        result = &mut serve_task => result.into_diagnostic().and_then(std::convert::identity),
+        signal = signals.wait() => {
             let _ = shutdown.send(true);
+            let cleanup = if let Some(host) = &prepared_host {
+                host.shutdown().await.map_err(|error| miette!(error.to_string()))
+            } else {
+                Ok(())
+            };
+            let served = serve_task.await.into_diagnostic().and_then(std::convert::identity);
+            signal.into_diagnostic().and(cleanup).and(served)
         }
-    });
-    serve_task.await.into_diagnostic()?
+    };
+    if let Some(host) = prepared_host {
+        host.shutdown()
+            .await
+            .map_err(|error| miette!(error.to_string()))?;
+    }
+    result
 }

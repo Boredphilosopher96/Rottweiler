@@ -71,6 +71,10 @@ pub struct SessionStateSnapshot {
     pub compaction: Option<SessionCompactionState>,
     #[schemars(length(max = MAX_SESSION_QUEUE_ITEMS))]
     pub queued_messages: Vec<SessionQueuedPreview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<_>", optional)]
+    #[schemars(length(max = 8))]
+    pub queued_controls: Vec<crate::QueuedSessionControl>,
     #[schemars(length(max = MAX_SESSION_PLUGIN_STATUSES))]
     pub plugin_statuses: Vec<SessionPluginStatus>,
     #[serde(deserialize_with = "Option::deserialize")]

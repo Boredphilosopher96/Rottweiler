@@ -15,6 +15,17 @@ pub trait SubagentArtifactSource: rw_tools::DiffArtifactAuthority {
         result: &SubagentResult,
     ) -> Result<(), OrchestrationError>;
 
+    /// Reads a completed retained child's durable result after process restart.
+    /// # Errors
+    /// Rejects unavailable or corrupt source authority.
+    async fn completed_result(
+        &self,
+        _parent: &SessionId,
+        _subagent: &SubagentId,
+    ) -> Result<Option<SubagentResult>, OrchestrationError> {
+        Ok(None)
+    }
+
     /// Resolve the latest effective child result's optional artifact reference.
     /// # Errors
     /// Rejects unavailable or corrupt source authority.

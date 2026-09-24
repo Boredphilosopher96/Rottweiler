@@ -224,3 +224,81 @@ fn active_child_snapshot_bounds_unicode_and_rejects_excess_associations() {
     assert_eq!(active.len(), 256);
     assert!(active.iter().all(|child| child.subagent_id.0 != "child-0"));
 }
+
+#[test]
+fn completed_results_read_the_effective_terminal_after_index_reopen() {
+    let root = tempfile::tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    append(
+        &mut journal,
+        vec![
+            PendingEvent::TurnStarted { turn: 1 },
+            spawn("child"),
+            finish("child", None),
+            boundary(1),
+        ],
+    );
+    let mut index = SubagentLifecycleIndex::open(&journal.read_view()).expect("index");
+    catch_up(&mut index, &journal);
+    drop(index);
+    let index = SubagentLifecycleIndex::open(&journal.read_view()).expect("reopen index");
+    let view = index.snapshot(&journal.read_view()).expect("view");
+    let result = view
+        .completed_result(&SubagentId("child".into()))
+        .expect("result")
+        .expect("terminal");
+    assert_eq!(result.session_id, SessionId("session-child".into()));
+    assert!(
+        view.completed_result(&SubagentId("other".into()))
+            .expect("unknown")
+            .is_none()
+    );
+    drop(view);
+    drop(index);
+    append(
+        &mut journal,
+        vec![PendingEvent::TurnStarted { turn: 2 }, spawn("child")],
+    );
+    let mut index = SubagentLifecycleIndex::open(&journal.read_view()).expect("index");
+    catch_up(&mut index, &journal);
+    assert!(
+        index
+            .snapshot(&journal.read_view())
+            .expect("view")
+            .completed_result(&SubagentId("child".into()))
+            .expect("running result")
+            .is_none()
+    );
+}
+
+#[test]
+fn background_completion_remains_bound_to_spawn_turn_across_unrelated_rewind() {
+    let root = tempfile::tempdir().expect("root");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    append(
+        &mut journal,
+        vec![
+            PendingEvent::TurnStarted { turn: 1 },
+            spawn("child"),
+            boundary(1),
+            PendingEvent::TurnStarted { turn: 2 },
+            finish("child", None),
+            boundary(2),
+            PendingEvent::ConversationRewound {
+                to_turn: 1,
+                operation_id: "rewind-unrelated".into(),
+                unrestorable_paths: vec![],
+            },
+        ],
+    );
+    let mut index = SubagentLifecycleIndex::open(&journal.read_view()).expect("index");
+    catch_up(&mut index, &journal);
+    assert!(
+        index
+            .snapshot(&journal.read_view())
+            .expect("view")
+            .completed_result(&SubagentId("child".into()))
+            .expect("child result")
+            .is_some()
+    );
+}

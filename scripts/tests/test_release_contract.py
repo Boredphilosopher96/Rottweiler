@@ -86,11 +86,11 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(contract.resolve_platform("Darwin", "arm64").id, "darwin-arm64")
         self.assertEqual(
             contract.platform("darwin-arm64").product_budgets.engine_less_than_bytes,
-            40_000_000,
+            52_428_800,
         )
         self.assertEqual(
             contract.platform("linux-x86_64").product_budgets.engine_less_than_bytes,
-            30_000_000,
+            52_428_800,
         )
         self.assertEqual(contract.platform("linux-aarch64").native_library, "libopentui.so")
 
@@ -233,13 +233,11 @@ class ReleaseContractTests(unittest.TestCase):
                 checked_typescript.returncode, 0, checked_typescript.stderr.decode()
             )
 
-    def test_engine_product_budget_is_platform_specific(self) -> None:
+    def test_engine_uses_packaging_ceiling_on_every_platform(self) -> None:
         contract = self.module.load_contract(CONTRACT_PATH)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             engine = root / "rw"
-            with engine.open("wb") as output:
-                output.truncate(30_000_000)
             wasm_host = root / "rottweiler-wasm-host"
             wasm_host.write_bytes(b"wasm")
             tui = root / "rottweiler-js-host"
@@ -247,19 +245,20 @@ class ReleaseContractTests(unittest.TestCase):
             native = root / "libopentui.dylib"
             native.write_bytes(b"native")
             (root / "opentui-licenses.txt").write_text("license fixture")
-            self.module.validate_build(
-                contract, "darwin-arm64", engine, wasm_host, tui, native
-            )
-            with self.assertRaisesRegex(ValueError, "product budget is <30000000"):
-                self.module.validate_build(
-                    contract, "linux-x86_64", engine, wasm_host, tui, native
-                )
+            for size in (40_467_952, 52_428_799):
+                with engine.open("wb") as output:
+                    output.truncate(size)
+                for platform in contract.platforms:
+                    self.module.validate_build(
+                        contract, platform.id, engine, wasm_host, tui, native
+                    )
             with engine.open("wb") as output:
-                output.truncate(29_999_999)
-            for platform in ("linux-x86_64", "linux-aarch64"):
-                self.module.validate_build(
-                    contract, platform, engine, wasm_host, tui, native
-                )
+                output.truncate(52_428_800)
+            for platform in contract.platforms:
+                with self.assertRaisesRegex(ValueError, "product budget is <52428800"):
+                    self.module.validate_build(
+                        contract, platform.id, engine, wasm_host, tui, native
+                    )
 
     def test_stage_release_projects_exact_archive_shape_and_modes(self) -> None:
         contract = self.module.load_contract(CONTRACT_PATH)

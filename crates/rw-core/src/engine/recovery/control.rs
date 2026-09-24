@@ -30,6 +30,7 @@ pub struct RecoveredMessage {
 /// Live payloads selected by the bounded recovery head. No historical IR is retained.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecoveryControlPayloads {
+    pub deferred_controls: Vec<rw_types::QueuedSessionControl>,
     pub conversation: super::ConversationMetadata,
     pub latest_budget: Option<rw_types::session_state::SessionBudgetState>,
     pub plugin_statuses: Vec<rw_types::session_state::SessionPluginStatus>,
@@ -144,6 +145,18 @@ impl CanonicalHistory {
         };
         let control = &head.control;
         let mut result = RecoveryControlPayloads::default();
+        if let Some(sequence) = control.deferred_controls {
+            let PendingEvent::SessionControlQueueChanged { controls, .. } =
+                reader.event(sequence)?
+            else {
+                return Err(RecoveryError::Invalid(
+                    "session control queue source selector",
+                ));
+            };
+            rw_types::validate_queued_controls(&controls).map_err(RecoveryError::Invalid)?;
+            result.deferred_controls = controls;
+        }
+
         if let Some(sequence) = control.todos {
             let PendingEvent::TodoStateCommitted { snapshot } = reader.event(sequence)? else {
                 return Err(RecoveryError::Invalid("task state source selector"));

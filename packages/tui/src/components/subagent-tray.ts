@@ -4,6 +4,7 @@ import { BoxRenderable, type RenderContext } from "@opentui/core"
 import type { RottweilerState, SubagentProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { truncateToCells } from "../render/text"
+import { formatCost } from "../render"
 import { subagentGlyph } from "./transcript/blocks"
 
 const MAX_TRAY_SUBAGENTS = 6
@@ -68,7 +69,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
   update(state: RottweilerState, nowMs = Date.now()): void {
     const subagents = subagentsForTray(state)
     this.#total = subagents.length
-    this.#subagents = boundedTraySubagents(subagents)
+    this.#subagents = boundedSubagents(subagents)
     const nextOrder = this.#subagents.map((subagent) => subagent.projectionId)
     if (
       nextOrder.length !== this.#rowOrder.length ||
@@ -130,7 +131,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
       const elapsed = subagent.status === "running"
         ? formatSubagentElapsed(subagent.spawnedAtMs, nowMs)
         : null
-      const content = `${subagentGlyph(subagent.status)} ${task} · ${activity}${elapsed === null ? "" : ` · ${elapsed}`}`
+      const content = `${subagentGlyph(subagent.status)} ${task} · ${activity}${elapsed === null ? "" : ` · ${elapsed}`}${subagent.cost === undefined ? "" : ` · ${formatCost(subagent.cost)}`}`
       row.content = truncateToCells(content, usableWidth)
     }
     const hidden = this.#total - this.#subagents.length
@@ -163,16 +164,9 @@ export class SubagentTrayRenderable extends BoxRenderable {
 }
 
 export function subagentsForTray(state: RottweilerState): SubagentProjection[] {
-  const currentTurnId = state.streamingTail?.turnId ?? Object.values(state.turns)
-    .filter((turn) => turn.status === "running")
-    .at(-1)?.turnId ?? null
   return state.subagentOrder
     .map((subagentId) => state.subagents[subagentId])
-    .filter(
-      (subagent): subagent is SubagentProjection =>
-        subagent !== undefined &&
-        (subagent.status === "running" || subagent.parentTurnId === currentTurnId),
-    )
+    .filter((subagent): subagent is SubagentProjection => subagent !== undefined)
 }
 
 export function formatSubagentElapsed(spawnedAtMs: number | null, nowMs = Date.now()): string | null {
@@ -186,7 +180,7 @@ export function formatSubagentElapsed(spawnedAtMs: number | null, nowMs = Date.n
   return `${seconds}s`
 }
 
-function boundedTraySubagents(
+export function boundedSubagents(
   subagents: readonly SubagentProjection[],
 ): SubagentProjection[] {
   if (subagents.length <= MAX_TRAY_SUBAGENTS) return [...subagents]

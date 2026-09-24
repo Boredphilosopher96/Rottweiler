@@ -322,6 +322,12 @@ pub trait SubagentSession: Send + Sync {
 
     async fn cancel(&self) -> Result<(), OrchestrationError>;
 
+    /// Stops live session resources while preserving private continuation metadata and worktrees.
+    /// Isolation wrappers must override this to avoid finalizing their lease.
+    async fn suspend(&self) -> Result<(), OrchestrationError> {
+        self.close(None).await
+    }
+
     async fn close(
         &self,
         durable_artifact: Option<&DiffArtifact>,
@@ -435,6 +441,7 @@ struct SessionRecord {
     model: String,
     session: Arc<dyn SubagentSession>,
     state: SessionState,
+    cancellation: Option<CancellationToken>,
     result: Option<watch::Receiver<Option<Result<SubagentResult, String>>>>,
     isolation: SubagentIsolation,
     parent_session_id: SessionId,
@@ -515,6 +522,7 @@ fn subagent_status(status: &TurnStatus) -> SubagentStatus {
 mod artifact_source;
 mod deferred_actor;
 mod lifecycle;
+mod shutdown;
 pub use artifact_source::SubagentArtifactSource;
 mod startup;
 

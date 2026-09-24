@@ -365,3 +365,9 @@ describe("bounded retained rendering", () => {
   })
 
 })
+
+test("status never presents an unresolved role alias as a concrete model", () => {
+  expect(formatStatusModel("fast", null, [])).toBeNull()
+  expect(formatStatusModel("fast", "fixture", [])).toBeNull()
+  expect(formatStatusModel("fixture/coding", "fixture", [])).toBe("fixture/coding")
+})

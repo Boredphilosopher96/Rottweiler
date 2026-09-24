@@ -180,6 +180,11 @@ async fn apply_workspace(
         })?
         .with_session_id(context.config.session_id.clone())
         .with_mcp_tool_policy(generation.tools.mcp_tool_policy().clone());
+    let replacement = if let Some(sink) = context.tool_context.background_subagent_event_sink() {
+        replacement.with_background_subagent_event_sink(Arc::clone(sink))
+    } else {
+        replacement
+    };
     let next = match context
         .config
         .with_workspace_generation(generation, &context.state.mode_id)

@@ -373,6 +373,10 @@ impl ModelDriver for RecomposableHostedModel {
         self.current().context_metadata(alias)
     }
 
+    fn needs_initial_preparation(&self) -> bool {
+        self.initial_load_pending.load(Ordering::Acquire)
+    }
+
     fn has_model_alias(&self, alias: &str) -> bool {
         if self.initial_load_pending.load(Ordering::Acquire) {
             return !alias.trim().is_empty();
@@ -485,6 +489,9 @@ impl ModelDriver for RecomposableHostedModel {
         _selected_model: Option<&str>,
     ) -> std::result::Result<(), AgentLoopError> {
         let _activation = self.activation.lock().await;
+        // Discovery refreshes metadata before the private generation captures it.
+        // Failure leaves offline metadata usable; activation still owns readiness.
+        let _ = self.catalog.discover_provider(provider).await;
         let activate = Arc::clone(&self.activate);
         let provider = provider.to_owned();
         let activation_provider = provider.clone();

@@ -1,3 +1,5 @@
+import { ErrorUiController } from "./errors"
+import { ContextUiController } from "./context"
 import type { UiContributionController } from "./ui-contributions"
 import type { RottweilerApp } from "../app"
 import {
@@ -19,8 +21,6 @@ import type { Attachment } from "../protocol"
 import {
   commandSourceLabel,
   isTuiHandledSlashCommand,
-  mergeSlashCommandChoices,
-  type CommandChoice,
 } from "../session-commands"
 import type { RottweilerState } from "../state"
 import { modePickerPresentation } from "../ui-presentation"
@@ -57,6 +57,8 @@ interface PickerContentHost {
     | "showConversationView"
     | "showToolsView"
     | "state"
+    | "statusLine"
+    | "setState"
   >
   readonly pickerController: PickerController
   readonly input: InputUiController
@@ -87,26 +89,15 @@ export interface PaletteAction {
   readonly catalogSource?: "builtin" | "extension"
   readonly sourceLabel?: string
   readonly detailDescription?: string
+  readonly unavailableReason?: string
   readonly run: () => void
 }
 
 type PaletteSection =
-  | "Conversation"
-  | "Agents & models"
-  | "Workspace"
-  | "Safety"
-  | "Appearance & settings"
-  | "Help & system"
-  | "Commands"
+  | "Conversation" | "Models & agents" | "Context & usage" | "Workspace" | "Safety" | "Settings & help"
 
 const PALETTE_SECTIONS: readonly PaletteSection[] = [
-  "Conversation",
-  "Agents & models",
-  "Workspace",
-  "Safety",
-  "Appearance & settings",
-  "Help & system",
-  "Commands",
+  "Conversation", "Models & agents", "Context & usage", "Workspace", "Safety", "Settings & help",
 ]
 
 const KEYBOARD_HELP_CONTEXT_NAMES: Record<KeybindingContext, string> = {
@@ -126,11 +117,15 @@ const KEYBOARD_HELP_CONTEXTS: Record<KeybindingPreset, readonly KeybindingContex
 
 export class PickerContentController {
   #commandsRequested = false
-  constructor(readonly host: PickerContentHost) {}
+  readonly context: ContextUiController
+  readonly errors: ErrorUiController
+  constructor(readonly host: PickerContentHost) { this.context = new ContextUiController(host); this.errors = new ErrorUiController(host) }
   get commandsRequested(): boolean { return this.#commandsRequested }
   resetCommands(): void { this.#commandsRequested = false }
   renderPicker(): void {
     switch (this.host.pickerController.kind) {
+      case "errors": this.errors.render(); break;
+      case "context": case "contextActions": case "cost": this.context.render(this.host.pickerController.kind); break
       case "uiPanels": this.host.contributions.renderPicker(); break;
       case "palette": {
         const paletteActions = this.paletteActions()
@@ -175,10 +170,11 @@ export class PickerContentController {
                 kind: "item",
                 id: row.id,
                 label: row.title,
+                disabled: row.action.unavailableReason !== undefined,
                 matchSpans: row.titleMatches,
                 detail: {
                   title: row.title,
-                  description: row.action.detailDescription ?? row.description,
+                  description: row.action.unavailableReason ?? row.action.detailDescription ?? row.description,
                   meta: `${row.section} · ${row.action.sourceLabel ?? (row.source === "builtin" ? "built-in" : "extension")}`,
                 },
                 action: row.action,
@@ -241,104 +237,6 @@ export class PickerContentController {
         this.host.pickerController.show("Keyboard shortcuts", items, () => this.host.ui.closePicker())
         break
       }
-      case "commands":
-        const commandError = this.host.projectionErrors.commands
-        const commandItems: PickerItem<CommandChoice | null>[] = [
-          ...(commandError === undefined
-            ? []
-            : [{
-                id: "commands.error",
-                label: "Couldn't load live commands",
-                description: `${commandError} · select to retry`,
-                value: null,
-              }]),
-          ...mergeSlashCommandChoices(this.host.ui.state.commands).map((command) => ({
-            id: command.name,
-            label: `/${command.name}`,
-            description: `${commandSourceLabel(command.source)} · ${command.description}`,
-            searchText: command.usage,
-            value: command,
-          })),
-        ]
-        this.host.pickerController.show(
-          this.host.ui.state.commandsTruncated ? "Commands · results truncated" : "Commands",
-          commandItems,
-          (item) => {
-            const command = item.value as CommandChoice | null
-            if (command === null) {
-              this.requestCommands()
-              return
-            }
-            const clearAnchoredTrigger = () => {
-              if (this.host.pickerController.anchored) this.host.ui.composer.value = ""
-            }
-            if (command.name === "review") {
-              clearAnchoredTrigger()
-              this.host.ui.openReview()
-              this.host.ui.closePicker()
-              return
-            }
-            if (command.name === "fork") {
-              clearAnchoredTrigger()
-              void this.host.requestFork(null)
-              this.host.ui.closePicker()
-              return
-            }
-            if (command.name === "rewind") {
-              clearAnchoredTrigger()
-              this.host.ui.closePicker()
-              this.host.ui.openTimelinePicker()
-              return
-            }
-            if (command.name === "models") {
-              clearAnchoredTrigger()
-              this.host.ui.closePicker()
-              this.host.ui.openModelPicker()
-              return
-            }
-            if (command.name === "providers") {
-              clearAnchoredTrigger()
-              this.host.ui.closePicker()
-              this.host.ui.openProviderPicker()
-              return
-            }
-            if (command.name === "agents") {
-              clearAnchoredTrigger()
-              this.host.ui.closePicker()
-              this.host.ui.openSubagentPicker()
-              return
-            }
-            if (command.name === "theme") {
-              clearAnchoredTrigger()
-              this.host.ui.closePicker()
-              this.host.ui.openThemePicker()
-              return
-            }
-            if (command.name === "settings") {
-              clearAnchoredTrigger()
-              this.host.ui.closePicker()
-              this.host.ui.openSettingsPicker()
-              return
-            }
-            if (command.name === "mode") {
-              clearAnchoredTrigger()
-              this.host.ui.closePicker()
-              this.openModePicker()
-              return
-            }
-            const content = `/${command.name}`
-            const requiresArgument = /<[^>]+>/.test(command.usage)
-            if (this.host.pickerController.anchored && !requiresArgument) {
-              this.host.ui.composer.value = content
-              this.host.ui.closePicker()
-              void this.host.ui.composer.submit()
-              return
-            }
-            this.host.ui.composer.value = `${content} `
-            this.host.ui.closePicker()
-          },
-        )
-        break
       case "timeline": this.host.sessions.render("timeline"); break
       case "timelineActions": this.host.sessions.render("timelineActions"); break
       case "queuedMessages": this.host.sessions.render("queuedMessages"); break
@@ -459,6 +357,8 @@ export class PickerContentController {
         })
         break
       }
+      case "providerSetup":
+        break
       case "models":
       case "providers":
       case "providerRecovery":
@@ -517,7 +417,6 @@ export class PickerContentController {
       case "agents": this.host.children.render("agents"); break
       case "agentActions": this.host.children.render("agentActions"); break
       case "sessions": this.host.sessions.render("sessions"); break
-      case "sessionActions": this.host.sessions.render("sessionActions"); break
       case "sessionRename": this.host.sessions.render("sessionRename"); break
       case null:
         break
@@ -575,59 +474,60 @@ export class PickerContentController {
       ...(Object.values(this.host.children.presentedState().turns).some((turn) => turn.status === "running")
         ? [{ id: "interrupt.run", title: "Interrupt turn", section: "Conversation", description: "Stop the active turn", run: submit("/interrupt") } satisfies PaletteAction]
         : []),
-      { id: "compact.run", title: "Compact context", section: "Conversation", description: "Compact the conversation context", run: submit("/compact") },
+      { id: "compact.run", title: "Compact context", section: "Context & usage", description: "Compact the conversation context", run: submit("/compact") },
       { id: "rewind.run", title: "Rewind to a turn", section: "Conversation", description: "Choose from completed user turns", run: open(() => this.host.ui.openTimelinePicker()) },
       { id: "fork.run", title: "Fork session", section: "Conversation", description: "Fork at the latest completed turn", run: open(() => void this.host.requestFork(null)) },
       { id: "session.new", title: "New session", section: "Conversation", description: this.paletteDescription("Start a clean conversation", "new_session"), run: open(() => void this.host.sessions.createSession()) },
       { id: "session.list", title: "Switch session", section: "Conversation", description: this.paletteDescription("Resume another durable session", "open_session_picker"), run: open(() => this.host.ui.openSessionPicker()) },
-      { id: "review.open", title: "Review changes", section: "Conversation", description: this.paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.host.ui.openReview()) },
+      { id: "review.open", title: "Review changes", section: "Workspace", description: this.paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.host.ui.openReview()) },
       { id: "session.export", title: "Export session", section: "Conversation", description: "Save this session's transcript to a file", run: open(() => this.host.ui.openExportSessionPicker()) },
       { id: "plan.show", title: "Show plan", section: "Conversation", description: "Display the pending or approved plan", run: submit("/plan") },
       { id: "queue.manage", title: "Manage queued messages", section: "Conversation", description: "Review, remove, or clear queued messages", run: open(() => this.host.ui.openQueuedMessagesPicker()) },
-      { id: "cost.show", title: "Show usage & cost", section: "Conversation", description: "Display tokens, cost, and budget", run: submit("/cost") },
+      { id: "cost.show", title: "Show usage & cost", section: "Context & usage", description: "Display tokens, cost, and budget", run: submit("/cost") },
 
-      { id: "model.list", title: "Switch model", section: "Agents & models", description: this.paletteDescription("Choose the active model alias", "open_model_picker"), run: open(() => this.host.ui.openModelPicker()) },
-      { id: "provider.list", title: "Switch provider route", section: "Agents & models", description: "Choose a configured provider and model route", run: open(() => this.host.ui.openProviderPicker()) },
-      { id: "mode.list", title: "Switch mode", section: "Agents & models", description: this.paletteDescription("Choose discuss, plan, or execute", "open_mode_picker"), run: open(() => this.openModePicker()) },
-      { id: "agent.children", title: "Child agents", section: "Agents & models", description: this.paletteDescription("Inspect, resume, interrupt, or close child agents", "open_subagent_picker"), run: open(() => this.host.ui.openSubagentPicker()) },
+      { id: "model.list", title: "Switch model", section: "Models & agents", description: this.paletteDescription("Choose the active model alias", "open_model_picker"), run: open(() => this.host.ui.openModelPicker()) },
+      { id: "provider.list", title: "Connect a provider", section: "Models & agents", description: "Choose a configured provider and model route", run: open(() => this.host.ui.openProviderPicker()) },
+      { id: "mode.list", title: "Agent mode", section: "Models & agents", description: this.paletteDescription("Choose discuss, plan, or execute", "open_mode_picker"), run: open(() => this.openModePicker()) },
+      { id: "agent.children", title: "Child agents", section: "Models & agents", description: this.paletteDescription("Inspect, resume, interrupt, or close child agents", "open_subagent_picker"), run: open(() => this.host.ui.openSubagentPicker()) },
       ...(this.host.children.activeId === null ? [] : [{
         id: "agent.current.actions",
         title: "Current child actions",
-        section: "Agents & models",
+        section: "Models & agents",
         description: "Inspect, continue, interrupt, or close the visible child",
         run: open(() => this.host.ui.openSubagentActionPicker(this.host.children.activeId)),
       } satisfies PaletteAction]),
-      { id: "status.show", title: "Show agent status", section: "Agents & models", description: "Display running and queue state", run: submit("/status") },
+      { id: "status.show", title: "Show agent status", section: "Models & agents", description: "Display running and queue state", run: submit("/status") },
 
-      { id: "view.conversation", title: "View conversation", section: "Workspace", description: "Return to the conversation transcript", run: open(() => this.host.ui.showConversationView()) },
+      { id: "view.conversation", title: "View conversation", section: "Conversation", description: "Return to the conversation transcript", run: open(() => this.host.ui.showConversationView()) },
       { id: "view.tools", title: "View tools", section: "Workspace", description: "Inspect retained tool activity and output", run: open(() => this.host.ui.showToolsView()) },
       ...(this.host.ui.state.replay.active || this.host.children.activeId !== null ? [] : [
         { id: "ui.panels", title: "Extension panels", section: "Workspace", description: "Open approved extension views and actions", run: open(() => this.host.contributions.openPanels()) } satisfies PaletteAction,
       ]),
       { id: "workspace.add", title: "Add workspace directory", section: "Workspace", description: "Prefills /add-dir · give a directory path", run: prefill("/add-dir") },
       { id: "workspace.roots", title: "Workspace roots", section: "Workspace", description: "See every live workspace root", run: open(() => this.openWorkspaceRootsPicker()) },
-      { id: "trust.manage", title: "Folder trust", section: "Workspace", description: "Show, grant, or revoke folder trust", run: open(() => this.host.ui.openTrustPicker()) },
-      { id: "context.manage", title: "Manage context", section: "Workspace", description: "Inspect, pin, or evict context items", run: submit("/context") },
+      { id: "trust.manage", title: "Folder trust", section: "Safety", description: "Show, grant, or revoke folder trust", run: open(() => this.host.ui.openTrustPicker()) },
+      { id: "context.manage", title: "Manage context", section: "Context & usage", description: "Inspect, pin, or evict context items", run: submit("/context") },
 
-      { id: "permissions.mode", title: "Permission mode", section: "Safety", description: "Choose when tool use needs confirmation", run: open(() => this.host.ui.openPermissionModePicker()) },
+      { id: "permissions.mode", title: "Approval policy", section: "Safety", description: "Choose when tool use needs confirmation", run: open(() => this.host.ui.openPermissionModePicker()) },
       { id: "permissions.manage", title: "Permission rules", section: "Safety", description: "Inspect, add, and remove session rules", run: open(() => this.host.ui.openPermissionPicker()) },
-      { id: "budget.manage", title: "Budget limits", section: "Safety", description: "Set spend and subscription-token limits", run: open(() => this.host.ui.openBudgetPicker()) },
+      { id: "budget.manage", title: "Budget limits", section: "Context & usage", description: "Set spend and subscription-token limits", run: open(() => this.host.ui.openBudgetPicker()) },
 
-      { id: "theme.list", title: "Switch theme", section: "Appearance & settings", description: "Preview and choose an interface theme", run: open(() => this.host.ui.openThemePicker()) },
-      { id: "settings.open", title: "Settings", section: "Appearance & settings", description: "Change safe persisted user settings", run: open(() => this.host.ui.openSettingsPicker()) },
-      { id: "mcp.manage", title: "MCP connections", section: "Appearance & settings", description: "Add, review, enable, disable, or remove MCP servers", run: open(() => this.host.ui.openMcpPicker()) },
+      { id: "theme.list", title: "Switch theme", section: "Settings & help", description: "Preview and choose an interface theme", run: open(() => this.host.ui.openThemePicker()) },
+      { id: "settings.open", title: "Settings", section: "Settings & help", description: "Change safe persisted user settings", run: open(() => this.host.ui.openSettingsPicker()) },
+      { id: "mcp.manage", title: "MCP connections", section: "Workspace", description: "Add, review, enable, disable, or remove MCP servers", run: open(() => this.host.ui.openMcpPicker()) },
 
-      { id: "keyboard.help", title: "Keyboard shortcuts", section: "Help & system", description: "Every binding for the active preset", run: open(() => this.openKeyboardHelpPicker()) },
-      { id: "help.show", title: "Command help", section: "Help & system", description: "List every available slash command", run: submit("/help") },
-      { id: "app.exit", title: "Exit Rottweiler", section: "Help & system", description: "Close the TUI and its supervised engine", run: open(() => this.host.onExit?.()) },
+      { id: "errors.show", title: "Recent errors", section: "Settings & help", description: "Inspect retained failure details for this session", run: open(() => this.errors.open()) },
+      { id: "keyboard.help", title: "Keyboard shortcuts", section: "Settings & help", description: "Every binding for the active preset", run: open(() => this.openKeyboardHelpPicker()) },
+      { id: "help.show", title: "Command help", section: "Settings & help", description: "List every available slash command", run: submit("/help") },
+      { id: "app.exit", title: "Exit Rottweiler", section: "Settings & help", description: "Close the TUI and its supervised engine", run: open(() => this.host.onExit?.()) },
     ]
     for (const command of this.host.ui.state.commands) {
-      if (isTuiHandledSlashCommand(command.name)) continue
+      if (isTuiHandledSlashCommand(command.name) || new Set(["compact", "plan", "cost", "mode", "status", "add-dir", "context", "help", "interrupt", "trust"]).has(command.name)) continue
       const requiresArgument = /<[^>]+>/.test(command.usage)
       actions.push({
         id: `slash.${command.name}`,
         title: `/${command.name}`,
-        section: "Commands",
+        section: "Workspace",
         description: `${commandSourceLabel(command.source)} · ${command.description}`,
         catalogSource: command.source === undefined || command.source === "builtin"
           ? "builtin"
@@ -637,20 +537,30 @@ export class PickerContentController {
         run: requiresArgument ? prefill(`/${command.name}`) : submit(`/${command.name}`),
       })
     }
-    return actions
+    const projectedActions: Readonly<Record<string, import("../protocol").SessionActionKind>> = {
+      "model.list": "switch_model", "mode.list": "switch_mode", "compact.run": "compact",
+      "rewind.run": "rewind", "fork.run": "fork", "review.open": "review", "workspace.add": "add_workspace_root",
+      "slash.rewind": "rewind", "slash.fork": "fork", "slash.review": "review",
+    }
+    return actions.map(action => {
+      const kind = projectedActions[action.id]
+      if (kind === undefined) return action
+      const projected = this.host.ui.state.availableActions.find(entry => entry.action === kind)
+      const unavailableReason = this.host.projectionErrors.commands !== undefined
+        ? "Availability unavailable · Ctrl+R to retry"
+        : this.#commandsRequested ? "Checking availability…"
+        : projected === undefined ? "Availability unavailable · Ctrl+R to retry" : projected.unavailable_reason
+      return unavailableReason === null
+        ? projected?.queued === true ? { ...action, detailDescription: `${action.description} · Queues until the current work finishes` } : action
+        : { ...action, unavailableReason }
+    })
   }
 
   updateComposerAutocomplete(value: string): void {
-    const slash = /^\/([^\s]*)$/.exec(value)
-    if (slash !== null) {
-      this.host.pickerController.anchored = true
-      this.host.pickerController.query = slash[1] ?? ""
-      this.host.pickerController.position(true)
-      this.host.pickerController.kind = "commands"
-      if (this.host.ui.state.commands.length === 0 && !this.#commandsRequested) {
-        this.requestCommands()
-      }
-      this.host.pickerController.refresh()
+    if (value === "/") {
+      // Consume the discovery trigger only. Attachments and pasted commands stay drafts.
+      if (this.host.ui.composer.value === "/") this.host.ui.composer.value = ""
+      this.openCommandPicker()
       return
     }
     const mention = /(?:^|\s)@([^\n]*)$/.exec(value)
@@ -674,6 +584,7 @@ export class PickerContentController {
     this.host.ui.commandPalette.resizeForTerminal(
       this.host.terminalWidth,
       this.host.terminalHeight,
+      this.host.terminalHeight - this.host.ui.composer.dockHeight - this.host.ui.statusLine.height,
     )
     if (!this.#commandsRequested) {
       this.requestCommands()

@@ -598,12 +598,6 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ModeCommand
                 action: SessionCommandAction::None,
             });
         }
-        if context.running() {
-            return Err(CommandExecutionError::new(
-                "turn_running",
-                "mode switching requires an idle session",
-            ));
-        }
         if context.modes.get(value).is_none() {
             let available = context
                 .modes
@@ -830,15 +824,9 @@ struct CompactCommand;
 impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CompactCommand {
     async fn execute(
         &self,
-        context: &mut SessionCommandContext,
+        _context: &mut SessionCommandContext,
         invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        if context.running() {
-            return Err(CommandExecutionError::new(
-                "turn_running",
-                "manual compaction requires an idle session",
-            ));
-        }
         let instructions = invocation.arguments().trim();
         Ok(SessionCommandOutput {
             message: "compaction started".to_owned(),
@@ -1075,19 +1063,21 @@ pub fn builtin_command_registry()
             InterruptCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("context", "Inspect, pin, or evict context items")
-                .with_argument_hint("[pin|evict <item-id>]"),
-            ContextCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
-    registry
-        .register(
-            CommandDescriptor::new("cost", "Show usage, cost, and budget accounting"),
-            CostCommand,
-        )
-        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    for &(name, description, arguments) in rw_types::client_navigation::INTERACTIVE_COMMANDS {
+        let handler: Arc<dyn CommandHandler<SessionCommandContext, SessionCommandOutput>> =
+            match name {
+                "context" => Arc::new(ContextCommand),
+                "cost" => Arc::new(CostCommand),
+                _ => Arc::new(navigation::InteractiveClientCommand),
+            };
+        let mut descriptor = CommandDescriptor::new(name, description);
+        if !arguments.is_empty() {
+            descriptor = descriptor.with_argument_hint(arguments);
+        }
+        registry
+            .register_shared(descriptor, handler)
+            .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    }
     registry
         .register(
             CommandDescriptor::new("compact", "Compact conversation context")

@@ -368,3 +368,64 @@ fn status_bootstrap_recovers_latest_sources_and_durable_clears() {
 }
 
 use super::test_source::{SourceEvent, append_script};
+
+#[test]
+fn durable_control_queue_recovers_running_ownership_and_terminal_removal() {
+    let root = tempfile::tempdir().expect("root");
+    let modes = ModeRegistry::builtins().expect("modes");
+    let mut journal = SegmentedJournal::open(root.path(), "canonical").expect("journal");
+    let mut recovery =
+        CanonicalRecovery::open(&journal.read_view(), &modes, None).expect("recovery");
+    let control = rw_types::QueuedSessionControl {
+        request: rw_types::CommandMeta {
+            protocol_version: rw_types::PROTOCOL_VERSION,
+            client_id: rw_types::ClientId("owner".into()),
+            request_id: rw_types::RequestId("queued-mode".into()),
+        },
+        action: rw_types::DeferredSessionAction::SwitchMode {
+            mode: rw_types::ModeId("plan".into()),
+        },
+        status: rw_types::QueuedControlStatus::Running,
+    };
+    append(
+        &mut journal,
+        vec![PendingEvent::SessionControlQueueChanged {
+            controls: vec![control.clone()],
+            settlement: None,
+        }],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    let controls = recovery
+        .snapshot()
+        .expect("snapshot")
+        .bind_source(&journal.read_view())
+        .expect("source")
+        .control_payloads(MAX_CONTROL_SOURCE_BYTES)
+        .expect("controls");
+    assert_eq!(controls.deferred_controls, vec![control.clone()]);
+    append(
+        &mut journal,
+        vec![PendingEvent::SessionControlQueueChanged {
+            controls: vec![],
+            settlement: Some(rw_types::SessionControlSettlement {
+                cancelled_question: None,
+                request: control.request,
+                action: rw_types::SessionActionKind::SwitchMode,
+                outcome: rw_types::SessionControlOutcome::Cancelled,
+                message: "Interrupted control was not repeated.".into(),
+            }),
+        }],
+    );
+    catch_up(&mut recovery, &journal.read_view(), &modes);
+    assert!(
+        recovery
+            .snapshot()
+            .expect("snapshot")
+            .bind_source(&journal.read_view())
+            .expect("source")
+            .control_payloads(MAX_CONTROL_SOURCE_BYTES)
+            .expect("controls")
+            .deferred_controls
+            .is_empty()
+    );
+}

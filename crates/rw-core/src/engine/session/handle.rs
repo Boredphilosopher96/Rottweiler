@@ -48,6 +48,7 @@ use tokio::sync::oneshot;
 /// Cloneable command/event boundary for one session actor.
 #[derive(Clone)]
 pub struct SessionHandle {
+    pub(super) background_children: Arc<dyn rw_tools::SubagentEventSink>,
     pub(super) child_progress: Arc<super::child_progress::HostedChildProgress>,
     pub(super) shutdown: shutdown::ActorShutdown,
     pub(in crate::engine) commands: mpsc::Sender<ActorCommand>,
@@ -242,6 +243,18 @@ impl SessionHandle {
     ) -> Result<CommandOutcome, AgentLoopError> {
         self.dispatch_wait(command).await?;
         Ok(CommandOutcome::Accepted {})
+    }
+
+    /// Returns whether the host owns preference persistence for this model control.
+    /// Queued controls retain that obligation in the actor through settlement.
+    pub(crate) async fn dispatch_model_control(
+        &self,
+        command: ClientCommand,
+    ) -> Result<bool, AgentLoopError> {
+        Ok(!matches!(
+            self.dispatch_wait(command).await?,
+            ProtocolCompletion::DeferredControl
+        ))
     }
 
     /// Persists a parent-owned child invocation through the parent actor's
@@ -732,7 +745,7 @@ impl SessionHandle {
             })
             .await?
         {
-            ProtocolCompletion::Unit => Ok(()),
+            ProtocolCompletion::Unit | ProtocolCompletion::DeferredControl => Ok(()),
             _ => Err(AgentLoopError::Closed),
         }
     }

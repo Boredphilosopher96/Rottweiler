@@ -127,7 +127,7 @@ async function main(): Promise<void> {
   let exitRequested = false
   let rssRecycleTimer: ReturnType<typeof setInterval> | undefined
   const renderer = await openTui.createCliRenderer({
-    exitOnCtrlC: true,
+    exitOnCtrlC: false,
     targetFps: 60,
     // Extended keyboard events keep macOS Command+Arrow distinct from Ctrl+E,
     // so terminal navigation can never masquerade as the external-editor key.
@@ -391,6 +391,7 @@ async function main(): Promise<void> {
         void (async () => {
           const runtime = runtimeForShutdown ?? (await runtimeWithin(runtimeBootstrap, 250))
           await runtime?.shutdownHost()
+          await runtime?.stop()
           renderer.destroy()
         })()
       })

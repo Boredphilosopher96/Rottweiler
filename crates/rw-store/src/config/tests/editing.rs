@@ -609,3 +609,135 @@ fn tui_settings_lock_contention_fails_without_blocking_driver_lifecycle() {
     assert!(started.elapsed() < std::time::Duration::from_millis(250));
     drop(held);
 }
+
+#[test]
+fn first_concrete_selection_seeds_user_default_without_overwriting_it() {
+    let root = tempdir().expect("root");
+    let user = root.path().join("user/config.toml");
+    let first = root.path().join("first/.rottweiler/config.toml");
+    let second = root.path().join("second/.rottweiler/config.toml");
+    fs::create_dir_all(first.parent().expect("first")).expect("directory");
+    fs::create_dir_all(second.parent().expect("second")).expect("directory");
+    let loader = ConfigLoader::new(user.clone(), first);
+    loader
+        .persist_tui_project_model("openai/first")
+        .expect("selection");
+    let other = ConfigLoader::new(user, second);
+    assert_eq!(
+        other.load().expect("config").config.models.default,
+        "openai/first"
+    );
+    other
+        .persist_tui_project_model("openai/second")
+        .expect("selection");
+    assert_eq!(
+        other.load().expect("config").config.models.default,
+        "openai/first"
+    );
+    assert_eq!(
+        other.tui_project_model().expect("preference").as_deref(),
+        Some("openai/second")
+    );
+}
+
+#[test]
+fn compatible_setup_is_atomic_private_and_preserves_existing_model_choice() {
+    let root = tempdir().expect("root");
+    let user = root.path().join("user/config.toml");
+    let project = root.path().join("repo/.rottweiler/config.toml");
+    fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+    let loader = ConfigLoader::new(user.clone(), project.clone());
+    let previous_default = loader.load().expect("defaults").config.models.default;
+    let mut setup = rw_types::CompatibleProviderSetup {
+        provider: "local.test".into(),
+        adapter: rw_types::CompatibleProviderAdapter::Chat,
+        endpoint: "http://127.0.0.1:11434/v1/chat/completions".into(),
+        auth: rw_types::CompatibleProviderAuth::None,
+        initial_model: Some("qwen/test".into()),
+    };
+    let saved = loader.configure_compatible_provider(&setup).expect("setup");
+    assert_eq!(saved.config.models.default, previous_default);
+    assert_eq!(
+        saved.config.models.aliases["local.test-model"],
+        ["local.test/qwen/test"]
+    );
+    assert!(saved.config.providers.contains_key("local.test"));
+    assert!(!saved.config.providers.contains_key("local"));
+    assert!(!project.exists());
+    loader
+        .configure_compatible_provider(&setup)
+        .expect("idempotent");
+    let before = fs::read(&user).expect("user bytes");
+    setup.endpoint = "http://127.0.0.1:9999/v1/chat/completions".into();
+    assert!(loader.configure_compatible_provider(&setup).is_err());
+    assert_eq!(fs::read(&user).expect("unchanged"), before);
+}
+
+#[test]
+fn compatible_setup_rejects_unsafe_endpoints_before_writing_and_references_secure_keys() {
+    let root = tempdir().expect("root");
+    let user = root.path().join("user/config.toml");
+    let loader = ConfigLoader::new(user.clone(), root.path().join("project.toml"));
+    let mut setup = rw_types::CompatibleProviderSetup {
+        provider: "gateway".into(),
+        adapter: rw_types::CompatibleProviderAdapter::Responses,
+        endpoint: String::new(),
+        auth: rw_types::CompatibleProviderAuth::ApiKey,
+        initial_model: None,
+    };
+    for endpoint in [
+        "http://remote.example/responses",
+        "https://user:secret@example.com/responses",
+        "https://example.com/responses?key=secret",
+        "https://example.com/responses#secret",
+    ] {
+        setup.endpoint = endpoint.into();
+        assert!(loader.configure_compatible_provider(&setup).is_err());
+        assert!(!user.exists());
+    }
+    setup.endpoint = "https://example.com/v1/responses".into();
+    setup.auth = rw_types::CompatibleProviderAuth::None;
+    assert!(loader.configure_compatible_provider(&setup).is_err());
+    setup.auth = rw_types::CompatibleProviderAuth::ApiKey;
+    let saved = loader
+        .configure_compatible_provider(&setup)
+        .expect("secure setup");
+    assert_eq!(
+        saved.config.providers["gateway"]
+            .api_key_credential
+            .as_deref(),
+        Some("providers.gateway.api_key")
+    );
+    assert!(saved.config.models.aliases.is_empty());
+}
+
+#[test]
+fn compatible_setup_retry_can_add_only_a_missing_initial_route() {
+    let root = tempdir().expect("root");
+    let user = root.path().join("user/config.toml");
+    let loader = ConfigLoader::new(user.clone(), root.path().join("project.toml"));
+    let mut setup = rw_types::CompatibleProviderSetup {
+        provider: "local".into(),
+        adapter: rw_types::CompatibleProviderAdapter::Chat,
+        endpoint: "http://localhost:11434/v1/chat/completions".into(),
+        auth: rw_types::CompatibleProviderAuth::None,
+        initial_model: None,
+    };
+    let first = loader
+        .configure_compatible_provider(&setup)
+        .expect("first setup");
+    setup.initial_model = Some("test-model".into());
+    let second = loader
+        .configure_compatible_provider(&setup)
+        .expect("add missing route");
+    assert_eq!(first.config.providers, second.config.providers);
+    assert_eq!(first.config.models.default, second.config.models.default);
+    assert_eq!(
+        second.config.models.aliases["local-model"],
+        ["local/test-model"]
+    );
+    let before = fs::read(&user).expect("saved");
+    setup.initial_model = Some("replacement-model".into());
+    assert!(loader.configure_compatible_provider(&setup).is_err());
+    assert_eq!(fs::read(&user).expect("unchanged"), before);
+}
