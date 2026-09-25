@@ -49,9 +49,14 @@ class ConsoleTests(unittest.TestCase):
                      f"open({str(pidfile)!r},'w').write(str(os.getpid()))\n"
                      "os.write(1,b'early marker\\n'+b'x'*262144+b'\\nfinal marker\\n')\n"
                      "time.sleep(60)\n")
+            # ci_evidence holds back (longest secret - 1) bytes so a secret split
+            # across reads is still redacted; secret-like variables inherited
+            # from a developer shell would otherwise shift the retained size.
+            environment = {key: value for key, value in os.environ.items()
+                           if not any(word in key.upper() for word in ('TOKEN', 'SECRET', 'PASSWORD', 'API_KEY'))}
             process = subprocess.Popen([sys.executable, str(SCRIPTS / 'ci_evidence.py'),
                 '--gate', 'blocked-console', '--output', str(output), '--', sys.executable, '-c', child],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
             try:
                 deadline = time.monotonic() + 3
                 while not output.with_suffix('.log').exists() or output.with_suffix('.log').stat().st_size < 262144:
