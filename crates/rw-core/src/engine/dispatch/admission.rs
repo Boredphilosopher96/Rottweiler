@@ -37,7 +37,8 @@ use tokio::sync::oneshot;
 pub(super) fn requires_driver(command: &ClientCommand) -> bool {
     !matches!(
         command,
-        ClientCommand::CreateSession { .. }
+        ClientCommand::ConfigureCompatibleProvider { .. }
+            | ClientCommand::CreateSession { .. }
             | ClientCommand::AttachSession { .. }
             | ClientCommand::TakeDriver { .. }
             | ClientCommand::GetContext { .. }
@@ -83,6 +84,7 @@ pub(super) async fn dispatch_protocol(
     respond: oneshot::Sender<CommandOutcome>,
     mut completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
     prepared: bool,
+    deferred: bool,
     authority: Option<(crate::FamilyControlAuthority, rw_types::SequenceId)>,
     context: DispatchContext<'_>,
 ) -> bool {
@@ -167,6 +169,34 @@ pub(super) async fn dispatch_protocol(
         return false;
     }
 
+    if !deferred
+        && super::deferred_controls::must_queue(state)
+        && let Some(action) = super::deferred_controls::action(&command)
+    {
+        let result =
+            super::deferred_controls::enqueue(state, config, events, meta.clone(), action).await;
+        let outcome = match &result {
+            Ok(()) => CommandOutcome::Accepted {},
+            Err(error) => protocol_rejection("queued_control_unavailable", error.to_string()),
+        };
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        if let Some(completion) = completion.take() {
+            let _ = completion.send(result.map(|()| ProtocolCompletion::DeferredControl));
+        }
+        return false;
+    }
+
+    if let Some(action) = super::action_availability::command_action(&command)
+        && let Some((code, message)) =
+            super::action_availability::ActionState::from_actor(state, config).unavailable(action)
+    {
+        let outcome = protocol_rejection(code, message);
+        send_ack(state, events, &meta, session, outcome.clone());
+        let _ = respond.send(outcome);
+        return false;
+    }
+
     if state.pending_model_preparation.is_some() && !super::model_job::admit_while_pending(&command)
     {
         let outcome = protocol_rejection(
@@ -178,7 +208,7 @@ pub(super) async fn dispatch_protocol(
         return false;
     }
     let preparation = (!prepared)
-        .then(|| super::model_job::protocol_alias(&command, state))
+        .then(|| super::model_job::protocol_alias(&command, state, config.model.as_ref()))
         .flatten();
     if state.pending_command.is_some() && !super::command_job::admit_while_pending(&command) {
         let outcome = protocol_rejection(
@@ -252,6 +282,18 @@ pub(super) async fn dispatch_protocol(
                 let _ = respond.send(outcome);
                 return false;
             }
+        }
+        ClientCommand::SendMessage { content, .. }
+            if !content.trim_start().starts_with('/')
+                && !config.model.has_model_alias(&state.model_alias) =>
+        {
+            let outcome = protocol_rejection(
+                "no_model_selected",
+                "Choose a model with /model before sending a message. Connect a provider from the same screen if needed.",
+            );
+            send_ack(state, events, &meta, session, outcome.clone());
+            let _ = respond.send(outcome);
+            return false;
         }
         ClientCommand::SendMessage { .. } if state.active_shell.is_some() => {
             let outcome = protocol_rejection(
@@ -337,23 +379,12 @@ pub(super) async fn dispatch_protocol(
                 return false;
             }
         }
-        ClientCommand::SwitchModel { .. }
-        | ClientCommand::SwitchMode { .. }
-        | ClientCommand::ApprovePlan { .. }
+        ClientCommand::ApprovePlan { .. }
             if state.running.is_some() || state.active_shell.is_some() =>
         {
             let outcome = protocol_rejection(
                 "session_not_idle",
                 "model switching requires an idle session with no active user shell",
-            );
-            send_ack(state, events, &meta, session, outcome.clone());
-            let _ = respond.send(outcome);
-            return false;
-        }
-        ClientCommand::SwitchModel { .. } if !state.pending_model_switches.is_empty() => {
-            let outcome = protocol_rejection(
-                "model_switch_pending",
-                "choose how to transfer context for the pending model switch first",
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
@@ -425,7 +456,10 @@ pub(super) async fn dispatch_protocol(
         {
             let outcome = protocol_rejection(
                 "shell_start_rejected",
-                "a non-empty foreground shell may start only while the session is idle",
+                idle_refusal(
+                    "a non-empty foreground shell may start only while the session is idle",
+                    config.tools.session_activity(&state.session_id),
+                ),
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
@@ -455,7 +489,10 @@ pub(super) async fn dispatch_protocol(
         {
             let outcome = protocol_rejection(
                 "session_not_idle",
-                "session review requires an idle session",
+                idle_refusal(
+                    "session review requires an idle session",
+                    config.tools.session_activity(&state.session_id),
+                ),
             );
             send_ack(state, events, &meta, session, outcome.clone());
             let _ = respond.send(outcome);
@@ -591,13 +628,6 @@ pub(super) async fn dispatch_protocol(
             let _ = respond.send(outcome);
             return false;
         }
-        ClientCommand::Compact { .. } if state.running.is_some() => {
-            let outcome =
-                protocol_rejection("turn_running", "manual compaction requires an idle session");
-            send_ack(state, events, &meta, session, outcome.clone());
-            let _ = respond.send(outcome);
-            return false;
-        }
         ClientCommand::PinContext { item_id, .. } | ClientCommand::EvictContext { item_id, .. } => {
             if state.running.is_some() {
                 let outcome =
@@ -647,6 +677,7 @@ pub(super) async fn dispatch_protocol(
             events,
             alias,
             super::model_job::SelectionAction::Protocol {
+                deferred,
                 authority,
                 command: Box::new(command),
                 respond,
@@ -867,8 +898,8 @@ pub(super) async fn dispatch_protocol(
     if matches!(
         &command,
         ClientCommand::ListPermissions { .. }
-            | ClientCommand::AddSessionPermissionRule { .. }
-            | ClientCommand::RemoveSessionPermissionRule { .. }
+            | ClientCommand::AddPermissionRule { .. }
+            | ClientCommand::RemovePermissionRule { .. }
             | ClientCommand::RevokePermissionApproval { .. }
     ) {
         let mutating = !matches!(&command, ClientCommand::ListPermissions { .. });
@@ -877,7 +908,10 @@ pub(super) async fn dispatch_protocol(
                 || state.active_shell.is_some()
                 || config.tools.session_activity(&state.session_id).is_some())
         {
-            Err("permission mutations require an idle session".to_owned())
+            Err(idle_refusal(
+                "permission mutations require an idle session",
+                config.tools.session_activity(&state.session_id),
+            ))
         } else {
             apply_permission_command(&command, &config.permissions)
         };
@@ -1219,4 +1253,12 @@ pub(super) async fn dispatch_protocol(
     )
     .await;
     true
+}
+
+/// Names the session-owned work that keeps the session from being idle.
+fn idle_refusal(base: &str, activity: Option<rw_tools::SessionActivity>) -> String {
+    match activity {
+        Some(activity) => format!("{base}: {}; {}", activity.holder(), activity.remedy()),
+        None => base.to_owned(),
+    }
 }

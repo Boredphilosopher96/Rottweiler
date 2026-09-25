@@ -120,6 +120,7 @@ pub(crate) async fn compose_hosted_actor(
     }
     validate_session_id(&options.session_id.0)?;
     let extension_credentials_path = options.credentials_path.clone();
+    let model_preferences_path = options.credentials_path.with_file_name("config.toml");
     let workspace = std::fs::canonicalize(&options.workspace).into_diagnostic()?;
     if workspace != options.workspace {
         return Err(miette!("hosted workspace must already be canonical"));
@@ -769,6 +770,9 @@ pub(crate) async fn compose_hosted_actor(
     if extension_catalog.workflows().len() > 0 {
         available_tools.push("workflow".to_owned());
     }
+    if extension_catalog.skills().len() > 0 {
+        available_tools.push(rw_tools::SKILL_TOOL_NAME.to_owned());
+    }
     agents
         .resolve_tool_names(available_tools)
         .map_err(|error| miette!("agent tools could not resolve: {error}"))?;
@@ -837,6 +841,7 @@ pub(crate) async fn compose_hosted_actor(
             max_depth: options.config.engine.subagent_max_depth,
             max_concurrency: options.config.engine.subagent_max_concurrency,
             max_turns: options.max_turns,
+            wake_on_completion: options.config.agents.wake_on_completion,
             ..SubagentLimits::default()
         },
         factory,
@@ -881,6 +886,8 @@ pub(crate) async fn compose_hosted_actor(
             )))
             .map_err(|error| miette!("workflow tool could not register: {error}"))?;
     }
+    super::skill_library::register_skill_tool(&mut registry, &extension_catalog)
+        .map_err(|error| miette!("skill tool could not register: {error}"))?;
     let runtime_tools = Arc::new(registry);
     orchestrator.bind_tools(Arc::clone(&runtime_tools));
     recover_subagent_tree(
@@ -959,6 +966,12 @@ pub(crate) async fn compose_hosted_actor(
         .map_err(display_agent_error)?;
     let initial_thinking = configured_session_thinking(&options.config, &persisted_model_alias);
     let handle = SessionActor::spawn(SessionActorConfig {
+        model_preferences: Some(Arc::new(super::model_preferences::HostedModelPreferences {
+            loader: rw_store::config::ConfigLoader::new(
+                model_preferences_path,
+                workspace.join(".rottweiler/config.toml"),
+            ),
+        })),
         ui: plugin_runtime.ui.clone(),
         ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
             reader: Arc::clone(&options.transcripts),

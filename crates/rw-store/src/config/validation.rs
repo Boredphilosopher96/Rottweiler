@@ -150,7 +150,7 @@ pub(super) fn validate_tui_setting(
     }
     let valid = match key {
         "ui.theme" => valid_theme_name(value),
-        "compaction.auto" => matches!(value, "true" | "false"),
+        "compaction.auto" | "agents.wake_on_completion" => matches!(value, "true" | "false"),
         "permissions.default" => matches!(value, "ask" | "allow" | "deny"),
         _ if key.starts_with("models.thinking.") => {
             let alias = key.trim_start_matches("models.thinking.");

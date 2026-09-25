@@ -1,3 +1,4 @@
+import { permissionModeLabel } from "../ui-presentation"
 import type {
   BoundedCommandTextProjection,
   CommandResultProjection,
@@ -107,9 +108,13 @@ function permissionCommandMarkdown(
     projection.rememberedApprovals === null &&
     projection.rules.length === 0
   ) return "**Permissions updated**"
-  const heading = projection.mode === null
+  const mode = projection.mode
+  const modeLabel = mode === "strict" || mode === "auto-safe" || mode === "yolo" || mode === "default"
+    ? permissionModeLabel(mode)
+    : sentenceCase(mode ?? "")
+  const heading = mode === null
     ? "**Permission settings**"
-    : `**${sentenceCase(projection.mode)} permissions**${projection.defaultPermission === null ? "" : ` · ${projection.defaultPermission} by default`}`
+    : `**Approvals ${modeLabel}**${projection.defaultPermission === null ? "" : ` · ${projection.defaultPermission} by default`}`
   return [
     heading,
     ...(projection.rememberedApprovals === null

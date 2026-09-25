@@ -73,7 +73,7 @@ fn deterministic_session_title(prompt: &str) -> String {
         .take(SESSION_TITLE_MAX_CHARS)
         .collect::<String>();
     if title.is_empty() {
-        "New session".to_owned()
+        "Untitled".to_owned()
     } else {
         title
     }

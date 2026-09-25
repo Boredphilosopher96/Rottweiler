@@ -101,7 +101,7 @@ fn read_only_session_listing_is_newest_first_and_bounded() {
                     id: id.to_owned(),
                     title: id.to_owned(),
                     updated_unix_ms: updated,
-                    cost_micros: 0,
+                    first_prompt: None,
                     turn_count: 0,
                 },
                 explicit_title: false,

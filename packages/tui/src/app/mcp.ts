@@ -1,6 +1,6 @@
 import { McpEnvironmentDraft, MCP_ENVIRONMENT_DRAFT_LIMITS } from "./mcp-draft"
 import {
-  FuzzyPickerRenderable,
+  PickerScreenRenderable,
   ListDetailRenderable,
   type TextPromptOptions,
   type PickerItem,
@@ -20,7 +20,7 @@ type McpServerAction =
   | { readonly kind: "remove"; readonly server: string }
 interface McpUiHost {
   readonly state: RottweilerState
-  readonly picker: FuzzyPickerRenderable<unknown>
+  readonly picker: PickerScreenRenderable<unknown>
   readonly browser: ListDetailRenderable<McpBrowserAction>
   readonly pickerController: PickerController
   readonly requests: ProjectionRequestBroker
@@ -30,6 +30,9 @@ interface McpUiHost {
   readonly statusHeight: number
   readonly composerDockHeight: number
   readonly vim: boolean
+  /** Approved extension panels can open from this session view. */
+  readonly panelsAvailable: boolean
+  openPanels(): void
   closePicker(): void
   modalOpened(): void
   projectError(code: string, message: string, retryable?: boolean): void
@@ -38,6 +41,7 @@ interface McpUiHost {
 export class McpUiController {
   readonly #host: McpUiHost
   #promptScope = {}
+  #catalogKind: McpCatalog["kind"] | null = null
   constructor(host: McpUiHost) { this.#host = host }
   get hasDraft(): boolean { return this.#mcpDraftName !== null }
   pickerClosed(): void {
@@ -48,7 +52,7 @@ export class McpUiController {
 
   #prompt(options: TextPromptOptions): void {
     const scope = this.#promptScope
-    this.#host.picker.openTextPrompt({ ...options, onSubmit: value => {
+    this.#host.pickerController.openTextPrompt({ ...options, onSubmit: value => {
       if (scope === this.#promptScope) options.onSubmit(value)
     } })
   }
@@ -71,6 +75,11 @@ export class McpUiController {
   }
 
   #activateMcpBrowserAction(action: McpBrowserAction): void {
+    if (action.kind === "panels") {
+      this.#host.closePicker()
+      this.#host.openPanels()
+      return
+    }
     if (action.kind === "retry") {
       this.#host.requests.command({ type: "list_mcp_servers" })
       this.#host.pickerController.refresh()
@@ -252,11 +261,15 @@ export class McpUiController {
           : this.#host.pickerController.query
         const preserveSelection = query === this.#host.pickerController.query
         this.#host.pickerController.query = query
+        const previousKind = this.#catalogKind
+        this.#catalogKind = catalog.kind
         const model = createMcpBrowserModel({
           catalog,
+          panels: this.#host.panelsAvailable,
           review: this.#host.state.mcpApprovalReview,
           query,
-          selectedId: this.#host.browser.visible && preserveSelection
+          // The loading surface lists only panels; settled inventory starts at its first row.
+          selectedId: this.#host.browser.visible && preserveSelection && catalog.kind === previousKind
             ? this.#host.browser.selectedId
             : null,
         })
@@ -272,10 +285,6 @@ export class McpUiController {
           }, {
             onQuery: () => this.#host.pickerController.refresh(),
             onSelection: () => this.#host.pickerController.refresh(),
-            onRetry: () => {
-              this.#host.requests.command({ type: "list_mcp_servers" })
-              this.#host.pickerController.refresh()
-            },
           })
           this.#host.modalOpened()
         }
@@ -325,8 +334,10 @@ export class McpUiController {
             value: { kind: "remove", server: server.name },
           },
         ]
+        // Dismissing an MCP sub-screen restores the retained inventory browser.
+        const back = () => this.#host.closePicker()
         this.#host.pickerController.show(
-          `MCP actions · ${server.name}`,
+          `MCP › ${server.name}`,
           items,
           (item) => {
             const action = item.value
@@ -342,6 +353,7 @@ export class McpUiController {
               this.#host.pickerController.refresh()
             }
           },
+          { primary: "run", back },
         )
         break
       }
@@ -353,10 +365,10 @@ export class McpUiController {
           break
         }
         this.#host.pickerController.show(
-          `Remove ${server}? This deletes its configuration`,
+          `MCP › Remove ${server}?`,
           [
-            { id: "mcp.remove.confirm", label: "Remove", description: "Disable if needed, then delete", value: true },
-            { id: "mcp.remove.cancel", label: "Cancel", description: "Keep this server", value: false },
+            { id: "mcp.remove.cancel", label: "Keep this server", description: "Nothing changes", value: false },
+            { id: "mcp.remove.confirm", label: "Remove", tone: "error", description: "Disable it if needed, then delete its configuration", value: true },
           ],
           (item) => {
             if (item.value) {
@@ -368,6 +380,10 @@ export class McpUiController {
             }
             this.#host.pickerController.refresh()
           },
+          { primary: "choose", back: () => {
+            this.#host.pickerController.kind = "mcpActions"
+            this.#host.pickerController.refresh()
+          } },
         )
         break
       }

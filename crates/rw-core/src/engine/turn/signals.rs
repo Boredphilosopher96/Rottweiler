@@ -90,6 +90,15 @@ pub(in crate::engine) async fn handle_turn_signal(
             let _ = respond.send(result);
         }
         TurnSignal::DurableEvent { kind, respond } => {
+            let child_result = match &kind {
+                PendingEvent::SubagentFinished { .. } => Some(None),
+                PendingEvent::ConversationContextCommitted {
+                    selection:
+                        rw_types::conversation_input::ContextSelection::ChildResult { source },
+                    ..
+                } => Some(Some(*source)),
+                _ => None,
+            };
             let compaction_accounting = match &kind {
                 PendingEvent::CompactionAttemptFinished {
                     summary_turn,
@@ -115,9 +124,15 @@ pub(in crate::engine) async fn handle_turn_signal(
             {
                 state.accounting.record(&accounting);
             }
+            match (&result, child_result) {
+                (Ok(meta), Some(None)) => state.child_results.finished(meta.sequence_id),
+                (Ok(_), Some(Some(source))) => state.child_results.delivered(source),
+                _ => {}
+            }
             let _ = respond.send(result.clone());
             result?;
         }
+        TurnSignal::WakeForChildResult { source } => state.child_results.request(source),
         TurnSignal::ToolProgress(slot) => {
             if state.running.as_ref().map(|running| running.id) != Some(slot.turn) {
                 return Ok(());
@@ -134,6 +149,27 @@ pub(in crate::engine) async fn handle_turn_signal(
                     },
                 });
             }
+        }
+        TurnSignal::ToolExecutionFinished {
+            turn,
+            id,
+            invocation_id,
+            is_error,
+        } => {
+            if state.running.as_ref().map(|running| running.id) != Some(turn) {
+                return Ok(());
+            }
+            let _ = events.send(RoutedEvent {
+                target: state.control.driver().clone(),
+                event: EngineEvent::ToolExecutionFinished {
+                    session_id: state.session_id.clone(),
+                    turn_id: wire_turn_id(turn),
+                    tool_call_id: ToolCallId(id),
+                    invocation_id,
+                    is_error,
+                    finished_at: state.event_clock.emitted_at(),
+                },
+            });
         }
         TurnSignal::SubagentProgress(slot) => {
             let Some(admitted) = slot.take() else {
@@ -383,6 +419,11 @@ pub(in crate::engine) async fn handle_turn_signal(
                 return Ok(());
             }
             let completed_successfully = outcome.status == AgentTurnStatus::Completed;
+            if outcome.status == AgentTurnStatus::Interrupted {
+                state.child_results.cancel();
+            } else {
+                state.child_results.turn_ended();
+            }
             state.control.finish(outcome.turn);
             state.running = None;
             active_turn.store(0, Ordering::Release);
@@ -509,7 +550,18 @@ pub(in crate::engine) enum TurnSignal {
         respond: oneshot::Sender<Result<EventMeta, AgentLoopError>>,
     },
     SubagentProgress(Arc<super::child_progress::ChildProgressSlot>),
+    /// A background child's committed result at `source` should wake an idle parent.
+    WakeForChildResult {
+        source: SequenceId,
+    },
     ToolProgress(Arc<ProgressSlot>),
+    /// Display-only: an invocation's execution ended before its ordered durable result.
+    ToolExecutionFinished {
+        turn: u64,
+        id: String,
+        invocation_id: rw_types::ToolInvocationId,
+        is_error: bool,
+    },
     CompactionProgress(CompactionProgress),
     Approval {
         request: PermissionRequest,

@@ -120,6 +120,7 @@ async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation()
     .await
     .expect("actor history");
     let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
         ui: std::sync::Arc::new(rw_core::ui::EmptyUiRegistry),
         ui_tool_source: std::sync::Arc::new(rw_core::ui::UnavailableUiToolSource),
         budget_session_id: session_id.clone(),
@@ -622,4 +623,158 @@ async fn hosted_resume_with_unavailable_concrete_model_keeps_control_plane_usabl
         .await
         .expect("resumed control plane query");
     drop(resumed);
+}
+
+fn catalog_with_window(model: &str, window: u64) -> rw_core::ModelCatalogSnapshot {
+    rw_core::ModelCatalogSnapshot {
+        aliases: vec![rw_types::ModelAliasDescriptor {
+            alias: rw_types::ModelAlias("coding".to_owned()),
+            candidates: vec![model.to_owned()],
+            current: false,
+        }],
+        models: vec![rw_types::ModelDescriptor {
+            id: model.to_owned(),
+            display_name: "Live Model".to_owned(),
+            provider: "openai".to_owned(),
+            aliases: Vec::new(),
+            current: false,
+            available: true,
+            status: None,
+            capabilities: rw_types::ModelCapabilities {
+                tool_calling: true,
+                vision: false,
+                thinking: true,
+                cache_behavior: rw_types::ModelCacheBehavior::ProviderManaged,
+                max_context_tokens: Some(window),
+                max_output_tokens: Some(32_000),
+            },
+        }],
+        providers: Vec::new(),
+        cached: false,
+        truncated: false,
+    }
+}
+
+#[tokio::test]
+async fn lazy_selection_reports_the_catalog_context_window_before_its_runtime_exists() {
+    let model = RecomposableHostedModel::new(
+        super::unavailable_hosted_model("openai/live-model"),
+        Arc::new(super::FixedProviderCatalogSource(catalog_with_window(
+            "openai/live-model",
+            400_000,
+        ))),
+        super::unused_hosted_activator(),
+    );
+    assert_eq!(
+        model
+            .context_metadata("openai/live-model")
+            .max_context_tokens,
+        None,
+        "no catalog row has been observed yet"
+    );
+
+    model.discover().await.expect("catalog discovery");
+
+    let metadata = model.context_metadata("openai/live-model");
+    assert_eq!(metadata.max_context_tokens, Some(400_000));
+    assert_eq!(metadata.max_output_tokens, Some(32_000));
+    assert_eq!(
+        model.context_metadata("coding").max_context_tokens,
+        Some(400_000),
+        "a configured alias resolves through its primary candidate"
+    );
+    assert_eq!(
+        model.context_metadata("openai/other").max_context_tokens,
+        None
+    );
+}
+
+#[tokio::test]
+async fn restarted_lazy_selection_seeds_its_context_window_from_the_durable_catalog() {
+    let storage = tempdir().expect("storage");
+    let cache = storage.path().join("model-catalog.json");
+    rw_store::catalog_cache::store_model_catalog_cache(
+        &cache,
+        &catalog_with_window("openai/live-model", 272_000),
+    )
+    .expect("cache written");
+    let model = RecomposableHostedModel::new(
+        super::unavailable_hosted_model("openai/live-model"),
+        Arc::new(super::QuickCatalogSource(false)),
+        super::unused_hosted_activator(),
+    )
+    .with_catalog_cache(cache);
+
+    assert_eq!(
+        model
+            .context_metadata("openai/live-model")
+            .max_context_tokens,
+        Some(272_000)
+    );
+}
+
+/// A built runtime whose static composition knows only bundled data for a
+/// different namespace, as a subscription route borrowing public API limits.
+struct BundledWindowModel(Arc<dyn ModelDriver>);
+
+#[async_trait::async_trait]
+impl ModelDriver for BundledWindowModel {
+    async fn settle_effects(&self) -> std::result::Result<(), rw_core::AgentLoopError> {
+        self.0.settle_effects().await
+    }
+
+    fn stream(
+        &self,
+        alias: &str,
+        request: rw_providers::ProviderRequest,
+        invocation: rw_core::provider_admission::ProviderInvocation,
+    ) -> std::result::Result<rw_providers::BoxEventStream, rw_core::AgentLoopError> {
+        self.0.stream(alias, request, invocation)
+    }
+
+    fn context_metadata(&self, _alias: &str) -> rw_core::ModelContextMetadata {
+        rw_core::ModelContextMetadata {
+            max_context_tokens: Some(1_050_000),
+            max_output_tokens: Some(128_000),
+            cache_breakpoints: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_reported_window_wins_before_and_after_the_runtime_is_built() {
+    let storage = tempdir().expect("storage");
+    let cache = storage.path().join("model-catalog.json");
+    rw_store::catalog_cache::store_model_catalog_cache(
+        &cache,
+        &catalog_with_window("openai_codex/gpt-5.6-terra", 272_000),
+    )
+    .expect("cache written");
+    let lazy = RecomposableHostedModel::new(
+        super::unavailable_hosted_model("openai_codex/gpt-5.6-terra"),
+        Arc::new(super::QuickCatalogSource(false)),
+        super::unused_hosted_activator(),
+    )
+    .with_catalog_cache(cache.clone());
+    let built = RecomposableHostedModel::new(
+        Arc::new(BundledWindowModel(super::unavailable_hosted_model(
+            "openai_codex/gpt-5.6-terra",
+        ))),
+        Arc::new(super::QuickCatalogSource(false)),
+        super::unused_hosted_activator(),
+    )
+    .with_catalog_cache(cache);
+
+    let before = lazy.context_metadata("openai_codex/gpt-5.6-terra");
+    let after = built.context_metadata("openai_codex/gpt-5.6-terra");
+    assert_eq!(before.max_context_tokens, Some(272_000));
+    assert_eq!(after.max_context_tokens, Some(272_000));
+    assert_eq!(after.max_output_tokens, Some(32_000));
+
+    let uncataloged = built.context_metadata("openai_codex/unlisted");
+    assert_eq!(
+        uncataloged.max_context_tokens,
+        Some(1_050_000),
+        "runtime metadata still applies when no catalog row exists"
+    );
 }

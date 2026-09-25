@@ -56,6 +56,7 @@ impl PermissionApprover for ChangeWorkspaceThenApprove {
 
 fn request(command: &str, capabilities: Vec<ToolCapability>) -> PermissionRequest {
     PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "call".to_owned(),
         tool_name: "bash".to_owned(),
@@ -67,6 +68,7 @@ fn request(command: &str, capabilities: Vec<ToolCapability>) -> PermissionReques
 
 fn bash_request(command: &str, cwd: &Path) -> PermissionRequest {
     PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "exact-bash".to_owned(),
         tool_name: "bash".to_owned(),
@@ -154,3 +156,6 @@ fn independent_project_store(path: &Path) -> ProjectApprovalStore {
 mod identity;
 mod persistence;
 mod policy;
+mod pre_approval;
+mod project_rules;
+mod reasons;

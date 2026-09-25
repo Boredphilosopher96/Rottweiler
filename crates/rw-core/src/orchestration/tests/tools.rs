@@ -83,7 +83,7 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
         .expect("tool context")
         .with_session_id(SessionId("parent".to_owned()))
         .with_model_alias("openai_codex/gpt-5.6-sol")
-        .with_subagent_event_sink(sink.clone());
+        .with_background_subagent_event_sink(sink.clone());
     let gate = crate::PermissionGate::from_config(crate::PermissionConfig {
         default: PermissionDecision::Ask,
         rules: Vec::new(),
@@ -97,6 +97,7 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
             "task": "delay:1",
             "agent": agent,
             "isolation": isolation,
+            "background": false,
         });
         let capabilities = tool
             .invocation_capabilities(&input)
@@ -108,6 +109,7 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
             "the parent control call must not claim the child's tool authority"
         );
         let permission = crate::PermissionRequest {
+            prompt_reason: None,
             invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
             id: format!("spawn-{agent}"),
             tool_name: "spawn_agent".to_owned(),
@@ -120,9 +122,12 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
             crate::PermissionOutcome::Allowed,
             "subagent control must bypass the parent approval modal"
         );
-        tool.execute(&context, input)
+        let finished = tool
+            .execute(&context, input)
             .await
             .expect("built-in child uses parent model");
+        assert_eq!(finished.data["status"], "completed");
+        assert!(finished.content.contains("<child-agent-result"));
     }
 
     assert_eq!(approver.0.load(Ordering::SeqCst), 0);
@@ -150,18 +155,27 @@ async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builti
 #[test]
 fn action_shapes_are_rejected_at_the_input_boundary() {
     for value in [
-        json!({"action":"spawn","task":"x","subagent_id":"child"}),
-        json!({"action":"follow_up","subagent_id":"child","follow_up":"x","agent":"general"}),
-        json!({"action":"cancel","subagent_id":"child","follow_up":"x"}),
-        json!({"action":"close","subagent_id":"child","isolation":"worktree"}),
+        json!({"action":"spawn","task":"x","id":"child"}),
+        json!({"action":"start","task":"x"}),
+        json!({"action":"follow_up","subagent_id":"child","follow_up":"x"}),
+        json!({"action":"message","id":"child","message":"x","agent":"general"}),
+        json!({"action":"cancel","id":"child","message":"x"}),
+        json!({"action":"close","id":"child","isolation":"worktree"}),
+        json!({"action":"wait","id":"child"}),
     ] {
         assert!(serde_json::from_value::<SpawnAgentAction>(value).is_err());
     }
-    let follow_up: SpawnAgentAction = serde_json::from_value(json!({
-        "action":"follow_up", "subagent_id":"child", "follow_up":"continue"
+    let message: SpawnAgentAction = serde_json::from_value(json!({
+        "action":"message", "id":"child", "message":"continue"
     }))
-    .expect("explicit follow-up action");
-    assert!(matches!(follow_up, SpawnAgentAction::FollowUp { .. }));
+    .expect("explicit message action");
+    assert!(matches!(
+        message,
+        SpawnAgentAction::Message {
+            background: true,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -234,18 +248,19 @@ fn result_schema_round_trips_cost_and_usage() {
 fn missing_subagent_action_is_rejected() {
     for input in [
         json!({"task":"inspect","agent":"explore"}),
-        json!({"subagent_id":"child","follow_up":"continue"}),
+        json!({"id":"child","message":"continue"}),
     ] {
         assert!(serde_json::from_value::<SpawnAgentAction>(input).is_err());
     }
 }
 
 #[test]
-fn every_subagent_schema_variant_requires_its_action_and_own_fields() {
+fn every_subagent_schema_variant_is_self_describing_and_requires_its_action() {
     let schema =
         serde_json::to_value(schemars::schema_for!(SpawnAgentAction)).expect("action schema");
     let variants = schema["oneOf"].as_array().expect("action variants");
-    assert_eq!(variants.len(), 4);
+    assert_eq!(variants.len(), 6);
+    let mut actions = Vec::new();
     for variant in variants {
         assert!(
             variant["required"]
@@ -254,20 +269,79 @@ fn every_subagent_schema_variant_requires_its_action_and_own_fields() {
                 .contains(&json!("action"))
         );
         assert_eq!(variant["additionalProperties"], json!(false));
+        assert!(
+            variant["description"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "every action explains itself: {variant}"
+        );
+        for (name, property) in variant["properties"].as_object().expect("properties") {
+            if name == "action" {
+                actions.push(property["const"].as_str().expect("action tag").to_owned());
+                continue;
+            }
+            assert!(
+                property["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "field `{name}` explains itself"
+            );
+        }
     }
+    actions.sort();
+    assert_eq!(
+        actions,
+        ["cancel", "close", "list", "message", "spawn", "wait"]
+    );
     let spawn =
         serde_json::from_value::<SpawnAgentAction>(json!({"action":"spawn","task":"inspect"}))
             .expect("spawn defaults");
-    assert!(
-        matches!(spawn, SpawnAgentAction::Spawn { agent, isolation: SubagentIsolation::Worktree, .. } if agent == "general")
-    );
+    assert!(matches!(
+        spawn,
+        SpawnAgentAction::Spawn { agent, isolation: SubagentIsolation::Worktree, background: true, .. }
+            if agent == "general"
+    ));
     for action in ["cancel", "close"] {
         assert!(
-            serde_json::from_value::<SpawnAgentAction>(
-                json!({"action":action,"subagent_id":"child"})
-            )
-            .is_ok()
+            serde_json::from_value::<SpawnAgentAction>(json!({"action":action,"id":"child"}))
+                .is_ok()
         );
         assert!(serde_json::from_value::<SpawnAgentAction>(json!({"action":action})).is_err());
     }
+}
+
+#[tokio::test]
+async fn parent_shutdown_attempts_every_child_when_one_suspension_fails() {
+    let factory = Arc::new(FakeFactory {
+        fail_close: true,
+        ..FakeFactory::default()
+    });
+    let owner = orchestrator(SubagentLimits::default(), factory.clone());
+    let observer: Arc<dyn SubagentObserver> = Arc::new(RecordingObserver::default());
+    for _ in 0..2 {
+        owner
+            .start(
+                SessionId("parent".into()),
+                request("delay:10000"),
+                observer.clone(),
+                CancellationToken::default(),
+            )
+            .await
+            .expect("child");
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            owner.suspend_parent(&SessionId("parent".into()))
+        )
+        .await
+        .expect("all children settle promptly")
+        .is_err()
+    );
+    assert_eq!(
+        factory.suspended.load(Ordering::SeqCst),
+        2,
+        "a failed sibling cannot skip remaining cleanup"
+    );
+    assert_eq!(factory.active.load(Ordering::SeqCst), 0);
 }

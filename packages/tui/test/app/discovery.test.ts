@@ -7,6 +7,7 @@ import {
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select, statusText } from "../picker-screen"
 
 describe("Rottweiler discovery", () => {
   let renderer: TestRenderer | undefined
@@ -19,15 +20,17 @@ describe("Rottweiler discovery", () => {
     { discovered: false, catalogFirst: true },
     { discovered: true, catalogFirst: false },
     { discovered: true, catalogFirst: true },
-  ])("keeps composer focus for a configured provider across asynchronous projections (%p)", async ({ discovered, catalogFirst }) => {
+  ])("resumes setup for a configured provider with no selected model across asynchronous projections (%p)", async ({ discovered, catalogFirst }) => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
+    const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
       sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
       },
+      onCommand(command) { emitted.push(command); return { type: "accepted" } },
     })
     renderer.root.add(app)
 
@@ -57,9 +60,135 @@ describe("Rottweiler discovery", () => {
       app.handleEvent(event)
       await Promise.resolve()
     }
-    expect(app.picker.visible).toBeFalse()
+    if (!discovered) {
+      // A cached catalog cannot prove the provider is unusable; setup waits
+      // for the live catalog instead of interrupting with a picker.
+      expect(app.picker.visible).toBeFalse()
+      expect(emitted).toContainEqual(expect.objectContaining({ type: "list_models", refresh: true }))
+      const refresh = emitted.findLast(command => command.type === "list_models")
+      app.handleEvent({ ...catalog, meta: { ...catalog.meta, request_id: refresh?.meta.request_id ?? "" }, cached: false })
+      await Promise.resolve()
+    }
+    expect(app.picker.visible).toBeTrue()
+    app.closePicker()
     await setup.mockInput.typeText("composer owns this")
     expect(app.composer.value).toBe("composer owns this")
+  })
+
+  test("a fresh session selects the first available tool-capable model of a connected provider", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      initialState: { ...createInitialState(), model: "fast", connection: { phase: "connected", attempt: 0, error: null, gap: null } },
+      onCommand(command) { emitted.push(command); return { type: "accepted" } },
+    })
+    renderer.root.add(app)
+    const meta = (request_id: string) => ({ protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id, emitted_at: "2026-01-01T00:00:00Z" })
+    const capabilities = (tool_calling: boolean) => ({ tool_calling, vision: false, thinking: true, cache_behavior: "provider_managed" as const, max_context_tokens: "272000", max_output_tokens: null })
+    const provider = { name: "openai_codex", auth_kind: "oauth" as const, next_action: "select_models" as const, configured: true, authenticated: true, reachable: true, model_count: 3 }
+    const catalog = (cached: boolean) => ({
+      type: "models_listed", meta: meta(cached ? "cached" : "live"), aliases: [], cached, truncated: false, providers: [provider],
+      models: [
+        { id: "openai_codex/gpt-image", display_name: "GPT Image", provider: "openai_codex", aliases: [], current: false, available: true, capabilities: capabilities(false) },
+        { id: "openai_codex/gpt-5.6-terra", display_name: "GPT-5.6-Terra", provider: "openai_codex", aliases: [], current: false, available: true, capabilities: capabilities(true) },
+        { id: "openai_codex/gpt-5.6-sol", display_name: "GPT-5.6-Sol", provider: "openai_codex", aliases: [], current: false, available: true, capabilities: capabilities(true) },
+      ],
+    }) satisfies EngineEvent
+    app.handleEvent({ type: "sessions_listed", meta: meta("sessions"), sessions: [] })
+    app.handleEvent(catalog(true))
+    expect(app.statusLine.plainText).toContain("loading models")
+    expect(app.statusLine.plainText).not.toContain("fast")
+    expect(emitted.some(command => command.type === "switch_model")).toBeFalse()
+    const refresh = emitted.findLast(command => command.type === "list_models")
+    expect(refresh).toMatchObject({ refresh: true })
+    app.handleEvent({ ...catalog(false), meta: meta(refresh?.meta.request_id ?? "") })
+    expect(emitted).toContainEqual(expect.objectContaining({ type: "switch_model", model: "openai_codex/gpt-5.6-terra", provider: "openai_codex" }))
+    expect(app.picker.visible).toBeFalse()
+    app.handleEvent({ type: "model_changed", meta: { protocol_version: PROTOCOL_VERSION, session_id: "session-local", sequence_id: "1", emitted_at: "2026-01-01T00:00:02Z", caused_by: null }, model: "openai_codex/gpt-5.6-terra", provider: "openai_codex" } as EngineEvent)
+    expect(app.statusLine.plainText).toContain("GPT-5.6-Terra")
+    expect(app.statusLine.plainText).not.toContain("openai_codex/")
+  })
+
+  test.each([true, false])("a failed live refresh at launch falls back to the cached catalog (cached model available: %p)", async (cachedAvailable) => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      initialState: { ...createInitialState(), connection: { phase: "connected", attempt: 0, error: null, gap: null } },
+      onCommand(command) {
+        emitted.push(command)
+        return command.type === "list_models" && command.refresh
+          ? { type: "rejected", error: { category: "provider", code: "catalog_unavailable", message: "model catalog is offline", retryable: true } }
+          : { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    const meta = (request_id: string) => ({ protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id, emitted_at: "2026-01-01T00:00:00Z" })
+    const provider = { name: "openai_codex", auth_kind: "oauth" as const, next_action: "select_models" as const, configured: true, authenticated: true, reachable: true, model_count: 1 }
+    app.handleEvent({ type: "sessions_listed", meta: meta("sessions"), sessions: [] })
+    app.handleEvent({
+      type: "models_listed", meta: meta("cached"), aliases: [], cached: true, truncated: false, providers: [provider],
+      models: [{ id: "openai_codex/gpt-5.6-terra", display_name: "GPT-5.6-Terra", provider: "openai_codex", aliases: [], current: false, available: cachedAvailable,
+        capabilities: { tool_calling: true, vision: false, thinking: true, cache_behavior: "provider_managed", max_context_tokens: "272000", max_output_tokens: null } }],
+    })
+    expect(emitted).toContainEqual(expect.objectContaining({ type: "list_models", refresh: true }))
+    await Bun.sleep(0)
+    if (cachedAvailable) {
+      expect(emitted).toContainEqual(expect.objectContaining({ type: "switch_model", model: "openai_codex/gpt-5.6-terra" }))
+      expect(app.picker.visible).toBeFalse()
+    } else {
+      expect(emitted.some(command => command.type === "switch_model")).toBeFalse()
+      expect(app.picker.visible).toBeTrue()
+      expect(options(app.picker).some(option => option.name.includes("Retry loading models"))).toBeTrue()
+    }
+  })
+
+  test("keeps unavailable controls discoverable without dispatching them", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      initialState: { ...createInitialState(), connection: { phase: "connected", attempt: 0, error: null, gap: null } },
+      onCommand(command) { emitted.push(command); return { type: "accepted" } },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+    const reply = (reason: string | null) => {
+      const request = emitted.findLast(command => command.type === "list_commands")
+      if (request?.type !== "list_commands") throw new Error("missing catalog request")
+      app.handleEvent({
+        type: "command_descriptors_listed",
+        meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui", request_id: request.meta.request_id, emitted_at: "2026-01-01T00:00:00Z" },
+        session_id: "session-local", commands: [], truncated: false,
+        available_actions: [
+          { action: "compact", unavailable_reason: reason },
+          { action: "switch_mode", unavailable_reason: reason },
+          { action: "switch_model", unavailable_reason: reason },
+          { action: "rewind", unavailable_reason: reason },
+          { action: "review", unavailable_reason: reason },
+          { action: "fork", unavailable_reason: reason },
+          { action: "add_workspace_root", unavailable_reason: reason },
+        ],
+      })
+    }
+    reply("Stop the current turn or wait for it to finish.")
+    for (const id of ["cmd.compact", "cmd.mode", "cmd.model", "cmd.rewind", "cmd.review"]) {
+      app.commandPalette.selectById(id)
+      expect(app.commandPalette.activateSelected()).toBeFalse()
+      expect(app.commandPalette.detail.plainText).toContain("Stop the current turn")
+    }
+    expect(emitted.filter(command => command.type === "send_message")).toHaveLength(0)
+    app.closePicker()
+    app.openCommandPicker()
+    reply(null)
+    app.commandPalette.selectById("cmd.compact")
+    expect(app.commandPalette.activateSelected()).toBeTrue()
+    await Bun.sleep(0)
+    expect(emitted).toContainEqual(expect.objectContaining({ type: "send_message", content: "/compact" }))
   })
 
   test("searches settings actions and never one-clicks destructive choices", async () => {
@@ -71,7 +200,7 @@ describe("Rottweiler discovery", () => {
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
-        commands: [{ source: "builtin", name: "mcp", description: "Manage MCP servers", usage: "[status]" }],
+        commands: [{ source: "builtin", scope: null, name: "mcp", description: "Manage MCP servers", usage: "[status]" }],
       },
       onCommand(command) {
         emitted.push(command)
@@ -81,23 +210,23 @@ describe("Rottweiler discovery", () => {
     renderer.root.add(app)
     app.openCommandPicker()
     await setup.mockInput.typeText("mcp")
-    expect(app.commandPalette.itemIds).toContain("mcp.manage")
+    expect(app.commandPalette.itemIds).toContain("cmd.mcp")
 
     app.commandPalette.input.value = "folder trust"
-    expect(app.commandPalette.itemIds).toContain("trust.manage")
-    app.commandPalette.selectById("trust.manage")
-    app.commandPalette.activateSelected()
-    expect(app.picker.title).toContain("Folder trust")
-    const grantIndex = app.picker.select.options.findIndex(
+    expect(app.commandPalette.itemIds[0]).toBe("cmd.permissions")
+    app.closePicker()
+    app.openTrustPicker()
+    expect(app.picker.screenTitle).toContain("Folder trust")
+    const grantIndex = options(app.picker).findIndex(
       (option) => option.value === "trust.grant",
     )
-    app.picker.select.setSelectedIndex(grantIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, grantIndex)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(app.composer.value).toBe("")
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "send_message",
-      content: "/trust grant",
+      content: "/permissions trust grant",
     }))
   })
 
@@ -110,8 +239,8 @@ describe("Rottweiler discovery", () => {
       initialState: {
         ...createInitialState(),
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
-        commands: [{ source: "builtin", name: "first", description: "First", usage: "" }],
-        models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: false, thinking: false, toolCalling: true }],
+        commands: [{ source: "builtin", scope: null, name: "first", description: "First", usage: "" }],
+        models: [{ id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: false, thinking: false, toolCalling: true, contextTokens: null }],
       },
       onCommand(command) {
         emitted.push(command)
@@ -124,10 +253,10 @@ describe("Rottweiler discovery", () => {
     const firstCatalogRequest = emitted.find((command) => command.type === "list_commands")
     expect(firstCatalogRequest?.type).toBe("list_commands")
     app.handleEvent({
-      type: "command_descriptors_listed",
+      type: "command_descriptors_listed", available_actions: [],
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: firstCatalogRequest!.meta.request_id, emitted_at: "2026-01-01T00:00:00Z" },
       session_id: "session-local",
-      commands: [{ source: "builtin", name: "second", description: "Second", usage: "" }],
+      commands: [{ source: "builtin", scope: null, name: "second", description: "Second", usage: "" }],
       truncated: false,
     })
     app.closePicker()
@@ -160,10 +289,10 @@ describe("Rottweiler discovery", () => {
     expect(app.state.mode).toBe("execute")
     app.closePicker()
     app.openModePicker()
-    const auditIndex = app.picker.select.options.findIndex((option) => option.value === "mode:audit")
+    const auditIndex = options(app.picker).findIndex((option) => option.value === "mode:audit")
     expect(auditIndex).toBeGreaterThanOrEqual(0)
-    app.picker.select.setSelectedIndex(auditIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, auditIndex)
+    app.picker.activateSelected()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "switch_mode",
       mode: "audit",
@@ -175,8 +304,9 @@ describe("Rottweiler discovery", () => {
     })
     expect(app.statusLine.plainText).toContain("AUDIT")
     app.openModePicker()
-    const currentAudit = app.picker.select.options.find((option) => option.value === "mode:audit")
-    expect(currentAudit?.name).toBe("● Audit")
+    const currentAudit = options(app.picker).find((option) => option.value === "mode:audit")
+    expect(currentAudit?.name).toBe("Audit")
+    expect(app.picker.selectedItem).toMatchObject({ id: "mode:audit", marker: "●" })
     app.closePicker()
 
     app.openModelPicker()
@@ -226,7 +356,7 @@ describe("Rottweiler discovery", () => {
         model_count: 0,
       }],
     })
-    expect(app.picker.title).toContain("Welcome to Rottweiler · connect a provider to start")
+    expect(app.picker.screenTitle).toContain("WELCOME   connect a provider to start")
 
     app.closePicker()
     app.handleEvent({ aliases: [], cached: false, truncated: false,
@@ -347,7 +477,7 @@ describe("Rottweiler discovery", () => {
     expect(app.picker.visible).toBeFalse()
   })
 
-  test("auto-selects the sole available model after provider activation", async () => {
+  test.each([{ count: 1, preserve: false }, { count: 5, preserve: false }, { count: 5, preserve: true }])("selects the first activation model while preserving an existing selection (%p)", async ({ count, preserve }) => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
@@ -355,6 +485,7 @@ describe("Rottweiler discovery", () => {
       sessionReader: emptySessionReader,
       initialState: {
         ...createInitialState(),
+        model: preserve ? "openai/model-1" : null,
         connection: { phase: "connected", attempt: 0, error: null, gap: null },
       },
       onCommand(command) {
@@ -377,15 +508,15 @@ describe("Rottweiler discovery", () => {
     app.handleEvent({ aliases: [], cached: false, truncated: false,
       type: "models_listed",
       meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: refresh!.meta.request_id, emitted_at: "2026-01-01T00:00:01Z" },
-      models: [{
-        id: "openai/gpt-5",
+      models: Array.from({ length: count }, (_, index) => ({
+        id: index === 0 ? "openai/gpt-5" : `openai/model-${index}`,
         display_name: "GPT-5",
         provider: "openai",
         aliases: ["fast"],
-        current: false,
+        current: preserve && index === 1,
         available: true,
         capabilities: { vision: true, thinking: true, tool_calling: true, cache_behavior: "none", max_context_tokens: null, max_output_tokens: null },
-      }],
+      })),
       providers: [{
         name: "openai",
         auth_kind: "api_key",
@@ -396,6 +527,11 @@ describe("Rottweiler discovery", () => {
         model_count: 1,
       }],
     })
+    if (preserve) {
+      expect(emitted.some(command => command.type === "switch_model")).toBeFalse()
+      expect(app.state.model).toBe("openai/model-1")
+      return
+    }
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "switch_model",
       model: "openai/gpt-5",
@@ -424,7 +560,7 @@ describe("Rottweiler discovery", () => {
     const request = emitted.find((command) => command.type === "list_commands")
     if (request?.type !== "list_commands") throw new Error("missing command catalog request")
     const event = {
-      type: "command_descriptors_listed",
+      type: "command_descriptors_listed", available_actions: [],
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "tui",
@@ -432,17 +568,17 @@ describe("Rottweiler discovery", () => {
         emitted_at: "2026-01-01T00:00:00Z",
       },
       session_id: "session-local",
-      commands: [{ source: "builtin", name: "fixture", description: "Fixture", usage: "/fixture" }],
+      commands: [{ source: "builtin", scope: null, name: "fixture", description: "Fixture", usage: "/fixture" }],
       truncated: true,
     } satisfies EngineEvent
     app.handleEvent(event)
     app.handleEvent(event)
     expect(app.state.errors.filter((error) => error.code === "command_catalog_truncated")).toHaveLength(1)
     expect(app.banner.plainText).toContain("command catalog is too large")
-    expect(app.picker.select.options.map((option) => option.value)).not.toContain("commands.truncated")
+    expect(options(app.picker).map((option) => option.value)).not.toContain("commands.truncated")
     app.closePicker()
     await setup.mockInput.typeText("/")
-    expect(app.picker.title).toContain("results truncated")
+    expect(app.slashPopup.visible).toBeTrue()
   })
 
   test("keeps local slash commands usable while a rejected live catalog is loud and retryable", async () => {
@@ -470,15 +606,12 @@ describe("Rottweiler discovery", () => {
     await setup.mockInput.typeText("/")
     await Bun.sleep(0)
 
-    expect(app.picker.select.options.map((option) => option.value)).toContain("commands.error")
-    expect(app.picker.select.options.map((option) => option.value)).toContain("providers")
-    expect(app.picker.select.options[0]?.description).toContain(
-      "driver lease rejected the command catalog",
-    )
+    expect(app.slashPopup.itemIds).toContain("cmd.model")
     expect(app.banner.plainText).toContain("couldn't load commands")
-
-    app.picker.select.setSelectedIndex(0)
-    app.picker.select.selectCurrent()
+    app.composer.value = ""
+    app.openCommandPicker()
+    app.commandPalette.selectById("ext.retry")
+    app.commandPalette.activateSelected()
     await Bun.sleep(0)
     expect(attempts).toBe(2)
   })
@@ -547,14 +680,14 @@ describe("Rottweiler discovery", () => {
 
     app.openModelPicker()
     await Bun.sleep(0)
-    expect(app.picker.select.options[0]?.value).toBe("models.error")
-    expect(app.picker.select.options[0]?.description).toContain("provider discovery timed out")
+    expect(options(app.picker)[0]?.value).toBe("models.error")
+    expect(options(app.picker)[0]?.description).toContain("provider discovery timed out")
 
     app.closePicker()
     app.openProviderPicker()
     await Bun.sleep(0)
-    expect(app.picker.select.options[0]?.value).toBe("providers.error")
-    expect(app.picker.select.options[0]?.description).toContain("provider discovery timed out")
+    expect(options(app.picker)[0]?.value).toBe("providers.error")
+    expect(options(app.picker)[0]?.description).toContain("provider discovery timed out")
   })
 
   test("presents model and provider loading as non-selectable picker status", async () => {
@@ -564,18 +697,18 @@ describe("Rottweiler discovery", () => {
     renderer.root.add(app)
 
     app.openProviderPicker()
-    expect(app.picker.status.plainText).toContain("Loading provider connections")
-    expect(app.picker.status.visible).toBeTrue()
-    expect(app.picker.select.visible).toBeFalse()
-    expect(app.picker.select.options).toHaveLength(0)
-    app.picker.select.selectCurrent()
+    expect(statusText(app.picker)).toContain("Loading provider connections")
+    expect((app.picker.mode === "status")).toBeTrue()
+    expect((app.picker.mode === "list")).toBeFalse()
+    expect(options(app.picker)).toHaveLength(0)
+    app.picker.activateSelected()
     expect(app.state.errors).toHaveLength(0)
 
     app.openModelPicker()
-    expect(app.picker.status.plainText).toContain("Loading available models")
-    expect(app.picker.select.visible).toBeFalse()
-    expect(app.picker.select.options).toHaveLength(0)
-    app.picker.select.selectCurrent()
+    expect(statusText(app.picker)).toContain("Loading available models")
+    expect((app.picker.mode === "list")).toBeFalse()
+    expect(options(app.picker)).toHaveLength(0)
+    app.picker.activateSelected()
     expect(app.state.errors).toHaveLength(0)
   })
 
@@ -609,8 +742,8 @@ describe("Rottweiler discovery", () => {
       matches: [],
       truncated: false,
     })
-    expect(app.picker.status.plainText).toContain("No matching files")
-    expect(app.picker.select.visible).toBeFalse()
+    expect(statusText(app.picker)).toContain("No matching files")
+    expect((app.picker.mode === "list")).toBeFalse()
 
     app.openSessionPicker()
     const sessions = commands.at(-1)
@@ -625,7 +758,9 @@ describe("Rottweiler discovery", () => {
       },
       sessions: [],
     })
-    expect(app.picker.select.options.map((option) => option.name)).toEqual(["New session"])
-    expect(app.picker.select.visible).toBeTrue()
+    expect(options(app.picker)).toEqual([])
+    expect((app.picker.mode === "list")).toBeTrue()
+    expect(statusText(app.picker)).toContain("ctrl+n starts one in this workspace")
+    expect(app.picker.footer.plainText).toBe("ctrl+x export · ctrl+n new · esc close")
   })
 })

@@ -173,6 +173,41 @@ impl SubagentLifecycleView {
             .binding(subagent)?
             .and_then(|binding| binding.latest_artifact))
     }
+    /// Reads the effective terminal result directly from its canonical source.
+    /// # Errors
+    /// Rejects stale or mismatched child identities.
+    pub fn completed_result(
+        &self,
+        child: &SubagentId,
+    ) -> Result<Option<rw_types::SubagentResult>, RecoveryError> {
+        let Some(binding) = self.binding(child)? else {
+            return Ok(None);
+        };
+        let Some(sequence) = binding.terminal else {
+            return Ok(None);
+        };
+        let event = SourceReader {
+            source: &self.source,
+            events: VecDeque::new(),
+        }
+        .event(sequence)?;
+        let EngineEvent::SubagentFinished {
+            subagent_id,
+            result,
+            ..
+        } = event
+        else {
+            return Err(RecoveryError::Invalid("child terminal source"));
+        };
+        if &subagent_id != child
+            || result.subagent_id != *child
+            || result.session_id != binding.session_id
+        {
+            return Err(RecoveryError::Invalid("child terminal identity"));
+        }
+        Ok(Some(result))
+    }
+
     /// Hash complete typed result contents without allocating a serialized copy.
     /// # Errors
     /// Rejects invalid result serialization.

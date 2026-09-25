@@ -7,6 +7,7 @@ import {
 import type { ClientCommand } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select } from "../picker-screen"
 
 describe("Rottweiler models", () => {
   let renderer: TestRenderer | undefined
@@ -24,8 +25,8 @@ describe("Rottweiler models", () => {
       initialState: {
         ...createInitialState(),
         models: [
-          { id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true },
-          { id: "copilot/steady", displayName: "steady", provider: "copilot", aliases: ["steady"], current: false, available: true, status: null, vision: false, thinking: true, toolCalling: true },
+          { id: "openai/fast", displayName: "fast", provider: "openai", aliases: ["fast"], current: false, available: true, status: null, vision: true, thinking: true, toolCalling: true, contextTokens: null },
+          { id: "copilot/steady", displayName: "steady", provider: "copilot", aliases: ["steady"], current: false, available: true, status: null, vision: false, thinking: true, toolCalling: true, contextTokens: null },
         ],
         providers: [
           { name: "copilot", authKind: "device_flow", nextAction: "select_models", configured: true, authenticated: true, reachable: true, modelCount: 1, status: null },
@@ -41,17 +42,20 @@ describe("Rottweiler models", () => {
 
     app.composer.value = "/providers"
     expect(await app.composer.submit()).toBeTrue()
-    expect(app.picker.title).toContain("Providers")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual(["copilot", "openai"])
-    app.picker.select.setSelectedIndex(0)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Models · copilot")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
-      "models.section.models",
-      "copilot/steady",
-    ])
-    app.picker.select.setSelectedIndex(1)
-    app.picker.select.selectCurrent()
+    expect(app.picker.screenTitle).toContain("MODELS")
+    expect(options(app.picker).map((option) => option.value)).not.toContain("models.connect")
+    expect(app.picker.footer.plainText).toContain("ctrl+n connect provider")
+    setup.mockInput.pressKey("n", { ctrl: true })
+    expect(app.picker.screenTitle).toContain("CONNECT A PROVIDER")
+    expect(app.picker.sectionLabels).toEqual(["Providers", "Custom"])
+    expect(options(app.picker).map((option) => option.value)).toEqual(["copilot", "openai", "providers.compatible"])
+    select(app.picker, 0)
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toContain("MODELS › Copilot")
+    expect(options(app.picker).map((option) => option.value)).toEqual(["copilot/steady"])
+    expect(app.picker.sectionLabels).toEqual(["Copilot"])
+    select(app.picker, 0)
+    app.picker.activateSelected()
     expect(commands).toContainEqual(expect.objectContaining({
       type: "switch_model",
       model: "copilot/steady",
@@ -73,12 +77,9 @@ describe("Rottweiler models", () => {
 
     app.composer.value = "/models"
     expect(await app.composer.submit()).toBeTrue()
-    expect(app.picker.title).toContain("Models")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
-      "models.section.models",
-      "openai/fast",
-      "copilot/steady",
-    ])
+    expect(app.picker.screenTitle).toContain("MODELS")
+    expect(app.picker.sectionLabels).toEqual(["OpenAI API", "Copilot"])
+    expect(options(app.picker).map((option) => option.value)).toEqual(["openai/fast", "copilot/steady"])
   })
 
   test("keeps failover aliases distinct from pinned model routes", async () => {
@@ -100,7 +101,7 @@ describe("Rottweiler models", () => {
             status: null,
             vision: true,
             thinking: true,
-            toolCalling: true,
+            toolCalling: true, contextTokens: null,
           },
           {
             id: "anthropic/claude",
@@ -112,7 +113,7 @@ describe("Rottweiler models", () => {
             status: null,
             vision: false,
             thinking: true,
-            toolCalling: true,
+            toolCalling: true, contextTokens: null,
           },
           {
             id: "offline/one",
@@ -124,7 +125,7 @@ describe("Rottweiler models", () => {
             status: null,
             vision: false,
             thinking: false,
-            toolCalling: true,
+            toolCalling: true, contextTokens: null,
           },
           {
             id: "offline/two",
@@ -136,7 +137,7 @@ describe("Rottweiler models", () => {
             status: null,
             vision: false,
             thinking: false,
-            toolCalling: true,
+            toolCalling: true, contextTokens: null,
           },
         ],
         modelAliases: [
@@ -154,27 +155,24 @@ describe("Rottweiler models", () => {
     renderer.root.add(app)
 
     app.openModelPicker()
-    const options = app.picker.select.options
-    const values = options.map((option) => option.value)
+    const rows = options(app.picker)
+    const values = rows.map((option) => option.value)
     expect(values).toEqual([
-      "models.section.failover-chains",
       "model-alias:fast",
       "model-alias:preferred",
       "model-alias:offline",
-      "models.section.models",
       "openai/gpt-5",
       "anthropic/claude",
       "offline/one",
       "offline/two",
     ])
-    expect(options[0]).toMatchObject({ name: "", description: "Failover chains" })
-    expect(options[1]).toMatchObject({ name: "● fast", description: "failover · openai/gpt-5 → anthropic/claude · available" })
-    expect(options[3]?.description).toContain("no available route")
-    expect(options[5]?.description).toContain("pinned route")
-    expect(options[4]).toMatchObject({ name: "", description: "Models" })
+    expect(app.picker.sectionLabels).toEqual(["Failover chains", "OpenAI API", "Anthropic API", "Offline"])
+    expect(app.picker.items[0]).toMatchObject({ label: "fast", marker: "●", description: "failover · openai/gpt-5 → anthropic/claude · available" })
+    expect(rows[2]?.description).toContain("no available route")
+    expect(rows[3]?.description).toContain("available · tools · vision · thinking")
 
-    app.picker.select.setSelectedIndex(values.indexOf("model-alias:fast"))
-    app.picker.select.selectCurrent()
+    select(app.picker, values.indexOf("model-alias:fast"))
+    app.picker.activateSelected()
     const aliasSwitch = commands.find(
       (command) => command.type === "switch_model" && command.model === "fast",
     )
@@ -182,11 +180,11 @@ describe("Rottweiler models", () => {
     expect(aliasSwitch).not.toHaveProperty("provider")
 
     app.openModelPicker()
-    const offlineIndex = app.picker.select.options.findIndex(
+    const offlineIndex = options(app.picker).findIndex(
       (option) => option.value === "model-alias:offline",
     )
-    app.picker.select.setSelectedIndex(offlineIndex)
-    app.picker.select.selectCurrent()
+    select(app.picker, offlineIndex)
+    app.picker.activateSelected()
     const offlineSwitch = commands.find(
       (command) => command.type === "switch_model" && command.model === "offline",
     )
@@ -195,10 +193,10 @@ describe("Rottweiler models", () => {
 
     app.openModelPicker()
     await setup.mockInput.typeText("fast")
-    expect(app.picker.select.options.map((option) => option.value)).not.toContain(
+    expect(options(app.picker).map((option) => option.value)).not.toContain(
       "models.section.failover-chains",
     )
-    expect(app.picker.select.options.map((option) => option.value)).not.toContain(
+    expect(options(app.picker).map((option) => option.value)).not.toContain(
       "models.section.models",
     )
   })
@@ -224,7 +222,7 @@ describe("Rottweiler models", () => {
           status: null,
           vision: true,
           thinking: true,
-          toolCalling: true,
+          toolCalling: true, contextTokens: null,
         }],
       },
       onCommand(command) {
@@ -236,7 +234,8 @@ describe("Rottweiler models", () => {
     app.openModelPicker()
     await setup.renderOnce()
 
-    await setup.mockMouse.click(app.picker.select.x + 2, app.picker.select.y + 2)
+    const row = app.picker.rowViews.find(view => view.plainText.includes("GPT-5"))!
+    await setup.mockMouse.click(row.x + 2, row.y)
     expect(commands).toContainEqual(expect.objectContaining({
       type: "switch_model",
       session_id: "session-model-context",
@@ -326,7 +325,7 @@ describe("Rottweiler models", () => {
           status: null,
           vision: true,
           thinking: true,
-          toolCalling: true,
+          toolCalling: true, contextTokens: null,
         }],
         providers: [{
           name: "copilot",
@@ -397,21 +396,18 @@ describe("Rottweiler models", () => {
     renderer.root.add(app)
 
     app.openProviderPicker()
-    expect(app.picker.select.options.map((option) => option.value)).toEqual(["copilot"])
-    expect(app.picker.select.options[0]?.description).toContain("Sign in with GitHub")
+    expect(options(app.picker).map((option) => option.value)).toEqual(["copilot", "providers.compatible"])
+    expect(options(app.picker)[0]?.description).toContain("Sign in with GitHub")
 
     app.openModelPicker()
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
-      "models.section.models",
-      "copilot/gpt-5",
-    ])
-    expect(app.picker.select.options.map((option) => option.name).join(" ")).not.toContain(
+    expect(options(app.picker).map((option) => option.value)).toEqual(["copilot/gpt-5"])
+    expect(options(app.picker).map((option) => option.name).join(" ")).not.toContain(
       "Alias ·",
     )
-    expect(app.picker.select.options.map((option) => option.name).join(" ")).not.toContain(
+    expect(options(app.picker).map((option) => option.name).join(" ")).not.toContain(
       "Thinking ·",
     )
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "switch_model",
       model: "copilot/gpt-5",
@@ -433,8 +429,8 @@ describe("Rottweiler models", () => {
       model: "copilot/gpt-5",
       provider: "copilot",
     })
-    expect(app.statusLine.plainText).toContain("gpt-5")
-    expect(app.statusLine.plainText).not.toContain("copilot/copilot")
+    expect(app.statusLine.plainText).toContain("GPT-5")
+    expect(app.statusLine.plainText).not.toContain("copilot/")
     app.handleEvent({
       type: "conversation_turn_committed",
       meta: {
@@ -484,15 +480,12 @@ describe("Rottweiler models", () => {
     }))
 
     app.closePicker()
-    await setup.mockInput.typeText("/")
-    const projectCommand = app.picker.select.options.find(
-      (option) => option.value === "deploy",
-    )
-    expect(projectCommand?.description).toContain("Project · Deploy project")
-    app.closePicker()
+    await setup.mockInput.typeText("/dep")
+    expect(app.slashPopup.selectedId).toBe("ext.deploy")
+    app.composer.value = ""
     app.openCommandPicker()
-    app.commandPalette.selectById("slash.deploy")
-    expect(app.commandPalette.detail.plainText).toContain("Commands · project")
+    app.commandPalette.selectById("ext.deploy")
+    expect(app.commandPalette.detail.plainText).toContain("Extensions · command · project")
     expect(app.commandPalette.detail.plainText).toContain("Deploy project")
   })
 })

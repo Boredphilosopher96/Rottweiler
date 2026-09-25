@@ -27,9 +27,9 @@ pub(super) async fn resolve(
             "transcript view changed; refresh the selected source".into(),
         ));
     }
-    if state.running.is_some()
-        || state.active_shell.is_some()
-        || config.tools.session_activity(&state.session_id).is_some()
+    if super::action_availability::ActionState::from_actor(state, config)
+        .unavailable(rw_types::SessionActionKind::Rewind)
+        .is_some()
     {
         return Err(AgentLoopError::InvalidConfiguration(
             "source rewind requires an idle session".into(),

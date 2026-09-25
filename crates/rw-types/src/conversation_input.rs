@@ -25,6 +25,11 @@ pub enum ContextSelection {
         body_source: crate::SequenceId,
     },
     Continuation {},
+    /// A finished child agent's result, delivered to its parent exactly once.
+    /// `source` is the parent's `subagent_finished` event.
+    ChildResult {
+        source: crate::SequenceId,
+    },
 }
 
 /// A provider result selects exactly one earlier authoritative completion body.

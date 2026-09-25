@@ -3,14 +3,14 @@ import type { RottweilerApp } from "../app"
 import {
   ComposerRenderable,
   ContextPanelRenderable,
-  FuzzyPickerRenderable,
+  PickerScreenRenderable,
   InteractionPanelRenderable,
   ListDetailRenderable,
   OutputViewerRenderable,
   ReviewPanelRenderable,
   StateBannerRenderable,
   StatusLineRenderable,
-  SubagentTrayRenderable,
+  AgentsStripRenderable,
   ToolsWorkspaceRenderable,
   TranscriptRenderable,
 } from "../components"
@@ -29,6 +29,9 @@ import type { PaletteAction, PickerContentController } from "./picker-content"
 import type { SessionUiController } from "./sessions"
 import type { SubmissionController } from "./submission"
 import { themeBrowserDetail, themeBrowserRow } from "./themes"
+import { paletteRow } from "../components/slash-popup"
+import type { AgentsBrowserAction } from "../agents-browser"
+import type { SkillsBrowserAction } from "../skills-browser"
 interface SurfaceHost {
   readonly ui: Pick<RottweilerApp,
     | "add"
@@ -41,6 +44,7 @@ interface SurfaceHost {
     | "mcpBrowser"
     | "openAttachmentPicker"
     | "openFilePicker"
+    | "openAlwaysAllowReview"
     | "outputViewer"
     | "picker"
     | "primaryView"
@@ -49,7 +53,9 @@ interface SurfaceHost {
     | "settingsBrowser"
     | "state"
     | "statusLine"
-    | "subagentTray"
+    | "agentsStrip"
+    | "agentsBrowser"
+    | "skillsBrowser"
     | "themeBrowser"
     | "toolsWorkspace"
     | "transcript"
@@ -74,6 +80,7 @@ interface SurfaceHost {
   openToolOutput(id: string): void
   openChangedFileDiff(path: string): void
   closeReview(): void
+  resizeNavigation(): void
   resizeReviewPanel(width: number, height: number): void
   projectError(code: string, message: string, retryable?: boolean): void
   onSubmit(content: string, attachments: readonly Attachment[]): Promise<boolean>
@@ -103,6 +110,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onOpenSubagent: (subagentId) => {
         void host.children.enterSubagent(subagentId)
       },
+      childAgentName: id => host.children.subagentDescriptor(id)?.agent || null,
       onOpenChild: child => {
         host.children.openHistorical({ sessionId: child.session_id, subagentId: child.subagent_id, task: child.task.text, sourceSequence: child.task.source.sequence })
       },
@@ -148,18 +156,16 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       host.syntaxStyle,
       {
         onApproval: (tool, action) => {
-          if (action === "allow_tool_session") {
-            host.requests.command({
-              type: "add_session_permission_rule",
-              pattern: `${tool.name}(*)`,
-              action: "allow",
-            })
-            host.submission.approve(tool, "allow_once")
+          if (action === "always_allow") {
+            host.ui.openAlwaysAllowReview(tool)
           } else if (action === "auto_safe_mode") {
             void host.submission.sendMessage("/permissions mode auto-safe", [])
             host.submission.approve(tool, "allow_once")
           } else {
             host.submission.approve(tool, action)
+            // "No, and tell the agent what to do differently": the composer
+            // takes the correction as the next message.
+            if (action === "deny") host.ui.composer.focus()
           }
         },
         onAnswer: (question, values) => host.submission.answer(question, values),
@@ -179,7 +185,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       host.treeSitterClient,
     )
     host.ui.outputViewer = new OutputViewerRenderable(host.context, theme)
-    host.ui.subagentTray = new SubagentTrayRenderable(
+    host.ui.agentsStrip = new AgentsStripRenderable(
       host.context,
       theme,
       (subagentId) => void host.children.enterSubagent(subagentId),
@@ -187,16 +193,23 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
         if (host.children.activeId !== null) host.children.updateSubagentBanner(host.children.presentedState())
       },
     )
-    const picker = new FuzzyPickerRenderable(host.context, theme, (query) => {
+    const screen = { surfaceLayout: "primary", splitListWidth: 48, splitMinWidth: 96, surfaceBackground: theme.background } as const
+    host.ui.agentsBrowser = new ListDetailRenderable<AgentsBrowserAction>(host.context, theme, {
+      ...screen, inputPlaceholder: "Filter agents…", emptyCopy: "No child agents yet",
+    })
+    host.ui.skillsBrowser = new ListDetailRenderable<SkillsBrowserAction>(host.context, theme, {
+      ...screen, inputPlaceholder: "Filter skills, commands, and agents…", emptyCopy: "No matching skills",
+    })
+    const picker = new PickerScreenRenderable<unknown>(host.context, theme, (query) => {
       if (host.ui.picker !== picker) return
       if (host.pickerController.kind === "sessions") host.sessions.scheduleSessionSearch(query)
     })
     host.ui.picker = picker
-    host.ui.picker.position = "absolute"
-    host.ui.picker.top = 2
-    host.ui.picker.left = "15%"
-    host.ui.picker.width = "70%"
-    host.ui.commandPalette = new ListDetailRenderable<PaletteAction>(host.context, theme)
+    host.ui.commandPalette = new ListDetailRenderable<PaletteAction>(host.context, theme, {
+      surfaceLayout: "primary", surfaceBackground: theme.background, splitMinWidth: 90,
+      inputPlaceholder: "Search commands…",
+      renderRow: (row, selected, width) => paletteRow(row.action, row.matchSpans, selected, width, theme),
+    })
     host.ui.mcpBrowser = new ListDetailRenderable<McpBrowserAction>(host.context, theme, {
       surfaceLayout: "primary",
       splitListWidth: 72,
@@ -232,13 +245,17 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
         themeBrowserRow(row, selected, availableWidth, theme),
       renderDetail: (row) => themeBrowserDetail(row.action),
     })
-    const pasteImageKeycap = host.pickerContent.bindingHint("paste_image", ["global", host.pickerContent.composerKeybindingContext()])
-    const externalEditorKeycap = host.pickerContent.bindingHint("open_external_editor", ["global", host.pickerContent.composerKeybindingContext()])
+    const composerContexts = ["global", host.pickerContent.composerKeybindingContext()] as const
     host.ui.composer = new ComposerRenderable(host.context, theme, {
       editor: host.options.editor,
       imagePaste: host.options.imagePaste,
-      ...(pasteImageKeycap === null ? {} : { pasteImageKeycap }),
-      ...(externalEditorKeycap === null ? {} : { externalEditorKeycap }),
+      hintKeys: {
+        palette: host.pickerContent.bindingHint("open_command_picker", ["global"]),
+        model: host.pickerContent.bindingHint("open_model_picker", ["global"]),
+        editor: host.pickerContent.bindingHint("open_external_editor", composerContexts),
+        pasteImage: host.pickerContent.bindingHint("paste_image", composerContexts),
+        background: host.pickerContent.bindingHint("background_subagent", ["global"]),
+      },
       onSubmit: host.onSubmit,
       submissionScope: () => host.children.composerScope(),
       drafts: host.children.draftStore,
@@ -251,6 +268,7 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
       onSubmissionSettled: host.onSubmissionSettled,
       onInputSettled: host.onInputSettled,
       onHeightChange: (height) => {
+        if (host.ui.composer !== undefined && host.ui.statusLine !== undefined) host.resizeNavigation()
         host.ui.interactionPanel.resizeForTerminal(
           host.height,
           host.ui.interactionPanel.usesComposer ? height : 0,
@@ -271,12 +289,15 @@ export function buildSurface(host: SurfaceHost, theme: RottweilerTheme): void {
     host.ui.add(host.ui.reviewPanel)
     host.ui.add(host.ui.outputViewer)
     host.ui.add(host.ui.interactionPanel)
-    host.ui.add(host.ui.subagentTray)
+    host.ui.add(host.ui.agentsStrip)
     host.ui.add(host.ui.composer)
     host.ui.add(host.ui.statusLine)
+    host.ui.add(host.pickerContent.mountSlashPopup(host.context, theme))
     host.ui.add(host.ui.picker)
     host.ui.add(host.ui.commandPalette)
     host.ui.add(host.ui.mcpBrowser)
     host.ui.add(host.ui.settingsBrowser)
     host.ui.add(host.ui.themeBrowser)
+    host.ui.add(host.ui.agentsBrowser)
+    host.ui.add(host.ui.skillsBrowser)
 }

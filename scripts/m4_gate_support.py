@@ -23,6 +23,7 @@ from perf_process_wait import observe_exit, signal_owned_group, require_group_di
 from perf_process_scope import UnsettledScope
 from perf_process import run_sample, check_sample_cancellation
 from m4_output import EngineErrorLog
+from m4_terminal_screen import TerminalScreen
 
 
 FIRST_PAINT_MARKER = b"Rottweiler"
@@ -45,7 +46,7 @@ SHELL_STDIN_MARKER = "M4_SHELL_CHILD_STDIN_0a19"
 
 SHELL_INTERRUPT_MARKER = "M4_SHELL_CHILD_INTERRUPT_82bc"
 
-SHELL_EXIT_MARKER = "Shell · exited 23"
+SHELL_EXIT_MARKER = "Terminal · exit 23"
 
 BLOCKED_TURN_MARKER = "M4_BLOCKED_AGENT_TURN_6d77"
 
@@ -504,14 +505,17 @@ def spawn_pty(
     env: dict[str, str],
     cwd: pathlib.Path,
     arguments: list[str] | None = None,
+    *,
+    dimensions: tuple[int, int] = (100, 30),
 ) -> PtyProcess:
     pid, fd = pty.fork()
     if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", dimensions[1], dimensions[0], 0, 0))
         os.chdir(cwd)
         os.execve(str(executable), [str(executable), *(arguments or [])], env)
     process = PtyProcess(pid, fd)
     try:
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", dimensions[1], dimensions[0], 0, 0))
         return process
     except BaseException:
         stop_pty(process)
@@ -542,16 +546,30 @@ def spawn_wrapped_pty(
         raise
 
 def read_until(
-    process: PtyProcess, marker: bytes, timeout: float = 5.0, *, phase: str = "render"
+    process: PtyProcess, marker: bytes, timeout: float = 5.0, *, phase: str = "render",
+    screen: TerminalScreen | None = None,
 ) -> bytes:
-    return read_until_all(process, (marker,), timeout, phase=phase)
+    return read_until_all(process, (marker,), timeout, phase=phase, screen=screen)
+
+BOX_DRAWING = "│╭╮╰╯─┃┏┓┗┛━"
+
+
+def unwrapped_screen_text(text: str) -> str:
+    """Rendered text with box borders removed and soft-wrapped lines joined,
+    so a long input that the composer wraps can still be matched."""
+    return "".join(line.strip().strip(BOX_DRAWING).strip() for line in text.splitlines())
+
 
 def read_until_all(
     process: PtyProcess, markers: tuple[bytes, ...], timeout: float = 5.0,
-    *, phase: str = "render",
+    *, phase: str = "render", screen: TerminalScreen | None = None,
+    rendered_markers: tuple[str, ...] = (), wrapped_markers: tuple[str, ...] = (),
 ) -> bytes:
-    if not markers or any(not marker for marker in markers):
+    rendered = (*rendered_markers, *wrapped_markers)
+    if (not markers and not rendered) or any(not marker for marker in (*markers, *rendered)):
         raise ValueError("PTY markers must be non-empty")
+    if rendered and screen is None:
+        raise ValueError("rendered markers require a retained terminal screen")
     deadline = time.monotonic() + timeout
     captured = bytearray()
     while time.monotonic() < deadline:
@@ -566,7 +584,11 @@ def read_until_all(
         if not chunk:
             break
         captured.extend(chunk)
-        if all(marker in captured for marker in markers):
+        if screen is not None:
+            screen.feed(chunk)
+        if (all(marker in captured for marker in markers)
+                and all(marker in screen.text for marker in rendered_markers)
+                and all(marker in unwrapped_screen_text(screen.text) for marker in wrapped_markers)):
             return bytes(captured)
         if len(captured) > 4 * 1024 * 1024:
             del captured[: len(captured) - 2 * 1024 * 1024]
@@ -583,11 +605,21 @@ def read_until_all(
         f"phase={phase}; PTY process {process.pid} did not render markers {markers!r} "
         f"({child_status}); fixture_discoveries={discovery_request_count()}; "
         f"fixture_completions={origin_request_count()}; "
-        f"tail={terminal_tail!r}"
+        f"tail={terminal_tail!r}; rendered_markers={rendered_markers!r}; "
+        f"screen={screen.text.replace(SHELL_SECRET_VALUE, '[REDACTED]')[-4000:] if screen is not None else None!r}"
     )
 
-def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
-    """Drain terminal teardown output while waiting for a PTY child to exit."""
+TEARDOWN_TAIL_BYTES = 4096
+
+
+def wait_for_pty_exit(
+    process: PtyProcess, timeout: float, tail: bytearray | None = None
+) -> int:
+    """Drain terminal teardown output while waiting for a PTY child to exit.
+
+    When `tail` is given it keeps the last teardown bytes, so a failing exit
+    can report what the process printed instead of only its status.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = process.exit_status()
@@ -598,7 +630,10 @@ def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
         )
         if ready:
             with contextlib.suppress(OSError):
-                os.read(process.fd, 65536)
+                chunk = os.read(process.fd, 65536)
+                if tail is not None:
+                    tail.extend(chunk)
+                    del tail[:-TEARDOWN_TAIL_BYTES]
     raise TimeoutError(f"PTY process {process.pid} did not exit within {timeout} seconds")
 
 def stop_pty(process: PtyProcess) -> None:

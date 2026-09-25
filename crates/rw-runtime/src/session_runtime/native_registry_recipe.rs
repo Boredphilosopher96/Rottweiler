@@ -69,6 +69,9 @@ impl NativeRegistryRecipe {
         if catalog.workflows().len() > 0 {
             names.push("workflow".into());
         }
+        if catalog.skills().len() > 0 {
+            names.push(rw_tools::SKILL_TOOL_NAME.into());
+        }
         agents
             .resolve_tool_names(names)
             .map_err(|failure| error(&failure))?;
@@ -95,6 +98,8 @@ impl NativeRegistryRecipe {
                 )))
                 .map_err(|failure| error(&failure))?;
         }
+        super::skill_library::register_skill_tool(tools, catalog)
+            .map_err(|failure| error(&failure))?;
         Ok(())
     }
 }

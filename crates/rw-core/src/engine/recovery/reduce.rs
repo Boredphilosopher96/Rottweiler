@@ -52,8 +52,16 @@ pub(super) fn reduce(
         .map_err(RecoveryError::Invalid)?;
     let body_source = super::context_selection::validate(head, event, rows)?;
     let materialized = super::input::materialize_claimed_event(source, checked)?;
+    // Lifecycle payloads are deliberately excluded from the actor's recovered
+    // PendingEvent projection. Observe their borrowed identities here so the
+    // canonical context retains child-result selectors without cloning bodies.
+    super::completions::observe(head, event, sequence)?;
     let Some(kind) = recovered_pending_event(&materialized)? else {
-        head.next_sequence += 1;
+        head.next_sequence = sequence
+            .0
+            .checked_add(1)
+            .ok_or(RecoveryError::Invalid("sequence overflow"))?;
+        head.validate()?;
         return Ok(());
     };
     match kind {
@@ -176,6 +184,18 @@ pub(super) fn reduce(
                 },
             )?;
             rows.put(key(ACCOUNTING, 0, sequence.0), &sequence)?;
+        }
+        PendingEvent::SessionControlQueueChanged {
+            controls,
+            settlement,
+        } => {
+            rw_types::validate_queued_controls(&controls).map_err(RecoveryError::Invalid)?;
+            if let Some(question) = settlement.and_then(|settled| settled.cancelled_question) {
+                head.control
+                    .questions
+                    .retain(|pending| pending.id != question.0);
+            }
+            head.control.deferred_controls = Some(sequence);
         }
         PendingEvent::MessageQueued {
             position, content, ..
@@ -380,6 +400,7 @@ pub(super) fn reduce(
             head.compacting = None;
         }
         PendingEvent::ModelContextCleared { .. } => {
+            head.completions = super::completions::CompletionSources::default();
             head.maintenance = Some(Maintenance::Clear {
                 sequence,
                 from: head.conversation,
@@ -520,7 +541,9 @@ pub(super) fn reduce(
                 head.plugin_statuses.insert(plugin_id, sequence);
             }
         }
-        PendingEvent::UserMessageRetained { .. }
+        PendingEvent::SubagentSpawned { .. }
+        | PendingEvent::SubagentFinished { .. }
+        | PendingEvent::UserMessageRetained { .. }
         | PendingEvent::ToolApprovalResolved { .. }
         | PendingEvent::ToolOutput { .. }
         | PendingEvent::PermissionRequested { .. }
@@ -528,8 +551,6 @@ pub(super) fn reduce(
         | PendingEvent::HookFailure { .. }
         | PendingEvent::CommandFinished { .. }
         | PendingEvent::GuardTriggered { .. }
-        | PendingEvent::SubagentSpawned { .. }
-        | PendingEvent::SubagentFinished { .. }
         | PendingEvent::PluginMessageInjected { .. }
         | PendingEvent::UiNotification { .. } => {}
     }

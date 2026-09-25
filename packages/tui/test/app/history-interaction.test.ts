@@ -39,7 +39,7 @@ describe("Rottweiler history-interaction", () => {
     expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
 
     setup.mockInput.pressKey(" ", { ctrl: true })
-    expect(block?.markdown.visible).toBeTrue()
+    expect(block?.expanded).toBeTrue()
     expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
 
     await setup.mockInput.typeText("x")
@@ -66,17 +66,17 @@ describe("Rottweiler history-interaction", () => {
     expect(card?.markdown.selectable).toBeTrue()
 
     await setup.mockMouse.pressDown(
-      card!.markdown.x + 2 + 1,
+      card!.markdown.x + 1,
       card!.markdown.y,
     )
     expect(renderer.getSelection()).not.toBeNull()
     await setup.mockMouse.emitMouseEvent(
       "drag",
-      card!.markdown.x + 2 + "Selectable".length - 1,
+      card!.markdown.x + "Selectable".length - 1,
       card!.markdown.y,
     )
     await setup.mockMouse.release(
-      card!.markdown.x + 2 + "Selectable".length - 1,
+      card!.markdown.x + "Selectable".length - 1,
       card!.markdown.y,
     )
     await setup.waitFor(() => copied.length === 1)

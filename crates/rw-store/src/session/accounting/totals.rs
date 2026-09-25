@@ -288,7 +288,34 @@ fn catch_up_page(connection: &mut Connection) -> Result<bool, SessionStoreError>
     Ok(last < end)
 }
 
+/// Lifetime spend recorded for one session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SessionSpend {
+    /// All-time USD micro-cost.
+    pub micros_usd: u64,
+    /// Entries whose price is unavailable or not denominated in USD.
+    pub unpriced_entries: u64,
+}
+
 impl AccountingLedger {
+    /// Lifetime spend for one session from the complete totals projection.
+    /// # Errors
+    /// Rejects an invalid identity, an incomplete/corrupt projection, or totals
+    /// which cannot fit the public u64 accounting contract.
+    pub fn session_spend(&self, session_id: &str) -> Result<SessionSpend, SessionStoreError> {
+        super::validate_session_id(session_id)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        require_complete(&transaction)?;
+        let session = prefix(&transaction, session_id, Some(TIME_ROOT - 1))?;
+        Ok(SessionSpend {
+            micros_usd: session.value(USD)?,
+            unpriced_entries: session
+                .value(UNAVAILABLE)?
+                .saturating_add(session.value(NON_USD)?),
+        })
+    }
+
     /// Exact as-of totals. Prefix subtraction uses u128 values so an overflowing
     /// lifetime sum cannot corrupt a smaller, representable time window.
     /// # Errors

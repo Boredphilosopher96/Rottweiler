@@ -63,11 +63,11 @@ describe("semantic history navigation", () => {
     const row = app.transcript.mountedCards.get("2")
     expect(liveBlocks(app.transcript.streamingCard)).toHaveLength(0)
     expect(row?.expanded).toBe(true)
-    expect(row?.markdown.content).toContain("canary output")
+    expect(row?.tool?.body.plainText).toContain("canary output")
     expect(app.transcript.selectedBlockId).toBe("tool:host-invocation")
     app.transcript.toggleSelectedBlock()
     expect(row?.expanded).toBe(false)
-    expect(row?.markdown.visible).toBe(false)
+    expect(row?.tool?.body.visible).toBe(false)
   })
 
   test("reasoning and tools navigate in semantic order without wrapping", async () => {
@@ -133,17 +133,17 @@ describe("semantic history navigation", () => {
     app.transcript.selectNextBlock()
     app.transcript.toggleSelectedBlock()
     const row = app.transcript.mountedCards.get("1")
-    const markdown = row?.markdown
+    const tool = row?.tool
     items[0] = { ...toolItem(1, "read", "{}", "complete output"), revision: "2" }
     app.transcript.scrollTo(0)
     await waitForHistory(setup, () => app.transcript.mountedCards.get("1")?.item.revision === "2")
     setup.resize(60, 18)
     await setup.flush()
     expect(app.transcript.mountedCards.get("1")).toBe(row)
-    expect(row?.markdown).toBe(markdown)
+    expect(row?.tool).toBe(tool)
     expect(row?.expanded).toBe(true)
     expect(app.transcript.selectedBlockId).toBe("tool:invocation-1")
-    expect(row?.markdown.content).toContain("complete output")
+    expect(row?.tool?.body.plainText).toContain("complete output")
   })
 
   test("expansion returns when a bounded window remounts the same source invocation", async () => {

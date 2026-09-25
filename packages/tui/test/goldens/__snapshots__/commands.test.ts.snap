@@ -1,0 +1,193 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`command palette and slash completion at 110x32: palette 1`] = `
+" COMMANDS                                              │ New session                                          
+ Search commands…                                      │ Conversation · Ctrl+N                                
+ ──────────────────────────────────────────────────────│                                                      
+ CONVERSATION                                          │ Start a clean conversation                           
+ › New session                                  Ctrl+N │                                                      
+   Sessions                                     Ctrl+S │ /new                                                 
+   Compact                                             │                                                      
+   Rewind                                  unavailable │                                                      
+ MODELS & AGENTS                                       │                                                      
+   Model                                         Alt+M │                                                      
+   Mode                                      Shift+Tab │                                                      
+ CONTEXT & USAGE                                       │                                                      
+   Context                                             │                                                      
+   Usage                                               │                                                      
+ WORKSPACE                                             │                                                      
+   Review changes                               Ctrl+R │                                                      
+   Directories                                         │                                                      
+   MCP servers                                         │                                                      
+   Init                                                │                                                      
+   Memory                                              │                                                      
+ SAFETY                                                │                                                      
+   Permissions                                         │                                                      
+ SETTINGS & HELP                                       │                                                      
+   Settings                                            │                                                      
+   Skills                                              │                                                      
+ 22 commands · Enter run · Ctrl+P close                │                                                      
+                                                       │                                                      
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ Describe a task…                                                                                         │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model · Ctrl+E editor                            │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M                                                                            
+"
+`;
+
+exports[`command palette and slash completion at 110x32: slash 1`] = `
+"                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+  rottweiler                                                                                                  
+  Rottweiler                                                                                                  
+  Loading models…                                                                                             
+  Describe a task, or press / for commands.                                                                   
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ CONVERSATION                                                                                             │ 
+ │ › /new          Start a clean conversation                                                        Ctrl+N │ 
+ │   /resume       Resume, rename, or export a session                                               Ctrl+S │ 
+ │   /compact      Summarize older context to free space                                                    │ 
+ │   /rewind       Stop the current turn or wait for it to finish.                              unavailable │ 
+ │ MODELS & AGENTS                                                                                          │ 
+ │   /model        Choose a model or connect a provider                                               Alt+M │ 
+ │   /mode         Switch between discuss, plan, and execute                                      Shift+Tab │ 
+ │ CONTEXT & USAGE                                                                                          │ 
+ │   /context      Inspect, pin, or evict context items                                                     │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ /                                                                                                        │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model · Ctrl+E editor                            │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M                                                                            
+"
+`;
+
+exports[`command palette and slash completion at 110x32: slash arguments 1`] = `
+"                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+  rottweiler                                                                                                  
+  Rottweiler                                                                                                  
+  Loading models…                                                                                             
+  Describe a task, or press / for commands.                                                                   
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ /compact [instructions]                                                                                  │ 
+ │ Summarize older context to free space · Enter to run                                                     │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ /compact keep the API notes                                                                              │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model · Ctrl+E editor                            │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M                                                                            
+"
+`;
+
+exports[`command palette and slash completion at 80x24: palette 1`] = `
+" COMMANDS                                                                       
+ Search commands…                                                               
+ ────────────────────────────────────────────────────────────────────────────── 
+ CONVERSATION                                                                   
+ › New session                                                          Ctrl+N  
+   Sessions                                                             Ctrl+S  
+   Compact                                                                      
+   Rewind                                                          unavailable  
+ MODELS & AGENTS                                                                
+   Model                                                                 Alt+M  
+   Mode                                                              Shift+Tab  
+ CONTEXT & USAGE                                                                
+   Context                                                                      
+   Usage                                                                        
+ WORKSPACE                                                                      
+   Review changes                                                       Ctrl+R  
+ Start a clean conversation                                                     
+ 22 commands · Enter run · Ctrl+P close                                         
+                                                                                
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ Describe a task…                                                           │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model              │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M                                              
+"
+`;
+
+exports[`command palette and slash completion at 80x24: slash 1`] = `
+"                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ CONVERSATION                                                               │ 
+ │ › /new          Start a clean conversation                          Ctrl+N │ 
+ │   /resume       Resume, rename, or export a session                 Ctrl+S │ 
+ │   /compact      Summarize older context to free space                      │ 
+ │   /rewind       Stop the current turn or wait for it to fini…  unavailable │ 
+ │ MODELS & AGENTS                                                            │ 
+ │   /model        Choose a model or connect a provider                 Alt+M │ 
+ │   /mode         Switch between discuss, plan, and execute        Shift+Tab │ 
+ │ CONTEXT & USAGE                                                            │ 
+ │   /context      Inspect, pin, or evict context items                       │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ /                                                                          │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model              │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M                                              
+"
+`;
+
+exports[`command palette and slash completion at 80x24: slash arguments 1`] = `
+"                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  rottweiler                                                                    
+  Rottweiler                                                                    
+  Loading models…                                                               
+  Describe a task, or press / for commands.                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ /compact [instructions]                                                    │ 
+ │ Summarize older context to free space · Enter to run                       │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ /compact keep the API notes                                                │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model              │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M                                              
+"
+`;

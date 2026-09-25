@@ -12,7 +12,6 @@ use crate::engine::session::subscription::SessionSubscription;
 use crate::engine::shutdown;
 use crate::engine::wire_turn_id;
 use rw_ext::ModeRegistry;
-use rw_tools::SubagentProgressEvent;
 use rw_types::Answer;
 use rw_types::ApprovalBinding;
 use rw_types::ApprovalDecision;
@@ -34,7 +33,6 @@ use rw_types::RewindTarget;
 use rw_types::SequenceId;
 use rw_types::SessionId;
 use rw_types::ShellId;
-use rw_types::SubagentId;
 use rw_types::ToolCallId;
 use rw_types::TurnId;
 use std::sync::Arc;
@@ -48,7 +46,7 @@ use tokio::sync::oneshot;
 /// Cloneable command/event boundary for one session actor.
 #[derive(Clone)]
 pub struct SessionHandle {
-    pub(super) child_progress: Arc<super::child_progress::HostedChildProgress>,
+    pub(super) background_children: Arc<dyn rw_tools::SubagentEventSink>,
     pub(super) shutdown: shutdown::ActorShutdown,
     pub(in crate::engine) commands: mpsc::Sender<ActorCommand>,
     pub(super) events: crate::engine::live_events::LiveEvents,
@@ -244,70 +242,16 @@ impl SessionHandle {
         Ok(CommandOutcome::Accepted {})
     }
 
-    /// Persists a parent-owned child invocation through the parent actor's
-    /// single-writer journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns when the parent actor is closed or its journal append fails.
-    pub async fn record_subagent_spawned(
+    /// Returns whether the host owns preference persistence for this model control.
+    /// Queued controls retain that obligation in the actor through settlement.
+    pub(crate) async fn dispatch_model_control(
         &self,
-        subagent_id: SubagentId,
-        child_session_id: SessionId,
-        task: String,
-    ) -> Result<(), AgentLoopError> {
-        self.child_progress
-            .register(&subagent_id, &child_session_id)?;
-        let (respond, receive) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::RecordSubagentSpawned {
-                subagent_id,
-                child_session_id,
-                task,
-                respond,
-            })
-            .await
-            .map_err(|_| AgentLoopError::Closed)?;
-        receive.await.map_err(|_| AgentLoopError::Closed)?
-    }
-
-    /// Persists a terminal parent-owned child invocation through the parent
-    /// actor's single-writer journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns when the parent actor is closed or its journal append fails.
-    pub async fn record_subagent_finished(
-        &self,
-        result: rw_types::SubagentResult,
-    ) -> Result<(), AgentLoopError> {
-        let child = result.subagent_id.clone();
-        let (respond, receive) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::RecordSubagentFinished { result, respond })
-            .await
-            .map_err(|_| AgentLoopError::Closed)?;
-        receive.await.map_err(|_| AgentLoopError::Closed)??;
-        self.child_progress.finish(&child);
-        Ok(())
-    }
-
-    /// Admission shared by child preview construction and this parent's queue.
-    #[must_use]
-    pub fn subagent_progress_budget(&self) -> rw_tools::ChildProgressBudget {
-        self.child_progress.budget.clone()
-    }
-
-    /// Publishes a bounded child observation. Saturated display delivery is
-    /// coalesced into a canonical source invalidation without delaying effects.
-    ///
-    /// # Errors
-    /// Returns for invalid progress or a child without an active durable spawn.
-    pub fn publish_subagent_progress(
-        &self,
-        progress: SubagentProgressEvent,
-    ) -> Result<(), AgentLoopError> {
-        self.child_progress.publish(progress, &self.commands)
+        command: ClientCommand,
+    ) -> Result<bool, AgentLoopError> {
+        Ok(!matches!(
+            self.dispatch_wait(command).await?,
+            ProtocolCompletion::DeferredControl
+        ))
     }
 
     /// Completes a foreground shell on behalf of the trusted CLI TTY broker.
@@ -732,7 +676,7 @@ impl SessionHandle {
             })
             .await?
         {
-            ProtocolCompletion::Unit => Ok(()),
+            ProtocolCompletion::Unit | ProtocolCompletion::DeferredControl => Ok(()),
             _ => Err(AgentLoopError::Closed),
         }
     }

@@ -259,6 +259,7 @@ fn generated_id(scope: ArtifactScope, location: ArtifactLocation, index: usize) 
     let location = match location {
         ArtifactLocation::Agents => "agents",
         ArtifactLocation::Rottweiler => "rottweiler",
+        ArtifactLocation::Claude => "claude",
     };
     format!("shell.{scope}.{location}.{}", index + 1)
 }

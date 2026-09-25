@@ -1,6 +1,7 @@
 mod contracts;
 pub use contracts::*;
 mod commands;
+mod compatible_provider;
 mod control;
 mod control_admission;
 mod control_completion;
@@ -1021,6 +1022,7 @@ fn wire_command_catalog(
         description: &'a str,
         usage: &'a str,
         source: rw_types::CommandSource,
+        scope: Option<rw_types::ExtensionArtifactScope>,
     }
     let mut commands = Vec::new();
     let mut truncated = false;
@@ -1039,6 +1041,7 @@ fn wire_command_catalog(
             description: descriptor.description(),
             usage: descriptor.argument_hint().unwrap_or_default(),
             source: descriptor.source(),
+            scope: descriptor.scope(),
         };
         let mut encoded =
             rw_types::json_encoding::JsonWriter::count(MAX_WIRE_COMMAND_CATALOG_BYTES);
@@ -1064,6 +1067,7 @@ fn wire_command_catalog(
             description: command.description.to_owned(),
             usage: command.usage.to_owned(),
             source: command.source,
+            scope: command.scope,
         });
     }
     (commands, truncated)

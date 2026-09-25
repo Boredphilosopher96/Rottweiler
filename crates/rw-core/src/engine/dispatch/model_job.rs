@@ -25,6 +25,7 @@ pub(in crate::engine) struct PluginSelection {
 
 pub(in crate::engine) enum SelectionAction {
     Protocol {
+        deferred: bool,
         authority: Option<(crate::FamilyControlAuthority, rw_types::SequenceId)>,
         command: Box<ClientCommand>,
         respond: oneshot::Sender<CommandOutcome>,
@@ -50,7 +51,11 @@ pub(in crate::engine) struct PendingPreparation {
     action: SelectionAction,
 }
 
-pub(super) fn protocol_alias(command: &ClientCommand, state: &ActorState) -> Option<String> {
+pub(super) fn protocol_alias(
+    command: &ClientCommand,
+    state: &ActorState,
+    model: &dyn crate::engine::ModelDriver,
+) -> Option<String> {
     match command {
         ClientCommand::SwitchModel {
             model, provider, ..
@@ -73,6 +78,11 @@ pub(super) fn protocol_alias(command: &ClientCommand, state: &ActorState) -> Opt
                         .map(|pending| pending.model.0.clone())
                 })
                 .flatten()
+        }
+        ClientCommand::SendMessage { content, .. }
+            if !content.trim_start().starts_with('/') && model.needs_initial_preparation() =>
+        {
+            Some(state.model_alias.clone())
         }
         ClientCommand::SendMessage { attachments, .. } => attachments
             .iter()
@@ -187,6 +197,7 @@ pub(in crate::engine) async fn finish(mut result: ResultValue, context: Dispatch
     }
     match pending.action {
         SelectionAction::Protocol {
+            deferred,
             authority,
             command,
             respond,
@@ -194,7 +205,7 @@ pub(in crate::engine) async fn finish(mut result: ResultValue, context: Dispatch
         } => {
             // Re-run all command authority and input checks after preparation.
             if !super::admission::dispatch_protocol(
-                *command, respond, completion, true, authority, context,
+                *command, respond, completion, true, deferred, authority, context,
             )
             .await
             {
@@ -291,12 +302,19 @@ fn reject(
     match action {
         SelectionAction::Protocol {
             authority: _,
+            deferred: _,
             command,
             respond,
             completion,
         } => {
-            let outcome =
-                super::replies::protocol_rejection("model_unavailable", error.to_string());
+            let outcome = if matches!(*command, ClientCommand::SendMessage { .. }) {
+                super::replies::protocol_rejection(
+                    "no_model_selected",
+                    "Choose a model with /model before sending a message. Connect a provider from the same screen if needed.",
+                )
+            } else {
+                super::replies::protocol_rejection("model_unavailable", error.to_string())
+            };
             super::replies::send_ack(
                 state,
                 events,

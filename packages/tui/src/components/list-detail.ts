@@ -10,7 +10,7 @@ import {
   type RenderContext,
 } from "@opentui/core"
 
-import { truncateToCells } from "../render"
+import { stringCellWidth, truncateToCells } from "../render"
 import type { RottweilerTheme } from "../theme"
 
 export interface ListDetailSectionRow {
@@ -19,10 +19,18 @@ export interface ListDetailSectionRow {
   readonly label: string
 }
 
+export type ListDetailTone = "muted" | "accent" | "success" | "warning" | "error"
+
 export interface ListDetailItemRow<Action> {
   readonly kind: "item"
   readonly id: string
   readonly label: string
+  readonly disabled?: boolean
+  /** Right-aligned secondary text such as a time, count, or state. */
+  readonly hint?: string
+  /** One-cell status glyph before the label, e.g. `●` for the current choice. */
+  readonly marker?: string
+  readonly tone?: ListDetailTone
   readonly matchSpans: readonly (readonly [start: number, end: number])[]
   readonly detail: {
     readonly title: string
@@ -35,7 +43,8 @@ export interface ListDetailItemRow<Action> {
 export type ListDetailRow<Action> = ListDetailSectionRow | ListDetailItemRow<Action>
 
 export interface ListDetailPresentation<Action> {
-  readonly title: string
+  /** One heading line; styled text carries inline meters such as context usage. */
+  readonly title: string | StyledText
   readonly query: string
   readonly rows: readonly ListDetailRow<Action>[]
   readonly selectedId: string | null
@@ -51,7 +60,8 @@ export interface ListDetailHandlers<Action> {
   readonly onSelect: (action: Action) => void
   readonly onQuery?: (query: string) => void
   readonly onSelection?: (selectedId: string | null) => void
-  readonly onRetry?: () => void
+  /** Screen-specific action chords, consulted before navigation and global bindings. */
+  readonly onKey?: (key: KeyEvent) => boolean
 }
 
 export interface ListDetailOptions<Action> {
@@ -62,6 +72,10 @@ export interface ListDetailOptions<Action> {
   readonly inputPlaceholder?: string
   readonly emptyCopy?: string
   readonly showCompactDetail?: boolean
+  /** Render empty copy in the list itself, for screens whose state is the message. */
+  readonly emptyInList?: boolean
+  /** The footer spans both panes, so a screen's full action list fits beside its detail. */
+  readonly fullWidthFooter?: boolean
   readonly surfaceBackground?: string
   readonly renderRow?: (
     row: ListDetailItemRow<Action>,
@@ -95,20 +109,25 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
   #theme: RottweilerTheme
   #options: ListDetailOptions<Action>
   #surfaceBackground: string
-  #layoutMode: "split" | "single" = "split"
+  #layoutMode: "split" | "single" | "inline" = "split"
   #visibleRows = 20
   #listWidth = 52
   #emptyCopy: string | undefined
   #onKey = (key: KeyEvent) => {
     if (!this.visible) return
+    if (this.interceptKey(key)) {
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (!this.navigable) return
+    // Only unmodified navigation keys: every Ctrl chord stays with the
+    // application's compiled global bindings (Ctrl+P toggles the palette).
     const plain = !key.ctrl && !key.meta && !key.option && !key.shift
-    const controlOnly = key.ctrl && !key.meta && !key.option && !key.shift
     let handled = true
-    if (controlOnly && key.name === "r" && this.#handlers?.onRetry !== undefined) {
-      this.#handlers.onRetry()
-    } else if ((plain && key.name === "up") || (controlOnly && key.name === "p")) {
+    if (plain && key.name === "up") {
       this.moveSelection(-1)
-    } else if ((plain && key.name === "down") || (controlOnly && key.name === "n")) {
+    } else if (plain && key.name === "down") {
       this.moveSelection(1)
     } else if (plain && key.name === "pageup") {
       this.moveSelection(-this.#visibleRows, false)
@@ -230,8 +249,18 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       event.preventDefault()
       event.stopPropagation()
     }
-    ctx.keyInput.on("keypress", this.#onKey)
+    // Prepended so a visible screen's keys and chords win over global
+    // bindings, even after a theme rebuild re-registers this surface.
+    ctx.keyInput.prependListener("keypress", this.#onKey)
     this.resizeForTerminal(ctx.width, ctx.height)
+  }
+
+  /** False while the surface shows no list of its own, so navigation keys pass through. */
+  protected get navigable(): boolean { return true }
+
+  /** Screen-specific keys; return true when the key was consumed. */
+  protected interceptKey(key: KeyEvent): boolean {
+    return this.#handlers?.onKey?.(key) ?? false
   }
 
   #clientStateRevision = 0
@@ -245,7 +274,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     return this.#scrollOffset
   }
 
-  get layoutMode(): "split" | "single" {
+  get layoutMode(): "split" | "single" | "inline" {
     return this.#layoutMode
   }
 
@@ -276,6 +305,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
   ): void {
     this.#handlers = { onSelect, ...handlers }
     this.input.value = presentation.query
+    this.input.visible = this.#layoutMode !== "inline"
     this.visible = true
     this.refresh(presentation)
     this.input.focus()
@@ -340,12 +370,13 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       : Math.max(1, terminalWidth - inset * 2)
     const top = primarySurface ? 0 : terminalHeight >= 14 ? 2 : 0
     const height = primarySurface
-      ? Math.max(6, Math.min(terminalHeight, primaryHeight ?? terminalHeight - 5))
-      : Math.max(6, Math.min(25, terminalHeight - top - 5))
+      ? Math.max(1, Math.min(terminalHeight, primaryHeight ?? terminalHeight - 5))
+      : Math.max(1, Math.min(25, terminalHeight - top - 5))
     this.left = inset
     this.top = top
     this.width = width
     this.height = height
+    this.#inlineReset()
 
     const horizontalPadding = primarySurface ? 1 : 2
     const innerWidth = Math.max(1, width - horizontalPadding * 2)
@@ -382,18 +413,21 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.listPane.width = listWidth
     this.listPane.height = this.#visibleRows
     this.divider.left = horizontalPadding + listWidth
+    const paneHeight = primarySurface
+      ? this.#options.fullWidthFooter === true ? Math.max(1, height - 2) : height
+      : this.#visibleRows
     this.divider.top = primarySurface ? 0 : 3
     this.divider.width = 1
-    this.divider.height = primarySurface ? height : this.#visibleRows
+    this.divider.height = paneHeight
     this.divider.content = Array.from(
-      { length: primarySurface ? height : this.#visibleRows },
+      { length: paneHeight },
       () => "│",
     ).join("\n")
     this.divider.visible = this.#layoutMode === "split"
     this.detailPane.left = horizontalPadding + listWidth + 1
     this.detailPane.top = primarySurface ? 0 : 3
     this.detailPane.width = detailWidth
-    this.detailPane.height = primarySurface ? height : this.#visibleRows
+    this.detailPane.height = paneHeight
     this.detailPane.visible = this.#layoutMode === "split"
     this.compactDetail.left = horizontalPadding
     this.compactDetail.top = 3 + this.#visibleRows
@@ -401,11 +435,53 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     this.compactDetail.visible = hasCompactDetail
     this.footer.left = horizontalPadding
     this.footer.top = height - 2
-    this.footer.width = leftContentWidth
+    this.footer.width = this.#options.fullWidthFooter === true ? innerWidth : leftContentWidth
     this.#ensureRowViews()
     this.#scrollOffset = Math.min(this.#scrollOffset, this.#maximumScrollOffset())
     this.#renderRows()
     this.#renderDetail()
+  }
+
+  /**
+   * Composer-anchored layout: a heading line and rows directly above the
+   * composer. The composer keeps editing focus, so there is no filter input,
+   * detail pane, or footer.
+   */
+  resizeInline(width: number, top: number, height: number): void {
+    const rows = Math.max(1, height - 1)
+    this.#layoutMode = "inline"
+    this.left = 0
+    this.top = top
+    this.width = Math.max(1, width)
+    this.height = Math.max(2, height)
+    const innerWidth = Math.max(1, width - 2)
+    this.#visibleRows = rows
+    this.#listWidth = innerWidth
+    this.heading.left = 1
+    this.heading.top = 0
+    this.heading.width = innerWidth
+    this.input.visible = false
+    this.rule.visible = false
+    this.divider.visible = false
+    this.detailPane.visible = false
+    this.compactDetail.visible = false
+    this.footer.visible = false
+    this.listPane.left = 1
+    this.listPane.top = 1
+    this.listPane.width = innerWidth
+    this.listPane.height = rows
+    this.#ensureRowViews()
+    this.#scrollOffset = Math.min(this.#scrollOffset, this.#maximumScrollOffset())
+    this.#ensureSelectionVisible()
+    this.#renderRows()
+  }
+
+  #inlineReset(): void {
+    if (this.#layoutMode !== "inline") return
+    this.#layoutMode = "split"
+    this.input.visible = true
+    this.rule.visible = true
+    this.footer.visible = true
   }
 
   moveSelection(delta: number, wrap = true): void {
@@ -449,7 +525,7 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
     const selected = this.#rows.find(
       (row): row is ListDetailItemRow<Action> => row.kind === "item" && row.id === this.#selectedId,
     )
-    if (selected === undefined || this.#handlers === null) return false
+    if (selected === undefined || selected.disabled === true || this.#handlers === null) return false
     this.#handlers.onSelect(selected.action)
     return true
   }
@@ -559,7 +635,12 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
       const row = this.#rows[this.#scrollOffset + slot]
       view.visible = true
       view.top = slot
-      if (row === undefined) {
+      if (row === undefined && this.#rows.length === 0 && this.#options.emptyInList === true) {
+        const line = (this.#emptyCopy ?? this.#options.emptyCopy ?? "").split("\n")[slot] ?? ""
+        view.content = new StyledText([fg(slot === 0 ? this.#theme.text : this.#theme.textMuted)(
+          truncateToCells(line.length === 0 ? "" : `  ${line}`, Math.max(0, this.#listWidth)))])
+        view.bg = this.#surfaceBackground
+      } else if (row === undefined) {
         view.content = ""
         view.bg = this.#surfaceBackground
       } else if (row.kind === "section") {
@@ -571,21 +652,22 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
           row,
           selected,
           this.#listWidth,
-        ) ?? styledLabel(
-          truncateToCells(row.label, Math.max(0, this.#listWidth - 2)),
-          row.matchSpans,
-          selected,
-          this.#theme,
-        )
+        ) ?? defaultRow(row, selected, this.#listWidth, this.#theme)
         view.bg = selected ? this.#theme.backgroundPanel : this.#surfaceBackground
       }
     }
   }
 
   #renderDetail(): void {
+    if (this.#layoutMode === "inline") return
     const selected = this.#rows.find(
       (row): row is ListDetailItemRow<Action> => row.kind === "item" && row.id === this.#selectedId,
     )
+    if (selected === undefined && this.#rows.length === 0 && this.#options.emptyInList === true) {
+      this.detail.content = ""
+      this.compactDetail.content = ""
+      return
+    }
     if (selected === undefined) {
       const emptyCopy = this.#emptyCopy ?? this.#options.emptyCopy ?? "No matching commands"
       this.detail.content = emptyCopy
@@ -605,21 +687,58 @@ export class ListDetailRenderable<Action> extends BoxRenderable {
   }
 }
 
+function toneColor(tone: ListDetailTone | undefined, theme: RottweilerTheme): string | null {
+  switch (tone) {
+    case "muted": return theme.textMuted
+    case "accent": return theme.accent
+    case "success": return theme.success
+    case "warning": return theme.warning
+    case "error": return theme.error
+    case undefined: return null
+  }
+}
+
+/**
+ * Shared row anatomy: pointer, optional status marker, label with fuzzy-match
+ * emphasis, and a right-aligned muted hint that yields space to the label.
+ */
+function defaultRow<Action>(
+  row: ListDetailItemRow<Action>,
+  selected: boolean,
+  width: number,
+  theme: RottweilerTheme,
+): StyledText {
+  const available = Math.max(0, width - 2)
+  const marker = row.marker === undefined ? "" : `${row.marker} `
+  const hint = row.hint === undefined || row.hint.length === 0 ? "" : row.hint
+  const labelBudget = Math.max(0, available - stringCellWidth(marker))
+  const hintBudget = hint.length === 0 ? 0 : Math.min(stringCellWidth(hint), Math.max(0, labelBudget - Math.min(stringCellWidth(row.label), 16) - 2))
+  const shownHint = hintBudget <= 1 ? "" : truncateToCells(hint, hintBudget)
+  const label = truncateToCells(row.label, Math.max(0, labelBudget - (shownHint.length === 0 ? 0 : stringCellWidth(shownHint) + 2)))
+  const gap = shownHint.length === 0 ? "" : " ".repeat(Math.max(2, labelBudget - stringCellWidth(label) - stringCellWidth(shownHint)))
+  const labelColor = row.disabled === true ? theme.textMuted : toneColor(row.tone, theme)
+  const chunks: StyledText["chunks"] = [fg(selected ? theme.primary : theme.textMuted)(selected ? "› " : "  ")]
+  if (marker.length > 0) chunks.push(fg(toneColor(row.tone, theme) ?? theme.primary)(marker))
+  chunks.push(...styledLabel(label, row.disabled === true ? [] : row.matchSpans, labelColor ?? theme.text, theme))
+  if (shownHint.length > 0) chunks.push(fg(theme.textMuted)(`${gap}${shownHint}`))
+  return new StyledText(chunks)
+}
+
 function styledLabel(
   label: string,
   matchSpans: readonly (readonly [number, number])[],
-  selected: boolean,
+  color: string,
   theme: RottweilerTheme,
-): StyledText {
-  const chunks: StyledText["chunks"] = [fg(selected ? theme.primary : theme.textMuted)(selected ? "› " : "  ")]
+): StyledText["chunks"] {
+  const chunks: StyledText["chunks"] = []
   let cursor = 0
   for (const [rawStart, rawEnd] of matchSpans) {
     const start = Math.min(label.length, Math.max(cursor, rawStart))
     const end = Math.min(label.length, Math.max(start, rawEnd))
-    if (start > cursor) chunks.push(fg(theme.text)(label.slice(cursor, start)))
+    if (start > cursor) chunks.push(fg(color)(label.slice(cursor, start)))
     if (end > start) chunks.push(bold(fg(theme.primary)(label.slice(start, end))))
     cursor = end
   }
-  if (cursor < label.length) chunks.push(fg(theme.text)(label.slice(cursor)))
-  return new StyledText(chunks)
+  if (cursor < label.length) chunks.push(fg(color)(label.slice(cursor)))
+  return chunks
 }

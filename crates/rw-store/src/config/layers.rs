@@ -27,6 +27,7 @@ pub(super) fn defaults_with_provenance() -> LoadedConfig {
         "engine.max_concurrent_sessions",
         "engine.subagent_max_depth",
         "engine.subagent_max_concurrency",
+        "agents.wake_on_completion",
         "models.default",
         "models.aliases",
         "models.thinking",
@@ -254,6 +255,14 @@ pub(super) fn apply_file(
                 set_source(loaded, &key, source);
             }
         }
+    }
+    if let Some(value) = file
+        .agents
+        .take()
+        .and_then(|agents| agents.wake_on_completion)
+    {
+        loaded.config.agents.wake_on_completion = value;
+        set_source(loaded, "agents.wake_on_completion", source);
     }
     if let Some(compaction) = file.compaction.take() {
         if let Some(value) = compaction.auto {
@@ -632,6 +641,13 @@ pub(super) fn apply_m3_override(
     raw: &str,
 ) -> Result<bool, ConfigError> {
     match key {
+        "agents.wake_on_completion" => {
+            loaded.config.agents.wake_on_completion =
+                value.parse().map_err(|_| ConfigError::CliOverride {
+                    override_value: raw.to_owned(),
+                    reason: "expected true or false".to_owned(),
+                })?;
+        }
         "compaction.auto" => {
             loaded.config.compaction.auto =
                 value.parse().map_err(|_| ConfigError::CliOverride {

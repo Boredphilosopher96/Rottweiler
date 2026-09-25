@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 pub(in crate::engine) struct CommandTurnOverrides {
     pub(in crate::engine) model_alias: Option<String>,
     pub(in crate::engine) allowed_tools: Option<Vec<String>>,
-    pub(in crate::engine) permission_patterns: Vec<String>,
+    pub(in crate::engine) pre_approvals: Vec<String>,
     pub(in crate::engine) tool_calls: Vec<CommandToolCall>,
 }
 
@@ -90,7 +90,7 @@ pub(super) fn prepare_turn_start(
     let CommandTurnOverrides {
         model_alias,
         allowed_tools,
-        permission_patterns,
+        pre_approvals,
         tool_calls,
     } = overrides;
     let model_alias = model_alias
@@ -122,11 +122,11 @@ pub(super) fn prepare_turn_start(
                 .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
         );
     }
-    if !permission_patterns.is_empty() {
+    if !pre_approvals.is_empty() {
         turn_config.permissions = Arc::new(
             config
                 .permissions
-                .restricted_to_patterns(&permission_patterns)
+                .with_turn_pre_approvals(&pre_approvals)
                 .map_err(AgentLoopError::InvalidConfiguration)?,
         );
     }

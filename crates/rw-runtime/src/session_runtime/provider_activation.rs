@@ -165,7 +165,7 @@ pub(super) fn live_provider_activator(
         // other configured provider. Live catalog discovery stays separate.
         let isolated = prepare_isolated_provider_activation_config(config, provider)?;
         let runtime = Arc::new(
-            factory
+            refreshed_activation_factory(&factory, &user_config_path)?
                 .build(&isolated)
                 .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
         );
@@ -197,6 +197,9 @@ pub(super) fn lazy_live_provider_model(
         user_config_path: user_config_path.clone(),
         project_config_path: project_config_path.clone(),
     });
+    // The private catalog cache lives in the configuration root beside the
+    // user configuration; it only seeds context limits for the selection.
+    let catalog_cache = user_config_path.with_file_name("model-catalog.json");
     let initial_model: Arc<dyn ModelDriver> = Arc::new(UnavailableHostedModel {
         alias: persisted_model_alias.clone(),
         reason: "the provider has not been connected for this session yet".to_owned(),
@@ -224,7 +227,7 @@ pub(super) fn lazy_live_provider_model(
         let config = merge_reloaded_provider_config(initialize_base_config.clone(), loaded);
         let isolated = prepare_isolated_model_initialization_config(config, alias)?;
         let runtime = Arc::new(
-            initialize_factory
+            refreshed_activation_factory(&initialize_factory, &initialize_user_config_path)?
                 .build(&isolated)
                 .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
         );
@@ -249,11 +252,47 @@ pub(super) fn lazy_live_provider_model(
         redactor,
     );
 
-    Arc::new(RecomposableHostedModel::new_lazy(
-        initial_model,
-        persisted_model_alias,
-        fallback_catalog,
-        activate,
-        initialize,
-    ))
+    Arc::new(
+        RecomposableHostedModel::new_lazy(
+            initial_model,
+            persisted_model_alias,
+            fallback_catalog,
+            activate,
+            initialize,
+        )
+        .with_catalog_cache(catalog_cache),
+    )
+}
+
+// Called only inside the already-owned blocking preparation worker. A new
+// generation sees refreshed metadata; an active model keeps its immutable table.
+pub(super) fn refreshed_activation_factory(
+    factory: &ProviderFactory,
+    user_config: &std::path::Path,
+) -> Result<ProviderFactory, AgentLoopError> {
+    use std::io::Read as _;
+    let path = user_config.with_file_name("models.toml");
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(factory.clone()),
+        Err(_) => {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "model metadata could not be read".into(),
+            ));
+        }
+    };
+    let mut contents = String::new();
+    file.take(64 * 1024 * 1024 + 1)
+        .read_to_string(&mut contents)
+        .map_err(|_| {
+            AgentLoopError::InvalidConfiguration("model metadata could not be read".into())
+        })?;
+    if contents.len() > 64 * 1024 * 1024 {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "model metadata exceeds its size limit".into(),
+        ));
+    }
+    let pricing = rw_providers::PricingTable::from_toml(&contents)
+        .map_err(|_| AgentLoopError::InvalidConfiguration("model metadata is invalid".into()))?;
+    Ok(factory.clone().with_pricing_table(pricing))
 }

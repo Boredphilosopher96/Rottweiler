@@ -78,7 +78,7 @@ async fn large_reconnect_pages_pin_cursor_and_preserve_attach_ack_after_lag() {
         .dispatch(ClientCommand::SendMessage {
             meta: protocol_meta("prior", "new-between-subscribe-attach"),
             session_id: session.clone(),
-            content: "/status".to_owned(),
+            content: "/help".to_owned(),
             attachments: Vec::new(),
         })
         .await
@@ -217,11 +217,11 @@ async fn lagged_subscription_replays_every_durable_sequence_and_continues_live()
         .dispatch(ClientCommand::SendMessage {
             meta: protocol_meta("driver", "status"),
             session_id,
-            content: "/status".to_owned(),
+            content: "/help".to_owned(),
             attachments: Vec::new(),
         })
         .await
-        .expect("status");
+        .expect("help");
     loop {
         let event = events
             .recv()
@@ -230,7 +230,7 @@ async fn lagged_subscription_replays_every_durable_sequence_and_continues_live()
             .as_ref()
             .clone();
         if let EngineEvent::CommandFinished { meta, name, .. } = event {
-            assert_eq!(name, "status");
+            assert_eq!(name, "help");
             assert_eq!(meta.sequence_id.0, durable_tail.0.saturating_add(1));
             break;
         }

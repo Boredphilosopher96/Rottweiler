@@ -16,6 +16,7 @@ fn start(root: &Path, script: &str, replay: bool) -> TuiProcess {
         keybindings: None,
         theme: "",
         replay,
+        closes_host: !replay,
     })
 }
 
@@ -28,6 +29,7 @@ async fn every_client_restart_preserves_role_parent_and_handoff_beyond_crash_bud
             "#!/bin/sh\n\
              [ \"$#\" = 1 ] && [ \"$1\" = tui ] || exit 64\n\
              [ \"$ROTTWEILER_SUPERVISOR_PID\" = \"$PPID\" ] || exit 64\n\
+             case \"$ROTTWEILER_REPLAY_MODE$ROTTWEILER_TUI_CLOSES_HOST\" in 01|10) ;; *) exit 64;; esac\n\
              [ -n \"$ROTTWEILER_TUI_RECYCLE_STATE_FILE\" ] || exit 64\n\
              state=\"$ROTTWEILER_TUI_RECYCLE_STATE_FILE\"\n\
              if [ -f \"$state\" ]; then count=$(cat \"$state\"); else count=0; fi\n\

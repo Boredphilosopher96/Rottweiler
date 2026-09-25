@@ -31,7 +31,6 @@ use std::sync::Arc;
 pub(super) async fn apply(
     command_meta: CommandMeta,
     content: String,
-    observed_turn: u64,
     result: super::command_job::Execution,
     respond: super::command_job::CommandReply,
     context: DispatchContext<'_>,
@@ -71,6 +70,35 @@ pub(super) async fn apply(
                 let _ = respond.send(Err(error));
                 return;
             }
+            let deferred = match &output.action {
+                SessionCommandAction::SwitchMode { mode } => {
+                    Some(rw_types::DeferredSessionAction::SwitchMode { mode: mode.clone() })
+                }
+                SessionCommandAction::Compact { instructions } => {
+                    Some(rw_types::DeferredSessionAction::Compact {
+                        instructions: instructions.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if super::deferred_controls::must_queue(state)
+                && let Some(action) = deferred
+            {
+                if let Err(error) = super::deferred_controls::enqueue(
+                    state,
+                    config,
+                    events,
+                    command_meta.clone(),
+                    action,
+                )
+                .await
+                {
+                    let _ = respond.send(Err(error));
+                    return;
+                }
+                output.action = SessionCommandAction::None;
+                output.message = "Queued until the current work finishes.".into();
+            }
             let mut unrestorable_paths = Vec::new();
             let mut submitted_prompt = None;
             let mut deferred_command_completion = false;
@@ -81,13 +109,6 @@ pub(super) async fn apply(
                     {
                         let _ = respond.send(Err(error));
                         return;
-                    }
-                }
-                SessionCommandAction::Interrupt => {
-                    if let Some(running) = &state.running
-                        && running.id == observed_turn
-                    {
-                        running.cancellation.cancel();
                     }
                 }
                 SessionCommandAction::Rewind { to_turn } => {
@@ -139,6 +160,7 @@ pub(super) async fn apply(
                         events,
                         item_id.clone(),
                         true,
+                        None,
                     )
                     .await
                     {
@@ -154,6 +176,7 @@ pub(super) async fn apply(
                         events,
                         item_id.clone(),
                         false,
+                        None,
                     )
                     .await
                     {
@@ -295,13 +318,14 @@ pub(super) async fn apply(
                     }
                 }
                 SessionCommandAction::InitializeWorkspace { depth } => {
-                    if state.running.is_some()
-                        || state.initialization_running
-                        || config.tools.session_activity(&state.session_id).is_some()
+                    let activity = config.tools.session_activity(&state.session_id);
+                    if state.running.is_some() || state.initialization_running || activity.is_some()
                     {
-                        let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(
-                            "workspace initialization requires an idle session".to_owned(),
-                        )));
+                        let message = activity.map_or_else(
+                            || "workspace initialization requires an idle session".to_owned(),
+                            |activity| activity.blocked("workspace initialization"),
+                        );
+                        let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(message)));
                         return;
                     }
                     let call_id = format!(
@@ -326,7 +350,7 @@ pub(super) async fn apply(
                     content,
                     model_alias,
                     allowed_tools,
-                    permission_patterns,
+                    pre_approvals,
                     tool_calls,
                 } => {
                     if state.running.is_some() {
@@ -340,7 +364,7 @@ pub(super) async fn apply(
                         CommandTurnOverrides {
                             model_alias,
                             allowed_tools,
-                            permission_patterns,
+                            pre_approvals,
                             tool_calls,
                         },
                     ));

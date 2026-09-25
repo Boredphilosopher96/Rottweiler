@@ -36,7 +36,7 @@ describe("direct query reply boundary", () => {
   })
   test("rejects query events from a different bound session", async () => {
     const command = { ...query, type: "list_commands", session_id: "expected" } satisfies ClientCommand
-    const event = { type: "command_descriptors_listed", meta: listed.meta, session_id: "foreign", commands: [], truncated: false } satisfies EngineEvent
+    const event = { type: "command_descriptors_listed", available_actions: [], meta: listed.meta, session_id: "foreign", commands: [], truncated: false } satisfies EngineEvent
     await expect(clientFor({ type: "read", outcome: { type: "accepted" }, events: [event] }).postCommand(command)).rejects.toThrow()
   })
   test("rejects malformed known data, durable data, and foreign request identity", async () => {

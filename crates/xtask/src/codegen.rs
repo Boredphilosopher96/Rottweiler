@@ -52,14 +52,15 @@ use rw_types::{
     ProviderAuthKind, ProviderCallActuals, ProviderCallIdentity, ProviderDescriptor,
     ProviderNextAction, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
     ReviewFileDecision, ReviewFileStatus, RewindSourcePosition, RewindTarget, Role,
-    RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
-    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
-    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus,
-    TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability, ToolInvocationId, ToolOutput,
-    ToolOutputPart, ToolOutputStream, ToolProgress, TouchedFile, TouchedFileStatus,
-    TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionActionAvailability,
+    SessionActionKind, SessionDescriptor, SessionId, SessionReview, SessionReviewFile, ShellId,
+    StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation,
+    SubagentResult, SubagentStatus, TRANSIENT_ENGINE_EVENT_TYPES, ToolCallId, ToolCapability,
+    ToolInvocationId, ToolOutput, ToolOutputPart, ToolOutputStream, ToolProgress, TouchedFile,
+    TouchedFileStatus, TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceChange,
+    WorkspaceChangeKind, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -518,8 +519,19 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(Attachment);
     declaration!(StoredAttachment);
     declaration!(SessionDescriptor);
+    declaration!(rw_types::SessionActivity);
     declaration!(rw_types::extension_control::SessionNavigationTarget);
     declaration!(CommandDescriptor);
+    declaration!(SessionActionKind);
+    declaration!(rw_types::CompatibleProviderSetup);
+    declaration!(rw_types::CompatibleProviderAdapter);
+    declaration!(rw_types::CompatibleProviderAuth);
+    declaration!(rw_types::DeferredSessionAction);
+    declaration!(rw_types::QueuedControlStatus);
+    declaration!(rw_types::QueuedSessionControl);
+    declaration!(rw_types::SessionControlOutcome);
+    declaration!(rw_types::SessionControlSettlement);
+    declaration!(SessionActionAvailability);
     declaration!(CommandSource);
     declaration!(ModelCacheBehavior);
     declaration!(ModelCapabilities);
@@ -532,6 +544,10 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(ProviderNextAction);
     declaration!(ModelCatalogSnapshot);
     declaration!(UserSettingDescriptor);
+    declaration!(rw_types::ExtensionArtifactKind);
+    declaration!(rw_types::ExtensionArtifactScope);
+    declaration!(rw_types::ExtensionArtifactStatus);
+    declaration!(rw_types::ExtensionInventoryEntry);
     declaration!(McpServerState);
     declaration!(McpServerDescriptor);
     declaration!(McpApprovalReview);
@@ -541,6 +557,8 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(WorkspaceFileMatch);
     declaration!(WorkspaceFilePreview);
     declaration!(WorkspaceStatus);
+    declaration!(WorkspaceChange);
+    declaration!(WorkspaceChangeKind);
     declaration!(WorkspaceDiff);
     declaration!(WorkspaceRootDescriptor);
     declaration!(UnifiedDiff);
@@ -637,6 +655,15 @@ fn generate_typescript() -> Result<String, XtaskError> {
     declaration!(rw_types::transcript::TranscriptSubagentStatus);
     declaration!(rw_types::transcript::TranscriptContent);
 
+    output.push_str("\nexport const COMMAND_SECTIONS = ");
+    output.push_str(&serde_json::to_string(
+        rw_types::client_navigation::COMMAND_SECTIONS,
+    )?);
+    output.push_str(" as const;\nexport const COMMAND_CATALOG = ");
+    output.push_str(&serde_json::to_string(
+        rw_types::client_navigation::COMMAND_CATALOG,
+    )?);
+    output.push_str(" as const;\n");
     output.push_str(&generate_engine_event_delivery()?);
     output.push_str(&execution::generate()?);
     Ok(output
@@ -869,6 +896,12 @@ fn contract_fixture() -> ContractFixture {
         model: ModelAlias("fast".to_owned()),
         driver_client_id: Some(ClientId("client-fixture".to_owned())),
         shell_active: false,
+        activity: Some(rw_types::SessionActivity {
+            updated_unix_ms: 1_767_225_600_000,
+            turn_count: 3,
+            first_prompt: Some("Fork the plan before refactoring".to_owned()),
+            cost_micros_usd: Some(12_500),
+        }),
     };
 
     ContractFixture {
@@ -1172,7 +1205,7 @@ fn contract_fixture() -> ContractFixture {
                 name: "bash".to_owned(),
                 args: json!({"command": "cargo test"}),
                 capabilities: vec![ToolCapability::Execute],
-                rationale: "runs a local command".to_owned(),
+                rationale: Some("Not in the safe command list".to_owned()),
                 diff: None,
             },
             EngineEvent::ToolOutputDelta {

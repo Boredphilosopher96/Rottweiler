@@ -77,7 +77,7 @@ export function createSettingsBrowserModel(
     ? input.catalog.message
     : "No matching settings"
   const status = input.catalog.kind === "error" && settings.length === 0
-    ? "Ctrl-R retry"
+    ? "Esc close · reopen to retry"
     : `${actionHint(selected?.action)} · Esc close`
 
   return {

@@ -85,6 +85,7 @@ async fn nonrememberable_approval_is_denied_when_workspace_changes_while_prompti
 async fn explicitly_typed_unsandboxed_patterns_are_rememberable_without_generic_escalation() {
     let root = tempfile::tempdir().expect("root");
     let request = |command: &str| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "unsandboxed-pattern".to_owned(),
         tool_name: "bash".to_owned(),
@@ -196,6 +197,7 @@ async fn explicitly_typed_unsandboxed_patterns_are_rememberable_without_generic_
 async fn remembered_mutations_bind_full_arguments_diff_and_bash_execution_context() {
     let gate = PermissionGate::new(PermissionDecision::Ask);
     let write = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "write".to_owned(),
         tool_name: "write".to_owned(),
@@ -246,6 +248,7 @@ async fn remembered_mutations_bind_full_arguments_diff_and_bash_execution_contex
 
     let bash_gate = PermissionGate::new(PermissionDecision::Ask);
     let bash = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "bash".to_owned(),
         tool_name: "bash".to_owned(),
@@ -290,6 +293,7 @@ async fn remembered_mutations_bind_full_arguments_diff_and_bash_execution_contex
 async fn remembered_network_domains_are_normalized_exact_and_invalid_fail_closed() {
     let gate = PermissionGate::new(PermissionDecision::Ask);
     let invocation = |domains: Vec<&str>| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "network-domains".to_owned(),
         tool_name: "bash".to_owned(),
@@ -350,6 +354,7 @@ async fn remembered_network_domains_are_normalized_exact_and_invalid_fail_closed
 async fn webfetch_is_no_prompt_for_every_valid_public_origin() {
     let gate = PermissionGate::new(PermissionDecision::Ask);
     let request = |url: &str| PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "webfetch".to_owned(),
         tool_name: "webfetch".to_owned(),

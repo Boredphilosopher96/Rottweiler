@@ -172,6 +172,7 @@ impl CanonicalHistory {
 
 impl super::RecoveryHead {
     pub(super) fn apply_rewind_boundary(&mut self, boundary: &Boundary, turn: u64) {
+        self.completions.rewind(turn);
         self.conversation = boundary.conversation;
         self.control.completed_turns = boundary.control.completed_turns;
         self.control.todos = boundary.control.todos;
@@ -181,6 +182,7 @@ impl super::RecoveryHead {
         self.control.approved_plan = boundary.control.approved_plan;
         self.control.plan_gate_active = boundary.control.plan_gate_active;
         self.control.queued.clear();
+        self.control.deferred_controls = None;
         self.control.input_claims.abandon_pending();
         self.control
             .questions

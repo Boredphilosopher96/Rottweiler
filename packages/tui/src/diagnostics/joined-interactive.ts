@@ -118,8 +118,10 @@ export async function runJoinedInteractive(directory: string): Promise<void> {
     }
     await wait("actual child activity", () => childEvents > 0 && Object.values(app.state.subagents).some(child => child.status === "running"))
     app.openSubagentPicker()
-    await wait("child picker response", () => app.picker.select.options.length > 0)
-    app.picker.select.selectCurrent()
+    await wait("agents screen response", () => app.agentsBrowser.itemIds.some(id => id.startsWith("agents.child.")))
+    app.agentsBrowser.selectById(app.agentsBrowser.itemIds.find(id => id.startsWith("agents.child."))!)
+    app.agentsBrowser.activateSelected()
+    app.picker.activateSelected()
     await wait("source-qualified child pane", () => app.activeSubagentId !== null && app.transcript.mountedCards.size > 0)
     const beforeChild = childEvents
     await wait("live child advances while selected", () => childEvents > beforeChild)

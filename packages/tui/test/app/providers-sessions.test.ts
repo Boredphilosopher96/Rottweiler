@@ -7,12 +7,73 @@ import {
 import type { ClientCommand, CommandOutcome } from "../../src/protocol"
 import { createInitialState } from "../../src/state"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select } from "../picker-screen"
 
 describe("Rottweiler providers-sessions", () => {
   let renderer: TestRenderer | undefined
   afterEach(() => {
     renderer?.destroy()
     renderer = undefined
+  })
+
+  test("compatible setup sends bounded nonsecret configuration before credential entry", async () => {
+    const setup = await createTestRenderer({ width: 110, height: 28, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, { sessionReader: emptySessionReader, onCommand(command) { emitted.push(command); return { type: "accepted" } } })
+    renderer.root.add(app)
+    app.openProviderPicker()
+    const catalog = emitted.find(command => command.type === "list_models")!
+    app.handleEvent({ type: "models_listed", meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: catalog.meta.request_id, emitted_at: "2026-01-01T00:00:00Z" },
+      aliases: [], cached: false, truncated: false, models: [], providers: [],
+    })
+    expect(options(app.picker).map(option => option.value)).toEqual(["providers.compatible"])
+    await setup.mockInput.typeText("compatible")
+    expect(options(app.picker).map(option => option.value)).toEqual(["providers.compatible"])
+    app.picker.activateSelected()
+    app.picker.input.value = "my-gateway"
+    setup.mockInput.pressEnter()
+    app.picker.activateSelected()
+    app.picker.input.value = "https://gateway.example/v1/chat/completions"
+    setup.mockInput.pressEnter()
+    app.picker.activateSelected()
+    app.picker.input.value = "test-model"
+    setup.mockInput.pressEnter()
+    expect(emitted.some(command => command.type === "configure_compatible_provider")).toBe(false)
+    app.picker.activateSelected()
+    expect(emitted).toContainEqual(expect.objectContaining({ type: "configure_compatible_provider", configuration: {
+      provider: "my-gateway", adapter: "chat", endpoint: "https://gateway.example/v1/chat/completions", auth: "api_key", initial_model: "test-model",
+    } }))
+    app.handleEvent({ type: "provider_configured", meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: "setup", emitted_at: "2026-01-01T00:00:00Z" }, session_id: "session-local", provider: "my-gateway", auth_kind: "api_key" })
+    expect(app.picker.visible).toBe(true)
+    expect(app.picker.screenTitle).toContain("API key")
+  })
+
+  test.each(["api_key", "none"] as const)("auto-selects a fresh compatible model after %s activation", async (authKind) => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      onCommand(command) { commands.push(command); return { type: "accepted" } },
+      async onProviderApiKey() { return { stored: true, activated: true, warnings: [] } },
+      async onProviderActivate() {},
+    })
+    renderer.root.add(app)
+    app.handleEvent({ type: "provider_configured", meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: "configured", emitted_at: "2026-01-01T00:00:00Z" }, session_id: "session-local", provider: "custom", auth_kind: authKind })
+    if (authKind === "api_key") {
+      await setup.mockInput.typeText("fixture-key")
+      setup.mockInput.pressEnter()
+    }
+    await Bun.sleep(0)
+    const request = commands.findLast(command => command.type === "list_models")
+    expect(request?.type).toBe("list_models")
+    app.handleEvent({ type: "models_listed", meta: { ...request!.meta, emitted_at: "2026-01-01T00:00:01Z" },
+      models: [{ id: "custom/test", display_name: "Test", provider: "custom", aliases: [], current: false, available: true,
+        capabilities: { tool_calling: true, vision: false, thinking: false, cache_behavior: "none", max_context_tokens: null, max_output_tokens: null } }],
+      aliases: [], providers: [], cached: false, truncated: false,
+    })
+    expect(commands).toContainEqual(expect.objectContaining({ type: "switch_model", model: "custom/test", provider: "custom" }))
   })
 
   test("quick-connects fresh built-in providers through connection-scoped auth prompts", async () => {
@@ -66,7 +127,7 @@ describe("Rottweiler providers-sessions", () => {
     renderer.root.add(app)
 
     app.openProviderPicker()
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "configure_builtin_provider",
       provider: "github_copilot",
@@ -110,9 +171,9 @@ describe("Rottweiler providers-sessions", () => {
       provider: "github_copilot",
       attempt_id: "attempt-1",
     }))
-    expect(app.picker.title).toContain("Sign in · GitHub Copilot")
-    expect(app.picker.select.options[0]?.description).toContain("ABCD-1234")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+    expect(app.picker.screenTitle).toContain("SIGN IN › GitHub Copilot")
+    expect(options(app.picker)[0]?.description).toContain("ABCD-1234")
+    expect(options(app.picker).map((option) => option.value)).toEqual([
       "provider-auth.open",
       "provider-auth.copy-code",
       "provider-auth.copy-url",
@@ -141,21 +202,21 @@ describe("Rottweiler providers-sessions", () => {
     )).toHaveLength(1)
     await Bun.sleep(0)
     expect(openedUrls).toEqual(["https://github.com/login/device"])
-    app.picker.select.setSelectedIndex(0)
-    app.picker.select.selectCurrent()
+    select(app.picker, 0)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(openedUrls).toEqual([
       "https://github.com/login/device",
       "https://github.com/login/device",
     ])
 
-    app.picker.select.setSelectedIndex(1)
-    app.picker.select.selectCurrent()
+    select(app.picker, 1)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(copiedText).toEqual(["ABCD-1234"])
 
-    app.picker.select.setSelectedIndex(2)
-    app.picker.select.selectCurrent()
+    select(app.picker, 2)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(copiedText).toEqual(["ABCD-1234", "https://github.com/login/device"])
     expect(app.state.providerAuth.pending?.challenge).toEqual({
@@ -196,7 +257,7 @@ describe("Rottweiler providers-sessions", () => {
       session_id: "session-local",
       provider: "github_copilot",
       success: true,
-      message: "Provider connected. Choose a model from /models.",
+      message: "Provider connected. Choose a model from /model.",
     })
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "list_models",
@@ -207,9 +268,9 @@ describe("Rottweiler providers-sessions", () => {
     )).toHaveLength(refreshesBeforeAuthFinished + 1)
 
     app.openProviderPicker()
-    const codex = app.picker.select.options.findIndex((option) => option.value === "openai_codex")
-    app.picker.select.setSelectedIndex(codex)
-    app.picker.select.selectCurrent()
+    const codex = options(app.picker).findIndex((option) => option.value === "openai_codex")
+    select(app.picker, codex)
+    app.picker.activateSelected()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "configure_builtin_provider",
       provider: "openai_codex",
@@ -240,6 +301,7 @@ describe("Rottweiler providers-sessions", () => {
           model: "gpt-5",
           driverClientId: null,
           shellActive: false,
+          activity: null,
         }],
       },
       onCommand: () => ({ type: "accepted" }),
@@ -247,13 +309,54 @@ describe("Rottweiler providers-sessions", () => {
     renderer.root.add(app)
 
     app.openProviderPicker()
-    expect(app.picker.select.options[0]?.name).toBe("OpenAI API")
-    expect(app.picker.select.options[0]?.name).not.toContain("ChatGPT")
-    expect(app.picker.select.options[0]?.description).not.toContain("ChatGPT")
+    expect(options(app.picker)[0]?.name).toBe("OpenAI API")
+    expect(options(app.picker)[0]?.name).not.toContain("ChatGPT")
+    expect(options(app.picker)[0]?.description).not.toContain("ChatGPT")
     app.openSessionPicker()
-    expect(app.picker.select.options[0]?.name).toBe("New session")
-    expect(app.picker.select.options[1]?.name).toBe("Fix login")
-    expect(app.picker.select.options[1]?.description).toContain("payments-service")
+    expect(options(app.picker).map(option => option.name)).toEqual(["Fix login"])
+    expect(app.picker.selectedItem?.detail).toContain("workspace  payments-service")
+    expect(app.picker.selectedItem?.description).toBe("payments-service · gpt-5")
+  })
+
+  test("session rows show recorded age and turns; details show the first prompt and cost", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const now = Date.UTC(2026, 8, 24, 12, 0, 0)
+    const app = createRottweilerApp(renderer, {
+      sessionReader: emptySessionReader,
+      nowMs: () => now,
+      initialState: {
+        ...createInitialState(),
+        sessions: [{
+          sessionId: "session-recorded",
+          title: "Fix login",
+          workspaceName: "payments-service",
+          model: "gpt-5",
+          driverClientId: null,
+          shellActive: false,
+          activity: { updatedUnixMs: now - 2 * 3_600_000, turnCount: 3, firstPrompt: "Why does login loop?", costMicrosUsd: 125_000 },
+        }, {
+          sessionId: "session-unpriced",
+          title: "Explore",
+          workspaceName: "payments-service",
+          model: "gpt-5",
+          driverClientId: null,
+          shellActive: false,
+          activity: { updatedUnixMs: Date.UTC(2025, 0, 5), turnCount: 1, firstPrompt: null, costMicrosUsd: null },
+        }],
+      },
+      onCommand: () => ({ type: "accepted" }),
+    })
+    renderer.root.add(app)
+
+    app.openSessionPicker()
+    expect(app.picker.selectedItem?.hint).toBe("2h ago · 3 turns")
+    const detail = app.picker.selectedItem?.detail ?? ""
+    expect(detail).toContain("› Why does login loop?")
+    expect(detail).toContain("cost       $0.13")
+    select(app.picker, 1)
+    expect(app.picker.selectedItem?.hint).toBe("Jan 5 2025 · 1 turn")
+    expect(app.picker.selectedItem?.detail).not.toContain("cost")
   })
 
   test("creates a clean session from Ctrl-N and switches only after correlated acceptance", async () => {
@@ -323,6 +426,7 @@ describe("Rottweiler providers-sessions", () => {
           model: "fast",
           driverClientId: null,
           shellActive: false,
+          activity: null,
         }],
       },
       requestId: () => `rename-${++request}`,
@@ -337,16 +441,9 @@ describe("Rottweiler providers-sessions", () => {
     renderer.root.add(app)
 
     app.openSessionPicker()
-    app.picker.select.setSelectedIndex(1)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Session actions · Fix login")
-    expect(app.picker.select.options.map((option) => option.name)).toEqual([
-      "Resume session",
-      "Rename session",
-    ])
-    app.picker.select.setSelectedIndex(1)
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("Rename session, e.g. Auth refactor")
+    expect(app.picker.footer.plainText).toBe("⏎ resume · ctrl+r rename · ctrl+x export · ctrl+n new · esc close")
+    setup.mockInput.pressKey("r", { ctrl: true })
+    expect(app.picker.screenTitle).toBe("Rename · Fix login")
     expect(app.picker.input.value).toBe("")
     expect(app.picker.input.placeholder).toBe("Fix login")
 
@@ -371,8 +468,8 @@ describe("Rottweiler providers-sessions", () => {
       },
       title: "Auth refactor",
     })
-    expect(app.picker.title).toContain("Sessions")
-    expect(app.picker.select.options[1]?.name).toBe("Auth refactor")
+    expect(app.picker.screenTitle).toContain("SESSIONS")
+    expect(options(app.picker)[0]?.name).toBe("Auth refactor")
     expect(app.state.sessions[0]?.title).toBe("Auth refactor")
     expect(app.state.lastSequence).toBeNull()
     expect(selected).toEqual([])
@@ -409,24 +506,24 @@ describe("Rottweiler providers-sessions", () => {
     renderer.root.add(app)
 
     app.openProviderPicker()
-    app.picker.select.selectCurrent()
-    expect(app.picker.title).toContain("OpenAI · ChatGPT")
-    expect(app.picker.title).not.toContain("openai_codex")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+    app.picker.activateSelected()
+    expect(app.picker.screenTitle).toContain("OpenAI · ChatGPT")
+    expect(app.picker.screenTitle).not.toContain("openai_codex")
+    expect(options(app.picker).map((option) => option.value)).toEqual([
       "provider-recovery.activate",
       "provider-recovery.reauthenticate",
     ])
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(activations).toEqual(["openai_codex"])
 
     app.openProviderPicker()
-    app.picker.select.selectCurrent()
-    const reauthenticate = app.picker.select.options.findIndex(
+    app.picker.activateSelected()
+    const reauthenticate = options(app.picker).findIndex(
       (option) => option.value === "provider-recovery.reauthenticate",
     )
-    app.picker.select.setSelectedIndex(reauthenticate)
-    app.picker.select.selectCurrent()
+    select(app.picker, reauthenticate)
+    app.picker.activateSelected()
     expect(commands).toContainEqual(expect.objectContaining({
       type: "begin_provider_auth",
       provider: "openai_codex",
@@ -479,13 +576,13 @@ describe("Rottweiler providers-sessions", () => {
       warnings: [],
     })
 
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+    expect(options(app.picker).map((option) => option.value)).toEqual([
       "provider-auth.open",
       "provider-auth.copy-url",
       "provider-auth.cancel",
     ])
-    app.picker.select.setSelectedIndex(0)
-    app.picker.select.selectCurrent()
+    select(app.picker, 0)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     const error = app.state.errors.at(-1)
     expect(error?.code).toBe("provider_auth_browser_failed")
@@ -493,15 +590,15 @@ describe("Rottweiler providers-sessions", () => {
     expect(error?.message).not.toContain("challenge-canary")
     expect(error?.message).not.toContain("launcher leaked")
 
-    const copyUrl = app.picker.select.options.findIndex(
+    const copyUrl = options(app.picker).findIndex(
       (option) => option.value === "provider-auth.copy-url",
     )
-    app.picker.select.setSelectedIndex(copyUrl)
-    app.picker.select.selectCurrent()
+    select(app.picker, copyUrl)
+    app.picker.activateSelected()
     await Bun.sleep(0)
     expect(copied).toEqual([authorizationUrl])
     expect(
-      app.picker.select.options.find((option) => option.value === "provider-auth.open")
+      options(app.picker).find((option) => option.value === "provider-auth.open")
         ?.description,
     ).toContain("URL copied")
   })
@@ -576,13 +673,13 @@ describe("Rottweiler providers-sessions", () => {
           status: null,
           vision: true,
           thinking: true,
-          toolCalling: true,
+          toolCalling: true, contextTokens: null,
         }],
       },
     })
     renderer.root.add(app)
     app.openModelPicker()
-    app.picker.select.selectCurrent()
+    app.picker.activateSelected()
     app.handleEvent({
       type: "command_acknowledged",
       meta: {
@@ -607,7 +704,7 @@ describe("Rottweiler providers-sessions", () => {
     expect(app.state.errors).toHaveLength(64)
     expect(app.state.errors.at(-1)?.code).toBe("session_not_idle")
     expect(app.banner.visible).toBeTrue()
-    expect(app.banner.plainText).toContain("model switching requires an idle session")
+    expect(app.banner.plainText).toContain("stop the response with Ctrl+C")
     expect(commands).not.toContainEqual(expect.objectContaining({
       type: "set_setting",
       key: "project.models.default",
@@ -638,14 +735,14 @@ describe("Rottweiler providers-sessions", () => {
           status: null,
           vision: false,
           thinking: true,
-          toolCalling: true,
+          toolCalling: true, contextTokens: null,
         }],
       },
     })
     renderer.root.add(app)
     for (let index = 0; index < 130; index += 1) {
       app.openModelPicker()
-      app.picker.select.selectCurrent()
+      app.picker.activateSelected()
     }
     const switches = commands.filter((command) => command.type === "switch_model")
     expect(switches).toHaveLength(130)

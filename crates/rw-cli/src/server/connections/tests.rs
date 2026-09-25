@@ -105,6 +105,7 @@ impl ServerEngine for EffectEngine {
 enum Effect {
     Credential,
     Command,
+    Shutdown,
 }
 struct Fixture {
     _root: tempfile::TempDir,
@@ -146,6 +147,17 @@ impl Fixture {
                 }))
                 .expect("credential request"),
             ),
+            Effect::Shutdown => (
+                "/v1/command",
+                serde_json::to_vec(&ClientCommand::ShutdownHost {
+                    meta: rw_types::CommandMeta {
+                        protocol_version: rw_core::PROTOCOL_VERSION,
+                        client_id: credentials.client_id.clone(),
+                        request_id: rw_types::RequestId("shutdown".into()),
+                    },
+                })
+                .expect("shutdown command"),
+            ),
             Effect::Command => (
                 "/v1/command",
                 serde_json::to_vec(&ClientCommand::ListSessions {
@@ -158,8 +170,13 @@ impl Fixture {
                 .expect("command"),
             ),
         };
+        let lane = if matches!(effect, Effect::Shutdown) {
+            "urgent"
+        } else {
+            "normal"
+        };
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n{CLIENT_HEADER}: {}\r\n{COMMAND_LANE_HEADER}: normal\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n{CLIENT_HEADER}: {}\r\n{COMMAND_LANE_HEADER}: {lane}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             credentials.token,
             credentials.client_id.0,
             body.len()
@@ -322,4 +339,21 @@ async fn dropping_full_sse_receiver_retires_a_forwarder_waiting_to_send() {
     assert_eq!(forwarded.len(), HOST_EVENT_FORWARD_CAPACITY);
     drop(forwarded);
     bounded(source.closed()).await;
+}
+
+#[tokio::test]
+async fn disconnected_shutdown_client_still_stops_server_after_cleanup() {
+    let fixture = Fixture::start();
+    let stream = fixture.request(Effect::Shutdown).await;
+    drop(stream);
+    // Let the connection observe peer loss while its admitted cleanup is blocked.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!fixture.server.is_finished());
+    fixture.engine.release.add_permits(1);
+    bounded(fixture.server)
+        .await
+        .expect("server owner")
+        .expect("shutdown completed despite lost client");
+    assert!(fixture.engine.completed.load(Ordering::SeqCst));
+    assert!(fixture.engine.retired.load(Ordering::SeqCst));
 }

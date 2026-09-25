@@ -49,6 +49,8 @@ impl SubagentOrchestrator {
                 retained: Arc::new(Semaphore::new(super::MAX_RETAINED_SUBAGENTS)),
                 sequence: std::sync::atomic::AtomicU64::new(0),
                 sessions: Mutex::new(HashMap::new()),
+                queue: super::queue::Queue::default(),
+                activity: watch::channel(0).0,
                 session_depths: Mutex::new(HashMap::new()),
                 diff_artifact_authority: artifact_source,
                 metadata: RwLock::new(Arc::new(NoopSubagentMetadataStore)),
@@ -97,7 +99,7 @@ impl SubagentOrchestrator {
         Arc::clone(&self.inner.diff_artifact_authority) as Arc<dyn rw_tools::DiffArtifactAuthority>
     }
 
-    fn prepare_launch(
+    pub(super) fn prepare_launch(
         &self,
         parent_session_id: SessionId,
         request: SubagentRequest,
@@ -152,17 +154,13 @@ impl SubagentOrchestrator {
 
     pub(super) async fn start_owned(
         &self,
-        parent_session_id: SessionId,
-        request: SubagentRequest,
+        launch: SubagentLaunch,
         observer: Arc<dyn SubagentObserver>,
         cancellation: CancellationToken,
         startup: &mut super::startup::ChildStartup,
     ) -> Result<SubagentHandle, OrchestrationError> {
-        let launch = self.prepare_launch(
-            parent_session_id.clone(),
-            request.clone(),
-            cancellation.clone(),
-        )?;
+        let parent_session_id = launch.parent_session_id.clone();
+        let request = launch.request.clone();
         let handle = launch.handle.clone();
         let depth = launch.depth;
         let session = self.inner.factory.create(launch.clone()).await?;
@@ -208,8 +206,14 @@ impl SubagentOrchestrator {
                     model: request.model.clone(),
                     session: Arc::clone(&session),
                     state: SessionState::Active,
+                    cancellation: Some(cancellation.clone()),
                     result: Some(result_rx),
                     isolation: request.isolation,
+                    shares_workspace_writes: request.isolation
+                        == rw_types::SubagentIsolation::Shared
+                        && request.permission_mode == rw_types::SessionMode::Execute,
+                    delivery: observer.delivery(),
+                    awaiting_slot: false,
                     parent_session_id: parent_session_id.clone(),
                     latest_durable_artifact_id: None,
                     closing_artifact: None,
@@ -218,6 +222,7 @@ impl SubagentOrchestrator {
                 },
             );
         crate::engine::control_observation::changed();
+        self.inner.activity_changed();
         self.spawn_turn(
             handle.clone(),
             parent_session_id,
@@ -226,7 +231,7 @@ impl SubagentOrchestrator {
             observer,
             cancellation,
             result_tx,
-            permit,
+            Some(permit),
         );
         startup.session = None;
         startup.recovery = None;
@@ -243,29 +248,54 @@ impl SubagentOrchestrator {
         observer: Arc<dyn SubagentObserver>,
         cancellation: CancellationToken,
         result_tx: watch::Sender<Option<Result<SubagentResult, String>>>,
-        permit: tokio::sync::OwnedSemaphorePermit,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
+            // A continuation admitted while every slot was busy waits here, in FIFO order.
+            let permit = if let Some(permit) = permit {
+                Some(permit)
+            } else {
+                let permit = tokio::select! {
+                    permit = Arc::clone(&inner.permits).acquire_owned() => permit.ok(),
+                    () = cancellation.cancelled() => None,
+                };
+                if let Some(record) = inner
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(&handle.subagent_id)
+                {
+                    record.awaiting_slot = false;
+                }
+                inner.activity_changed();
+                permit
+            };
             let started = Instant::now();
             let progress: Arc<dyn SubagentProgressObserver> = Arc::new(ObserverProgress {
                 observer: Arc::clone(&observer),
                 handle: handle.clone(),
             });
-            let turn = tokio::select! {
-                () = cancellation.cancelled() => {
-                    let _ = bounded_cancel(&session, inner.limits).await;
-                    Err(OrchestrationError::Session("cancelled".to_owned()))
-                },
-                result = tokio::time::timeout(
-                    inner.limits.max_duration,
-                    session.run_turn(prompt, cancellation.clone(), progress),
-                ) => if let Ok(result) = result {
-                    result
-                } else {
+            let turn = if permit.is_none() {
+                Err(OrchestrationError::Session(
+                    "cancelled before it started".to_owned(),
+                ))
+            } else {
+                tokio::select! {
+                    () = cancellation.cancelled() => {
                         let _ = bounded_cancel(&session, inner.limits).await;
-                        Err(OrchestrationError::Session("timed out".to_owned()))
-                },
+                        Err(OrchestrationError::Session("cancelled".to_owned()))
+                    },
+                    result = tokio::time::timeout(
+                        inner.limits.max_duration,
+                        session.run_turn(prompt, cancellation.clone(), progress),
+                    ) => if let Ok(result) = result {
+                        result
+                    } else {
+                            let _ = bounded_cancel(&session, inner.limits).await;
+                            Err(OrchestrationError::Session("timed out".to_owned()))
+                    },
+                }
             };
             if turn.is_err() {
                 let _ = bounded_cancel(&session, inner.limits).await;
@@ -340,6 +370,7 @@ impl SubagentOrchestrator {
                     record.state = SessionState::Inactive;
                 }
             }
+            inner.activity_changed();
             let _ = result_tx.send(Some(durable_result));
             drop(permit);
         });
@@ -354,14 +385,26 @@ impl SubagentOrchestrator {
         &self,
         handle: &SubagentHandle,
     ) -> Result<SubagentResult, OrchestrationError> {
-        let mut receiver = self
-            .inner
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&handle.subagent_id)
-            .and_then(|record| record.result.clone())
-            .ok_or_else(|| OrchestrationError::NoPendingResult(handle.subagent_id.0.clone()))?;
+        let (receiver, parent) = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = sessions
+                .get(&handle.subagent_id)
+                .filter(|record| record.handle.session_id == handle.session_id)
+                .ok_or_else(|| OrchestrationError::UnknownSubagent(handle.subagent_id.0.clone()))?;
+            (record.result.clone(), record.parent_session_id.clone())
+        };
+        let Some(mut receiver) = receiver else {
+            return self
+                .inner
+                .diff_artifact_authority
+                .completed_result(&parent, &handle.subagent_id)
+                .await?
+                .ok_or_else(|| OrchestrationError::NoPendingResult(handle.subagent_id.0.clone()));
+        };
         loop {
             if let Some(result) = receiver.borrow().clone() {
                 return result.map_err(OrchestrationError::Session);
@@ -394,7 +437,7 @@ impl SubagentOrchestrator {
     ///
     /// # Errors
     ///
-    /// Returns for unknown/running children, invalid prompts, exhausted concurrency, or failures.
+    /// Returns for unknown/running children, invalid prompts, or failures.
     pub async fn follow_up(
         &self,
         caller_parent_session_id: &SessionId,
@@ -403,6 +446,31 @@ impl SubagentOrchestrator {
         observer: Arc<dyn SubagentObserver>,
         cancellation: CancellationToken,
     ) -> Result<SubagentHandle, OrchestrationError> {
+        self.continue_child(
+            caller_parent_session_id,
+            subagent_id,
+            prompt,
+            observer,
+            cancellation,
+        )
+        .await
+        .map(|ticket| ticket.handle)
+    }
+
+    /// Continues a completed child. When every slot is busy its turn waits for one;
+    /// the ticket reports that it is queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns for unknown/running children, invalid prompts, or failures.
+    pub async fn continue_child(
+        &self,
+        caller_parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+        prompt: String,
+        observer: Arc<dyn SubagentObserver>,
+        cancellation: CancellationToken,
+    ) -> Result<super::SubagentTicket, OrchestrationError> {
         if prompt.trim().is_empty() {
             return Err(OrchestrationError::InvalidRequest(
                 "follow-up prompt must not be empty".to_owned(),
@@ -421,12 +489,11 @@ impl SubagentOrchestrator {
             if record.state != SessionState::Inactive {
                 return Err(OrchestrationError::AlreadyRunning(subagent_id.0.clone()));
             }
-            let permit = Arc::clone(&self.inner.permits)
-                .try_acquire_owned()
-                .map_err(|_| OrchestrationError::ConcurrencyExceeded {
-                    maximum: self.inner.limits.max_concurrency,
-                })?;
+            let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
             record.state = SessionState::Active;
+            record.awaiting_slot = permit.is_none();
+            record.cancellation = Some(cancellation.clone());
+            record.delivery = observer.delivery();
             (
                 record.handle.clone(),
                 record.parent_session_id.clone(),
@@ -434,6 +501,7 @@ impl SubagentOrchestrator {
                 permit,
             )
         };
+        self.inner.activity_changed();
         let (result_tx, result_rx) = watch::channel(None);
         if let Some(record) = self
             .inner
@@ -454,9 +522,12 @@ impl SubagentOrchestrator {
                 .get_mut(subagent_id)
             {
                 record.state = SessionState::Inactive;
+                record.awaiting_slot = false;
             }
+            self.inner.activity_changed();
             return Err(error);
         }
+        let queued = permit.is_none();
         self.spawn_turn(
             handle.clone(),
             parent_session_id,
@@ -467,7 +538,7 @@ impl SubagentOrchestrator {
             result_tx,
             permit,
         );
-        Ok(handle)
+        Ok(super::SubagentTicket { handle, queued })
     }
 
     /// Cooperatively cancels one active child.
@@ -480,6 +551,9 @@ impl SubagentOrchestrator {
         caller_parent_session_id: &SessionId,
         subagent_id: &SubagentId,
     ) -> Result<(), OrchestrationError> {
+        if self.cancel_queued(caller_parent_session_id, subagent_id)? {
+            return Ok(());
+        }
         let session = self
             .inner
             .sessions
@@ -489,6 +563,9 @@ impl SubagentOrchestrator {
             .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))
             .and_then(|record| {
                 ensure_child_owner(caller_parent_session_id, subagent_id, record)?;
+                if let Some(cancellation) = &record.cancellation {
+                    cancellation.cancel();
+                }
                 Ok(Arc::clone(&record.session))
             })?;
         bounded_cancel(&session, self.inner.limits).await
@@ -505,6 +582,9 @@ impl SubagentOrchestrator {
         caller_parent_session_id: &SessionId,
         subagent_id: &SubagentId,
     ) -> Result<(), OrchestrationError> {
+        if self.is_queued(subagent_id) {
+            return Err(OrchestrationError::Queued(subagent_id.0.clone()));
+        }
         let close_gate = self
             .inner
             .sessions
@@ -643,6 +723,19 @@ impl SubagentOrchestrator {
             .filter(|record| record.parent_session_id == *parent_session_id)
             .map(session_record_descriptor)
             .collect::<Vec<_>>();
+        descriptors.extend(
+            self.queued_for_parent(parent_session_id)
+                .into_iter()
+                .map(|child| SubagentDescriptor {
+                    subagent_id: child.subagent_id,
+                    child_session_id: child.child_session_id,
+                    task: child.task,
+                    agent: child.agent,
+                    model: child.model,
+                    isolation: child.isolation,
+                    activity: rw_types::SubagentActivity::Queued,
+                }),
+        );
         descriptors.sort_by(|left, right| left.subagent_id.0.cmp(&right.subagent_id.0));
         descriptors
     }
@@ -768,8 +861,14 @@ impl SubagentOrchestrator {
                     model: record.policy.model_alias.clone(),
                     session,
                     state: SessionState::Inactive,
+                    cancellation: None,
                     result: None,
                     isolation: record.isolation,
+                    shares_workspace_writes: record.isolation
+                        == rw_types::SubagentIsolation::Shared
+                        && record.policy.permission_mode == rw_types::SessionMode::Execute,
+                    delivery: None,
+                    awaiting_slot: false,
                     parent_session_id: record.parent_session_id,
                     latest_durable_artifact_id,
                     closing_artifact: None,

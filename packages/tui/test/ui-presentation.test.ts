@@ -74,27 +74,27 @@ describe("pure UI presentation policy", () => {
       modesTruncated: true,
     }
     const loading = modePickerPresentation(state, undefined, true)
-    expect(loading.title).toBe("Modes · refreshing")
-    expect(loading.items[1]?.label).toBe("● Audit")
+    expect(loading.title).toBe("MODE · refreshing   /mode")
+    expect(loading.items[1]).toMatchObject({ label: "Audit", marker: "●", hint: "current" })
     expect(loading.items[1]?.description.length).toBeLessThanOrEqual(160)
 
     const failed = modePickerPresentation(state, "unsafe\u0000 failure", false)
-    expect(failed.title).toBe("Modes · load failed")
+    expect(failed.title).toBe("MODE · load failed   /mode")
     expect(failed.items[0]).toMatchObject({
       id: "modes.retry",
       description: "unsafe failure",
       value: { kind: "retry" },
     })
 
-    expect(modePickerPresentation(state, undefined, false).title).toBe("Modes · partial catalog")
+    expect(modePickerPresentation(state, undefined, false).title).toBe("MODE · partial catalog   /mode")
   })
 
   test("summarizes model routes and permission patterns consistently", () => {
     expect(modelAliasDescription(
       { alias: "fast", candidates: ["openai/gpt-5", "copilot/gpt-5"], current: false },
       [
-        { id: "openai/gpt-5", displayName: "gpt-5", provider: "openai", aliases: ["fast"], current: false, status: null, vision: true, thinking: true, toolCalling: true, available: false },
-        { id: "copilot/gpt-5", displayName: "gpt-5", provider: "copilot", aliases: ["fast"], current: false, status: null, vision: true, thinking: true, toolCalling: true, available: false },
+        { id: "openai/gpt-5", displayName: "gpt-5", provider: "openai", aliases: ["fast"], current: false, status: null, vision: true, thinking: true, toolCalling: true, contextTokens: null, available: false },
+        { id: "copilot/gpt-5", displayName: "gpt-5", provider: "copilot", aliases: ["fast"], current: false, status: null, vision: true, thinking: true, toolCalling: true, contextTokens: null, available: false },
       ],
     )).toContain("no available route")
     expect(permissionPatternLabel("bash(*)")).toBe("bash · any arguments")

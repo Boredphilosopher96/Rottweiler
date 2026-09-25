@@ -39,8 +39,6 @@ pub(super) fn reject(
         ActorCommand::UiCatalog { respond } => reject_reply(respond),
         ActorCommand::UiPanels { respond } => reject_reply(respond),
         ActorCommand::CompleteUserShell { respond, .. }
-        | ActorCommand::RecordSubagentSpawned { respond, .. }
-        | ActorCommand::RecordSubagentFinished { respond, .. }
         | ActorCommand::PluginSetStatus { respond, .. }
         | ActorCommand::PluginNotify { respond, .. } => reject_reply(respond),
         ActorCommand::PluginInjectMessage { respond, .. }
@@ -51,7 +49,7 @@ pub(super) fn reject(
         ActorCommand::PluginQuery { respond } => reject_reply(respond),
         ActorCommand::PluginStateRead { respond, .. } => reject_reply(respond),
         ActorCommand::PluginStateCommit { respond, .. } => reject_reply(respond),
-        ActorCommand::PublishSubagentProgress(_) | ActorCommand::Snapshot { .. } => {}
+        ActorCommand::Snapshot { .. } => {}
         #[cfg(test)]
         ActorCommand::Interrupt { respond, .. } => {
             let _ = respond.send(false);

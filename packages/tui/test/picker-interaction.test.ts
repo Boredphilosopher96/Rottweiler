@@ -1,6 +1,6 @@
 import { createTestRenderer } from "@opentui/core/testing"
 import { expect, test } from "bun:test"
-import { FuzzyPickerRenderable, type PickerItem } from "../src/components"
+import { PickerScreenRenderable, type PickerItem } from "../src/components"
 import { ClientAllocationOwner } from "../src/client-allocation"
 import { PickerController } from "../src/picker-controller"
 import { kennelTheme } from "../src/theme"
@@ -8,17 +8,17 @@ import { kennelTheme } from "../src/theme"
 test("picker transitions retire captured actions while refresh retains the active interaction", async () => {
   const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
   try {
-    const picker = new FuzzyPickerRenderable<unknown>(setup.renderer, kennelTheme)
+    const picker = new PickerScreenRenderable<unknown>(setup.renderer, kennelTheme)
     setup.renderer.root.add(picker)
     const callbacks: Array<(item: PickerItem<unknown>) => void> = []
-    const refresh = picker.refresh.bind(picker)
-    picker.refresh = (title, items, callback, compact) => {
+    const present = picker.present.bind(picker)
+    picker.present = (screen, title, items, callback, options, anchored, query) => {
       callbacks.push(callback)
-      refresh(title, items, callback, compact)
+      present(screen, title, items, callback, options, anchored, query)
     }
     const controller = new PickerController({
       allocations: new ClientAllocationOwner(),
-      picker: () => picker, terminalHeight: () => 24, statusHeight: () => 1,
+      picker: () => picker, terminalWidth: () => 80, terminalHeight: () => 24, vim: () => false, statusHeight: () => 1,
       composerDockHeight: () => 4, focusComposer() {}, renderPicker() {},
       withRefreshGuard: (_kind, action) => action(), onModalOpened() {}, onClosed() {},
     })

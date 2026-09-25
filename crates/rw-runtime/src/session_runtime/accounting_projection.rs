@@ -175,9 +175,9 @@ pub(super) fn project_session(
             .expect("empty checkpoint"),
         summary: rw_store::session::SessionSummary {
             id: session_id.into(),
-            title: "New session".into(),
+            title: "Untitled".into(),
             updated_unix_ms: session_projection_updated_at(path),
-            cost_micros: 0,
+            first_prompt: None,
             turn_count: 0,
         },
         explicit_title: false,

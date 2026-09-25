@@ -1237,6 +1237,28 @@
       ]
     },
     {
+      "description": "Read the session's declarative extension inventory: every discovered\nskill, command, and agent with its source and load outcome.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_extensions"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {
@@ -1509,6 +1531,7 @@
       ]
     },
     {
+      "description": "Adds a reviewed `tool(glob)` rule for this session only, or durably for\nthis project in private user storage.",
       "type": "object",
       "properties": {
         "meta": {
@@ -1516,6 +1539,9 @@
         },
         "session_id": {
           "$ref": "#/$defs/SessionId"
+        },
+        "scope": {
+          "$ref": "#/$defs/PermissionApprovalScope"
         },
         "pattern": {
           "type": "string"
@@ -1525,7 +1551,7 @@
         },
         "type": {
           "type": "string",
-          "const": "add_session_permission_rule"
+          "const": "add_permission_rule"
         }
       },
       "additionalProperties": false,
@@ -1533,11 +1559,13 @@
         "type",
         "meta",
         "session_id",
+        "scope",
         "pattern",
         "action"
       ]
     },
     {
+      "description": "Removes a session or project rule by the id `list_permissions` reported.",
       "type": "object",
       "properties": {
         "meta": {
@@ -1551,7 +1579,7 @@
         },
         "type": {
           "type": "string",
-          "const": "remove_session_permission_rule"
+          "const": "remove_permission_rule"
         }
       },
       "additionalProperties": false,
@@ -1718,6 +1746,31 @@
         "meta",
         "session_id",
         "provider"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "configuration": {
+          "$ref": "#/$defs/CompatibleProviderSetup"
+        },
+        "type": {
+          "type": "string",
+          "const": "configure_compatible_provider"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "configuration"
       ]
     },
     {
@@ -2007,6 +2060,32 @@
         "type": {
           "type": "string",
           "const": "close_subagent"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "description": "Moves a running child out of the parent's foreground. The tool call waiting\non it returns at once and the parent turn continues; the child's result is\ndelivered to the parent when it finishes, like any background child.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "type": {
+          "type": "string",
+          "const": "background_subagent"
         }
       },
       "additionalProperties": false,
@@ -3233,6 +3312,14 @@
         "value"
       ]
     },
+    "PermissionApprovalScope": {
+      "description": "Scope of a remembered exact approval.",
+      "type": "string",
+      "enum": [
+        "session",
+        "project"
+      ]
+    },
     "PermissionDecision": {
       "description": "Default permission decision used when no rule matches.",
       "oneOf": [
@@ -3262,12 +3349,56 @@
         "json"
       ]
     },
-    "PermissionApprovalScope": {
-      "description": "Scope of a remembered exact approval.",
+    "CompatibleProviderSetup": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "adapter": {
+          "$ref": "#/$defs/CompatibleProviderAdapter"
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "auth": {
+          "$ref": "#/$defs/CompatibleProviderAuth"
+        },
+        "initial_model": {
+          "description": "Optional static model for local endpoints that do not expose discovery.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "adapter",
+        "endpoint",
+        "auth",
+        "initial_model"
+      ]
+    },
+    "CompatibleProviderAdapter": {
       "type": "string",
       "enum": [
-        "session",
-        "project"
+        "chat",
+        "responses"
+      ]
+    },
+    "CompatibleProviderAuth": {
+      "type": "string",
+      "enum": [
+        "api_key",
+        "none"
       ]
     },
     "ProviderAuthAttemptId": {

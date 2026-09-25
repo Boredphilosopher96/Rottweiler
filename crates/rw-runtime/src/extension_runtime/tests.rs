@@ -1237,7 +1237,7 @@ async fn mcp_prompt_commands_are_namespaced_bounded_and_fail_when_disabled() {
         commands
             .dispatch_line(
                 &mut context,
-                "/mcp.prompt fixture review {\"topic\":\"before-enable\"}",
+                "/mcp prompt fixture review {\"topic\":\"before-enable\"}",
             )
             .await
             .is_err()
@@ -1249,7 +1249,7 @@ async fn mcp_prompt_commands_are_namespaced_bounded_and_fail_when_disabled() {
     let output = commands
         .dispatch_line(
             &mut context,
-            "/mcp.prompt fixture review {\"topic\":\"needle\"}",
+            "/mcp prompt fixture review {\"topic\":\"needle\"}",
         )
         .await
         .expect("prompt");
@@ -1268,7 +1268,7 @@ async fn mcp_prompt_commands_are_namespaced_bounded_and_fail_when_disabled() {
     );
     assert!(
         commands
-            .dispatch_line(&mut context, "/mcp.prompt fixture review []")
+            .dispatch_line(&mut context, "/mcp prompt fixture review []")
             .await
             .is_err()
     );
@@ -1279,7 +1279,7 @@ async fn mcp_prompt_commands_are_namespaced_bounded_and_fail_when_disabled() {
         .expect("disable");
     assert!(
         commands
-            .dispatch_line(&mut context, "/mcp.prompt fixture review {}")
+            .dispatch_line(&mut context, "/mcp prompt fixture review {}")
             .await
             .is_err()
     );

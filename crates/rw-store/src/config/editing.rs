@@ -1,3 +1,5 @@
+mod compatible;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write as _;
@@ -207,6 +209,47 @@ impl ConfigLoader {
                 reason: error.to_string(),
             }
         })?;
+        if bytes.len() > 64 * 1024 {
+            return Err(ConfigError::InvalidUserSetting {
+                key: "project.models.default".into(),
+                reason: "project model preferences exceeded their size limit".into(),
+            });
+        }
+        // Seed a user default from the first concrete selection. Explicit user
+        // defaults and later workspace choices retain their own precedence.
+        if model.contains('/') {
+            validate_tui_config_file(&self.user_path, "models.default")?;
+            let mut document = read_tui_config_document(&self.user_path)?;
+            let root = document
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::InvalidUserSetting {
+                    key: "models.default".to_owned(),
+                    reason: "user configuration root is not a table".to_owned(),
+                })?;
+            let models = root
+                .entry("models".to_owned())
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::InvalidUserSetting {
+                    key: "models.default".to_owned(),
+                    reason: "models configuration is not a table".to_owned(),
+                })?;
+            if !models.contains_key("default") {
+                models.insert("default".to_owned(), toml::Value::String(model.to_owned()));
+                let contents = toml::to_string_pretty(&document).map_err(|error| {
+                    ConfigError::InvalidUserSetting {
+                        key: "models.default".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                persist_tui_config_atomic(
+                    parent,
+                    &self.user_path,
+                    contents.as_bytes(),
+                    "models.default",
+                )?;
+            }
+        }
         persist_tui_config_atomic(parent, &path, &bytes, "project.models.default")?;
         self.load()
     }
@@ -1054,6 +1097,7 @@ pub(super) fn configured_setting_value(config: &Config, key: &str) -> Option<Str
     match key {
         "ui.theme" => Some(config.ui.theme.clone()),
         "compaction.auto" => Some(config.compaction.auto.to_string()),
+        "agents.wake_on_completion" => Some(config.agents.wake_on_completion.to_string()),
         "permissions.default" => Some(config.permissions.default.as_str().to_owned()),
         "budget.session_cost_cap_micros_usd" => config
             .budget
@@ -1121,7 +1165,7 @@ pub(super) fn set_toml_leaf(
             .entry((*segment).to_owned())
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
     }
-    let boolean_leaf = key == "compaction.auto"
+    let boolean_leaf = matches!(key, "compaction.auto" | "agents.wake_on_completion")
         || (segments.first() == Some(&"servers") && segments.last() == Some(&"enabled"));
     let integer_leaf = matches!(
         key,

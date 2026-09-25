@@ -75,13 +75,14 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::RemoveMcpServer { .. }
         | ClientCommand::ApproveMcpServer { .. }
         | ClientCommand::SetMcpServerEnabled { .. }
-        | ClientCommand::AddSessionPermissionRule { .. }
-        | ClientCommand::RemoveSessionPermissionRule { .. }
+        | ClientCommand::AddPermissionRule { .. }
+        | ClientCommand::RemovePermissionRule { .. }
         | ClientCommand::RemoveQueuedMessage { .. }
         | ClientCommand::ClearQueuedMessages { .. }
         | ClientCommand::RenameSession { .. }
         | ClientCommand::ExportSession { .. }
         | ClientCommand::RevokePermissionApproval { .. }
+        | ClientCommand::ConfigureCompatibleProvider { .. }
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::ContinueSubagent { .. }
         | ClientCommand::CloseSubagent { .. }
@@ -116,6 +117,7 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::ListModes { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ListSettings { .. }
+        | ClientCommand::ListExtensions { .. }
         | ClientCommand::ListMcpServers { .. }
         | ClientCommand::ListRuntimeServices { .. }
         | ClientCommand::ReviewMcpServer { .. }
@@ -129,6 +131,7 @@ fn durable_mutation(command: &ClientCommand) -> bool {
         | ClientCommand::GetWorkspaceDiff { .. }
         | ClientCommand::ListSubagents { .. }
         | ClientCommand::InterruptSubagent { .. }
+        | ClientCommand::BackgroundSubagent { .. }
         | ClientCommand::ShutdownHost { .. } => false,
     }
 }

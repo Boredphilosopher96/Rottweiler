@@ -41,6 +41,7 @@ pub(super) async fn handle_plugin_message(
     let disposition = if state.running.is_some()
         || state.pending_command.is_some()
         || state.pending_model_preparation.is_some()
+        || !state.deferred_controls.is_empty()
     {
         if state.queued.len() >= rw_types::session_state::MAX_SESSION_QUEUE_ITEMS {
             return Err(AgentLoopError::InvalidConfiguration(

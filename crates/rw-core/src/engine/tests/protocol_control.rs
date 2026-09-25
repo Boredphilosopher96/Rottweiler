@@ -405,6 +405,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
         permissions
             .authorize(
                 PermissionRequest {
+                    prompt_reason: None,
                     invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
                     id: "remember-session".to_owned(),
                     tool_name: "write".to_owned(),
@@ -526,9 +527,10 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
 
     assert!(matches!(
         handle
-            .dispatch(ClientCommand::AddSessionPermissionRule {
+            .dispatch(ClientCommand::AddPermissionRule {
                 meta: protocol_meta("observer", "observer-add"),
                 session_id: session_id.clone(),
+                scope: PermissionApprovalScope::Session,
                 pattern: "write(**)".to_owned(),
                 action: PermissionDecision::Allow,
             })
@@ -540,9 +542,10 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
 
     assert_eq!(
         handle
-            .dispatch(ClientCommand::AddSessionPermissionRule {
+            .dispatch(ClientCommand::AddPermissionRule {
                 meta: protocol_meta("driver", "driver-add"),
                 session_id: session_id.clone(),
+                scope: PermissionApprovalScope::Session,
                 pattern: "write(**)".to_owned(),
                 action: PermissionDecision::Allow,
             })
@@ -558,7 +561,7 @@ async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_ga
         .expect("typed added row");
     assert_eq!(
         handle
-            .dispatch(ClientCommand::RemoveSessionPermissionRule {
+            .dispatch(ClientCommand::RemovePermissionRule {
                 meta: protocol_meta("driver", "driver-remove"),
                 session_id: session_id.clone(),
                 rule_id: added_rule.id.clone(),

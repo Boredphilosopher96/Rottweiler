@@ -208,6 +208,9 @@ export function selectedToolsTurnId(state: RottweilerState): string | null {
 
 function toolOutcome(tool: ToolProjection, summary: string): ToolOutcomePresentation {
   if (tool.status === "running") return { kind: "running", label: "live" }
+  if (tool.status === "completed") {
+    return tool.isError === true ? { kind: "failed", label: "failed" } : { kind: "succeeded", label: "complete" }
+  }
   if (tool.status === "awaiting_approval") {
     return { kind: "awaiting_approval", label: "approval needed" }
   }

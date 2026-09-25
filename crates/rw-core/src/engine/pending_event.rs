@@ -97,6 +97,10 @@ pub(super) enum PendingEvent {
         operation_id: String,
         unrestorable_paths: Vec<UnrestorablePath>,
     },
+    SessionControlQueueChanged {
+        controls: Vec<rw_types::QueuedSessionControl>,
+        settlement: Option<rw_types::SessionControlSettlement>,
+    },
     MessageQueued {
         position: u64,
         content: String,
@@ -429,6 +433,14 @@ impl PendingEvent {
                 operation_id,
                 unrestorable_paths,
             },
+            Self::SessionControlQueueChanged {
+                controls,
+                settlement,
+            } => EngineEvent::SessionControlQueueChanged {
+                meta,
+                controls,
+                settlement,
+            },
             Self::MessageQueued {
                 position,
                 content,
@@ -529,7 +541,7 @@ impl PendingEvent {
                 decision,
             },
             Self::PermissionRequested { turn, request } => {
-                let rationale = request.rationale();
+                let rationale = request.prompt_reason;
                 EngineEvent::ToolApprovalNeeded {
                     meta,
                     turn_id: wire_turn_id(turn),

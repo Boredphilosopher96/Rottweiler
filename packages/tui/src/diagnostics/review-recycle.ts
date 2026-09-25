@@ -31,7 +31,7 @@ export async function runReviewRecycleProbe(directory: string, mode: "capture" |
   try {
     app = createRottweilerApp(setup.renderer, { allocations, treeSitterClient: treeSitter, sessionId: "memory-probe", clientId: "memory-client", sessionReader: fixture.reader,
       initialState: { ...initial, connection: { ...initial.connection, phase: "connected" }, driverClientId: "memory-client",
-        workspaceStatus: { workspaceName: "Review", branch: "main", changedPaths: ["held-review2.txt"], truncated: false },
+        workspaceStatus: { workspaceName: "Review", branch: "main", changes: [{ path: "held-review2.txt", kind: "modified" as const }], truncated: false },
         workspaceRoots: { generation: "1", effectiveFromTurn: "0", roots: ["/review-workspace"] } },
       async onCommand(command, allocation) {
         if (command.type === "review_file") decisions++

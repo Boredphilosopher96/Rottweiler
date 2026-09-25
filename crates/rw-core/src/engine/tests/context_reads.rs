@@ -116,3 +116,92 @@ async fn context_read_rejects_publication_after_mode_changes() {
     );
     handle.close().await.expect("close");
 }
+
+/// Reports a window only for the switched-to model, like a lazy hosted runtime
+/// whose startup alias never resolves.
+struct WindowByAlias;
+
+#[async_trait]
+impl crate::engine::ModelDriver for WindowByAlias {
+    async fn settle_effects(&self) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+
+    fn stream(
+        &self,
+        _alias: &str,
+        _request: rw_providers::ProviderRequest,
+        _invocation: crate::provider_admission::ProviderInvocation,
+    ) -> Result<rw_providers::BoxEventStream, AgentLoopError> {
+        Err(AgentLoopError::Provider(
+            "no provider requests expected".into(),
+        ))
+    }
+
+    fn context_metadata(&self, alias: &str) -> crate::engine::ModelContextMetadata {
+        crate::engine::ModelContextMetadata {
+            max_context_tokens: (alias == "provider/wide").then_some(400_000),
+            ..crate::engine::ModelContextMetadata::default()
+        }
+    }
+}
+
+#[tokio::test]
+async fn idle_context_read_after_a_model_switch_uses_the_switched_model_window() {
+    use rw_types::{ClientCommand, ClientRole, CommandOutcome, ModelAlias};
+    let root = tempfile::tempdir().expect("workspace");
+    let config = config(
+        root.path(),
+        Arc::new(WindowByAlias),
+        Arc::new(ToolRegistry::new()),
+        PermissionDecision::Allow,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    let handle = super::fixtures::history::spawn(config)
+        .await
+        .expect("actor");
+    let session_id = rw_types::SessionId("fixture-session".to_owned());
+    let before = handle.context_snapshot().await.expect("startup context");
+    assert!(
+        !before.context_window_known,
+        "the startup alias has no window"
+    );
+
+    let meta = |request: &str| super::fixtures::support::protocol_meta("driver", request);
+    assert_eq!(
+        handle
+            .dispatch(ClientCommand::AttachSession {
+                meta: meta("attach"),
+                session_id: session_id.clone(),
+                last_seen_sequence: None,
+                role: ClientRole::Driver,
+            })
+            .await
+            .expect("attach"),
+        CommandOutcome::Accepted {}
+    );
+    assert_eq!(
+        handle
+            .dispatch(ClientCommand::SwitchModel {
+                meta: meta("switch"),
+                session_id,
+                model: ModelAlias("provider/wide".to_owned()),
+                provider: None,
+            })
+            .await
+            .expect("switch"),
+        CommandOutcome::Accepted {}
+    );
+    timeout(Duration::from_secs(2), async {
+        while handle.snapshot().await.expect("snapshot").model_alias != "provider/wide" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("model switch committed");
+
+    let after = handle.context_snapshot().await.expect("idle context");
+    assert!(after.context_window_known);
+    let dump = handle.dump_prompt(None).await.expect("prompt dump");
+    assert_eq!(dump.model_alias.0, "provider/wide");
+}

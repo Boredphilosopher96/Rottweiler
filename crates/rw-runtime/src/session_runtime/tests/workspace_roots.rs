@@ -88,7 +88,7 @@ async fn runtime_trust_controller_persists_grant_and_revoke_for_slash_commands()
         .await
         .expect("grant preview");
     let stale_token = preview
-        .split("`/trust grant ")
+        .split("`/permissions trust grant ")
         .nth(1)
         .and_then(|tail| tail.split('`').next())
         .expect("confirmation token")
@@ -114,7 +114,7 @@ async fn runtime_trust_controller_persists_grant_and_revoke_for_slash_commands()
         .expect("fresh preview");
     assert!(preview.contains("config.toml"));
     let token = preview
-        .split("`/trust grant ")
+        .split("`/permissions trust grant ")
         .nth(1)
         .and_then(|tail| tail.split('`').next())
         .expect("fresh confirmation token")
@@ -415,6 +415,7 @@ async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() 
             .permissions
             .authorize(
                 PermissionRequest {
+                    prompt_reason: None,
                     id: "recovered-child-write".to_owned(),
                     invocation_id: rw_types::ToolInvocationId(
                         "recovered-child-write-invocation".to_owned()

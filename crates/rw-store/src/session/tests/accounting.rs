@@ -258,6 +258,25 @@ fn accounting_totals_cross_utc_day_without_erasing_nonpriced_costs() {
     assert_eq!(totals.day_unavailable_turns, 1);
     assert_eq!(totals.session_non_usd_monetary_turns, 1);
     assert_eq!(totals.day_non_usd_monetary_turns, 1);
+    let spend = |session| {
+        ledger
+            .session_spend(session)
+            .unwrap_or_else(|error| panic!("lifetime spend must query: {error}"))
+    };
+    assert_eq!(
+        spend("session-a"),
+        crate::session::SessionSpend {
+            micros_usd: 100,
+            unpriced_entries: 2,
+        }
+    );
+    assert_eq!(
+        spend("session-b"),
+        crate::session::SessionSpend {
+            micros_usd: 5_300,
+            unpriced_entries: 0,
+        }
+    );
 }
 
 #[test]

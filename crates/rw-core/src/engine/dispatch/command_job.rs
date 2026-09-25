@@ -47,14 +47,12 @@ pub(in crate::engine) struct PendingCommand {
     meta: CommandMeta,
     name: String,
     navigation: Option<rw_types::extension_control::SessionNavigationTarget>,
-    observed_turn: u64,
     reply: CommandReply,
 }
 
 pub(super) async fn start(
     meta: CommandMeta,
     bound: Result<BoundUiCommand, CommandRegistryError>,
-    observed_turn: u64,
     reply: CommandReply,
     context: DispatchContext<'_>,
 ) {
@@ -70,7 +68,6 @@ pub(super) async fn start(
             super::command_result::apply(
                 meta,
                 String::new(),
-                observed_turn,
                 Err(command_error(&error)),
                 reply,
                 context,
@@ -88,10 +85,20 @@ pub(super) async fn start(
     };
     let bound = bound.with_origin(origin.clone());
     let name = bound.name().to_owned();
+    if let Some(action) = super::action_availability::slash_action(&name)
+        && let Some((_, reason)) =
+            super::action_availability::ActionState::from_actor(context.state, context.config)
+                .unavailable(action)
+    {
+        let _ = reply.send(Err(AgentLoopError::InvalidConfiguration(reason.into())));
+        return;
+    }
+
     let host_tools = bound.host_tools();
     let mut snapshot = super::command_snapshot::capture(context.state, context.config);
     let owner = Arc::clone(context.config);
     let next_turn = context.state.next_turn;
+    let model_alias = context.state.model_alias.clone();
     let (prepare_started, preparation) = oneshot::channel();
     let operation = async move {
         let result = bound
@@ -101,7 +108,8 @@ pub(super) async fn start(
         let result = match result {
             Ok(output) => {
                 let _ = prepare_started.send(());
-                super::command_generation::prepare_output(output, &owner, next_turn).await
+                super::command_generation::prepare_output(output, &owner, next_turn, &model_alias)
+                    .await
             }
             Err(error) => Err(error),
         };
@@ -109,7 +117,6 @@ pub(super) async fn start(
     };
     admit(
         meta,
-        observed_turn,
         reply,
         name,
         origin,
@@ -145,17 +152,18 @@ pub(super) fn start_development(
         }
     };
     let owner = Arc::clone(config);
+    let model_alias = state.model_alias.clone();
     let (prepare_started, preparation) = oneshot::channel();
     let operation = async move {
         let _ = prepare_started.send(());
         (
-            super::command_generation::prepare_development(source.as_deref(), &owner).await,
+            super::command_generation::prepare_development(source.as_deref(), &owner, &model_alias)
+                .await,
             None,
         )
     };
     admit(
         meta,
-        state.next_turn,
         reply,
         "plugin-development".into(),
         origin,
@@ -170,7 +178,6 @@ pub(super) fn start_development(
 #[allow(clippy::too_many_arguments)]
 fn admit(
     meta: CommandMeta,
-    observed_turn: u64,
     reply: CommandReply,
     name: String,
     origin: rw_types::extension_invocation::ExtensionInvocationId,
@@ -234,7 +241,6 @@ fn admit(
                 meta,
                 name,
                 navigation: None,
-                observed_turn,
                 reply,
             });
         }
@@ -316,7 +322,6 @@ pub(in crate::engine) async fn finish(mut result: Execution, context: DispatchCo
     super::command_result::apply(
         pending.meta,
         format!("/{}", pending.name),
-        pending.observed_turn,
         result,
         pending.reply,
         DispatchContext {
@@ -385,10 +390,12 @@ impl PendingCommand {
     pub(in crate::engine) fn allows(
         &self,
         origin: &rw_types::extension_invocation::ExtensionInvocationId,
-        config: &Arc<SessionActorConfig>,
+        config: &SessionActorConfig,
         driver: Option<&ClientId>,
     ) -> bool {
-        &self.origin == origin && Arc::ptr_eq(&self.owner, config) && self.driver.as_ref() == driver
+        &self.origin == origin
+            && std::ptr::eq(self.owner.as_ref(), config)
+            && self.driver.as_ref() == driver
     }
     pub(super) fn queue_navigation(
         &mut self,

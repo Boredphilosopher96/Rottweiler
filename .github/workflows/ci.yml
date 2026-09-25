@@ -476,6 +476,51 @@ jobs:
           path: ci-results/
           retention-days: 30
 
+  ux-acceptance:
+    name: Native UX acceptance (${{ matrix.os }})
+    needs: [linux-candidate-build, macos-candidate-build]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            candidate_artifact: ${{ needs.linux-candidate-build.outputs.candidate_artifact }}
+          - os: macos-15
+            candidate_artifact: ${{ needs.macos-candidate-build.outputs.candidate_artifact }}
+    env:
+      ROTTWEILER_M4_SKIP_PERFORMANCE: 1
+      ROTTWEILER_M4_EVIDENCE_OUTPUT: ci-results/ux-acceptance.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download verified native candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.candidate_artifact }}
+          path: ${{ runner.temp }}/native-candidate.noindex
+      - name: Verify and prepare native candidate
+        run: python3 scripts/native_candidate.py prepare "$RUNNER_TEMP/native-candidate.noindex"
+      - name: Prepare Linux sandbox namespace prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends iproute2 util-linux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          timeout 10s unshare --user --map-root-user --mount --net --pid --fork /bin/true
+          echo "ROTTWEILER_REQUIRE_LINUX_SANDBOX=1" >> "$GITHUB_ENV"
+      - name: Exercise onboarding, replay, shell ownership, and active shutdown
+        run: python3 scripts/ci_evidence.py --delegated --gate ux-acceptance --output ci-results/ux.json -- crates/rw-cli/tests/m4_release_gate.sh "$RUNNER_TEMP/native-candidate.noindex"
+      - name: Retain UX evidence
+        if: always()
+        uses: ./.github/actions/retain-evidence
+        with:
+          name: ci-${{ github.job }}-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ci-results/
+          retention-days: 30
+
   supply-chain:
     name: Supply chain
     runs-on: ubuntu-latest
@@ -515,7 +560,7 @@ jobs:
   required:
     name: CI required
     if: always()
-    needs: [linux-candidate-build, macos-candidate-build, contracts, package-inventory, packages, fuzz-compile, test, security-tests, performance-smoke, tui-performance-smoke, m4-ssh-loopback, supply-chain]
+    needs: [linux-candidate-build, macos-candidate-build, contracts, package-inventory, packages, fuzz-compile, test, security-tests, performance-smoke, tui-performance-smoke, m4-ssh-loopback, ux-acceptance, supply-chain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

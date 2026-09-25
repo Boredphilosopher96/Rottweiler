@@ -33,18 +33,14 @@ async fn built_in_command_copy_is_human_readable_and_contains_no_wire_json() {
         mode_id: ModeId("execute".to_owned()),
         modes: Arc::new(ModeRegistry::builtins().expect("built-in modes")),
         permission_summary: "Default permission: ask\nSession rules: none".to_owned(),
-        plan_summary: "No plan has been submitted.".to_owned(),
-        command_summary: "/status — Show agent status".to_owned(),
+        command_summary: "/help — Commands and keyboard shortcuts".to_owned(),
     };
-    let status = registry
-        .dispatch_line(&mut context, "/status")
+    let help = registry
+        .dispatch_line(&mut context, "/help")
         .await
-        .expect("status command");
-    assert_eq!(
-        status.message,
-        "Agent: idle\nQueued messages: 2\nMode: execute"
-    );
-    assert!(!status.message.contains(['{', '}', '_']));
+        .expect("help command");
+    assert_eq!(help.message, "/help — Commands and keyboard shortcuts");
+    assert!(!help.message.contains(['{', '}', '_']));
 
     let permissions = registry
         .dispatch_line(&mut context, "/permissions list")

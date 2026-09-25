@@ -26,7 +26,7 @@ fn recent_session_text_labels_dates_turns_and_ids_without_fake_cost() {
         id: "session-fixture".to_owned(),
         title: "Investigate startup".to_owned(),
         updated_unix_ms: 1_776_508_645_000,
-        cost_micros: 0,
+        first_prompt: None,
         turn_count: 3,
     }];
 
@@ -828,4 +828,60 @@ fn local_tui_discovers_the_repository_root_from_a_nested_launch_directory() {
 
     assert_eq!(discover_local_workspace(&nested), repository);
     assert_eq!(discover_local_workspace(root.path()), root.path());
+}
+
+#[test]
+fn owned_runtime_cursor_temporaries_require_writer_settlement_and_private_identity()
+-> std::io::Result<()> {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let root = tempfile::tempdir()?;
+    let valid = ".last-seen.12345678-1234-4234-8234-123456789abc.tmp";
+    for (index, kind) in ["valid", "unknown", "uuid", "symlink", "hardlink", "public"]
+        .iter()
+        .enumerate()
+    {
+        let directory = root.path().join(format!("runtime-{index}"));
+        std::fs::create_dir(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let name = match *kind {
+            "unknown" => ".unrelated.12345678-1234-4234-8234-123456789abc.tmp",
+            "uuid" => ".last-seen.not-a-uuid.tmp",
+            _ => valid,
+        };
+        let path = directory.join(name);
+        let outside = root.path().join(format!("outside-{index}"));
+        std::fs::write(&outside, b"retained")?;
+        match *kind {
+            "symlink" => symlink(&outside, &path)?,
+            "hardlink" => std::fs::hard_link(&outside, &path)?,
+            _ => std::fs::write(&path, b"42")?,
+        }
+        if *kind != "symlink" {
+            std::fs::set_permissions(
+                &path,
+                std::fs::Permissions::from_mode(if *kind == "public" { 0o644 } else { 0o600 }),
+            )?;
+        }
+        let mut guard = RuntimeDirectoryGuard::capture(&directory)
+            .unwrap_or_else(|error| panic!("private runtime capture: {error}"));
+        assert!(
+            guard.cleanup().is_err(),
+            "a server guard cannot remove a live client's temporary"
+        );
+        assert!(std::fs::symlink_metadata(&path).is_ok());
+        guard.cursor_writer_stopped();
+        if *kind == "valid" {
+            guard.cleanup()?;
+            assert!(!directory.exists());
+        } else {
+            assert!(
+                guard.cleanup().is_err(),
+                "unexpected artifact {kind} retained"
+            );
+            assert!(std::fs::symlink_metadata(&path).is_ok());
+            guard.preserve();
+        }
+        assert_eq!(std::fs::read(&outside)?, b"retained");
+    }
+    Ok(())
 }

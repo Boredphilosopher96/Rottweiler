@@ -191,6 +191,7 @@ async fn command_tool_prelude_uses_interactive_approval_and_denial_aborts_prompt
                 CommandDescriptor::new("prelude", "run typed command prelude"),
                 PreludePromptCommand {
                     command: "fixture-shell".to_owned(),
+                    pre_approvals: Vec::new(),
                 },
             )
             .expect("prelude command");
@@ -250,6 +251,57 @@ async fn command_tool_prelude_uses_interactive_approval_and_denial_aborts_prompt
 }
 
 #[tokio::test]
+async fn pre_approved_command_prelude_runs_without_prompting() {
+    let root = TempDir::new().expect("tempdir");
+    let model = Arc::new(ScriptedModel::new([stop_script("done", &[])]));
+    let tool = Arc::new(
+        StubTool::new(
+            "bash",
+            vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+            StubOutcome::Success(ToolResult::new("prelude output", Value::Null)),
+        )
+        .with_behavior(rw_tools::ToolBehavior::Shell),
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).expect("register bash");
+    let mut commands = builtin_command_registry().expect("commands");
+    commands
+        .register(
+            CommandDescriptor::new("prelude", "run typed command prelude"),
+            PreludePromptCommand {
+                command: "fixture-shell --check".to_owned(),
+                pre_approvals: vec!["bash(fixture-shell*)".to_owned()],
+            },
+        )
+        .expect("prelude command");
+    let mut actor_config = config(
+        root.path(),
+        model.clone(),
+        Arc::new(tools),
+        PermissionDecision::Ask,
+        builtin_hook_dispatcher().expect("hooks"),
+    );
+    actor_config.commands = Arc::new(commands);
+    let handle = crate::engine::tests::fixtures::history::spawn(actor_config)
+        .await
+        .expect("actor");
+    let mut events = handle.subscribe().expect("subscription");
+    assert_eq!(
+        handle.send_message("/prelude").await.expect("command"),
+        MessageDisposition::Started
+    );
+    let turn = collect_turn(&mut events).await;
+    assert!(
+        !turn
+            .iter()
+            .any(|event| matches!(event.kind, PendingEvent::PermissionRequested { .. })),
+        "a pre-approved invocation must not prompt"
+    );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(model.request_count(), 1);
+}
+
+#[tokio::test]
 async fn mutating_command_prelude_is_byte_restored_by_rewind() {
     let root = TempDir::new().expect("tempdir");
     let mutated = root.path().join("prelude.txt");
@@ -269,6 +321,7 @@ async fn mutating_command_prelude_is_byte_restored_by_rewind() {
             CommandDescriptor::new("prelude", "run typed command prelude"),
             PreludePromptCommand {
                 command: "fixture-shell".to_owned(),
+                pre_approvals: Vec::new(),
             },
         )
         .expect("prelude command");
@@ -429,7 +482,7 @@ async fn unsandboxed_bash_denial_is_conspicuous_and_never_reaches_the_executor()
     assert!(matches!(
         &approval.wire,
         EngineEvent::ToolApprovalNeeded { rationale, args, .. }
-            if rationale.contains("UNSANDBOXED EXECUTION")
+            if rationale.as_deref() == Some("Runs outside the sandbox, without filesystem or network isolation")
                 && args["sandbox"] == "unsandboxed"
     ));
     let PendingEvent::PermissionRequested { request, .. } = approval.kind else {
@@ -441,10 +494,9 @@ async fn unsandboxed_bash_denial_is_conspicuous_and_never_reaches_the_executor()
         controls.controls.approvals[0].invocation_id,
         request.invocation_id
     );
-    assert!(
-        controls.controls.approvals[0]
-            .rationale
-            .contains("UNSANDBOXED EXECUTION")
+    assert_eq!(
+        controls.controls.approvals[0].rationale.as_deref(),
+        Some("Runs outside the sandbox, without filesystem or network isolation")
     );
     assert!(
         handle

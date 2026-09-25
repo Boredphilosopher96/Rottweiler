@@ -1,15 +1,17 @@
 import { TextRenderable } from "../text"
 import { bindSelectableClick } from "../selectable-click"
-import { BoxRenderable, CodeRenderable, MarkdownRenderable, t, fg, bold, type RenderContext, type SyntaxStyle, type TreeSitterClient } from "@opentui/core"
+import { BoxRenderable, CodeRenderable, MarkdownRenderable, type RenderContext, type SyntaxStyle, type TreeSitterClient } from "@opentui/core"
 import type { TranscriptBodyPreview, TranscriptContent, TranscriptContentSource, TranscriptItem } from "../../protocol"
 import type { RottweilerTheme } from "../../theme"
 import { ReasoningBlockRenderable } from "./blocks"
+import { ToolBlockRenderable } from "./tool-block"
 import { commandResultMarkdown } from "../../render/command-presentation"
 import { projectCommandResult } from "../../render/command-results"
-import { formatCost } from "../../render"
+import { turnEndLine } from "../../render/turn-end"
+import { childResultTitle, parseChildResult, shortTask, type ChildLabel, type ChildResult } from "../../render/child-result"
 
 const MAX_ROW_TEXT = 4096
-const USER_GUTTER = { topLeft: "▌", topRight: "▌", bottomLeft: "▌", bottomRight: "▌", horizontal: "▌", vertical: "▌", topT: "▌", bottomT: "▌", leftT: "▌", rightT: "▌", cross: "▌" } as const
+const OPEN_FULL = "… click to open full content"
 
 export interface TranscriptRowOptions {
   readonly syntaxStyle: SyntaxStyle
@@ -20,18 +22,27 @@ export interface TranscriptRowOptions {
   readonly reasoningExpanded?: boolean
   readonly onReasoningExpansion?: (id: string, expanded: boolean) => void
   readonly onExpansionChange: (id: string, expanded: boolean) => void
+  /** Agent name and task of a child, as far as the client knows them. */
+  readonly childLabel?: (subagentId: string) => ChildLabel
 }
 
-/** One stable semantic row; provider IR and lifetime event reduction stay outside rendering. */
+/**
+ * One transcript item. Messages, commands, shells, children, and turn endings
+ * render here; tool items delegate to the same `ToolBlockRenderable` the live
+ * tail uses, so a finished turn keeps its exact appearance when it moves from
+ * the streaming tail into durable history.
+ */
 export class TranscriptRowRenderable extends BoxRenderable {
-  readonly header: TextRenderable
+  readonly #header: TextRenderable
   readonly markdown: MarkdownRenderable
-  readonly footer: TextRenderable
+  readonly prefix: TextRenderable
+  readonly #footer: TextRenderable
   readonly diffFooter: TextRenderable
-  readonly presentationFooter: TextRenderable
   readonly shellCommand: CodeRenderable | null
   readonly shellOutput: TextRenderable | null
   readonly reasoning: ReasoningBlockRenderable
+  readonly tool: ToolBlockRenderable | null
+  readonly #message: BoxRenderable
   readonly #options: TranscriptRowOptions
   readonly #theme: RottweilerTheme
   #retainedItem: TranscriptItem | null = null
@@ -44,13 +55,15 @@ export class TranscriptRowRenderable extends BoxRenderable {
   #expanded: boolean
   #selected = false
   #width = 0
+  #follows: TranscriptContent["type"] | null = null
+  #shadowed = false
+  #empty = false
   #source: TranscriptContentSource | null = null
   #diffSource: TranscriptContentSource | null = null
-  #presentationSource: TranscriptContentSource | null = null
 
   override destroy(): void {
     this.#retainedItem = null
-    this.#source = null; this.#diffSource = null; this.#presentationSource = null
+    this.#source = null; this.#diffSource = null
     super.destroy()
   }
 
@@ -59,155 +72,196 @@ export class TranscriptRowRenderable extends BoxRenderable {
     this.#item = item
     this.#options = options
     this.#theme = theme
-    this.#expanded = expanded ?? item.content.type !== "tool"
-    this.header = new TextRenderable(ctx, { content: "", fg: theme.textMuted, height: 1, selectable: true })
+    this.#expanded = expanded ?? childResultOf(item) === null
+    this.#header = new TextRenderable(ctx, { content: "", fg: theme.textMuted, height: 1, selectable: true, visible: false })
+    this.#message = new BoxRenderable(ctx, { width: "100%", flexDirection: "row", flexShrink: 0 })
+    this.prefix = new TextRenderable(ctx, { content: "", fg: theme.primary, width: 2, flexShrink: 0, selectable: false })
     this.markdown = new MarkdownRenderable(ctx, {
-      content: "", width: "100%", fg: theme.markdownText, syntaxStyle: options.syntaxStyle,
+      content: "", flexGrow: 1, flexShrink: 1, fg: theme.markdownText, syntaxStyle: options.syntaxStyle,
       ...(options.treeSitterClient === undefined ? {} : { treeSitterClient: options.treeSitterClient }),
-      conceal: true, concealCode: false, streaming: false, flexShrink: 0,
+      conceal: true, concealCode: false, streaming: false,
       internalBlockMode: "top-level", tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
     })
     this.markdown.selectable = true
+    this.#message.add(this.prefix)
+    this.#message.add(this.markdown)
     this.reasoning = new ReasoningBlockRenderable(ctx, theme, options.syntaxStyle, {
       blockId: `history-reasoning:${item.id}`, content: "", width: 80,
       expanded: options.reasoningExpanded ?? true,
       onExpansionChange: expanded => options.onReasoningExpansion?.(item.id, expanded),
       onInteraction: () => options.onInteraction?.(),
     })
+    this.tool = item.content.type === "tool"
+      ? new ToolBlockRenderable(ctx, theme, item.content, expanded, value => options.onExpansionChange(this.#toolId(), value), {
+        syntaxStyle: options.syntaxStyle,
+        ...(options.treeSitterClient === undefined ? {} : { treeSitterClient: options.treeSitterClient }),
+        ...(options.onOpenContent === undefined ? {} : { onOpenContent: options.onOpenContent }),
+      }) : null
     this.shellCommand = item.content.type === "shell"
       ? new CodeRenderable(ctx, {
-        content: "", fg: theme.text, width: "100%",
+        content: "", fg: theme.text, width: "100%", marginLeft: 2,
         syntaxStyle: options.syntaxStyle, filetype: "bash", conceal: false,
         ...(options.treeSitterClient === undefined ? {} : { treeSitterClient: options.treeSitterClient })
       }) : null
     this.shellOutput = item.content.type === "shell"
-      ? new TextRenderable(ctx, { content: "", fg: theme.textMuted, selectable: true, width: "100%" }) : null
-    this.diffFooter = new TextRenderable(ctx, { content: "Open child changes →", fg: theme.textMuted, height: 1, selectable: false, visible: false })
+      ? new TextRenderable(ctx, { content: "", fg: theme.textMuted, selectable: true, width: "100%", marginLeft: 2 }) : null
+    this.diffFooter = new TextRenderable(ctx, { content: "Open child changes →", fg: theme.accent, height: 1, selectable: false, visible: false, marginLeft: 2 })
     bindSelectableClick(ctx, this.diffFooter, () => {
       if (this.#diffSource !== null) options.onOpenContent?.(this.#diffSource)
       options.onInteraction?.()
     })
-    this.presentationFooter = new TextRenderable(ctx, { content: "", fg: theme.accent, height: 1, selectable: false, visible: false })
-    bindSelectableClick(ctx, this.presentationFooter, () => {
-      if (this.#presentationSource !== null) options.onOpenContent?.(this.#presentationSource)
-      options.onInteraction?.()
-    })
-    this.footer = new TextRenderable(ctx, { content: "", fg: theme.textMuted, height: 1, selectable: false })
-    bindSelectableClick(ctx, this.header, () => { this.toggle(); options.onInteraction?.() })
-    bindSelectableClick(ctx, this.footer, () => {
+    this.#footer = new TextRenderable(ctx, { content: "", fg: theme.textMuted, height: 1, selectable: false, visible: false, marginLeft: 2 })
+    bindSelectableClick(ctx, this.#header, () => { this.toggle(); options.onInteraction?.() })
+    // A child row is one line; opening it shows the child's own transcript.
+    bindSelectableClick(ctx, this.#footer, () => {
       if (this.#item.content.type === "subagent") options.onOpenChild?.(this.#item.content)
       else if (this.#source !== null) options.onOpenContent?.(this.#source)
       options.onInteraction?.()
     })
-    this.add(this.header)
-    this.add(this.reasoning)
-    this.add(this.markdown)
-    if (this.shellCommand !== null) this.add(this.shellCommand)
-    if (this.shellOutput !== null) this.add(this.shellOutput)
-    this.add(this.diffFooter)
-    this.add(this.presentationFooter)
-    this.add(this.footer)
+    if (this.tool !== null) {
+      this.add(this.tool)
+    } else {
+      this.add(this.#header)
+      this.add(this.reasoning)
+      this.add(this.#message)
+      if (this.shellCommand !== null) this.add(this.shellCommand)
+      if (this.shellOutput !== null) this.add(this.shellOutput)
+      this.add(this.diffFooter)
+      this.add(this.#footer)
+    }
     this.#render()
   }
 
   get item(): TranscriptItem { return this.#item }
-  get blockId(): string {
-    return this.#item.content.type === "tool"
-      ? `tool:${this.#item.content.invocation_id}` : `history:${this.#item.id}`
-  }
-  get expanded(): boolean { return this.#expanded }
+  /** Tool rows present the tool block's header so selection highlights one line. */
+  get header(): TextRenderable { return this.tool?.header ?? this.#header }
+  get blockId(): string { return this.tool?.blockId ?? `history:${this.#item.id}` }
+  get expanded(): boolean { return this.tool?.expanded ?? this.#expanded }
+  /** Child-result cards are keyboard-navigable blocks like tool rows. */
+  get isChildResult(): boolean { return childResultOf(this.#item) !== null }
+  /** The row's one open-content link: full output, a result view, or a child transcript. */
+  get footer(): TextRenderable { return this.tool?.truncationMarker ?? this.#footer }
 
-  update(item: TranscriptItem, width: number): void {
-    if (this.#item === item && this.#width === width) return
+  /** `follows` is the content type of the preceding row, which sets vertical rhythm. */
+  update(item: TranscriptItem, width: number, follows: TranscriptContent["type"] | null = this.#follows): void {
+    if (this.#item === item && this.#width === width && this.#follows === follows) return
     this.#item = item
     this.#width = width
+    this.#follows = follows
     this.#render()
   }
 
+  /** A running tool that the live tail is drawing is hidden here to avoid a duplicate row. */
+  setShadowed(shadowed: boolean): void {
+    if (this.#shadowed === shadowed) return
+    this.#shadowed = shadowed
+    this.visible = !shadowed && !this.#empty
+  }
+
   toggle(): void {
+    if (this.tool !== null) { this.tool.toggle(); return }
+    if (this.#item.content.type === "subagent") { this.#options.onOpenChild?.(this.#item.content); return }
     this.#expanded = !this.#expanded
-    this.#options.onExpansionChange(this.#item.content.type === "tool" ? this.#item.content.invocation_id : this.blockId, this.#expanded)
+    this.#options.onExpansionChange(this.blockId, this.#expanded)
     this.#render()
   }
 
   setSelected(selected: boolean): void {
+    if (this.tool !== null) { this.tool.setSelected(selected); return }
     if (this.#selected === selected) return
     this.#selected = selected
-    this.header.fg = selected ? this.#theme.accent : this.#theme.textMuted
-    this.header.bg = selected ? this.#theme.backgroundElement : this.#theme.background
+    this.#header.bg = selected ? this.#theme.backgroundElement : this.#theme.background
+  }
+
+  #toolId(): string {
+    const content = this.#item.content
+    return content.type === "tool" ? content.invocation_id : this.blockId
   }
 
   #render(): void {
     const content = this.#item.content
+    this.marginTop = this.#item.ordinal === "0" || (content.type === "tool" && this.#follows === "tool") ? 0 : 1
+    if (content.type === "tool") {
+      this.tool?.update(content, Math.max(20, this.#width))
+      this.#setEmpty(false)
+      return
+    }
     const bodies: TranscriptBodyPreview[] = []
-    let title: string
+    let header = ""
     let reasoning = ""
+    let prefix = ""
+    const child = childResultOf(this.#item)
     this.#source = null
     this.#diffSource = null
-    this.#presentationSource = null
-    this.presentationFooter.visible = false
+    this.#message.backgroundColor = this.#theme.background
     switch (content.type) {
-      case "turn_summary":
-        title = `${content.status.replaceAll("_", " ")} · ${content.cost.kind === "subscription_quota" && content.cost.used == null ? "turn usage · " : ""}${formatCost(content.cost, content.usage)}`
+      case "turn_summary": {
+        const line = turnEndLine(content.status, content.cost, content.usage)
+        this.#setEmpty(line === null)
+        header = line?.text ?? ""
+        this.#header.fg = line?.tone === "error" ? this.#theme.error : line?.tone === "warning" ? this.#theme.warning : this.#theme.textMuted
         break
+      }
       case "conversation":
-        title = content.role === "user" ? "You" : content.role === "assistant" ? "Rottweiler" : content.role
         this.#source = content.source
+        if (child !== null) {
+          header = childResultTitle(child, this.#options.childLabel?.(child.id) ?? { name: null, task: null })
+          this.#header.fg = child.status === "completed" ? this.#theme.success
+            : child.status === "failed" ? this.#theme.error : this.#theme.warning
+          const report = content.blocks.find(block => block.type === "text")
+          if (child.report !== "" && report?.type === "text") bodies.push({ ...report.body, text: child.report })
+          break
+        }
         for (const block of content.blocks) {
           if (block.type === "reasoning") reasoning += `${block.body.text}\n`
           else if (block.type !== "image") bodies.push(block.body)
         }
-        if (content.blocks.some(block => block.type === "image")) title += " · image attached"
-        break
-      case "tool":
-        title = `${this.#expanded ? "▾" : "▸"} ${content.name} · ${content.status.type === "running" ? "running" : content.status.is_error ? "failed" : "done"}`
-        bodies.push(content.arguments)
-        if (content.status.type === "finished") {
-          bodies.push(content.status.output)
-          this.#source = content.status.output.source
-          if (content.status.presentation !== null) {
-            this.#presentationSource = content.status.presentation.source
-            this.presentationFooter.content = `${content.status.presentation.title} →`
-            this.presentationFooter.visible = this.#expanded
-          }
-        } else this.#source = content.arguments.source
-        if (content.diff !== null) bodies.push(content.diff)
+        if (content.role === "user") {
+          prefix = "›"
+          this.#message.backgroundColor = this.#theme.backgroundPanel
+        }
         break
       case "command":
-        title = `/${content.name}`
+        header = `/${content.name}`
         bodies.push(content.message)
         this.#source = content.message.source
         break
       case "shell":
-        title = `Terminal · ${content.active ? "running" : content.status === 0 ? "done" : `exit ${content.status ?? "—"}`}`
+        header = `Terminal · ${content.active ? "running" : content.status === 0 ? "done" : `exit ${content.status ?? "—"}`}`
         if (content.command !== null) bodies.push(content.command)
         if (content.output !== null) bodies.push(content.output)
         this.#source = content.output?.source ?? content.command?.source ?? null
         break
-      case "subagent":
-        title = `Child agent · ${content.status.type === "running" ? "running" : content.status.status}`
-        bodies.push(content.task)
+      case "subagent": {
+        // The report is shown once, in the child-result card that follows.
+        const name = this.#options.childLabel?.(content.subagent_id).name ?? "Agent"
+        const status = content.status.type === "running" ? "running" : content.status.status.replaceAll("_", " ")
+        header = `↳ ${name} · ${shortTask(content.task.text)} · ${status}`
         if (content.status.type === "finished") {
-          bodies.push(content.status.result)
-          if (content.status.touched_file_count > 0) title += ` · ${content.status.touched_file_count} files`
+          if (content.status.touched_file_count > 0) header += ` · ${content.status.touched_file_count} files`
           this.#diffSource = content.status.diff
-          if (this.#diffSource !== null) title += " · diff ready"
+          if (this.#diffSource !== null) header += " · diff ready"
         }
         break
+      }
     }
-    const text = content.type === "command"
+    if (content.type !== "turn_summary") this.#setEmpty(false)
+    const images = content.type === "conversation" && content.blocks.some(block => block.type === "image") ? "_image attached_\n\n" : ""
+    const text = images + (content.type === "command"
       ? content.message.complete ? commandResultMarkdown(projectCommandResult(content.name, content.message.text))
         : content.message.format === "json" || /^[\s]*[\[{]/.test(content.message.text)
-          ? "_Open complete content to inspect this structured result._" : content.message.text
-      : bodies.map(body => body.format === "json" ? `\`\`\`json\n${body.text}\n\`\`\`` : body.text).join("\n\n")
+          ? "" : content.message.text
+      : bodies.map(body => body.format === "json" ? `\`\`\`json\n${body.text}\n\`\`\`` : body.text).join("\n\n"))
     const clipped = text.length > MAX_ROW_TEXT
-    this.header.content = content.type === "conversation" && content.role === "assistant"
-      ? t`${fg(this.#theme.accent)("● ")}${bold(fg(this.#theme.text)("rottweiler"))}`
-      : content.type === "conversation" && content.role === "user"
-        ? t`${bold(fg(this.#theme.primary)("you"))}` : title
-    this.markdown.content = this.#expanded && content.type !== "shell" ? clip(text) : ""
-    this.markdown.visible = this.#expanded && text.length > 0 && content.type !== "shell"
-    this.reasoning.visible = this.#expanded && reasoning.length > 0
+    const expanded = content.type !== "subagent" && ((content.type === "conversation" && child === null) || this.#expanded)
+    this.#header.visible = header !== ""
+    this.#header.content = header
+    this.prefix.content = prefix
+    this.markdown.content = expanded && content.type !== "shell" ? clip(text) : ""
+    this.#message.visible = expanded && text.length > 0 && content.type !== "shell"
+    this.reasoning.visible = reasoning.length > 0
+    this.reasoning.marginTop = header === "" ? 0 : 1
+    this.#message.marginTop = reasoning.length > 0 ? 1 : 0
     this.reasoning.update(clip(reasoning), false, Math.max(20, this.#width))
     if (content.type === "shell" && this.shellCommand !== null && this.shellOutput !== null) {
       this.shellCommand.content = content.command === null ? "" : `$ ${clip(content.command.text)}`
@@ -218,16 +272,22 @@ export class TranscriptRowRenderable extends BoxRenderable {
     const incomplete = clipped || bodies.some(body => !body.complete)
       || (content.type === "conversation" && content.omitted_blocks)
     this.diffFooter.visible = this.#diffSource !== null
-    this.footer.visible = content.type === "subagent" || (this.#source !== null && (incomplete || content.type === "tool"))
-    this.footer.content = content.type === "subagent" ? "Open child transcript →" : incomplete ? "Preview · open complete content →" : "Open content →"
-    const user = content.type === "conversation" && content.role === "user"
-    this.border = user ? ["left"] : false
-    if (user) { this.customBorderChars = USER_GUTTER; this.borderColor = this.#theme.primary }
-    this.backgroundColor = this.#theme.background
-    this.paddingX = user ? 1 : 0
-    this.markdown.paddingLeft = content.type === "conversation" && content.role === "assistant" ? 2 : 0
-    this.marginTop = this.#item.ordinal === "0" ? 0 : 1
+    this.#footer.visible = this.#source !== null && incomplete && expanded
+    this.#footer.content = OPEN_FULL
+    this.#footer.fg = this.#theme.textMuted
   }
+
+  #setEmpty(empty: boolean): void {
+    this.#empty = empty
+    this.visible = !this.#shadowed && !empty
+  }
+}
+
+function childResultOf(item: TranscriptItem): ChildResult | null {
+  const content = item.content
+  if (content.type !== "conversation" || content.role !== "user") return null
+  const first = content.blocks.find(block => block.type === "text")
+  return first === undefined || first.type !== "text" ? null : parseChildResult(first.body.text)
 }
 
 function clip(text: string): string {

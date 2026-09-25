@@ -250,6 +250,9 @@ async fn run_remote_session(
         keybindings: tui_keybindings.as_deref(),
         theme: "",
         replay: false,
+        // This invocation owns remote engine shutdown (only for an engine it
+        // started, and never with --detach), including tunnel fallback.
+        closes_host: false,
     });
     let mut broker_finished = false;
     let result = tokio::select! {
@@ -399,12 +402,16 @@ pub(super) async fn finish_remote_watchdog(
     }
 }
 
+/// The engine settles sessions, turns, and owned processes under a 30s proof
+/// deadline before acknowledging shutdown; allow that plus transport grace.
+const REMOTE_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(35);
+
 pub(super) async fn shutdown_authenticated_remote(
     paths: &server::ServerRuntimePaths,
 ) -> Result<()> {
     let token = read_private_bootstrap_token(&paths.token)?
         .ok_or_else(|| miette!("remote engine token disappeared before attached shutdown"))?;
-    remote::shutdown_authenticated_host(&paths.socket, &token, std::time::Duration::from_secs(5))
+    remote::shutdown_authenticated_host(&paths.socket, &token, REMOTE_SHUTDOWN_DEADLINE)
         .await
         .map_err(|error| miette!(error))
 }
@@ -416,7 +423,7 @@ pub(super) async fn shutdown_remote_using_runtime(
     let direct = remote::shutdown_authenticated_host(
         &runtime.paths.socket,
         bootstrap_token,
-        std::time::Duration::from_secs(5),
+        REMOTE_SHUTDOWN_DEADLINE,
     )
     .await;
     if direct.is_err() {
@@ -430,7 +437,7 @@ pub(super) async fn shutdown_remote_using_runtime(
         remote::shutdown_authenticated_host(
             &runtime.paths.socket,
             bootstrap_token,
-            std::time::Duration::from_secs(5),
+            REMOTE_SHUTDOWN_DEADLINE,
         )
         .await
         .map_err(|error| miette!(error))

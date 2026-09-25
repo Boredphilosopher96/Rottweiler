@@ -303,6 +303,7 @@ fn test_process_is_running(pid: rustix::process::Pid) -> bool {
     rustix::process::test_kill_process(pid).is_ok()
 }
 
+mod git_safety;
 mod lifecycle;
 mod output;
 mod replay;

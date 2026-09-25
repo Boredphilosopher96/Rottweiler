@@ -286,6 +286,7 @@ pub(super) async fn authorize_tool_call(
     mode: SessionMode,
 ) -> Result<AuthorizedToolBinding, String> {
     let mut request = PermissionRequest {
+        prompt_reason: None,
         id: call.id.clone(),
         invocation_id: call.invocation_id.clone(),
         tool_name: call.name.clone(),
@@ -419,13 +420,13 @@ pub(super) async fn prepare_tool_call(
             "background commands cannot run with workspace-mutating hooks",
         ));
     }
-    if config.tools.session_activity(&config.session_id).is_some()
+    if let Some(activity) = config.tools.session_activity(&config.session_id)
         && !matches!(initial_security.mutation_scope, MutationScope::None)
         && !background_control
     {
         return PreparedToolCall::Complete(failed_execution(
             call,
-            "workspace mutation is blocked while a background shell process is running",
+            activity.blocked("workspace mutation"),
         ));
     }
     let mut authorization = match authorize_tool_call(
@@ -516,13 +517,13 @@ pub(super) async fn prepare_tool_call(
             "background commands cannot run with workspace-mutating hooks",
         ));
     }
-    if config.tools.session_activity(&config.session_id).is_some()
+    if let Some(activity) = config.tools.session_activity(&config.session_id)
         && !matches!(security.mutation_scope, MutationScope::None)
         && !background_control
     {
         return PreparedToolCall::Complete(failed_execution(
             call,
-            "workspace mutation is blocked while a background shell process is running",
+            activity.blocked("workspace mutation"),
         ));
     }
     if call.name != original_name || arguments != original_arguments {

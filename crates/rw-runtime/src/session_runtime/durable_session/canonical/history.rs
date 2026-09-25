@@ -82,6 +82,12 @@ impl SessionHistoryView for CapturedHistory {
     fn conversation(&self) -> ConversationCut {
         self.cut
     }
+    async fn completion_notices(
+        &self,
+    ) -> Result<HistoryRead<Vec<rw_core::recovery::CompletionNotice>>, AgentLoopError> {
+        self.query(rw_core::recovery::CanonicalHistory::completion_notices)
+            .await
+    }
     async fn conversation_sources(
         &self,
         range: Range<u64>,
@@ -248,5 +254,23 @@ impl RetainedResult for rw_core::recovery::ConversationFragmentSource {
     fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
         self.retained_bytes()
             .ok_or_else(|| persistence("fragment source retained allocation overflow"))
+    }
+}
+
+impl RetainedResult for Vec<rw_core::recovery::CompletionNotice> {
+    fn prepare_retained(&mut self) -> Result<usize, AgentLoopError> {
+        if self.len() > rw_core::recovery::MAX_COMPLETION_NOTICES
+            || self
+                .iter()
+                .any(|notice| notice.text.len() > rw_core::recovery::MAX_COMPLETION_NOTICE_BYTES)
+        {
+            return Err(persistence("child completion notice bounds"));
+        }
+        Ok(std::mem::size_of::<Self>()
+            + self.capacity() * std::mem::size_of::<rw_core::recovery::CompletionNotice>()
+            + self
+                .iter()
+                .map(|notice| notice.text.capacity())
+                .sum::<usize>())
     }
 }

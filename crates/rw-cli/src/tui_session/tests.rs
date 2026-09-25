@@ -35,6 +35,7 @@ async fn lost_waiter_retains_directory_until_client_is_physically_reaped() {
                 keybindings: None,
                 theme: "",
                 replay: false,
+                closes_host: false,
             });
             started.send(()).expect("caller ready");
             stop.cancelled().await;

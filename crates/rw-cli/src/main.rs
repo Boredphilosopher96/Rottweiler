@@ -692,7 +692,7 @@ fn render_session_search(
                 .map(|session| {
                     serde_json::json!({
                         "id":session.id,"title":session.title,
-                        "updated_unix_ms":session.updated_unix_ms,"cost_micros":session.cost_micros,
+                        "updated_unix_ms":session.updated_unix_ms,"first_prompt":session.first_prompt,
                         "turn_count":session.turn_count,
                     })
                 })
@@ -705,7 +705,7 @@ fn render_session_search(
                     "{}",
                     serde_json::json!({
                         "id":session.id,"title":session.title,
-                        "updated_unix_ms":session.updated_unix_ms,"cost_micros":session.cost_micros,
+                        "updated_unix_ms":session.updated_unix_ms,"first_prompt":session.first_prompt,
                         "turn_count":session.turn_count,
                     })
                 );

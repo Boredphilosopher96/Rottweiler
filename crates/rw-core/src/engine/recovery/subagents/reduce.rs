@@ -59,7 +59,7 @@ pub(super) fn apply(
             result,
             ..
         } => {
-            finish(head, rows, sequence, subagent_id, result)?;
+            finish(rows, sequence, subagent_id, result)?;
         }
         _ => {}
     }
@@ -126,7 +126,6 @@ fn spawn(
     Ok(())
 }
 fn finish(
-    head: &Head,
     rows: &mut BatchRows,
     sequence: SequenceId,
     subagent_id: &rw_types::SubagentId,
@@ -175,7 +174,9 @@ fn finish(
         current.artifact_scope = Some(bound.scope);
         rows.put(key(ARTIFACTS, bound.scope, sequence.0), &current.scope)?;
     }
-    let turn = head.active_turn.unwrap_or(current.spawned_turn);
+    // A background completion belongs to its spawning invocation even if
+    // another parent turn happens to be active when the result arrives.
+    let turn = current.spawned_turn;
     rows.delete(key(PENDING, 0, current.spawned.0));
     version(rows, turn, &current)?;
     publish(rows, &current)?;

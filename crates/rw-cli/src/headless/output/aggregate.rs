@@ -37,6 +37,10 @@ impl PrintOutput {
         }
         Ok(())
     }
+    /// Status of the most recent finished turn.
+    pub(super) const fn status(&self) -> Option<&TurnStatus> {
+        self.status.as_ref()
+    }
     pub(super) fn finish(
         self,
         format: OutputFormat,
@@ -153,8 +157,22 @@ impl PrintAggregate {
             self.text.push('\n');
         }
         if let EngineEvent::TurnFinished { status, usage, .. } = &event {
+            // A run can include turns woken by child results; usage covers all.
             self.status = Some(status.clone());
-            self.usage = usage.clone();
+            self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens);
+            self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens);
+            self.usage.cache_read_tokens = self
+                .usage
+                .cache_read_tokens
+                .saturating_add(usage.cache_read_tokens);
+            self.usage.cache_write_tokens = self
+                .usage
+                .cache_write_tokens
+                .saturating_add(usage.cache_write_tokens);
+            self.usage.reasoning_tokens = self
+                .usage
+                .reasoning_tokens
+                .saturating_add(usage.reasoning_tokens);
         }
         self.event_heap += event_heap;
         self.events.push(event);

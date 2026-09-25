@@ -43,8 +43,8 @@ pub use admin::{
     PreparedGitHubCopilotCredential, PreparedOAuthCredential, ProviderApiKey, ProviderLogin,
     ProviderLoginCancellation, ResolvedProviderApiKey, UpdateNetworkClient, begin_oauth_login,
     begin_provider_login, default_provider_api_key_credential_id, prepare_update_network,
-    refresh_model_catalog, resolve_provider_api_key, store_provider_api_key,
-    validate_stored_provider_credential,
+    refresh_model_catalog, refresh_model_catalog_with_download_timeout, resolve_provider_api_key,
+    store_provider_api_key, validate_stored_provider_credential,
 };
 #[cfg(unix)]
 pub use engine::recovery;
@@ -54,7 +54,7 @@ pub use engine::{
     CommandToolCall, CommandToolOutputKind, CompletedTurn, ContextSurgeryAction, EventBatchPlan,
     EventBatchReservation, EventClock, ExtensionStateView, FolderTrustController,
     FolderTrustOperation, InitialSessionContext, InterruptedToolRepair, MessageDisposition,
-    ModelContextMetadata, ModelDriver, ModelSource, MutationCheckpoint,
+    ModelContextMetadata, ModelDriver, ModelSelectionPreferences, ModelSource, MutationCheckpoint,
     MutationCheckpointCoordinator, MutationCheckpointOutcome, NoopFolderTrustController,
     NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink,
     NoopSessionExtensionController, NoopSessionResources, NoopWorkspaceRootController,

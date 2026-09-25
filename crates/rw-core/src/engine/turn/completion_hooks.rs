@@ -69,14 +69,9 @@ impl CompletionHooks<'_> {
                 "completion hooks cancelled".to_owned(),
             ));
         }
-        if self
-            .config
-            .tools
-            .session_activity(&self.config.session_id)
-            .is_some()
-        {
+        if let Some(activity) = self.config.tools.session_activity(&self.config.session_id) {
             return Err(AgentLoopError::Extension(
-                "completion hook workspace mutation is blocked while a background shell process is running".to_owned(),
+                activity.blocked("completion hook workspace mutation"),
             ));
         }
         let begin = self
@@ -137,6 +132,7 @@ impl CompletionHooks<'_> {
         capabilities: Vec<ToolCapability>,
     ) -> Result<(), AgentLoopError> {
         let request = PermissionRequest {
+            prompt_reason: None,
             id: operation.to_owned(),
             invocation_id: ToolInvocationId(operation.to_owned()),
             tool_name: "completion_hooks".to_owned(),

@@ -1,43 +1,21 @@
-//! Registry command for the same driver-scoped navigation contract exposed to extensions.
-use super::{SessionCommandAction, SessionCommandContext, SessionCommandOutput};
+//! Refusal for catalog screens invoked by a peer without an interactive client.
+use super::{SessionCommandContext, SessionCommandOutput};
 use async_trait::async_trait;
 use rw_ext::{CommandExecutionError, CommandHandler, CommandInvocation};
-use rw_types::{SequenceId, SessionId, extension_control::SessionNavigationTarget};
 
-pub(super) struct NavigateCommand;
+/// Headless peers receive an explicit capability refusal for client screens.
+/// Interactive clients open these catalog entries with their own UI owner.
+pub(super) struct InteractiveClientCommand;
 #[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for NavigateCommand {
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for InteractiveClientCommand {
     async fn execute(
         &self,
         _: &mut SessionCommandContext,
-        invocation: CommandInvocation,
+        _: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        let mut arguments = invocation.arguments().split_whitespace();
-        let target = match (arguments.next(), arguments.next(), arguments.next()) {
-            (Some("session"), Some(id), None) => SessionNavigationTarget::Session {
-                session_id: SessionId(id.into()),
-            },
-            (Some("sequence"), Some(sequence), None) => {
-                let number = sequence.parse::<u64>().map_err(|_| usage())?;
-                if number.to_string() != sequence {
-                    return Err(usage());
-                }
-                SessionNavigationTarget::Transcript {
-                    sequence: SequenceId(number),
-                }
-            }
-            _ => return Err(usage()),
-        };
-        target.validate().map_err(|_| usage())?;
-        Ok(SessionCommandOutput {
-            message: "navigation requested".into(),
-            action: SessionCommandAction::Navigate { target },
-        })
+        Err(CommandExecutionError::new(
+            "interactive_client_required",
+            "This command opens a screen in an interactive client.",
+        ))
     }
-}
-fn usage() -> CommandExecutionError {
-    CommandExecutionError::new(
-        "invalid_navigation",
-        "usage: /goto session <id> | sequence <number>",
-    )
 }

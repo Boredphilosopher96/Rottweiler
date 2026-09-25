@@ -1,5 +1,5 @@
 import { TextRenderable } from "./text"
-import { statusContext } from "../state/context-usage"
+import { contextWarning, statusContext } from "../state/context-usage"
 import {
   bg,
   bold,
@@ -8,11 +8,13 @@ import {
   type RenderContext
 } from "@opentui/core"
 import {
-  formatStatusContext,
-  formatStatusModel,
-  formatStatusSessionCost,
+  contextPercent,
+  formatKnownSessionCost,
+  formatTokenCount,
+  modelDisplayLabel,
   presentError
 } from "../render"
+import { permissionModeLabel } from "../ui-presentation"
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { humanLabel, permissionRuntimeMode, toolDisplayName } from "./panel-labels"
@@ -55,6 +57,7 @@ export class StatusLineRenderable extends TextRenderable {
   }
 
   update(state: RottweilerState): void {
+    const theme = this.#theme
     const waitingApproval = Object.values(state.tools).find(
       (tool) => tool.status === "awaiting_approval",
     )
@@ -64,49 +67,46 @@ export class StatusLineRenderable extends TextRenderable {
       state.hasActivity ||
       state.streamingTail !== null ||
       Object.keys(state.tools).length > 0
-    const context =
-      statusContext(state) === null
-        ? (hasSessionActivity ? "ctx —" : null)
-        : headlineContext(formatStatusContext(statusContext(state)!))
-    const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
-    const statusModel = state.model === null
-      ? null
-      : formatStatusModel(state.model, state.provider, state.models)
-    const statusProvider = statusModel?.includes("/") === true
-      ? statusModel.slice(0, statusModel.indexOf("/"))
-      : state.provider
-    const mode = state.replay.active ? "REPLAY" : (state.mode ?? "—").toUpperCase()
-    const modeColor = state.replay.active ? this.#theme.info : this.#theme.primary
-    const modePill = bg(modeColor)(fg(this.#theme.background)(` ${mode} `))
-    const model = statusModel === null
-      ? `model not selected${this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`}`
-      : compactStatusModel(statusModel)
-    const approval = waitingApproval === undefined
-      ? ""
-      : `  approval · ${toolDisplayName(waitingApproval.name)}`
-    const cost = state.cost === null && !hasSessionActivity
-      ? ""
-      : `  ${formatStatusSessionCost(state.cost, statusProvider, statusContext(state)?.used_tokens ?? null)}`
-    const branch = this.#branch === null && !hasSessionActivity ? "" : `  ${this.#branch ?? "—"}`
-    const changedCount = state.workspaceStatus?.changedPaths.length ?? 0
-    const changed = changedCount === 0 ? "" : `  ${changedCount} changed`
+    const mode = state.replay.active ? "REPLAY" : (state.mode ?? "execute").toUpperCase()
+    const modeColor = state.replay.active ? theme.info : theme.primary
+    const modePill = bg(modeColor)(fg(theme.background)(` ${mode} `))
+    const keycap = this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`
+    const modelName = modelDisplayLabel(state.model, state.models)
+    // Replay is read-only and never loads the model catalog: show the recorded
+    // model when the history names one, and no model call to action.
+    const model = state.replay.active
+      ? modelName ?? state.model ?? ""
+      : modelName ?? `${missingModelLabel(state)}${keycap}`
+    const usage = statusContext(state)
+    const percent = usage === null ? null : contextPercent(usage)
+    const contextLabel = usage === null
+      ? (hasSessionActivity ? "ctx —" : "")
+      : percent === null
+        ? `ctx ${formatTokenCount(usage.used_tokens)}`
+        : `ctx ${percent}%`
+    const contextColor = percent === null ? theme.textMuted
+      : percent >= 85 ? theme.error : percent >= 70 ? theme.warning : theme.text
+    const cost = formatKnownSessionCost(state.cost)
+    const branch = this.#branch
+    const changedCount = state.workspaceStatus?.changes.length ?? 0
     const runningAgents = Object.values(state.subagents)
       .filter((subagent) => subagent.status === "running").length
-    const extension = pluginStatus === undefined ? "" : `  Extension · ${humanLabel(pluginStatus[1])}`
-    const contextLabel = context === null ? "" : context.replace(/^(ctx)\s*/, "")
-    const agentLabel = runningAgents === 1 ? " agent" : " agents"
-    this.content = t`${bold(modePill)}${permissionMode === null ? "" : fg(this.#theme.textMuted)(`  ${permissionMode}`)}  ${fg(this.#theme.textMuted)(model)}${approval === "" ? "" : fg(this.#theme.warning)(approval)}${contextLabel === "" ? "" : fg(this.#theme.border)("    ctx ")}${contextLabel === "" ? "" : fg(this.#theme.text)(contextLabel)}${fg(this.#theme.text)(cost)}${branch === "" ? "" : fg(this.#theme.secondary)(branch)}${changed === "" ? "" : fg(this.#theme.warning)(changed)}${runningAgents === 0 ? "" : fg(this.#theme.info)(`    ${runningAgents}`)}${runningAgents === 0 ? "" : fg(this.#theme.textMuted)(agentLabel)}${extension === "" ? "" : fg(this.#theme.textMuted)(extension)}`
+    const queuedControls = state.queuedControls.length === 0
+      ? state.lastControlSettlement !== null && state.lastControlSettlement.outcome !== "applied" ? `queued control ${state.lastControlSettlement.outcome} · open queue` : ""
+      : `${state.queuedControls.length} queued`
+    const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
+    const gap = "  "
+    const segment = (text: string, color: string) => text === "" ? "" : fg(color)(`${gap}${text}`)
+    this.content = t`${bold(modePill)}${segment(permissionMode === null ? "" : `approvals ${permissionModeLabel(permissionMode)}`, permissionMode === "yolo" ? theme.warning : theme.textMuted)}${segment(model, modelName === null && !state.replay.active ? theme.warning : theme.text)}${segment(contextLabel, contextColor)}${segment(cost ?? "", theme.text)}${segment(branch ?? "", theme.secondary)}${segment(changedCount === 0 ? "" : `${changedCount} changed`, theme.warning)}${segment(waitingApproval === undefined ? "" : `approval · ${toolDisplayName(waitingApproval.name)}`, theme.warning)}${segment(runningAgents === 0 ? "" : `${runningAgents} agent${runningAgents === 1 ? "" : "s"} running`, theme.info)}${segment(queuedControls, theme.textMuted)}${segment(pluginStatus === undefined ? "" : humanLabel(pluginStatus[1]), theme.textMuted)}`
   }
 }
 
-function compactStatusModel(model: string): string {
-  const separator = model.indexOf("/")
-  return separator < 0 ? model : model.slice(separator + 1)
-}
-
-function headlineContext(context: string): string {
-  const percent = /\(([^)]+)\)$/.exec(context)?.[1]
-  return percent === undefined ? context : `ctx ${percent}`
+/** One call to action while no usable model is selected. */
+function missingModelLabel(state: RottweilerState): string {
+  if (!state.modelCatalogLoaded || state.modelCatalogCached) return "loading models"
+  return state.providers.some(provider => provider.configured && provider.authenticated)
+    ? "choose a model"
+    : "connect a provider"
 }
 
 export class StateBannerRenderable extends TextRenderable {
@@ -145,10 +145,6 @@ export class StateBannerRenderable extends TextRenderable {
       this.visible = true
       this.fg = this.#theme.error
       this.content = `Budget limit reached · ${budgetScopeLabel(latestBudget.scope)} · ${formatBudgetAmount(latestBudget.current, latestBudget.unit)} of ${formatBudgetAmount(latestBudget.limit, latestBudget.unit)}`
-    } else if (waitingApproval !== undefined) {
-      this.visible = true
-      this.fg = this.#theme.warning
-      this.content = `Waiting for approval · ${toolDisplayName(waitingApproval.name)}`
     } else if (state.replay.active) {
       this.visible = true
       this.fg = this.#theme.info
@@ -168,6 +164,10 @@ export class StateBannerRenderable extends TextRenderable {
       this.content = state.connection.gap === null
         ? connectionMessage(state.connection.phase)
         : "Restoring missed updates…"
+    } else if (contextWarning(statusContext(state)) !== null) {
+      this.visible = true
+      this.fg = this.#theme.warning
+      this.content = contextWarning(statusContext(state))!
     } else if (latestPluginNotification !== undefined) {
       this.visible = true
       this.fg = this.#theme.info

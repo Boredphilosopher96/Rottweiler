@@ -1,122 +1,64 @@
+import { COMMAND_CATALOG } from "../../../protocol/types"
 import type { RottweilerState } from "./state"
 
 export type CommandChoice = RottweilerState["commands"][number]
+export type CatalogCommand = (typeof COMMAND_CATALOG)[number]
+export type CatalogCommandName = CatalogCommand["name"]
+/** Catalog entries an interactive client opens as its own screen. */
+export type CatalogScreenName = Extract<CatalogCommand, { readonly target: "screen" | "screen_or_engine" }>["name"]
 
-export const TUI_SLASH_COMMANDS: readonly CommandChoice[] = [
-  { name: "new", description: "Start a new conversation", usage: "/new" },
-  { name: "models", description: "Switch the active model", usage: "/models" },
-  { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
-  { name: "agents", description: "Inspect and manage child agents", usage: "/agents" },
-  { name: "theme", description: "Preview and change the interface theme", usage: "/theme" },
-  { name: "settings", description: "Change safe user settings", usage: "/settings" },
-  { name: "exit", description: "Close Rottweiler", usage: "/exit" },
-]
+/** Engine-owned built-in catalog, projected at build time. */
+export const BUILTIN_COMMANDS: readonly CatalogCommand[] = COMMAND_CATALOG
 
-const TUI_HANDLED_SLASH_COMMAND_NAMES = new Set([
-  ...TUI_SLASH_COMMANDS.map((command) => command.name),
-  "fork",
-  "mcp",
-  "permissions",
-  "review",
-  "rewind",
-])
-
-export function isTuiHandledSlashCommand(name: string): boolean {
-  return TUI_HANDLED_SLASH_COMMAND_NAMES.has(name)
+/** Resolves a canonical name or alias to its catalog entry. */
+export function catalogCommand(name: string): CatalogCommand | undefined {
+  return BUILTIN_COMMANDS.find((command) =>
+    command.name === name || (command.aliases as readonly string[]).includes(name))
 }
 
-/** Engine descriptors augment the small set of commands owned by the TUI. */
-export function mergeSlashCommandChoices(
-  liveCommands: readonly CommandChoice[],
-): readonly CommandChoice[] {
-  const choices = new Map(TUI_SLASH_COMMANDS.map((command) => [command.name, command]))
-  for (const command of liveCommands) choices.set(command.name, command)
-  return [...choices.values()]
+export function catalogUsage(command: CatalogCommand): string {
+  return command.argument_hint.length === 0 ? `/${command.name}` : `/${command.name} ${command.argument_hint}`
 }
 
-export type SessionAction =
-  | { readonly type: "exit" }
-  | { readonly type: "new" }
-  | { readonly type: "review" }
-  | { readonly type: "fork"; readonly atTurn: string | null }
-  | { readonly type: "rewindTimeline" }
-  | { readonly type: "models" }
-  | { readonly type: "providers" }
-  | { readonly type: "agents" }
-  | { readonly type: "theme" }
-  | { readonly type: "settings" }
-  | { readonly type: "permissions" }
-  | { readonly type: "mcp" }
+export type SlashResolution =
+  /** An interactive screen opened by the client. */
+  | { readonly type: "screen"; readonly name: CatalogScreenName }
+  /** A built-in engine invocation, rewritten to its canonical command name. */
+  | { readonly type: "engine"; readonly content: string }
   | { readonly type: "invalid"; readonly message: string }
 
-export function parseSessionAction(content: string): SessionAction | null {
-  const tokens = content.trim().split(/\s+/)
-  const command = tokens[0]
-  if (command === "/new") {
-    return tokens.length === 1
-      ? { type: "new" }
-      : { type: "invalid", message: "usage: /new" }
+/**
+ * Classifies composer input against the built-in catalog. Returns null for
+ * ordinary prompts and extension commands, which the engine resolves itself.
+ */
+export function resolveSlashInput(content: string): SlashResolution | null {
+  const match = /^\s*\/(\S+)(?:\s+([\s\S]*))?$/u.exec(content)
+  if (match === null) return null
+  const command = catalogCommand(match[1] ?? "")
+  if (command === undefined) return null
+  const args = (match[2] ?? "").trim()
+  if (args.length === 0 && command.target !== "engine") {
+    return { type: "screen", name: command.name as CatalogScreenName }
   }
-  if (command === "/exit") {
-    return tokens.length === 1
-      ? { type: "exit" }
-      : { type: "invalid", message: `usage: ${command}` }
+  if (command.target === "screen") {
+    return { type: "invalid", message: `usage: /${command.name}` }
   }
-  if (command === "/review") {
-    return tokens.length === 1
-      ? { type: "review" }
-      : { type: "invalid", message: "usage: /review" }
-  }
-  if (command === "/rewind" && tokens.length === 1) return { type: "rewindTimeline" }
-  if (command === "/models") {
-    return tokens.length === 1
-      ? { type: "models" }
-      : { type: "invalid", message: "usage: /models" }
-  }
-  if (command === "/providers") {
-    return tokens.length === 1
-      ? { type: "providers" }
-      : { type: "invalid", message: "usage: /providers" }
-  }
-  if (command === "/agents") {
-    return tokens.length === 1
-      ? { type: "agents" }
-      : { type: "invalid", message: "usage: /agents" }
-  }
-  if (command === "/theme") {
-    return tokens.length === 1
-      ? { type: "theme" }
-      : { type: "invalid", message: "usage: /theme" }
-  }
-  if (command === "/settings") {
-    return tokens.length === 1
-      ? { type: "settings" }
-      : { type: "invalid", message: "usage: /settings" }
-  }
-  if (command === "/permissions") return tokens.length === 1 ? { type: "permissions" } : null
-  if (command === "/mcp") return tokens.length === 1 ? { type: "mcp" } : null
-  if (command !== "/fork") return null
-  if (tokens.length === 1) return { type: "fork", atTurn: null }
-  if (tokens.length !== 2 || !isU64(tokens[1] ?? "")) {
-    return { type: "invalid", message: "usage: /fork [turn] where turn is a decimal u64" }
-  }
-  return { type: "fork", atTurn: tokens[1] ?? null }
+  return { type: "engine", content: args.length === 0 ? `/${command.name}` : `/${command.name} ${args}` }
 }
 
-export function commandSourceLabel(source: CommandChoice["source"]): string {
-  switch (source) {
-    case "project": return "Project"
-    case "user": return "User"
-    case "plugin": return "Plugin"
-    case "skill": return "Skills"
-    case "workflow": return "Workflows"
-    case "mcp": return "MCP"
-    case "builtin":
-    case undefined:
-      return "Built-in"
+/** Human label for an extension command's provenance. */
+export function commandSourceLabel(command: Pick<CommandChoice, "name" | "source">): string {
+  switch (command.source) {
+    case "project": return "project command"
+    case "user": return "user command"
+    case "plugin": return "plugin"
+    case "skill": return "skill"
+    case "workflow": return "workflow"
+    case "mcp": {
+      const server = /^mcp\.([^.]+)\./u.exec(command.name)?.[1]
+      return server === undefined ? "mcp" : `mcp · ${server}`
+    }
+    default:
+      return "built-in"
   }
-}
-
-export function isU64(value: string): boolean {
-  return /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
 }

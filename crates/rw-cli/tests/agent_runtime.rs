@@ -420,6 +420,9 @@ use process::TestProcess;
 #[path = "agent_runtime/print_output.rs"]
 mod print_output;
 
+#[path = "agent_runtime/background_wake.rs"]
+mod background_wake;
+
 #[cfg(unix)]
 #[path = "agent_runtime/host_restart.rs"]
 mod host_restart;

@@ -1,15 +1,18 @@
 use super::*;
+use rw_types::{WorkspaceChange, WorkspaceChangeKind};
+#[cfg(unix)]
+use std::ffi::OsString;
 
 pub(super) fn read_workspace_status(
     workspace: &Path,
     workspace_name: String,
 ) -> Result<WorkspaceStatus, HostError> {
     let branch = read_git_branch(workspace)?;
-    let (changed_paths, truncated) = read_git_changed_paths(workspace);
+    let (changes, truncated) = read_git_changes(workspace);
     Ok(WorkspaceStatus {
         workspace_name,
         branch,
-        changed_paths,
+        changes,
         truncated,
     })
 }
@@ -180,8 +183,44 @@ pub(super) fn run_bounded_git(
     })
 }
 
+/// The user's global ignore file. Status runs with global configuration
+/// disabled (it could name filters or helpers to execute), so the one setting
+/// that only selects ignore patterns is read separately and passed back.
 #[cfg(unix)]
-pub(super) fn read_git_changed_paths(workspace: &Path) -> (Vec<String>, bool) {
+fn global_excludes_file(git: &Path, workspace: &Path) -> Option<OsString> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let candidates = [
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map_or_else(|| home.join(".config"), PathBuf::from)
+            .join("git/config"),
+        home.join(".gitconfig"),
+    ];
+    // Git reads the XDG file first, so the home file wins when both set it.
+    candidates.iter().rev().find_map(|config| {
+        if !config.is_file() {
+            return None;
+        }
+        let arguments = [
+            OsStr::new("config"),
+            OsStr::new("--file"),
+            config.as_os_str(),
+            OsStr::new("--type=path"),
+            OsStr::new("--get"),
+            OsStr::new("core.excludesFile"),
+        ];
+        let output = run_bounded_git(git, workspace, &arguments, 4096, GIT_STATUS_DEADLINE)?;
+        if !output.status.success() || output.overflow {
+            return None;
+        }
+        let path = std::str::from_utf8(&output.stdout)
+            .ok()?
+            .trim_end_matches('\n');
+        (!path.is_empty() && Path::new(path).is_absolute()).then(|| OsString::from(path))
+    })
+}
+
+#[cfg(unix)]
+pub(super) fn read_git_changes(workspace: &Path) -> (Vec<WorkspaceChange>, bool) {
     let Ok(root) = open_workspace_directory(workspace) else {
         return (Vec::new(), true);
     };
@@ -198,13 +237,22 @@ pub(super) fn read_git_changed_paths(workspace: &Path) -> (Vec<String>, bool) {
     let Some(git) = resolve_git_executable(workspace) else {
         return (Vec::new(), true);
     };
-    let arguments = [
+    let excludes = global_excludes_file(&git, workspace).map(|path| {
+        let mut setting = OsString::from("core.excludesFile=");
+        setting.push(path);
+        setting
+    });
+    let mut arguments = Vec::new();
+    if let Some(setting) = &excludes {
+        arguments.extend([OsStr::new("-c"), setting.as_os_str()]);
+    }
+    arguments.extend([
         OsStr::new("status"),
         OsStr::new("--porcelain=v1"),
         OsStr::new("-z"),
         OsStr::new("--untracked-files=all"),
         OsStr::new("--ignored=no"),
-    ];
+    ]);
     let Some(output) = run_bounded_git(
         &git,
         workspace,
@@ -221,12 +269,25 @@ pub(super) fn read_git_changed_paths(workspace: &Path) -> (Vec<String>, bool) {
 }
 
 #[cfg(not(unix))]
-pub(super) fn read_git_changed_paths(_workspace: &Path) -> (Vec<String>, bool) {
+pub(super) fn read_git_changes(_workspace: &Path) -> (Vec<WorkspaceChange>, bool) {
     (Vec::new(), false)
 }
 
+/// Porcelain v1 `XY` codes combined into one user-facing kind.
 #[cfg(unix)]
-pub(super) fn parse_git_status(bytes: &[u8], mut truncated: bool) -> (Vec<String>, bool) {
+fn change_kind(status: [u8; 2]) -> WorkspaceChangeKind {
+    match status {
+        [b'?', b'?'] => WorkspaceChangeKind::Untracked,
+        [b'U', _] | [_, b'U'] | [b'A', b'A'] | [b'D', b'D'] => WorkspaceChangeKind::Conflicted,
+        [b'R' | b'C', _] | [_, b'R' | b'C'] => WorkspaceChangeKind::Renamed,
+        [b'D', _] | [_, b'D'] => WorkspaceChangeKind::Deleted,
+        [b'A', _] => WorkspaceChangeKind::Added,
+        _ => WorkspaceChangeKind::Modified,
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn parse_git_status(bytes: &[u8], mut truncated: bool) -> (Vec<WorkspaceChange>, bool) {
     let complete_bytes = match bytes.iter().rposition(|byte| *byte == 0) {
         Some(last_nul) => {
             truncated |= last_nul.saturating_add(1) != bytes.len();
@@ -236,7 +297,7 @@ pub(super) fn parse_git_status(bytes: &[u8], mut truncated: bool) -> (Vec<String
             return (Vec::new(), !bytes.is_empty() || truncated);
         }
     };
-    let mut paths = BTreeSet::new();
+    let mut paths = BTreeMap::new();
     let mut records = complete_bytes.split(|byte| *byte == 0);
     while let Some(record) = records.next() {
         if record.is_empty() {
@@ -246,7 +307,7 @@ pub(super) fn parse_git_status(bytes: &[u8], mut truncated: bool) -> (Vec<String
             truncated = true;
             continue;
         }
-        let status = &record[..2];
+        let status = [record[0], record[1]];
         let path = &record[3..];
         if status.iter().any(|code| matches!(*code, b'R' | b'C')) {
             // Porcelain v1 -z follows a rename/copy destination with its
@@ -273,13 +334,17 @@ pub(super) fn parse_git_status(bytes: &[u8], mut truncated: bool) -> (Vec<String
             truncated = true;
             continue;
         };
-        paths.insert(path.to_owned());
+        paths.insert(path.to_owned(), change_kind(status));
         if paths.len() >= MAX_CHANGED_PATHS {
             truncated |= records.any(|record| !record.is_empty());
             break;
         }
     }
-    (paths.into_iter().collect(), truncated)
+    let changes = paths
+        .into_iter()
+        .map(|(path, kind)| WorkspaceChange { path, kind })
+        .collect();
+    (changes, truncated)
 }
 
 #[cfg(unix)]

@@ -56,7 +56,7 @@ fn protocol_interaction_queue_preserves_question_then_permission_order() {
             tool_call_id: "permission-second".to_owned(),
             invocation_id: rw_types::ToolInvocationId("permission-second-invocation".to_owned()),
             capabilities: vec![ToolCapability::ReadFilesystem],
-            rationale: "fixture".to_owned(),
+            rationale: Some("fixture".to_owned()),
             binding: None,
         },
     ]);

@@ -170,6 +170,17 @@ impl DiffArtifactAuthority for ChildLifecycleReader {
 }
 #[async_trait]
 impl SubagentArtifactSource for ChildLifecycleReader {
+    async fn completed_result(
+        &self,
+        parent: &SessionId,
+        child: &SubagentId,
+    ) -> Result<Option<SubagentResult>, OrchestrationError> {
+        let child = child.clone();
+        self.query(parent, move |view, _| view.completed_result(&child))
+            .await
+            .map_err(|error| orchestration(&error))
+    }
+
     async fn latest(
         &self,
         parent: &SessionId,

@@ -37,7 +37,8 @@ const MAX_U64 = 18_446_744_073_709_551_615n
 const SESSION_PREPARE_ATTEMPTS = 24
 const SESSION_PREPARE_INITIAL_DELAY_MS = 10
 const SESSION_PREPARE_MAXIMUM_DELAY_MS = 250
-const HOST_SHUTDOWN_TIMEOUT_MS = 1_500
+// The host owns a 30s cleanup proof; leave transport time for its final reply.
+const HOST_SHUTDOWN_TIMEOUT_MS = 35_000
 
 export interface EngineRuntimeEnvironment {
   readonly [name: string]: string | undefined
@@ -45,7 +46,7 @@ export interface EngineRuntimeEnvironment {
 
 export interface RuntimeFileSystem {
   readText(path: string, maximumBytes: number): Promise<string | null>
-  writePrivateTextAtomic(path: string, content: string): Promise<void>
+  writePrivateTextAtomic(path: string, content: string, parentPolicy: "create" | "existing"): Promise<void>
 }
 
 export interface EngineRuntimeConfig {
@@ -124,9 +125,9 @@ export const systemRuntimeFiles: RuntimeFileSystem = {
     return readFile(path, "utf8")
   },
 
-  async writePrivateTextAtomic(path, content) {
+  async writePrivateTextAtomic(path, content, parentPolicy) {
     const parent = dirname(path)
-    await mkdir(parent, { recursive: true, mode: 0o700 })
+    if (parentPolicy === "create") await mkdir(parent, { recursive: true, mode: 0o700 })
     const parentMetadata = await lstat(parent)
     if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink()) {
       throw new EngineRuntimeError("runtime handoff parent is not a private directory")
@@ -438,6 +439,9 @@ export class TuiEngineRuntime {
     this.#driverReady = false
     this.#transitionController?.abort(this.#controller.signal.reason)
     this.#subscriptionController?.abort(this.#controller.signal.reason)
+    // A stream callback already in flight may still record its final cursor.
+    // Retire that producer before waiting for the atomic handoff writer.
+    await this.#subscription?.catch(() => {})
     await this.#handoff?.close()
     await Promise.all([this.#metadata.settle(), this.#children.settle(), this.#bootstrapPending?.catch(() => {})])
   }
@@ -1138,7 +1142,9 @@ class SequenceHandoff {
     while (this.#pending !== null && this.#pending !== this.#written) {
       const next = this.#pending
       this.#pending = null
-      await this.#files.writePrivateTextAtomic(this.#path, `${next}\n`)
+      // The supervisor owns this directory; late events cannot recreate it
+      // after the engine retires the runtime leaf during shutdown.
+      await this.#files.writePrivateTextAtomic(this.#path, `${next}\n`, "existing")
       this.#written = next
     }
   }
@@ -1183,12 +1189,12 @@ class ForkOperationHandoff {
       at_turn: atTurn,
       operation_id: operationId,
     }
-    await this.#files.writePrivateTextAtomic(path, `${JSON.stringify(operation)}\n`)
+    await this.#files.writePrivateTextAtomic(path, `${JSON.stringify(operation)}\n`, "create")
     return operation.operation_id
   }
 
   async complete(sessionId: string): Promise<void> {
-    await this.#files.writePrivateTextAtomic(this.#path(sessionId), "")
+    await this.#files.writePrivateTextAtomic(this.#path(sessionId), "", "create")
   }
 
   #path(sessionId: string): string {

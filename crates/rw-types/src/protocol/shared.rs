@@ -28,7 +28,7 @@ pub(crate) mod decimal_u64 {
     }
 }
 
-mod decimal_option_u64 {
+pub(crate) mod decimal_option_u64 {
     use serde::{Deserialize, Deserializer, Serialize as _, Serializer, de::Error as _};
 
     #[allow(clippy::ref_option, clippy::trivially_copy_pass_by_ref)]
@@ -256,21 +256,6 @@ pub struct StoredAttachment {
     pub byte_len: u64,
 }
 
-/// One active or resumable session returned by the engine host.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
-#[ts(optional_fields = nullable)]
-#[derive(Allocation)]
-#[serde(deny_unknown_fields)]
-pub struct SessionDescriptor {
-    pub session_id: SessionId,
-    /// Human-facing session title.
-    pub title: String,
-    pub workspace_name: String,
-    pub model: ModelAlias,
-    pub driver_client_id: Option<ClientId>,
-    pub shell_active: bool,
-}
-
 /// One slash command exposed to fuzzy pickers without UI-private metadata.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -294,6 +279,11 @@ pub struct CommandDescriptor {
     pub description: String,
     pub usage: String,
     pub source: CommandSource,
+    /// Where a declarative command or skill was discovered; `null` for
+    /// built-in, plugin, workflow, and MCP commands.
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "crate::schema::required_nullable::<super::ExtensionArtifactScope>")]
+    pub scope: Option<super::ExtensionArtifactScope>,
 }
 
 /// One bounded, credential-free interaction mode exposed to clients.
@@ -618,8 +608,31 @@ pub struct WorkspaceFilePreview {
 pub struct WorkspaceStatus {
     pub workspace_name: String,
     pub branch: Option<String>,
-    pub changed_paths: Vec<String>,
+    /// Changed, added, deleted, and untracked paths; ignored files are omitted.
+    pub changes: Vec<WorkspaceChange>,
     pub truncated: bool,
+}
+
+/// One workspace-relative path that differs from the committed tree.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS, Allocation)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceChange {
+    pub path: String,
+    pub kind: WorkspaceChangeKind,
+}
+
+/// How a path differs, from Git's staged and worktree status combined.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+#[derive(Allocation)]
+pub enum WorkspaceChangeKind {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
 }
 
 /// Bounded current-worktree diff for one exact workspace-relative path.
@@ -1282,6 +1295,8 @@ pub enum SubagentIsolation {
 #[ts(rename_all = "snake_case")]
 #[derive(Allocation)]
 pub enum SubagentActivity {
+    /// Admitted by its parent and waiting for a free child slot.
+    Queued,
     Running,
     Idle,
 }

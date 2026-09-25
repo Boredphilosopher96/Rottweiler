@@ -8,7 +8,7 @@ use rw_ext::ModeRegistry;
 use rw_store::session::journal::SegmentedJournal;
 use rw_types::{Role, SequenceId};
 
-fn usage(turn: u64) -> PendingEvent {
+pub(super) fn usage(turn: u64) -> PendingEvent {
     PendingEvent::ContextUsage {
         turn,
         used_tokens: 10,

@@ -28,17 +28,6 @@ pub(super) fn validate(connection: &Connection) -> Result<(), Error> {
             "incomplete provider accounting authority",
         ));
     }
-    if !calls_exist && table_exists(connection, "turn_accounting")? {
-        let has_turn_history = connection
-            .query_row("SELECT 1 FROM turn_accounting LIMIT 1", [], |_| Ok(()))
-            .optional()?
-            .is_some();
-        if has_turn_history {
-            return Err(Error::InvalidPlan(
-                "turn-only history has no exact provider receipts; cannot admit new charges",
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -58,8 +47,12 @@ pub(super) fn ensure(connection: &Connection) -> Result<(), Error> {
     connection.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
         validate(connection)?;
+        let legacy = !table_exists(connection, "provider_calls")?;
         connection.execute_batch(CALLS)?;
         connection.execute_batch(SUMS)?;
+        if legacy {
+            preserve_legacy_uncertainty(connection)?;
+        }
         connection.execute_batch("CREATE INDEX IF NOT EXISTS provider_calls_unsettled ON provider_calls(session_id,call_id,attempt) WHERE phase IN ('reserved','started','ambiguous')")?;
         connection.execute_batch("COMMIT")?;
         Ok(())
@@ -68,4 +61,31 @@ pub(super) fn ensure(connection: &Connection) -> Result<(), Error> {
         let _ = connection.execute_batch("ROLLBACK");
     }
     result
+}
+
+// Turn rollups cannot settle exact attempts. Preserve their uncertainty in the
+// same dated index, without inventing receipts or discarding transcript history.
+fn preserve_legacy_uncertainty(connection: &Connection) -> Result<(), Error> {
+    use super::projection::{self, Amounts};
+    let mut statement =
+        connection.prepare("SELECT session_id, emitted_at_utc FROM turn_accounting")?;
+    let mut rows = statement.query([])?;
+    let mut unknown = Amounts::default();
+    unknown.0[projection::UNKNOWN] = 1;
+    while let Some(row) = rows.next()? {
+        let session: String = row.get(0)?;
+        crate::session::journal_io::validate_session_id(&session)?;
+        let timestamp: String = row.get(1)?;
+        let timestamp = crate::session::UtcTimestamp::parse(&timestamp)?;
+        for scope in [session.as_str(), projection::ROOT_SCOPE] {
+            projection::dated(
+                connection,
+                scope,
+                timestamp.as_str(),
+                Amounts::default(),
+                unknown,
+            )?;
+        }
+    }
+    Ok(())
 }

@@ -6,23 +6,10 @@ pub(crate) async fn register_mcp_command(
     approvals: Option<Arc<McpApprovalStore>>,
 ) -> std::result::Result<(), CommandRegistryError> {
     registry.register(
-        CommandDescriptor::new("mcp", "Inspect or control MCP servers").with_argument_hint(
-            "[status|enable <server>|disable <server>|approve <server> [displayed-fingerprint]]",
-        ).with_source(CommandSource::Mcp),
+        crate::project_commands::catalog_descriptor("mcp")?,
         McpCommand {
             manager: Arc::clone(&manager),
             approvals,
-        },
-    )?;
-    registry.register(
-        CommandDescriptor::new(
-            "mcp.prompt",
-            "Load one currently available MCP prompt as untrusted context",
-        )
-        .with_argument_hint("<server> <prompt> [JSON object]")
-        .with_source(CommandSource::Mcp),
-        DynamicMcpPromptCommand {
-            manager: Arc::clone(&manager),
         },
     )?;
     let prompts = Arc::new(
@@ -112,37 +99,30 @@ pub(super) struct McpPromptCommand {
     _retained: Arc<dyn Send + Sync>,
 }
 
-pub(super) struct DynamicMcpPromptCommand {
-    manager: Arc<McpManager>,
+fn invalid_mcp_prompt_command() -> CommandExecutionError {
+    CommandExecutionError::new(
+        "invalid_mcp_prompt_command",
+        "usage: /mcp prompt <server> <prompt> [JSON object]",
+    )
 }
 
-#[async_trait]
-impl CommandHandler<SessionCommandContext, SessionCommandOutput> for DynamicMcpPromptCommand {
-    async fn execute(
-        &self,
-        _context: &mut SessionCommandContext,
-        invocation: CommandInvocation,
-    ) -> std::result::Result<SessionCommandOutput, CommandExecutionError> {
-        let (server, remaining) = take_command_word(invocation.arguments()).ok_or_else(|| {
-            CommandExecutionError::new(
-                "invalid_mcp_prompt_command",
-                "usage: /mcp.prompt <server> <prompt> [JSON object]",
-            )
-        })?;
-        let (prompt, arguments) = take_command_word(remaining).ok_or_else(|| {
-            CommandExecutionError::new(
-                "invalid_mcp_prompt_command",
-                "usage: /mcp.prompt <server> <prompt> [JSON object]",
-            )
-        })?;
-        let server = McpServerId::new(server).map_err(|_| {
-            CommandExecutionError::new(
-                "invalid_mcp_prompt_command",
-                "MCP prompt server name is invalid",
-            )
-        })?;
-        execute_mcp_prompt(&self.manager, &server, prompt, arguments).await
-    }
+/// Loads any currently available prompt, including one published after the
+/// namespaced prompt commands were registered.
+async fn execute_named_mcp_prompt(
+    manager: &McpManager,
+    arguments: &str,
+) -> std::result::Result<SessionCommandOutput, CommandExecutionError> {
+    let (server, remaining) =
+        take_command_word(arguments).ok_or_else(invalid_mcp_prompt_command)?;
+    let (prompt, arguments) =
+        take_command_word(remaining).ok_or_else(invalid_mcp_prompt_command)?;
+    let server = McpServerId::new(server).map_err(|_| {
+        CommandExecutionError::new(
+            "invalid_mcp_prompt_command",
+            "MCP prompt server name is invalid",
+        )
+    })?;
+    execute_mcp_prompt(manager, &server, prompt, arguments).await
 }
 
 #[async_trait]
@@ -247,6 +227,9 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
         _context: &mut SessionCommandContext,
         invocation: CommandInvocation,
     ) -> std::result::Result<SessionCommandOutput, CommandExecutionError> {
+        if let Some(("prompt", arguments)) = take_command_word(invocation.arguments()) {
+            return execute_named_mcp_prompt(&self.manager, arguments).await;
+        }
         let words = invocation
             .arguments()
             .split_whitespace()
@@ -376,7 +359,7 @@ pub(super) fn server_id(value: &str) -> std::result::Result<McpServerId, Command
 pub(super) fn invalid_mcp_command() -> CommandExecutionError {
     CommandExecutionError::new(
         "invalid_mcp_command",
-        "usage: /mcp [status | enable <server> | disable <server> | approve <server> [displayed-fingerprint]]",
+        "usage: /mcp [status | enable <server> | disable <server> | approve <server> [displayed-fingerprint] | prompt <server> <prompt> [JSON object]]",
     )
 }
 pub(super) fn mcp_command_error(error: &rw_mcp::McpError) -> CommandExecutionError {

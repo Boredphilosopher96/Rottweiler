@@ -342,13 +342,13 @@ impl EngineHost {
                             "only the current driver may fork a session".to_owned(),
                         ));
                     }
-                    if snapshot.running
-                        || snapshot.active_shell.is_some()
-                        || snapshot.active_background
+                    if let Some(reason) = snapshot
+                        .available_actions
+                        .iter()
+                        .find(|action| action.action == rw_types::SessionActionKind::Fork)
+                        .and_then(|action| action.unavailable_reason.as_ref())
                     {
-                        return Err(HostError::Protocol(
-                            "forking requires an idle session".to_owned(),
-                        ));
+                        return Err(HostError::Protocol(reason.clone()));
                     }
                     let explicit_turn = at_turn.is_some();
                     let resolved_turn = if let Some(turn) = &at_turn {

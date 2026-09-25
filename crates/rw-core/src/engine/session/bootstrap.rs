@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub struct SessionActorRecovery {
+    pub deferred_controls: Vec<rw_types::QueuedSessionControl>,
     pub title: Option<String>,
     pub conversation: ConversationMetadata,
     pub accepted_messages: Vec<crate::engine::recovery::RecoveredMessage>,
@@ -101,6 +102,7 @@ impl SessionActorRecovery {
                 (Some(model.model.0), model.provider, Some(model.thinking))
             });
         Ok(Self {
+            deferred_controls: controls.deferred_controls,
             title: controls.title,
             conversation: controls.conversation,
             accepted_messages: controls

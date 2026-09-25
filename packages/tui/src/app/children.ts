@@ -1,3 +1,4 @@
+import { DRAFT_SWITCH_LIMIT_NOTICE } from "../render/resource-copy"
 import { retainedJsonBytes } from "../retained-json"
 import type { RecycleChildTarget } from "../recycle-child"
 import { SubagentCatalog } from "../subagent-catalog"
@@ -19,10 +20,11 @@ import { directSessionRead, descendantSessionRead, type SessionReader, type Sess
 import { ComposerDraftStore } from "../composer-drafts"
 import { fg, t } from "@opentui/core"
 import {
+  agentsStripEntries,
   formatSubagentElapsed,
+  type AgentsStripInput,
   type ComposerRenderable,
   type StateBannerRenderable,
-  type PickerItem,
 } from "../components"
 import type { ClientDiagnostics } from "../client-diagnostics"
 import type { HistoryPresentation } from "../history/presentation"
@@ -31,10 +33,11 @@ import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker } from "../projection-requests"
 import type { CommandOutcome, EngineEvent } from "../protocol"
 import { presentError } from "../render"
-import { createInitialState, engineEvent, reduceRottweilerState, type RottweilerState } from "../state"
+import { createInitialState, engineEvent, reduceRottweilerState, type RottweilerState, type SubagentProjection } from "../state"
 import {
   boundSubagentState,
   childEngineEvent,
+  foregroundSubagentId,
   initialSubagentState,
   type ComposerDraft,
   type SubagentDescriptor,
@@ -63,12 +66,16 @@ interface ChildUiHost {
   projectRejection(outcome: Extract<CommandOutcome, { type: "rejected" }>): void
 }
 function safeErrorMessage(error: unknown): string { return error instanceof Error && error.message.length > 0 ? error.message : "the request could not be delivered to the engine" }
-type SubagentAction =
-  | { readonly kind: "inspect"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "continue"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
-  | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
+/** Child-agent controls the parent's driver sends on the user's behalf. */
+type ChildControlCommand = "interrupt_subagent" | "close_subagent" | "background_subagent" | "continue_subagent"
+const CONTROL_COPY: Readonly<Record<ChildControlCommand, { readonly code: string; readonly unavailable: string }>> = {
+  interrupt_subagent: { code: "subagent_interrupt", unavailable: "Couldn't stop the agent because the engine connection is unavailable." },
+  close_subagent: { code: "subagent_close", unavailable: "Couldn't close the agent because the engine connection is unavailable." },
+  background_subagent: { code: "subagent_background", unavailable: "Couldn't move the agent to the background because the engine connection is unavailable." },
+  continue_subagent: { code: "subagent_continue", unavailable: "Couldn't message the agent because the engine connection is unavailable." },
+}
+/** Bound on remembered strip membership; finished children beyond it are simply shown until dismissed. */
+const MAX_STRIP_MEMORY = 512
 
 export class ChildUiController {
   readonly #host: ChildUiHost
@@ -82,7 +89,10 @@ export class ChildUiController {
   #historicalChild: { readonly sessionId: string; readonly task: string; readonly target: SessionReadTarget } | null = null
   readonly draftStore: ComposerDraftStore
   #activeSubagentId: string | null = null
-  #subagentActionId: string | null = null
+  /** Children seen running in this client; only they persist in the strip once finished. */
+  #stripObserved = new Set<string>()
+  /** Finished children the user dismissed from the strip. */
+  #stripHidden = new Set<string>()
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   #parentReadTarget: SessionReadTarget | null = null
   #activeReadTarget: SessionReadTarget | null = null
@@ -184,6 +194,15 @@ export class ChildUiController {
   get familyControlReady(): boolean { return this.#familyChild !== null && this.#family?.ready === true }
   get selectedFamily(): boolean { return this.#familyChild !== null }
   interactionState(state: RottweilerState): RottweilerState { return this.#activeSubagentId === null || this.familyControlReady ? state : childPassiveInteractionState(state) }
+  /**
+   * Viewing a child never borrows the parent's composer: the view is read-only
+   * unless the child waits on a typed answer. Messages go through the Agents screen.
+   */
+  get composerHidden(): boolean {
+    if (this.#activeSubagentId === null) return false
+    if (this.#historicalChild !== null || !this.familyControlReady) return true
+    return !Object.values(this.#activeChildState?.questions ?? {}).some(question => question.question.response_kind === "text")
+  }
   presentHistory(transcript: TranscriptRenderable): void {
     if (this.sourceReady) this.#host.history.present(this.readTarget)
     else this.#host.history.suspend()
@@ -296,11 +315,69 @@ export class ChildUiController {
     this.#todos.reset()
     this.#scope = {}
     this.#subagentListError = null; this.#catalog.clear(); this.#activeChildState = null
-    this.#historicalChild = null; this.#activeReadTarget = null; this.draftStore.clear(); this.#activeSubagentId = null; this.#subagentActionId = null
+    this.#historicalChild = null; this.#activeReadTarget = null; this.draftStore.clear(); this.#activeSubagentId = null
+    this.#stripObserved.clear(); this.#stripHidden.clear()
     this.#subagentErrorBaseline = undefined
     this.#resetting = false
   }
-  pickerClosed(): void { this.#subagentActionId = null }
+  /** Accepts the engine's child catalog when it answers this session's latest request. */
+  acceptListed(event: Extract<EngineEvent, { type: "subagents_listed" }>, requestId: string | null): void {
+    if (event.session_id !== this.#host.sessionId || !this.#host.requests.matches("subagents", requestId)) return
+    this.#host.requests.clear("subagents")
+    this.acceptCatalog(event.subagents)
+  }
+  get catalog(): readonly SubagentDescriptor[] { return this.#subagentDescriptors }
+  get familyPending(): readonly FamilyControlRow[] { return this.#family?.pending ?? [] }
+  get listError(): string | null { return this.#subagentListError ?? this.#family?.error ?? null }
+  get listLoading(): boolean { return this.#host.requests.current("subagents") !== null }
+  retryListing(): void { this.#family?.refresh(); this.requestSubagents() }
+  /** Child a foreground spawn or wait is blocked on; only it can move to the background. */
+  get foregroundId(): string | null { return this.#host.state.replay.active ? null : foregroundSubagentId(this.#host.state) }
+
+  /**
+   * Refreshes the child catalog when a child starts, finishes, or a
+   * `spawn_agent` call settles; queued children are known only from it.
+   */
+  afterEvent(event: EngineEvent, state: RottweilerState): void {
+    if (event.type === "subagent_spawned" || event.type === "subagent_finished"
+      || (event.type === "tool_call_finished" && state.tools[event.invocation_id]?.name === "spawn_agent")) this.requestSubagents()
+  }
+
+  /** Strip rows for the parent: running and queued children, then undismissed finished ones. */
+  stripInput(agentsKey: string | null, backgroundKey: string | null): AgentsStripInput {
+    const state = this.#host.state
+    for (const subagent of Object.values(state.subagents)) {
+      if (subagent.status === "running" && this.#stripObserved.size < MAX_STRIP_MEMORY) this.#stripObserved.add(subagent.projectionId)
+    }
+    for (const set of [this.#stripObserved, this.#stripHidden]) {
+      for (const id of set) if (state.subagents[id] === undefined) set.delete(id)
+    }
+    const queued = new Set(this.#subagentDescriptors.filter(value => value.activity === "queued").map(value => value.subagent_id))
+    const entries = agentsStripEntries(state, this.#stripHidden, this.#stripObserved)
+    const waiting = this.#subagentDescriptors.filter(value => value.activity === "queued" && state.subagents[value.subagent_id] === undefined)
+      .map(value => queuedProjection(value))
+    const live = entries.filter(entry => entry.status === "running").length
+    return {
+      entries: [...entries.slice(0, live), ...waiting, ...entries.slice(live)],
+      agentName: id => this.subagentDescriptor(id)?.agent || null,
+      queued: id => queued.has(id),
+      agentsKey,
+      backgroundKey: this.foregroundId === null ? null : backgroundKey,
+    }
+  }
+  /** Finished children currently listed in the strip. */
+  get finishedInStrip(): number {
+    return Object.values(this.#host.state.subagents).filter(subagent => subagent.status !== "running"
+      && this.#stripObserved.has(subagent.projectionId) && !this.#stripHidden.has(subagent.projectionId)).length
+  }
+  /** Removes finished children from the strip; the Agents screen still lists them. */
+  hideFinished(): void {
+    for (const subagent of Object.values(this.#host.state.subagents)) {
+      if (subagent.status !== "running" && this.#stripHidden.size < MAX_STRIP_MEMORY) this.#stripHidden.add(subagent.projectionId)
+    }
+    this.#host.refresh()
+  }
+
   acceptCatalog(values: readonly SubagentDescriptor[]): void {
     this.#subagentListError = null
     this.#catalog.replace(values)
@@ -328,26 +405,6 @@ export class ChildUiController {
     this.#subagentErrorBaseline = this.#host.state.errors.at(-1)
     this.setSubagentActivity(id, "running")
   }
-  openSubagentPicker(): void {
-    if (this.#host.state.replay.active) {
-      this.#host.projectError(
-        "subagents_unavailable_in_replay",
-        "Child-agent controls are available from the live parent session, not historical replay.",
-      )
-      return
-    }
-    this.#host.pickerController.begin("agents")
-    this.requestSubagents()
-    this.#host.pickerController.refresh()
-  }
-
-  openSubagentActionPicker(subagentId = this.#activeSubagentId): void {
-    if (subagentId === null || this.subagentDescriptor(subagentId) === undefined) return
-    this.#subagentActionId = subagentId
-    this.#host.pickerController.begin("agentActions")
-    this.#host.pickerController.refresh()
-  }
-
   requestSubagents(): void {
     if (this.#host.state.replay.active) return
     this.#subagentListError = null
@@ -435,7 +492,6 @@ export class ChildUiController {
     this.#historicalChild = null
     this.#activeChildState = null
     this.restoreComposerDraft(null)
-    this.#subagentActionId = null
     this.#subagentErrorBaseline = undefined
     this.#host.refresh(); source?.release()
     this.#host.focus()
@@ -445,7 +501,7 @@ export class ChildUiController {
     const accepted = this.draftStore.set(this.composerScope(), {
       content: this.#host.composer.value, attachments: this.#host.composer.attachments,
     })
-    if (!accepted) this.#host.projectError("draft_budget_full", "Draft storage is full. Shorten a draft or remove an attachment before switching.")
+    if (!accepted) this.#host.projectError("draft_budget_full", DRAFT_SWITCH_LIMIT_NOTICE)
     return accepted
   }
 
@@ -547,150 +603,67 @@ export class ChildUiController {
       }
       return
     }
-    if (this.#familyChild !== null) {
-      this.#host.banner.visible = true
-      this.#host.banner.content = `Child ${this.#familyChild.session_id} · ${this.familyControlReady ? "controls ready" : "refreshing controls"}${this.#family?.error ? ` · ${this.#family.error}` : ""}${this.#displayError ? ` · ${this.#displayError}` : ""} · Esc parent`
-      return
-    }
-    if (this.#historicalChild !== null) {
-      this.#host.banner.visible = true
-      this.#host.banner.content = `Child transcript · ${this.#historicalChild.task} · Esc parent`
-      return
-    }
-    const descriptor = this.subagentDescriptor(this.#activeSubagentId)
-    if (descriptor === undefined) return
+    // Viewing a child overlays the parent, which keeps running underneath.
+    const subagentId = this.#activeSubagentId
+    const descriptor = this.subagentDescriptor(subagentId)
+    const projection = this.#host.state.subagents[subagentId] ?? Object.values(
+      this.#host.state.subagents,
+    ).findLast((subagent) => subagent.subagentId === subagentId)
+    const name = descriptor?.agent || "agent"
     const approval = Object.values(state.tools).some((tool) => tool.status === "awaiting_approval")
     const history = this.#host.history?.controller.snapshot
     const replaying = history?.loading ?? false
     const latestError = this.#host.state.errors.at(-1)
     const hasErrorContext = latestError !== undefined && latestError !== this.#subagentErrorBaseline
-    const projection = this.#host.state.subagents[this.#activeSubagentId] ?? Object.values(
-      this.#host.state.subagents,
-    ).findLast((subagent) => subagent.subagentId === this.#activeSubagentId)
-    const status = projection?.status.replaceAll("_", " ") ?? descriptor.activity
-    const elapsed = projection?.status === "running"
-      ? formatSubagentElapsed(projection.spawnedAtMs)
-      : null
+    const status = this.#historicalChild !== null
+      ? "history"
+      : projection?.status.replaceAll("_", " ") ?? descriptor?.activity ?? "loading"
+    const elapsed = projection?.status === "running" ? formatSubagentElapsed(projection.spawnedAtMs) : null
     const activity = replaying
       ? "loading transcript"
       : approval
-        ? "approval requested by child"
-        : projection?.activity ?? descriptor.activity
-    const activitySegment = activity.trim()
+        ? "needs your approval"
+        : this.#familyChild !== null && !this.familyControlReady
+          ? "refreshing controls"
+          : projection?.status === "running" ? projection.activity ?? "" : ""
+    const errorPresentation = hasErrorContext && latestError !== undefined ? presentError(latestError) : null
+    const context = errorPresentation?.text ?? history?.error ?? this.#family?.error ?? this.#displayError ?? null
+    const parentWaiting = Object.values(this.#host.state.tools).some(tool => tool.status === "awaiting_approval")
+      || Object.keys(this.#host.state.questions).length > 0 || this.#host.state.pendingPlan !== null
     const detail = [
       status,
-      ...(activitySegment === "" || activitySegment.toLowerCase() === status.trim().toLowerCase()
-        ? []
-        : [activitySegment]),
+      ...(activity.trim() === "" || activity.trim().toLowerCase() === status.toLowerCase() ? [] : [activity.trim()]),
       ...(elapsed === null ? [] : [elapsed]),
-      ...(status.toLowerCase() === "running" && !replaying && !approval && !hasErrorContext
-        ? ["read-only", "interrupt to reply"]
-        : []),
+      ...(context === null ? [] : [context]),
+      ...(parentWaiting ? ["parent needs you"] : []),
     ].join(" · ")
-    const errorPresentation = hasErrorContext && latestError !== undefined
-      ? presentError(latestError)
-      : null
-    const context = errorPresentation !== null
-      ? errorPresentation.text
-      : history?.error ?? null
     this.#host.banner.visible = true
     this.#host.banner.fg = errorPresentation !== null
       ? this.#host.theme[errorPresentation.severity]
-      : approval
-        ? this.#host.theme.warning
-        : this.#host.theme.info
-    const childrenHint = this.#host.binding("open_subagent_picker")
-    const paletteHint = this.#host.binding("open_command_picker")
-    const hints = [
-      "Esc parent",
-      ...(childrenHint === null ? [] : [`${childrenHint} children`]),
-      ...(paletteHint === null ? [] : [`${paletteHint} palette`]),
-    ]
-    this.#host.banner.content = t`${fg(this.#host.theme.primary)("◉ child agent")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · ${hints.join(" · ")}`
+      : approval || parentWaiting ? this.#host.theme.warning : this.#host.theme.info
+    const task = this.#historicalChild?.task ?? projection?.task ?? descriptor?.task ?? ""
+    this.#host.banner.content = t`${fg(this.#host.theme.primary)(`Agent · ${name}`)} · ${detail} · Esc back${task === "" ? "" : ` · ${boundedUiText(task, 96)}`}`
   }
 
-  async interruptSubagent(subagentId: string): Promise<void> {
-    using replyAllocation = this.#host.requests.allocate()
-    const scope = this.#scope
-    let outcome: void | CommandOutcome | null
-    try {
-      outcome = await this.#host.requests.emit({
-        type: "interrupt_subagent",
-        meta: this.#host.requests.meta(),
-        session_id: this.#host.sessionId,
-        subagent_id: subagentId,
-      }, replyAllocation)
-      if (scope !== this.#scope) return
-    } catch (error) {
-      if (scope !== this.#scope) return
-      this.#host.projectError(
-        "subagent_interrupt_failed",
-        presentError({
-          category: "protocol",
-          code: "subagent_interrupt_failed",
-          message: safeErrorMessage(error),
-        }).text,
-        true,
-      )
-      return
-    }
-    if (outcome?.type === "rejected") this.#host.projectRejection(outcome)
-    else if (outcome == null) {
-      const presentation = presentError({
-        category: "protocol",
-        code: "subagent_interrupt_unavailable",
-        message: "Couldn't interrupt the child because the engine connection is unavailable.",
-      })
-      this.#host.projectError(
-        "subagent_interrupt_unavailable",
-        presentation.text,
-        true,
-      )
-    }
+  async interruptSubagent(subagentId: string): Promise<boolean> {
+    return await this.#control("interrupt_subagent", subagentId)
   }
 
-  async closeSubagent(subagentId: string): Promise<void> {
-    using replyAllocation = this.#host.requests.allocate()
+  /** Detaches the child a foreground spawn or wait is blocked on; the parent continues. */
+  async backgroundSubagent(subagentId: string): Promise<boolean> {
+    return await this.#control("background_subagent", subagentId)
+  }
+
+  /** Sends an explicit follow-up to a finished child. */
+  async messageSubagent(subagentId: string, content: string): Promise<boolean> {
+    const accepted = await this.#control("continue_subagent", subagentId, content)
+    if (accepted) this.responseStarted(subagentId)
+    return accepted
+  }
+
+  async closeSubagent(subagentId: string): Promise<boolean> {
     const scope = this.#scope
-    let outcome: void | CommandOutcome | null
-    try {
-      outcome = await this.#host.requests.emit({
-        type: "close_subagent",
-        meta: this.#host.requests.meta(),
-        session_id: this.#host.sessionId,
-        subagent_id: subagentId,
-      }, replyAllocation)
-      if (scope !== this.#scope) return
-    } catch (error) {
-      if (scope !== this.#scope) return
-      this.#host.projectError(
-        "subagent_close_failed",
-        presentError({
-          category: "protocol",
-          code: "subagent_close_failed",
-          message: safeErrorMessage(error),
-        }).text,
-        true,
-      )
-      return
-    }
-    if (outcome?.type === "rejected") {
-      this.#host.projectRejection(outcome)
-      return
-    }
-    if (outcome == null) {
-      const presentation = presentError({
-        category: "protocol",
-        code: "subagent_close_unavailable",
-        message: "Couldn't close the child because the engine connection is unavailable.",
-      })
-      this.#host.projectError(
-        "subagent_close_unavailable",
-        presentation.text,
-        true,
-      )
-      return
-    }
+    if (!await this.#control("close_subagent", subagentId) || scope !== this.#scope) return false
     if (this.#activeSubagentId === subagentId) this.leaveSubagent()
     const { [subagentId]: _closed, ...subagents } = this.#host.state.subagents
     this.#host.state = {
@@ -702,120 +675,43 @@ export class ChildUiController {
     this.draftStore.remove(`child:${subagentId}`)
     this.#host.refresh()
     this.requestSubagents()
+    return true
   }
 
-  render(kind: "agents" | "agentActions"): void {
-    switch (kind) {
-      case "agents": {
-        const listingError = this.#subagentListError ?? this.#family?.error ?? null
-        if (listingError !== null && (this.#family?.pending.length ?? 0) === 0) {
-          this.#host.pickerController.show(
-            "Child agents · load failed",
-            [{
-              id: "agents.retry",
-              label: "Retry loading child agents",
-              description: boundedUiText(listingError, 160),
-              value: null,
-            }],
-            () => { this.#family?.refresh(); this.requestSubagents() },
-          )
-          break
-        }
-        if (
-          this.#host.requests.current("subagents") !== null &&
-          this.#subagentDescriptors.length === 0 && (this.#family?.pending.length ?? 0) === 0
-        ) {
-          this.#host.pickerController.showLoading("Child agents", "Loading child agents")
-          break
-        }
-        type Choice = { agent: SubagentDescriptor } | { control: FamilyControlRow }
-        const pending = this.#family?.pending ?? []
-        const items: PickerItem<Choice>[] = pending.map(row => ({ id: `control:${row.target.session_id}`,
-          label: `Response needed · ${row.target.session_id}`,
-          description: `${row.controls.questions} questions · ${row.controls.approvals} approvals${row.controls.pending_plan ? " · plan review" : ""}`,
-          value: { control: row },
-        }))
-        items.push(...this.#subagentDescriptors.filter(subagent => !pending.some(row => row.target.session_id === subagent.child_session_id)).map((subagent) => ({
-          id: subagent.subagent_id,
-          label: subagent.task,
-          description: `${subagent.activity === "running" ? "Running" : "Idle"} · ${subagent.agent} · ${subagent.model} · ${subagent.isolation}`,
-          searchText: `${subagent.task} ${subagent.agent} ${subagent.model} ${subagent.activity}`,
-          value: { agent: subagent },
-        })))
-        if (items.length === 0) {
-          this.#host.pickerController.showStatus(
-            "Child agents",
-            "No child agents",
-            "Child agents started by this session will appear here.",
-          )
-          break
-        }
-        this.#host.pickerController.show("Child agents · Enter to inspect", items, (item) => {
-          this.#host.closePicker()
-          if ("control" in item.value) this.enterFamily(item.value.control)
-          else void this.enterSubagent(item.value.agent.subagent_id)
-        })
-        break
+  async #control(type: ChildControlCommand, subagentId: string, content?: string): Promise<boolean> {
+    using replyAllocation = this.#host.requests.allocate()
+    const scope = this.#scope
+    const copy = CONTROL_COPY[type]
+    let outcome: void | CommandOutcome | null
+    try {
+      const target = { meta: this.#host.requests.meta(), session_id: this.#host.sessionId, subagent_id: subagentId }
+      outcome = await this.#host.requests.emit(type === "continue_subagent"
+        ? { type, ...target, content: content ?? "" }
+        : { type, ...target }, replyAllocation)
+    } catch (error) {
+      if (scope === this.#scope) {
+        this.#host.projectError(`${copy.code}_failed`, presentError({
+          category: "protocol", code: `${copy.code}_failed`, message: safeErrorMessage(error),
+        }).text, true)
       }
-      case "agentActions": {
-        const subagent = this.#subagentActionId === null
-          ? undefined
-          : this.subagentDescriptor(this.#subagentActionId)
-        if (subagent === undefined) {
-          this.#host.closePicker()
-          break
-        }
-        const items: PickerItem<SubagentAction>[] = [
-          {
-            id: "inspect",
-            label: "Inspect transcript",
-            description: "Open this child's live, typed event stream",
-            value: { kind: "inspect", subagent },
-          },
-          ...(subagent.activity === "running"
-            ? [{
-                id: "running",
-                label: "Child is still running",
-                description: "Inspect progress or interrupt before sending a follow-up",
-                value: { kind: "running", subagent } as SubagentAction,
-                selectable: false,
-              }]
-            : [{
-                id: "continue",
-                label: "Resume with follow-up",
-                description: "Focus the child composer; Enter sends to this child",
-                value: { kind: "continue", subagent } as SubagentAction,
-              }]),
-          ...(subagent.activity === "running"
-            ? [{
-                id: "interrupt",
-                label: "Interrupt child",
-                description: "Stop the active child response",
-                value: { kind: "interrupt", subagent } as SubagentAction,
-              }]
-            : []),
-          {
-            id: "close",
-            label: "Close child",
-            description: "Release this retained child agent",
-            value: { kind: "close", subagent },
-          },
-        ]
-        this.#host.pickerController.show(`Child actions · ${boundedUiText(subagent.task, 64)}`, items, (item) => {
-          const action = item.value
-          if (action.kind === "running") return
-          this.#host.closePicker()
-          if (action.kind === "inspect") void this.enterSubagent(action.subagent.subagent_id)
-          else if (action.kind === "continue") {
-            void this.enterSubagent(action.subagent.subagent_id)
-          } else if (action.kind === "interrupt") {
-            void this.interruptSubagent(action.subagent.subagent_id)
-          } else {
-            void this.closeSubagent(action.subagent.subagent_id)
-          }
-        })
-        break
-      }
+      return false
     }
+    if (scope !== this.#scope) return false
+    if (outcome?.type === "rejected") this.#host.projectRejection(outcome)
+    else if (outcome == null) {
+      this.#host.projectError(`${copy.code}_unavailable`, presentError({
+        category: "protocol", code: `${copy.code}_unavailable`, message: copy.unavailable,
+      }).text, true)
+    }
+    return outcome?.type === "accepted"
+  }
+}
+
+/** Strip row for a child admitted by the parent but still waiting for a slot. */
+function queuedProjection(descriptor: SubagentDescriptor): SubagentProjection {
+  return {
+    projectionId: descriptor.subagent_id, subagentId: descriptor.subagent_id, parentTurnId: "",
+    task: descriptor.task, spawnedAtMs: null, status: "running", childSessionId: descriptor.child_session_id,
+    lastChildSequence: null, activity: "queued", summary: null, touchedFileCount: 0, diffArtifactId: null,
   }
 }

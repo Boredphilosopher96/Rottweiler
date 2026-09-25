@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::BackgroundProcessManager;
+use crate::SessionActivity;
 use crate::registry::{
     CancellationToken, CapabilityManifest, Tool, ToolContext, ToolDescriptor, ToolError,
     ToolLimits, ToolOutputSink, ToolResult, input_schema, parse_input,
@@ -308,11 +309,11 @@ impl Tool for BashTool {
         Ok(())
     }
 
-    fn session_activity(&self, session_id: &rw_types::SessionId) -> Option<String> {
+    fn session_activity(&self, session_id: &rw_types::SessionId) -> Option<SessionActivity> {
         self.background
             .as_ref()
             .is_some_and(|background| background.has_running(session_id))
-            .then(|| "background shell process is still running".to_owned())
+            .then_some(SessionActivity::BackgroundShell)
     }
 
     fn observes_session_resources(&self) -> bool {

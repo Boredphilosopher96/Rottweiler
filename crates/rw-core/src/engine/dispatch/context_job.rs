@@ -86,12 +86,15 @@ pub(in crate::engine) fn start(
         Target::Plugin { request, .. } => Some(request.clone()),
         _ => None,
     };
+    // The actor's base configuration keeps the session's initial alias; the
+    // selected model lives in actor state and changes with every switch.
+    let model_alias = state.model_alias.clone();
     let (send, receive) = oneshot::channel();
     let spawned = state.tasks.spawn(
         Arc::clone(config),
         rw_tools::CancellationToken::default(),
         async move {
-            let result = read(owner, tasks, requested_turn, dump, plugin).await;
+            let result = read(owner, tasks, requested_turn, dump, plugin, model_alias).await;
             let _ = send.send(result);
         },
     );
@@ -117,6 +120,7 @@ async fn read(
     requested_turn: Option<TurnId>,
     dump: bool,
     plugin: Option<rw_types::extension_control::ExtensionContextRead>,
+    model_alias: String,
 ) -> ReadResult {
     if let Some(turn) = requested_turn {
         return historical_prompt(config, tasks, turn).await;
@@ -155,7 +159,7 @@ async fn read(
                     } else if dump {
                         Ok(Output::Prompt(prompt_dump(
                             current.assembled,
-                            &config.model_alias,
+                            &model_alias,
                             None,
                             current.through,
                         )))
@@ -167,7 +171,7 @@ async fn read(
                                 sources: &current.sources,
                                 pruned: &current.pruned_tool_outputs,
                             },
-                            config.model.context_metadata(&config.model_alias),
+                            config.model.context_metadata(&model_alias),
                             &config.model.compaction_config(),
                             active_turn,
                             current.through,

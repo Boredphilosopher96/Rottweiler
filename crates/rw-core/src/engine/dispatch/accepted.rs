@@ -28,7 +28,6 @@ use rw_types::PlanArtifact;
 use rw_types::PlanDecision;
 use rw_types::RewindTarget;
 use rw_types::ShellId;
-use std::sync::atomic::Ordering;
 use tokio::sync::oneshot;
 
 #[allow(clippy::too_many_lines)]
@@ -51,8 +50,8 @@ pub(super) async fn apply_accepted(
     } = context;
     match command {
         ClientCommand::ListPermissions { .. }
-        | ClientCommand::AddSessionPermissionRule { .. }
-        | ClientCommand::RemoveSessionPermissionRule { .. }
+        | ClientCommand::AddPermissionRule { .. }
+        | ClientCommand::RemovePermissionRule { .. }
         | ClientCommand::RemoveQueuedMessage { .. }
         | ClientCommand::ClearQueuedMessages { .. }
         | ClientCommand::ExportSession { .. }
@@ -269,7 +268,6 @@ pub(super) async fn apply_accepted(
                     super::command_job::start(
                         meta,
                         Ok(bound),
-                        active_turn.load(Ordering::Acquire),
                         super::command_job::CommandReply::Protocol(completion.take()),
                         DispatchContext {
                             state,
@@ -296,7 +294,6 @@ pub(super) async fn apply_accepted(
                 super::command_job::start(
                     meta,
                     bound,
-                    active_turn.load(Ordering::Acquire),
                     super::command_job::CommandReply::Protocol(completion.take()),
                     DispatchContext {
                         state,
@@ -318,7 +315,6 @@ pub(super) async fn apply_accepted(
                     command_meta: meta,
                     content,
                     attachments,
-                    observed_turn: active_turn.load(Ordering::Acquire),
                     respond: internal_respond,
                 },
                 state,
@@ -393,6 +389,16 @@ pub(super) async fn apply_accepted(
                         }
                     }
                     PrecommittedAnswer::Model(pending, strategy) => {
+                        if super::deferred_controls::owns_model_selection(
+                            state,
+                            &pending.model,
+                            pending.provider.as_deref(),
+                        ) && let Some(complete) = completion.take()
+                        {
+                            // The durable control owns the remaining preparation,
+                            // compaction, and preference save after this answer.
+                            let _ = complete.send(Ok(ProtocolCompletion::DeferredControl));
+                        }
                         let prepared = PreparedModelSwitch {
                             thinking: config
                                 .model
@@ -555,8 +561,10 @@ pub(super) async fn apply_accepted(
         | ClientCommand::ListModes { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ListSettings { .. }
+        | ClientCommand::ListExtensions { .. }
         | ClientCommand::SetSetting { .. }
         | ClientCommand::BeginProviderAuth { .. }
+        | ClientCommand::ConfigureCompatibleProvider { .. }
         | ClientCommand::ConfigureBuiltinProvider { .. }
         | ClientCommand::CompleteProviderAuth { .. }
         | ClientCommand::CancelProviderAuth { .. }
@@ -567,6 +575,7 @@ pub(super) async fn apply_accepted(
         | ClientCommand::ListSubagents { .. }
         | ClientCommand::ContinueSubagent { .. }
         | ClientCommand::InterruptSubagent { .. }
+        | ClientCommand::BackgroundSubagent { .. }
         | ClientCommand::CloseSubagent { .. }
         | ClientCommand::ShutdownHost { .. }
         | ClientCommand::Rewind {

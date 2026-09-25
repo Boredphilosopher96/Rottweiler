@@ -29,7 +29,11 @@ pub(super) async fn rejection(
         }
     };
     if is_rewind {
-        if state.running.is_some() || config.tools.session_activity(&state.session_id).is_some() {
+        if super::action_availability::ActionState::from_actor(state, config)
+            .unavailable(rw_types::SessionActionKind::Rewind)
+            .is_some()
+            && state.pending_rewind.as_ref().map(|pending| pending.0) != Some(turn)
+        {
             return Some(protocol_rejection(code, "rewind requires an idle session"));
         }
         if state.pending_rewind.as_ref().map(|pending| pending.0) == Some(turn) {

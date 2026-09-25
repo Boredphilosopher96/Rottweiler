@@ -69,6 +69,22 @@ pub async fn refresh_models_dev_with_proxy_auth(
     proxies: &ProxySettings,
     proxy_authentication: Option<&ProxyAuthentication>,
 ) -> Result<ModelsRefreshReport, ProviderError> {
+    refresh_models_dev_with_download_timeout(source, output, proxies, proxy_authentication, None)
+        .await
+}
+
+/// Refreshes metadata with an optional deadline covering only the HTTP download.
+/// Validation and atomic publication are awaited after the download completes.
+///
+/// # Errors
+/// Returns transport, validation, proxy, or atomic installation failures.
+pub async fn refresh_models_dev_with_download_timeout(
+    source: &str,
+    output: &Path,
+    proxies: &ProxySettings,
+    proxy_authentication: Option<&ProxyAuthentication>,
+    download_timeout: Option<std::time::Duration>,
+) -> Result<ModelsRefreshReport, ProviderError> {
     crate::http::require_process_network()?;
     let source = parse_source_url(source)?;
     let proxy = proxies
@@ -76,11 +92,11 @@ pub async fn refresh_models_dev_with_proxy_auth(
         .map(|resolution| resolution.url);
     let client = build_client_with_proxy_auth(proxy.as_ref(), proxy_authentication)?;
     let _network_lease = crate::http::network_admission()?;
-    let response = client
-        .get(source.clone())
-        .send()
-        .await
-        .map_err(transport_error)?;
+    let mut request = client.get(source.clone());
+    if let Some(timeout) = download_timeout {
+        request = request.timeout(timeout);
+    }
+    let response = request.send().await.map_err(transport_error)?;
     if let Some(error) = response_error(&response) {
         return Err(error);
     }
@@ -252,6 +268,41 @@ fn convert_models_dev(
 ) -> Result<PricingTable, ProviderError> {
     let providers: BTreeMap<String, UpstreamProvider> = serde_json::from_slice(json)
         .map_err(|error| catalog_error(format!("invalid models.dev JSON: {error}")))?;
+    convert_catalog(providers, source_url, snapshot_date, revision)
+}
+
+impl PricingTable {
+    /// Loads the release-pinned offline metadata fallback. Live provider discovery
+    /// still owns availability; this table supplies limits and pricing only.
+    ///
+    /// # Errors
+    /// Returns an error if the bundled snapshot violates the pricing contract.
+    pub fn bundled() -> Result<Self, ProviderError> {
+        #[derive(Deserialize)]
+        struct BundledMetadata {
+            source_url: String,
+            snapshot_date: String,
+            revision: String,
+            catalog: BTreeMap<String, UpstreamProvider>,
+        }
+        let snapshot: BundledMetadata =
+            serde_json::from_slice(include_bytes!("../data/models-dev.json"))
+                .map_err(|error| catalog_error(format!("invalid bundled metadata: {error}")))?;
+        convert_catalog(
+            snapshot.catalog,
+            &snapshot.source_url,
+            &snapshot.snapshot_date,
+            &snapshot.revision,
+        )
+    }
+}
+
+fn convert_catalog(
+    providers: BTreeMap<String, UpstreamProvider>,
+    source_url: &str,
+    snapshot_date: &str,
+    revision: &str,
+) -> Result<PricingTable, ProviderError> {
     let mut models = BTreeMap::new();
 
     for (provider_id, provider) in providers {
@@ -504,6 +555,22 @@ mod tests {
         value
             .parse()
             .unwrap_or_else(|error| panic!("fixture number must parse: {error}"))
+    }
+
+    #[test]
+    fn bundled_metadata_has_known_limits_without_provider_discovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let table = crate::PricingTable::bundled()?;
+        table.validate()?;
+        assert!(table.revision.starts_with("sha256:"));
+        let model = table
+            .models
+            .get("openai/gpt-5")
+            .ok_or("missing pinned model")?;
+        assert!(model.max_context_tokens.is_some_and(|limit| limit > 0));
+        assert!(model.max_output_tokens.is_some_and(|limit| limit > 0));
+        assert!(model.supports_tools);
+        Ok(())
     }
 
     #[test]

@@ -12,3 +12,12 @@ export function contextUsage(snapshot: ContextSnapshot): ContextUsageProjection 
 export function statusContext(state: RottweilerState): ContextUsageProjection | null {
   return state.contextUsage ?? state.context
 }
+
+/** Thresholds use the engine's reserved-output-adjusted capacity, never a guessed limit. */
+export function contextWarning(usage: ContextUsageProjection | null): string | null {
+  if (!usage?.context_window_known || Number(usage.usable_tokens) <= 0) return null
+  const percent = Number(usage.used_tokens) / Number(usage.usable_tokens) * 100
+  return percent >= 85 ? "Context near limit · inspect /context or compact with /compact"
+    : percent >= 70 ? "Context filling · inspect /context; compaction makes room"
+    : null
+}

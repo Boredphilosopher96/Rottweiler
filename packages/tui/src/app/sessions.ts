@@ -3,14 +3,14 @@ import { directSessionRead } from "../session-reader"
 import { homedir } from "node:os"
 import type {
   ComposerRenderable,
-  FuzzyPickerRenderable,
+  PickerScreenRenderable,
   StateBannerRenderable,
   PickerItem,
 } from "../components"
 import type { PickerController } from "../picker-controller"
 import type { ProjectionRequestBroker, ProjectionKind } from "../projection-requests"
 import type { Attachment, CommandOutcome, EngineEvent, SessionSearchMatch } from "../protocol"
-import { presentError } from "../render"
+import { formatRelativeTime, formatUsdMicros, modelDisplayLabel, presentError } from "../render"
 import type { ComposerDraftStore, DraftSubmission } from "../composer-drafts"
 import type { ClientCache } from "../history/cache"
 import type { HistoryCacheValue } from "../history/controller"
@@ -19,9 +19,9 @@ import { TimelineController, readTimelineDraft, type TimelineChoice } from "../h
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 import { isRecord } from "../transport"
-import { boundedUiText, queuedMessageLabel, timelineTurnLabel } from "../ui-presentation"
+import { queuedMessageLabel, timelineTurnLabel } from "../ui-presentation"
 
-type SessionPickerKind = "timeline" | "timelineActions" | "queuedMessages" | "exportFormat" | "exportOverwrite" | "exportPath" | "sessions" | "sessionActions" | "sessionRename"
+type SessionPickerKind = "timeline" | "timelineActions" | "queuedMessages" | "exportFormat" | "exportOverwrite" | "exportPath" | "sessions" | "sessionRename"
 interface SessionUiHost {
   readonly sessionReader: SessionReader
   readonly historyCache: ClientCache<HistoryCacheValue>
@@ -29,11 +29,13 @@ interface SessionUiHost {
   readonly draftScope: string
   readonly state: RottweilerState
   readonly sessionId: string
-  readonly picker: FuzzyPickerRenderable<unknown>
+  readonly picker: PickerScreenRenderable<unknown>
   readonly composer: ComposerRenderable
   readonly banner: StateBannerRenderable
   readonly theme: RottweilerTheme
   readonly pickerController: PickerController
+  /** Presentation clock for relative session ages. */
+  nowMs(): number
   readonly requests: ProjectionRequestBroker
   readonly projectionErrors: Partial<Record<ProjectionKind, string>>
   readonly destroyed: boolean
@@ -43,13 +45,14 @@ interface SessionUiHost {
   navigateTranscript(source: string | SessionSearchMatch): Promise<import("../protocol").TranscriptAnchor | null>
   selectSession(sessionId: string): void | Promise<void>
   sendMessage(content: string, attachments: readonly Attachment[]): Promise<boolean>
+  requestFork(atTurn: string): Promise<boolean>
   projectError(code: string, message: string, retryable?: boolean): void
   projectRejection(outcome: Extract<CommandOutcome, { type: "rejected" }>): void
 }
 function safeErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.length > 0 ? error.message : "the request could not be delivered to the engine"
 }
-type TimelineAction = "edit" | "retry" | "rewind"
+type TimelineAction = "edit" | "retry" | "rewind" | "fork"
 interface PendingRewindIntent {
   readonly action: TimelineAction
   readonly draft: DraftSubmission | null
@@ -59,20 +62,15 @@ interface PendingRewindIntent {
 }
 
 type QueuedMessagePickerAction =
+  | { readonly kind: "info" }
   | { readonly kind: "remove"; readonly position: string }
   | { readonly kind: "clear" }
 
 type SessionProjection = RottweilerState["sessions"][number]
 
 type SessionListAction =
-  | { readonly kind: "new" }
   | { readonly kind: "session"; readonly session: SessionProjection }
   | { readonly kind: "retry" }
-
-type SessionPickerAction =
-  | { readonly kind: "match"; readonly source: SessionSearchMatch }
-  | { readonly kind: "resume"; readonly session: SessionProjection }
-  | { readonly kind: "rename"; readonly session: SessionProjection }
 
 type ExportFormat = "markdown" | "html" | "json"
 
@@ -216,7 +214,7 @@ export class SessionUiController {
   }
   get timelineRestorable(): boolean {
     const snapshot = this.#timeline?.history.snapshot
-    const selected = this.#host.picker.select.getSelectedOption()?.value
+    const selected = this.#host.picker.selectedId
     return snapshot !== undefined && !snapshot.loading && snapshot.error === null
       && (snapshot.total === 0n || (typeof selected === "string" && /^timeline\.turn\.[0-9]+$/.test(selected)))
   }
@@ -247,11 +245,18 @@ export class SessionUiController {
     const choice = EXPORT_FORMAT_CHOICES.find((item) => item.format === format)
     if (choice === undefined) return
     this.#host.pickerController.kind = "exportPath"
-    this.#host.picker.openTextPrompt({ title: "Save to path, e.g. ~/transcript.md", placeholder: `~/rottweiler-export.${choice.extension}`, onSubmit: (value) => {
+    this.#host.pickerController.openTextPrompt({
+      title: `EXPORT › ${choice.label}`,
+      placeholder: `~/rottweiler-export.${choice.extension}`,
+      detail: `Path for the ${choice.label} transcript, e.g. ~/transcript.${choice.extension}\nAn existing file is only replaced after you confirm.`,
+      onSubmit: (value) => {
         this.#host.closePicker()
         const outputPath = expandLeadingHome(value.trim())
         void this.#submitSessionExport(format, outputPath, false)
-      }, maxBytes: 4_096, empty: "reject" })
+      },
+      maxBytes: 4_096,
+      empty: "reject",
+    }, () => this.openExportSessionPicker())
   }
 
   async #submitSessionExport(
@@ -339,7 +344,6 @@ export class SessionUiController {
 
   openSessionPicker(): void {
     this.#sessionActionId = null
-    this.#host.picker.input.value = ""
     this.#host.pickerController.begin("sessions")
     this.#host.requests.command({ type: "list_sessions" })
     this.#host.pickerController.refresh()
@@ -401,25 +405,121 @@ export class SessionUiController {
     }
   }
 
-  #openSessionActionPicker(session: SessionProjection): void {
-    this.#sessionActionId = session.sessionId
-    this.#host.pickerController.kind = "sessionActions"
-    this.#host.picker.input.value = ""
-    this.#host.pickerController.refresh()
-  }
-
   #openSessionRenamePrompt(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
+    const back = () => {
+      this.#sessionActionId = null
+      this.#host.pickerController.kind = "sessions"
+      this.#host.pickerController.refresh()
+    }
     this.#host.pickerController.kind = "sessionRename"
-    this.#host.picker.openTextPrompt({ title: "Rename session, e.g. Auth refactor", placeholder: session.title ?? session.workspaceName, onSubmit: (title) => {
+    this.#host.pickerController.openTextPrompt({
+      title: `Rename · ${session.title?.trim() || "Untitled"}`,
+      placeholder: session.title?.trim() || "Untitled",
+      detail: "The new title appears in this list and in the status line. The session itself is not switched.",
+      onSubmit: (title) => {
         const sessionId = this.#sessionActionId
-        this.#host.pickerController.kind = "sessions"
-        this.#host.pickerController.query = ""
-        if (sessionId !== null) {
-          this.#host.requests.command({ type: "rename_session", sessionId, title })
+        if (sessionId !== null) this.#host.requests.command({ type: "rename_session", sessionId, title })
+        back()
+      },
+      maxBytes: 288,
+      empty: "reject",
+    }, back)
+  }
+
+  /**
+   * Sessions: every resumable conversation. Enter resumes directly; renaming,
+   * exporting, and starting a new session are chords listed in the footer.
+   */
+  #renderSessions(): void {
+    const state = this.#host.state
+    const error = this.#host.projectionErrors.sessions
+    const query = this.#host.picker.visible ? this.#host.picker.input.value : this.#host.pickerController.query
+    if (error === undefined && this.#host.requests.current("sessions") !== null
+      && state.sessions.length === 0 && query.length === 0) {
+      this.#host.pickerController.showLoading("SESSIONS", "Loading sessions")
+      return
+    }
+    // A session nobody has prompted yet has nothing to resume; only the open
+    // one is listed so the list still shows where you are.
+    const sessions = state.sessions.filter(session => session.sessionId === this.#host.sessionId || !emptySession(session))
+    const workspaces = new Set(sessions.map(session => session.workspaceName))
+    const grouped = workspaces.size > 1 && state.sessionSearch === null
+    const ordered = grouped
+      ? [...workspaces].flatMap(workspace => sessions.filter(session => session.workspaceName === workspace))
+      : sessions
+    const items: PickerItem<SessionListAction>[] = [
+      ...(error === undefined ? [] : [{
+        id: "sessions.retry", label: "Retry loading sessions", description: error,
+        detail: `${error}\n\nSelect to ask the engine for the session list again.`,
+        tone: "error" as const, primary: "retry", value: { kind: "retry" } as const,
+      }]),
+      ...ordered.flatMap((session, index) => {
+        const section = grouped && ordered[index - 1]?.workspaceName !== session.workspaceName
+          ? [{ id: `sessions.section.${session.workspaceName}`, label: session.workspaceName, description: "",
+              sectionHeader: true, value: { kind: "retry" } as const }]
+          : []
+        return [...section, this.#sessionItem(session)]
+      }),
+    ]
+    this.#host.pickerController.show(
+      `SESSIONS   ${sessions.length} ${sessions.length === 1 ? "session" : "sessions"}${state.sessionSearch?.truncated === true ? " · more matches not shown" : ""}   /resume`,
+      items,
+      (item) => {
+        if (item.value.kind === "retry") {
+          const typed = this.#host.picker.input.value.trim()
+          this.#host.requests.command(typed.length === 0 ? { type: "list_sessions" } : { type: "search_sessions", query: typed, limit: 100 })
+          return
         }
-        this.#host.pickerController.refresh()
-      }, maxBytes: 288, empty: "reject" })
+        if (item.value.kind !== "session") return
+        const sessionId = item.value.session.sessionId
+        const match = state.sessionSearch?.matches.find(source => source.session_id === sessionId)
+        if (match !== undefined) void this.#search.open(match)
+        else { this.#host.closePicker(); void this.#host.selectSession(sessionId) }
+      },
+      {
+        primary: "resume",
+        selectedId: this.#host.sessionId,
+        emptyCopy: query.trim().length > 0 ? `No sessions match “${query.trim()}”` : "No sessions yet\nctrl+n starts one in this workspace.",
+        keys: [
+          { stroke: "ctrl+r", label: "rename", available: item => item?.value.kind === "session",
+            run: item => { if (item?.value.kind === "session") this.#openSessionRenamePrompt(item.value.session) } },
+          { stroke: "ctrl+x", label: "export", available: () => !state.replay.active,
+            run: () => this.openExportSessionPicker() },
+          { stroke: "ctrl+n", label: "new", available: () => !state.replay.active,
+            run: () => { void this.createSession() } },
+        ],
+      },
+    )
+  }
+
+  #sessionItem(session: SessionProjection): PickerItem<SessionListAction> {
+    const state = this.#host.state
+    const current = session.sessionId === this.#host.sessionId
+    const model = modelDisplayLabel(session.model, state.models) ?? session.model
+    const title = session.title?.trim() || "Untitled"
+    const activity = session.activity
+    const age = activity === null ? null : formatRelativeTime(activity.updatedUnixMs, this.#host.nowMs())
+    const turns = activity === null ? null : `${activity.turnCount} ${activity.turnCount === 1 ? "turn" : "turns"}`
+    const cost = activity?.costMicrosUsd == null ? null : formatUsdMicros(activity.costMicrosUsd)
+    const firstPrompt = activity?.firstPrompt ?? null
+    return {
+      id: session.sessionId,
+      label: title,
+      hint: [age, turns, session.shellActive ? "shell active" : null].filter(Boolean).join(" · "),
+      ...(current ? { marker: "●" } : {}),
+      description: `${session.workspaceName} · ${model}`,
+      detail: [
+        ...(firstPrompt === null ? [] : [`› ${firstPrompt}`, ""]),
+        `workspace  ${session.workspaceName}`,
+        `model      ${model}`,
+        ...(cost === null ? [] : [`cost       ${cost}`]),
+        ...(current ? ["", "This is the open session."] : []),
+        ...(session.shellActive ? ["A foreground shell is active in this session."] : []),
+      ].join("\n"),
+      searchText: `${state.sessionSearch?.query ?? ""} ${title} ${session.workspaceName} ${model} ${firstPrompt ?? ""}`,
+      value: { kind: "session", session },
+    }
   }
 
   #showExportNotice(path: string): void {
@@ -449,7 +549,7 @@ export class SessionUiController {
     return detail.join(" · ")
   }
 
-  async #startRewindIntent(turn: TimelineChoice, action: TimelineAction): Promise<void> {
+  async #startRewindIntent(turn: TimelineChoice, action: Exclude<TimelineAction, "fork">): Promise<void> {
     using replyAllocation = this.#host.requests.allocate()
     if (this.#host.state.replay.active || this.#host.draftScope !== "parent" || this.#retrying) return
     this.clearRewind()
@@ -535,40 +635,39 @@ export class SessionUiController {
         const turns = timeline?.choices ?? []
         if (turns.length === 0 && !timeline?.older && !timeline?.newer) {
           this.#host.pickerController.showStatus(
-            "Conversation timeline",
-            timeline?.history.snapshot.loading ? "Loading conversation history" : timeline?.history.snapshot.error ?? "No user turns",
-            this.#host.state.replay.active ? "read-only session" : "Send a message to create a checkpoint.",
+            "REWIND   /rewind",
+            timeline?.history.snapshot.loading ? "Loading conversation history" : timeline?.history.snapshot.error ?? "No messages yet",
+            this.#host.state.replay.active ? "This is a read-only session." : "Each message you send becomes a point you can rewind to.",
           )
           break
         }
         const readOnly = this.#host.state.replay.active
-        const items: PickerItem<TimelineChoice | "older" | "newer" | null>[] = [
-          ...(readOnly
-            ? [{
-                id: "timeline.read-only",
-                label: "read-only session",
-                description: "Timeline actions are unavailable in replay",
-                value: null,
-                selectable: false,
-              }]
-            : []),
-          ...(timeline?.newer ? [{ id: "timeline.newer", label: "Newer history", description: "Read the next page", value: "newer" as const }] : []),
-          ...(timeline?.older ? [{ id: "timeline.older", label: "Older history", description: "Read the previous page", value: "older" as const }] : []),
+        const items: PickerItem<TimelineChoice | "older" | "newer">[] = [
+          ...(timeline?.newer ? [{ id: "timeline.newer", label: "Newer messages", marker: "↑", tone: "muted" as const,
+            description: "Read the next page of history", primary: "load", value: "newer" as const }] : []),
           ...turns.map((turn) => ({
             id: `timeline.turn.${turn.sequenceId}`,
             label: timelineTurnLabel(turn.preview),
+            hint: this.#timelineTurnDescription(turn.agentTurn, false),
             description: this.#timelineTurnDescription(turn.agentTurn, readOnly),
+            detail: `${timelineTurnLabel(turn.preview)}\n\n${this.#timelineTurnDescription(turn.agentTurn, readOnly)}\n\n${readOnly
+              ? "Timeline actions are unavailable in a read-only session."
+              : "Enter to edit and resend, retry, rewind, or fork from this message."}`,
+            primary: readOnly ? null : "actions",
             value: turn,
-            selectable: !readOnly,
           })),
+          ...(timeline?.older ? [{ id: "timeline.older", label: "Older messages", marker: "↓", tone: "muted" as const,
+            description: "Read the previous page of history", primary: "load", value: "older" as const }] : []),
         ]
-        this.#host.pickerController.show("Conversation timeline", items, (item) => {
+        this.#host.pickerController.show("REWIND   /rewind", items, (item) => {
           if (item.value === "older") { void timeline?.previous(); return }
           if (item.value === "newer") { void timeline?.next(); return }
-          if (item.value === null || readOnly) return
+          if (readOnly) return
           this.#timelineTurn = item.value
           this.#host.pickerController.kind = "timelineActions"
           this.#host.pickerController.refresh()
+        }, {
+          notice: readOnly ? { message: "read-only session", tone: "warning" } : null,
         })
         break
       }
@@ -579,28 +678,26 @@ export class SessionUiController {
           break
         }
         const items: PickerItem<TimelineAction>[] = [
-          {
-            id: "timeline.action.edit",
-            label: "Edit and resend",
-            description: "Rewind, restore the message in the composer, and focus it",
-            value: "edit",
-          },
-          {
-            id: "timeline.action.retry",
-            label: "Retry",
-            description: "Rewind and resend the same text without attachments",
-            value: "retry",
-          },
-          {
-            id: "timeline.action.rewind",
-            label: "Rewind only",
-            description: "Rewind without restoring the message",
-            value: "rewind",
-          },
+          { id: "timeline.action.edit", label: "Edit and resend", value: "edit",
+            description: "Rewind to before this message and put it back in the composer to edit" },
+          { id: "timeline.action.retry", label: "Retry", value: "retry",
+            description: "Rewind to before this message and send the same text again, without attachments" },
+          { id: "timeline.action.rewind", label: "Rewind only", value: "rewind",
+            description: "Rewind the conversation through this message without resending" },
+          { id: "timeline.action.fork", label: "Fork from here", value: "fork",
+            description: "Branch a new session at this message; this session stays unchanged" },
         ]
-        this.#host.pickerController.show(`Turn ${turn.agentTurn} actions`, items, (item) => {
+        this.#host.pickerController.show(`REWIND › ${timelineTurnLabel(turn.preview)}`, items, (item) => {
           this.#host.closePicker()
-          void this.#startRewindIntent(turn, item.value)
+          if (item.value === "fork") void this.#host.requestFork(turn.agentTurn)
+          else void this.#startRewindIntent(turn, item.value)
+        }, {
+          primary: "run",
+          back: () => {
+            this.#timelineTurn = null
+            this.#host.pickerController.kind = "timeline"
+            this.#host.pickerController.refresh()
+          },
         })
         break
       }
@@ -609,41 +706,56 @@ export class SessionUiController {
           this.#host.closePicker()
           break
         }
-        const queuedMessages = this.#host.state.queuedMessages
-        if (queuedMessages.length === 0) {
+        const state = this.#host.state
+        const queuedMessages = state.queuedMessages
+        const controls = state.queuedControls
+        const settlement = state.lastControlSettlement
+        if (queuedMessages.length === 0 && controls.length === 0 && settlement === null) {
           this.#host.pickerController.showStatus(
-            "Queued messages",
-            "No queued messages",
-            "Messages sent during an active turn will appear here.",
+            "QUEUED WORK   /queue",
+            "Nothing is queued",
+            "Messages and changes sent during an active turn wait here until it finishes.",
           )
           break
         }
+        const controlLabel = (action: RottweilerState["queuedControls"][number]["action"]) =>
+          action.type === "switch_model" ? `Switch model · ${modelDisplayLabel(action.model, state.models) ?? action.model}`
+            : action.type === "switch_mode" ? `Agent mode · ${action.mode}` : "Compact context"
         const items: PickerItem<QueuedMessagePickerAction>[] = [
-          ...queuedMessages.map((message) => ({
+          ...(settlement === null && controls.length === 0 ? [] : [{
+            id: "queued.section.controls", label: "Changes", description: "", sectionHeader: true, value: { kind: "info" } as const }]),
+          ...(settlement === null ? [] : [{
+            id: "queued.control.latest", label: `Last change · ${settlement.outcome}`, selectable: false,
+            description: settlement.message, value: { kind: "info" } as const,
+          }]),
+          ...controls.map(control => ({
+            id: `queued.control.${control.request.client_id}.${control.request.request_id}`,
+            label: controlLabel(control.action),
+            hint: control.status === "running" ? "applying" : "queued",
+            selectable: false,
+            description: control.status === "running" ? "Applying now · it may ask for your input" : "Runs at the next turn boundary, before queued messages",
+            value: { kind: "info" } as const,
+          })),
+          ...(queuedMessages.length === 0 ? [] : [{
+            id: "queued.section.messages", label: "Messages", description: "", sectionHeader: true, value: { kind: "info" } as const }]),
+          ...queuedMessages.map((message, index) => ({
             id: `queued.message.${message.position}`,
             label: queuedMessageLabel(message.content),
-            description: "queued",
+            hint: `#${index + 1}`,
+            description: "Sent after the active turn finishes",
+            detail: message.content,
+            primary: "remove",
             value: { kind: "remove", position: message.position } as const,
           })),
-          ...(queuedMessages.length < 2
-            ? []
-            : [{
-                id: "queued.messages.clear",
-                label: "Clear all queued messages",
-                description: "Remove every queued message",
-                value: { kind: "clear" } as const,
-              }]),
         ]
-        this.#host.pickerController.show("Queued messages · select to remove", items, (item) => {
-          if (item.value.kind === "clear") {
+        this.#host.pickerController.show("QUEUED WORK   /queue", items, (item) => {
+          if (item.value.kind !== "remove") return
+          this.#host.requests.command({ type: "remove_queued_message", position: item.value.position })
+        }, {
+          keys: [{ stroke: "ctrl+l", label: "clear all", available: () => queuedMessages.length > 1, run: () => {
             this.#host.closePicker()
             this.#host.requests.command({ type: "clear_queued_messages" })
-            return
-          }
-          this.#host.requests.command({
-            type: "remove_queued_message",
-            position: item.value.position,
-          })
+          } }],
         })
         break
       }
@@ -653,14 +765,16 @@ export class SessionUiController {
           break
         }
         this.#host.pickerController.show(
-          "Export session",
+          "EXPORT SESSION",
           EXPORT_FORMAT_CHOICES.map((choice) => ({
             id: `export.format.${choice.format}`,
             label: choice.label,
+            hint: `.${choice.extension}`,
             description: choice.description,
             value: choice.format,
           })),
           (item) => this.#openExportPathPrompt(item.value),
+          { primary: "choose path" },
         )
         break
       }
@@ -671,133 +785,37 @@ export class SessionUiController {
           break
         }
         this.#host.pickerController.show(
-          "Overwrite existing file?",
+          "EXPORT › File exists",
           [
-            {
-              id: "export.overwrite.confirm",
-              label: "Overwrite",
-              description: "Replace the existing file atomically",
-              value: true,
-            },
-            {
-              id: "export.overwrite.cancel",
-              label: "Cancel",
-              description: "Keep the existing file",
-              value: false,
-            },
+            { id: "export.overwrite.confirm", label: "Overwrite", tone: "warning", value: true,
+              description: `Replace ${pending.outputPath} atomically` },
+            { id: "export.overwrite.cancel", label: "Keep existing file", value: false,
+              description: "Cancel this export" },
           ],
           (item) => {
             this.#host.closePicker()
             this.#pendingExport = null
-            if (item.value) {
-              void this.#submitSessionExport(pending.format, pending.outputPath, true)
-            }
+            if (item.value) void this.#submitSessionExport(pending.format, pending.outputPath, true)
           },
+          { selectedId: "export.overwrite.cancel" },
         )
         break
       }
       case "exportPath":
         break
       case "sessions":
-        const sessionError = this.#host.projectionErrors.sessions
-        if (
-          sessionError === undefined &&
-          this.#host.requests.current("sessions") !== null &&
-          this.#host.state.sessions.length === 0 &&
-          this.#host.picker.input.value.length === 0
-        ) {
-          this.#host.pickerController.showLoading("Sessions", "Loading sessions")
-          break
-        }
-        const sessionItems: PickerItem<SessionListAction>[] = [
-          {
-            id: "sessions.new",
-            label: "New session",
-            description: "Start a clean conversation in this workspace",
-            value: { kind: "new" },
-          },
-          ...(sessionError === undefined
-            ? []
-            : [{
-                id: "sessions.error",
-                label: "Couldn't load sessions",
-                description: `${sessionError} · select to retry`,
-                value: { kind: "retry" } as const,
-              }]),
-          ...this.#host.state.sessions.map((session) => ({
-            id: session.sessionId,
-            label: session.title || session.workspaceName,
-            description: `${session.workspaceName} · ${session.model}${session.shellActive ? " · shell active" : ""}`,
-            searchText: `${this.#host.state.sessionSearch?.query ?? ""} ${session.sessionId} ${session.title ?? ""} ${session.workspaceName} ${session.model}`,
-            value: { kind: "session", session } as const,
-          })),
-        ]
-        this.#host.pickerController.show(
-          this.#host.state.sessionSearch?.truncated === true
-            ? "Sessions · results truncated"
-            : "Sessions",
-          sessionItems,
-          (item) => {
-            if (item.value.kind === "new") {
-              void this.createSession()
-              return
-            }
-            if (item.value.kind === "retry") {
-              const query = this.#host.picker.input.value.trim()
-              if (query.length === 0) {
-                this.#host.requests.command({ type: "list_sessions" })
-              } else {
-                this.#host.requests.command({ type: "search_sessions", query, limit: 100 })
-              }
-              return
-            }
-            this.#openSessionActionPicker(item.value.session)
-          },
-        )
+        this.#renderSessions()
         break
-      case "sessionActions": {
-        const session = this.#host.state.sessions.find(
-          (candidate) => candidate.sessionId === this.#sessionActionId,
-        )
-        if (session === undefined) {
-          this.#host.closePicker()
-          break
-        }
-        const match = this.#host.state.sessionSearch?.matches.find(source => source.session_id === session.sessionId)
-        const items: PickerItem<SessionPickerAction>[] = [
-          ...(match === undefined ? [] : [{ id: "match", label: "Open matching message",
-            description: "Jump to the exact source found in this conversation", value: { kind: "match", source: match } as const }]),
-          {
-            id: "resume",
-            label: "Resume session",
-            description: "Switch to this session",
-            value: { kind: "resume", session },
-          },
-          {
-            id: "rename",
-            label: "Rename session",
-            description: "Change its picker title without switching",
-            value: { kind: "rename", session },
-          },
-        ]
-        this.#host.pickerController.show(
-          `Session actions · ${boundedUiText(session.title ?? session.workspaceName, 64)}`,
-          items,
-          (item) => {
-            if (item.value.kind === "match") {
-              void this.#search.open(item.value.source)
-            } else if (item.value.kind === "resume") {
-              this.#host.closePicker()
-              void this.#host.selectSession(item.value.session.sessionId)
-            } else {
-              this.#openSessionRenamePrompt(item.value.session)
-            }
-          },
-        )
-        break
-      }
       case "sessionRename":
         break
     }
   }
+}
+
+/**
+ * Recorded activity shows no accepted prompt: nothing to resume. A session
+ * without recorded activity stays listed, since its index row may be missing.
+ */
+function emptySession(session: SessionProjection): boolean {
+  return session.activity !== null && session.activity.turnCount === 0 && session.activity.firstPrompt === null
 }

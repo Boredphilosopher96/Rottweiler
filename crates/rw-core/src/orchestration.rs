@@ -39,9 +39,12 @@ const MAX_ARTIFACT_REF_PATH_BYTES: usize = 128;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SubagentLimits {
     pub max_depth: usize,
+    /// Children running at once. Further spawns queue until a slot frees.
     pub max_concurrency: usize,
     pub max_turns: usize,
     pub max_duration: Duration,
+    /// Start a parent turn when a background child finishes while the parent is idle.
+    pub wake_on_completion: bool,
 }
 
 impl Default for SubagentLimits {
@@ -51,6 +54,7 @@ impl Default for SubagentLimits {
             max_concurrency: DEFAULT_SUBAGENT_CONCURRENCY,
             max_turns: DEFAULT_SUBAGENT_MAX_TURNS,
             max_duration: DEFAULT_SUBAGENT_MAX_DURATION,
+            wake_on_completion: true,
         }
     }
 }
@@ -322,6 +326,12 @@ pub trait SubagentSession: Send + Sync {
 
     async fn cancel(&self) -> Result<(), OrchestrationError>;
 
+    /// Stops live session resources while preserving private continuation metadata and worktrees.
+    /// Isolation wrappers must override this to avoid finalizing their lease.
+    async fn suspend(&self) -> Result<(), OrchestrationError> {
+        self.close(None).await
+    }
+
     async fn close(
         &self,
         durable_artifact: Option<&DiffArtifact>,
@@ -371,6 +381,11 @@ pub trait SubagentProgressObserver: Send + Sync {
 pub trait SubagentObserver: Send + Sync {
     /// Existing publisher allowance, shared by construction and every queued preview.
     fn progress_budget(&self) -> rw_tools::ChildProgressBudget;
+
+    /// Parent-side delivery state for this invocation, when a tool call owns it.
+    fn delivery(&self) -> Option<Arc<ChildDelivery>> {
+        None
+    }
     async fn spawned(&self, handle: &SubagentHandle, task: &str) -> Result<(), OrchestrationError>;
 
     async fn finished(&self, result: &SubagentResult) -> Result<(), OrchestrationError>;
@@ -387,8 +402,6 @@ pub trait SubagentObserver: Send + Sync {
 pub enum OrchestrationError {
     #[error("subagent depth {requested} exceeds configured maximum {maximum}")]
     DepthExceeded { requested: usize, maximum: usize },
-    #[error("subagent concurrency limit {maximum} is exhausted")]
-    ConcurrencyExceeded { maximum: usize },
     #[error("continuable subagent capacity {maximum} is exhausted; close an inactive child")]
     RetainedCapacityExceeded { maximum: usize },
     #[error("subagent request is invalid: {0}")]
@@ -399,6 +412,10 @@ pub enum OrchestrationError {
     AlreadyRunning(String),
     #[error("subagent `{0}` has no pending result")]
     NoPendingResult(String),
+    #[error("subagent `{0}` is not being waited on; it already runs in the background")]
+    NotInForeground(String),
+    #[error("subagent `{0}` is queued and has not started")]
+    Queued(String),
     #[error("subagent effects remain unproven: {0}")]
     EffectsUnsettled(String),
     #[error("subagent session failed: {0}")]
@@ -422,6 +439,9 @@ struct OrchestratorInner {
     retained: Arc<Semaphore>,
     sequence: std::sync::atomic::AtomicU64,
     sessions: Mutex<HashMap<SubagentId, SessionRecord>>,
+    queue: queue::Queue,
+    /// Advances whenever a child starts, finishes, or leaves the queue.
+    activity: watch::Sender<u64>,
     session_depths: Mutex<HashMap<SessionId, usize>>,
     diff_artifact_authority: Arc<dyn SubagentArtifactSource>,
     metadata: RwLock<Arc<dyn SubagentMetadataStore>>,
@@ -435,8 +455,14 @@ struct SessionRecord {
     model: String,
     session: Arc<dyn SubagentSession>,
     state: SessionState,
+    cancellation: Option<CancellationToken>,
     result: Option<watch::Receiver<Option<Result<SubagentResult, String>>>>,
     isolation: SubagentIsolation,
+    /// Execute-mode children sharing the parent workspace hold its lock while active.
+    shares_workspace_writes: bool,
+    delivery: Option<Arc<ChildDelivery>>,
+    /// An active continuation admitted while every slot was busy.
+    awaiting_slot: bool,
     parent_session_id: SessionId,
     latest_durable_artifact_id: Option<String>,
     closing_artifact: Option<Arc<rw_tools::AuthorizedDiffArtifact>>,
@@ -472,10 +498,10 @@ fn session_record_descriptor(record: &SessionRecord) -> SubagentDescriptor {
         agent: record.agent.clone(),
         model: record.model.clone(),
         isolation: record.isolation,
-        activity: if record.state == SessionState::Active {
-            SubagentActivity::Running
-        } else {
-            SubagentActivity::Idle
+        activity: match record.state {
+            SessionState::Active if record.awaiting_slot => SubagentActivity::Queued,
+            SessionState::Active => SubagentActivity::Running,
+            SessionState::Inactive | SessionState::Closing => SubagentActivity::Idle,
         },
     }
 }
@@ -512,9 +538,15 @@ fn subagent_status(status: &TurnStatus) -> SubagentStatus {
     }
 }
 
+mod activity;
 mod artifact_source;
 mod deferred_actor;
+mod delivery;
+pub use delivery::{ChildDelivery, DeliveryWaiter};
+mod queue;
+pub use queue::{ChildWait, SubagentTicket};
 mod lifecycle;
+mod shutdown;
 pub use artifact_source::SubagentArtifactSource;
 mod startup;
 

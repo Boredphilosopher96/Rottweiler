@@ -54,6 +54,8 @@ impl ModelDriver for SelectedModel {
 struct RecordingSubagentSink {
     progress: rw_tools::ChildProgressBudget,
     lifecycles: Mutex<Vec<SubagentLifecycleEvent>>,
+    /// Completions that asked the session to wake an idle parent.
+    wakes: AtomicUsize,
 }
 
 #[async_trait]
@@ -72,6 +74,11 @@ impl SubagentEventSink for RecordingSubagentSink {
     async fn progress(&self, _event: SubagentProgressEvent) -> Result<(), ToolError> {
         Ok(())
     }
+
+    async fn background_finished(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        self.lifecycle(event).await
+    }
 }
 
 struct RejectingApprover(AtomicUsize);
@@ -89,6 +96,7 @@ struct FakeFactory {
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
     cancelled: Arc<AtomicUsize>,
+    suspended: Arc<AtomicUsize>,
     hang_cancel: bool,
     closed_artifacts: Arc<Mutex<Vec<Option<String>>>>,
     fail_close: bool,
@@ -100,6 +108,7 @@ struct FakeSession {
     active: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
     cancelled: Arc<AtomicUsize>,
+    suspended: Arc<AtomicUsize>,
     history: Mutex<Vec<String>>,
     hang_cancel: bool,
     closed_artifacts: Arc<Mutex<Vec<Option<String>>>>,
@@ -138,6 +147,7 @@ impl SubagentSessionFactory for FakeFactory {
             active: Arc::clone(&self.active),
             peak: Arc::clone(&self.peak),
             cancelled: Arc::clone(&self.cancelled),
+            suspended: Arc::clone(&self.suspended),
             history: Mutex::new(Vec::new()),
             hang_cancel: self.hang_cancel,
             closed_artifacts: Arc::clone(&self.closed_artifacts),
@@ -158,6 +168,7 @@ impl SubagentSessionFactory for FakeFactory {
             active: Arc::clone(&self.active),
             peak: Arc::clone(&self.peak),
             cancelled: Arc::clone(&self.cancelled),
+            suspended: Arc::clone(&self.suspended),
             history: Mutex::new(Vec::new()),
             hang_cancel: self.hang_cancel,
             closed_artifacts: Arc::clone(&self.closed_artifacts),
@@ -207,7 +218,14 @@ impl SubagentSession for FakeSession {
         cancellation: CancellationToken,
         progress: Arc<dyn SubagentProgressObserver>,
     ) -> Result<SubagentTurnResult, OrchestrationError> {
+        struct ActiveTurn<'a>(&'a AtomicUsize);
+        impl Drop for ActiveTurn<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        let _active_turn = ActiveTurn(&self.active);
         self.peak.fetch_max(active, Ordering::AcqRel);
         let delay = prompt
             .strip_prefix("delay:")
@@ -215,7 +233,6 @@ impl SubagentSession for FakeSession {
             .unwrap_or(1);
         tokio::select! {
             () = cancellation.cancelled() => {
-                self.active.fetch_sub(1, Ordering::AcqRel);
                 return Err(OrchestrationError::Session("cancelled".to_owned()));
             }
             () = tokio::time::sleep(Duration::from_millis(delay)) => {}
@@ -240,7 +257,6 @@ impl SubagentSession for FakeSession {
             history.push(prompt);
             history.len()
         };
-        self.active.fetch_sub(1, Ordering::AcqRel);
         let diff_artifact = if invalid_artifact {
             let mut artifact = test_artifact();
             artifact.id = "0".repeat(64);
@@ -269,6 +285,11 @@ impl SubagentSession for FakeSession {
             std::future::pending::<()>().await;
         }
         Ok(())
+    }
+
+    async fn suspend(&self) -> Result<(), OrchestrationError> {
+        self.suspended.fetch_add(1, Ordering::SeqCst);
+        self.close(None).await
     }
 
     async fn close(
@@ -535,6 +556,25 @@ fn test_event_meta(sequence: u64) -> rw_types::EventMeta {
     }
 }
 
+/// An unproven startup keeps its slot: a new child queues instead of starting.
+async fn assert_capacity_retained(orchestrator: &SubagentOrchestrator, request: SubagentRequest) {
+    let parent = SessionId("parent".to_owned());
+    let ticket = orchestrator
+        .submit(
+            parent.clone(),
+            request,
+            Arc::new(RecordingObserver::default()),
+            CancellationToken::default(),
+        )
+        .await
+        .expect("admitted");
+    assert!(ticket.queued, "unproven startup keeps its slot");
+    orchestrator
+        .cancel(&parent, &ticket.handle.subagent_id)
+        .await
+        .expect("cancel queued child");
+}
+
 fn orchestrator(limits: SubagentLimits, factory: Arc<FakeFactory>) -> SubagentOrchestrator {
     SubagentOrchestrator::new(
         limits,
@@ -632,6 +672,7 @@ impl Tool for FixedResultTool {
     }
 }
 
+mod background;
 mod lifecycle;
 mod tools;
 

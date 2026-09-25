@@ -102,7 +102,7 @@ export async function exerciseHistory(app: RottweilerApp, fixture: MemoryFixture
   await render()
   while (!app.picker.visible || !app.picker.input.visible || app.picker.input.width === 0
     || setup.renderer.currentFocusedRenderable !== app.picker.input
-    || !app.picker.select.options.some(option => option.value === "sessions.new")) {
+    || app.picker.mode !== "list") {
     if (performance.now() >= deadline) throw new Error("session picker did not become editable")
     await Bun.sleep(1); await render()
   }
@@ -111,18 +111,15 @@ export async function exerciseHistory(app: RottweilerApp, fixture: MemoryFixture
   const inputBefore = { focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, visible: app.picker.visible, query: app.picker.input.value }
   await setup.mockInput.typeText("needle-in-message")
   const inputAfter = { focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, visible: app.picker.visible, query: app.picker.input.value }
-  while (!app.picker.select.options.some(option => option.value === "memory-probe")) {
+  while (!app.picker.items.some(item => item.id === "memory-probe")) {
     requireThat(app.picker.input.value === "needle-in-message",
       `session search lost its terminal query: ${JSON.stringify({ inputBefore, inputAfter, query: app.picker.input.value })}`)
-    if (performance.now() >= deadline) throw new Error(`indexed search result was filtered out of the picker: ${JSON.stringify({ inputBefore, inputAfter, focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, composer: app.composer.value.slice(0, 100), query: app.picker.input.value, results: app.state.sessionSearch, options: app.picker.select.options.map(option => option.value), errors: app.state.errors.slice(-3) })}`)
+    if (performance.now() >= deadline) throw new Error(`indexed search result was filtered out of the picker: ${JSON.stringify({ inputBefore, inputAfter, focus: setup.renderer.currentFocusedRenderable?.id, editable: app.picker.input.visible, composer: app.composer.value.slice(0, 100), query: app.picker.input.value, results: app.state.sessionSearch, options: app.picker.items.map(item => item.id), errors: app.state.errors.slice(-3) })}`)
     await Bun.sleep(1); await render()
   }
-  app.picker.select.setSelectedIndex(app.picker.select.options.findIndex(option => option.value === "memory-probe"))
-  app.picker.select.selectCurrent()
+  app.picker.selectById("memory-probe")
+  app.picker.activateSelected()
   await render()
-  const matchIndex = app.picker.select.options.findIndex(option => option.value === "match")
-  requireThat(matchIndex >= 0, "source search hit has no exact jump action")
-  app.picker.select.setSelectedIndex(matchIndex); app.picker.select.selectCurrent()
   while (app.transcript.captureHistoryViewport()?.anchor?.id !== "5001") {
     if (performance.now() >= deadline) throw new Error("search result did not reveal its exact semantic row")
     await Bun.sleep(1); await render()

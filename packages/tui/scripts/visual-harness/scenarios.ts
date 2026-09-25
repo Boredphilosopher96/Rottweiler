@@ -378,7 +378,7 @@ function conversationState(): RottweilerState {
     workspaceStatus: {
       workspaceName: "Rottweiler",
       branch: "feat/tui-v2",
-      changedPaths: ["core/cursor.rs", "tui/transport/sse.ts", "core/durable.rs"],
+      changes: [{ path: "core/cursor.rs", kind: "modified" as const }, { path: "tui/transport/sse.ts", kind: "modified" as const }, { path: "core/durable.rs", kind: "modified" as const }],
       truncated: false,
     },
     runtimeServices: [{ kind: "lsp", name: "rust-analyzer" }],

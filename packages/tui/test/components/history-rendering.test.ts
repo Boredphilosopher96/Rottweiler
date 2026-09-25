@@ -103,19 +103,20 @@ describe("semantic history rendering", () => {
         reserved_tokens: "0", context_window_known: true, cache_breakpoints: [], items: []
       }
     })
-    expect(app.transcript.mountedCards.get("1")?.header.plainText).toBe("you")
-    expect(app.transcript.mountedCards.get("3")?.header.plainText).toContain("turn usage · 1234 tokens")
+    expect(app.transcript.mountedCards.get("1")?.prefix.plainText).toBe("›")
+    expect(app.transcript.mountedCards.get("1")?.header.visible).toBeFalse()
+    expect(app.transcript.mountedCards.get("3")?.header.plainText).toBe("1.2k tokens")
     expect(app.statusLine.plainText).toContain("ctx 5%")
   })
 
   test("active permission mode appears beside agent mode without unknown-state noise", async () => {
     const { app, setup } = await fixture([], { ...createInitialState(), permissions: permissionState("auto-safe") })
     expect(app.statusLine.plainText).toContain("EXECUTE")
-    expect(app.statusLine.plainText).toContain("auto-safe")
+    expect(app.statusLine.plainText).toContain("approvals Auto")
     app.setState({ ...app.state, permissions: null })
     await setup.flush()
     expect(app.statusLine.plainText).toContain("EXECUTE")
-    expect(app.statusLine.plainText).not.toContain("auto-safe")
+    expect(app.statusLine.plainText).not.toContain("approvals Auto")
   })
 
   test("committed reasoning stays readable and collapses without taking composer focus", async () => {
@@ -162,7 +163,7 @@ describe("semantic history rendering", () => {
     app.setState({ ...app.state, workspaceRoots: { generation: "2", roots: [], effectiveFromTurn: "1" } })
     await setup.flush()
     expect(app.transcript.mountedCards.get("1")).toBe(row)
-    expect(row?.markdown.content).toContain("Retained tool output")
-    expect(row?.header.plainText).toContain("read · done")
+    expect(row?.tool?.body.plainText).toContain("Retained tool output")
+    expect(row?.header.plainText).toStartWith("● Read README.md")
   })
 })

@@ -987,6 +987,9 @@ async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::Lo
         if extension_catalog.workflows().len() > 0 {
             available_tools.push("workflow".to_owned());
         }
+        if extension_catalog.skills().len() > 0 {
+            available_tools.push(rw_tools::SKILL_TOOL_NAME.to_owned());
+        }
         agents
             .resolve_tool_names(available_tools)
             .map_err(|error| miette!("agent tools could not resolve: {error}"))?;
@@ -1055,6 +1058,7 @@ async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::Lo
                 max_depth: loaded_config.config.engine.subagent_max_depth,
                 max_concurrency: loaded_config.config.engine.subagent_max_concurrency,
                 max_turns: options.max_turns,
+                wake_on_completion: loaded_config.config.agents.wake_on_completion,
                 ..SubagentLimits::default()
             },
             factory,
@@ -1099,6 +1103,8 @@ async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::Lo
                 )))
                 .map_err(|error| miette!("workflow tool could not register: {error}"))?;
         }
+        super::skill_library::register_skill_tool(&mut registry, &extension_catalog)
+            .map_err(|error| miette!("skill tool could not register: {error}"))?;
         let registry = Arc::new(registry);
         orchestrator.bind_tools(Arc::clone(&registry));
         recover_subagent_tree(
@@ -1161,6 +1167,7 @@ async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::Lo
     }
     let runtime_commands = Arc::new(runtime_commands);
     let _ = commands_cell.set(Arc::clone(&runtime_commands));
+    let waking_orchestrator = native_orchestrator.clone();
     let extension_development: Arc<dyn rw_core::SessionExtensionController> = if inspection {
         Arc::new(rw_core::NoopSessionExtensionController)
     } else {
@@ -1186,6 +1193,7 @@ async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::Lo
     };
     let initial_thinking = configured_session_thinking(&loaded_config.config, &model_alias);
     let actor = SessionActor::spawn(SessionActorConfig {
+        model_preferences: None,
         ui: plugin_runtime.ui.clone(),
         ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
             reader: Arc::clone(&transcripts),
@@ -1272,6 +1280,7 @@ async fn compose_owned_session(options: LocalSessionOptions) -> Result<super::Lo
             session_id,
             storage_root,
             dump,
+            waking_orchestrator,
             lifetime,
         )),
         Err(error) => {

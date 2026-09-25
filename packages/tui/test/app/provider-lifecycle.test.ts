@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createRottweilerApp, type RottweilerAppOptions } from "../../src/app"
 import { PROTOCOL_VERSION, type ClientCommand, type EngineEvent } from "../../src/protocol"
 import { emptySessionReader } from "../fixtures/history"
+import { options, select } from "../picker-screen"
 
 type CredentialResult = Awaited<ReturnType<NonNullable<RottweilerAppOptions["onProviderApiKey"]>>>
 const authEvent = (attemptId: string): EngineEvent => ({
@@ -76,11 +77,11 @@ describe("provider UI lifetime", () => {
     first.reject(new Error("old browser error"))
     await settleContinuations()
     expect(app.state.errors).toHaveLength(0)
-    app.picker.select.setSelectedIndex(0)
-    app.picker.select.selectCurrent()
+    select(app.picker, 0)
+    app.picker.activateSelected()
     expect(urls).toHaveLength(2)
     second.resolve()
     await settleContinuations()
-    expect(app.picker.select.options[0]?.description).toContain("Browser opened")
+    expect(options(app.picker)[0]?.description).toContain("Browser opened")
   })
 })

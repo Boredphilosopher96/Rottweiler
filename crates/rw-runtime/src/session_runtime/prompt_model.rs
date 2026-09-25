@@ -86,6 +86,10 @@ impl ModelDriver for PromptRecordingModel {
         self.inner.context_metadata(alias)
     }
 
+    fn needs_initial_preparation(&self) -> bool {
+        self.inner.needs_initial_preparation()
+    }
+
     fn has_model_alias(&self, alias: &str) -> bool {
         self.inner.has_model_alias(alias)
     }

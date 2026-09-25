@@ -26,6 +26,8 @@ pub use child_progress::{
     MAX_CHILD_PROGRESS_BYTES,
 };
 mod search;
+mod skill;
+pub use skill::{SKILL_TOOL_NAME, SkillDocument, SkillInput, SkillLibrary, SkillTool};
 mod symbols;
 pub mod todo;
 mod web;
@@ -67,7 +69,7 @@ pub use protocol::{
 };
 pub use registry::{
     ApprovalPreview, CancellationToken, CapabilityManifest, McpToolPolicy, MutationScope,
-    NoopOutputSink, NoopProgressSink, SubagentEventSink, SubagentLifecycleEvent,
+    NoopOutputSink, NoopProgressSink, SessionActivity, SubagentEventSink, SubagentLifecycleEvent,
     SubagentLifecycleMode, SubagentProgressEvent, Tool, ToolBehavior, ToolContext, ToolDescriptor,
     ToolError, ToolInvocationSemantics, ToolLimits, ToolOutputChunk, ToolOutputSink,
     ToolProgressSink, ToolRegistry, ToolResult, WorkspaceBinding, validate_mcp_virtual_tool,

@@ -36,7 +36,7 @@ async fn search_excludes_other_workspaces_but_rejects_malformed_session_metadata
     }
     let reader = factory(root.path(), &allowed).await;
     let (hits, truncated) = reader
-        .search_persisted_sessions("New session", 1)
+        .search_persisted_sessions("Untitled", 1)
         .await
         .expect("authorized search remains available");
     assert!(!truncated);
@@ -61,7 +61,7 @@ async fn search_excludes_other_workspaces_but_rejects_malformed_session_metadata
     )
     .expect("invalid source");
     assert!(matches!(
-        reader.search_persisted_sessions("New session", 1).await,
+        reader.search_persisted_sessions("Untitled", 1).await,
         Err(HostError::Persistence(_))
     ));
 }

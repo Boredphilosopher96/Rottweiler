@@ -261,6 +261,12 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    /// Read the session's declarative extension inventory: every discovered
+    /// skill, command, and agent with its source and load outcome.
+    ListExtensions {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     SetSetting {
         meta: CommandMeta,
         session_id: SessionId,
@@ -315,13 +321,17 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
-    AddSessionPermissionRule {
+    /// Adds a reviewed `tool(glob)` rule for this session only, or durably for
+    /// this project in private user storage.
+    AddPermissionRule {
         meta: CommandMeta,
         session_id: SessionId,
+        scope: PermissionApprovalScope,
         pattern: String,
         action: PermissionDecision,
     },
-    RemoveSessionPermissionRule {
+    /// Removes a session or project rule by the id `list_permissions` reported.
+    RemovePermissionRule {
         meta: CommandMeta,
         session_id: SessionId,
         rule_id: String,
@@ -357,6 +367,11 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
         provider: String,
+    },
+    ConfigureCompatibleProvider {
+        meta: CommandMeta,
+        session_id: SessionId,
+        configuration: crate::CompatibleProviderSetup,
     },
     ConfigureBuiltinProvider {
         meta: CommandMeta,
@@ -413,6 +428,14 @@ pub enum ClientCommand {
         subagent_id: SubagentId,
     },
     CloseSubagent {
+        meta: CommandMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+    },
+    /// Moves a running child out of the parent's foreground. The tool call waiting
+    /// on it returns at once and the parent turn continues; the child's result is
+    /// delivered to the parent when it finishes, like any background child.
+    BackgroundSubagent {
         meta: CommandMeta,
         session_id: SessionId,
         subagent_id: SubagentId,
@@ -475,6 +498,7 @@ impl ClientCommand {
             | Self::ListModes { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
+            | Self::ListExtensions { meta, .. }
             | Self::SetSetting { meta, .. }
             | Self::ListMcpServers { meta, .. }
             | Self::ListRuntimeServices { meta, .. }
@@ -485,14 +509,15 @@ impl ClientCommand {
             | Self::ApproveMcpServer { meta, .. }
             | Self::SetMcpServerEnabled { meta, .. }
             | Self::ListPermissions { meta, .. }
-            | Self::AddSessionPermissionRule { meta, .. }
-            | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::AddPermissionRule { meta, .. }
+            | Self::RemovePermissionRule { meta, .. }
             | Self::RemoveQueuedMessage { meta, .. }
             | Self::ClearQueuedMessages { meta, .. }
             | Self::RenameSession { meta, .. }
             | Self::ExportSession { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
+            | Self::ConfigureCompatibleProvider { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
             | Self::CompleteProviderAuth { meta, .. }
             | Self::CancelProviderAuth { meta, .. }
@@ -504,6 +529,7 @@ impl ClientCommand {
             | Self::ContinueSubagent { meta, .. }
             | Self::InterruptSubagent { meta, .. }
             | Self::CloseSubagent { meta, .. }
+            | Self::BackgroundSubagent { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -563,6 +589,7 @@ impl ClientCommand {
             | Self::ListCommands { session_id, .. }
             | Self::ListModes { session_id, .. }
             | Self::ListSettings { session_id, .. }
+            | Self::ListExtensions { session_id, .. }
             | Self::SetSetting { session_id, .. }
             | Self::ListMcpServers { session_id, .. }
             | Self::ListRuntimeServices { session_id, .. }
@@ -573,21 +600,23 @@ impl ClientCommand {
             | Self::ApproveMcpServer { session_id, .. }
             | Self::SetMcpServerEnabled { session_id, .. }
             | Self::ListPermissions { session_id, .. }
-            | Self::AddSessionPermissionRule { session_id, .. }
-            | Self::RemoveSessionPermissionRule { session_id, .. }
+            | Self::AddPermissionRule { session_id, .. }
+            | Self::RemovePermissionRule { session_id, .. }
             | Self::RemoveQueuedMessage { session_id, .. }
             | Self::ClearQueuedMessages { session_id, .. }
             | Self::RenameSession { session_id, .. }
             | Self::ExportSession { session_id, .. }
             | Self::RevokePermissionApproval { session_id, .. }
             | Self::BeginProviderAuth { session_id, .. }
+            | Self::ConfigureCompatibleProvider { session_id, .. }
             | Self::ConfigureBuiltinProvider { session_id, .. }
             | Self::CompleteProviderAuth { session_id, .. }
             | Self::CancelProviderAuth { session_id, .. }
             | Self::ListSubagents { session_id, .. }
             | Self::ContinueSubagent { session_id, .. }
             | Self::InterruptSubagent { session_id, .. }
-            | Self::CloseSubagent { session_id, .. } => Some(session_id),
+            | Self::CloseSubagent { session_id, .. }
+            | Self::BackgroundSubagent { session_id, .. } => Some(session_id),
         }
     }
 
@@ -642,6 +671,7 @@ impl ClientCommand {
             | Self::ListModes { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
+            | Self::ListExtensions { meta, .. }
             | Self::SetSetting { meta, .. }
             | Self::ListMcpServers { meta, .. }
             | Self::ListRuntimeServices { meta, .. }
@@ -652,14 +682,15 @@ impl ClientCommand {
             | Self::ApproveMcpServer { meta, .. }
             | Self::SetMcpServerEnabled { meta, .. }
             | Self::ListPermissions { meta, .. }
-            | Self::AddSessionPermissionRule { meta, .. }
-            | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::AddPermissionRule { meta, .. }
+            | Self::RemovePermissionRule { meta, .. }
             | Self::RemoveQueuedMessage { meta, .. }
             | Self::ClearQueuedMessages { meta, .. }
             | Self::RenameSession { meta, .. }
             | Self::ExportSession { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
+            | Self::ConfigureCompatibleProvider { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
             | Self::CompleteProviderAuth { meta, .. }
             | Self::CancelProviderAuth { meta, .. }
@@ -671,6 +702,7 @@ impl ClientCommand {
             | Self::ContinueSubagent { meta, .. }
             | Self::InterruptSubagent { meta, .. }
             | Self::CloseSubagent { meta, .. }
+            | Self::BackgroundSubagent { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -728,6 +760,7 @@ read_commands!(
     ListModes,
     ListModels,
     ListSettings,
+    ListExtensions,
     ListMcpServers,
     ListRuntimeServices,
     SearchWorkspaceFiles,
@@ -774,6 +807,7 @@ macro_rules! urgent_commands {
 urgent_commands!(
     Interrupt,
     InterruptSubagent,
+    BackgroundSubagent,
     CancelProviderAuth,
     ApproveTool,
     ApprovePlan,

@@ -55,9 +55,9 @@ pub mod executable_config {
 /// Intentional session-runtime surface consumed by headless frontends.
 pub mod session {
     pub use crate::session_runtime::{
-        HostedProviderMode, LocalSession, LocalSessionOptions, LocalSessionPurpose,
+        HostedProviderMode, LocalSession, LocalSessionOptions, LocalSessionPurpose, WakingChildren,
         compose_local_session, discover_model_catalog, discover_runtime_extensions,
-        extension_user_roots, initialize_private_storage_root,
+        extension_inventory, extension_user_roots, initialize_private_storage_root,
         load_inherited_accounting_boundary_bounded, locate_wasm_host_executable, new_session_id,
         register_credential_environment, select_interactive_session,
     };

@@ -196,6 +196,25 @@ Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard 
 
 ### OpenTUI test surface
 
+The audit journey goldens exercise setup, model selection, prompt submission,
+approval with steering, edit/test output, interruption, child completion,
+compaction, session resume, and idle exit at 110×32 and 80×24. These deterministic
+client fixtures do not claim live account authentication. The required native UX
+CI job consumes verified macOS and Linux candidates. At both screen sizes, it
+starts with an empty home, configures a loopback-compatible provider through the
+visible TUI, checks automatic model/default selection and bundled context limits,
+gets a first response, and exits. No provider configuration or model metadata is
+pre-seeded; metadata refresh is confined to a rejecting local proxy. A separate
+native journey uses a loopback provider to request real approved file edits and
+terminal tests, interrupt a response, run two background children, compact, and
+resume the session at both sizes. Acceptance requires actual workspace effects
+and durable journal records, rather than injecting client events. The M4 gate
+also holds a loopback provider stream open while `/exit`, SIGTERM, and SIGHUP
+close the supervised application at both screen sizes. It requires provider disconnection,
+retirement of observed descendants, and removal of owned runtime directories
+within the 35-second client/supervisor grace period. Foreground shell interruption
+and idle double-Ctrl+C exit retain distinct acceptance cases.
+
 OpenTUI exposes a public `@opentui/core/testing` entry point.
 Source TUI suites require an explicit `ROTTWEILER_OPENTUI_LIBRARY` from
 `python3 scripts/build-opentui-native.py` before the test or measurement starts.
@@ -220,7 +239,7 @@ harnesses use this surface; no custom terminal renderer is required.
 
 Property tests worth calling out:
 - **Plan mode cannot mutate**: fuzz arbitrary tool-call sequences in plan mode → assert zero filesystem diff **outside `.git/` metadata** (read-only-blessed commands like `git status` legitimately refresh the index; workspace content must be untouched).
-- **Mutation-focused permission boundary**: the default-`ask` matrix proves reads, todo, valid public `webfetch`, and non-writing tools never invoke an approver; writes and unsafe Bash do. The hardened `cat`/audited-`bat`/`ls`/`git status`/`git diff` plans are tested against compound syntax, hostile Git/environment overrides, symlinked binaries, mutating flags, and sandbox-write attempts. Session-local YOLO is tested both for suppressed asks and for the explicit-deny/mode/sandbox gates it cannot override; launch-fixed remote/headless policies reject weakening commands.
+- **Mutation-focused permission boundary**: the default-`ask` matrix proves reads, todo, valid public `webfetch`, and non-writing tools never invoke an approver; writes and unsafe Bash do. The hardened `cat`/audited-`bat`/`ls`/read-only Git plans are tested against compound syntax, hostile Git/environment overrides, symlinked binaries, mutating flags, and sandbox-write attempts. Session-local YOLO is tested both for suppressed asks and for the explicit-deny/mode/sandbox gates it cannot override; launch-fixed remote/headless policies reject weakening commands.
 - **Retained mutation previews**: every tool preview emits a redacted durable `ToolDiffReady` independently of whether permission asked. Rust actor tests cover an auto-approved write with no approval event, protocol fixtures round-trip the event, and the TUI reducer/render tests retain the Tree-sitter-highlighted inline diff through tool completion.
 - **Truthful active-service projection**: host tests expose only initialized LSP clients and currently executing formatter/linter guards, never configured-idle commands, arguments, paths, output, endpoints, or credentials. TUI tests poll only while tool work is active and omit empty service/MCP sections.
 - **Terminal rendering contracts**: the embedded Tree-sitter smoke parses TypeScript, Bash, and Rust without network/runtime asset lookup; canonical extension fixtures cover the remaining bundled grammars. TUI fixtures retain visible Bash command cards, compact the command palette, and keep unsupported fenced languages as bounded code blocks without claiming a terminal-native diagram renderer.
@@ -257,6 +276,12 @@ privileged Linux security gate exercises the syscall policy and mount topology.
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 600 MiB RSS | soak test, nightly |
 | Release size | Platform product budgets from `contracts/release-contract.json` | `scripts/release_contract.py validate-build`; generated Rust and TypeScript projections |
+
+Engine size optimization is deferred: all platforms use the existing 50 MiB
+engine packaging ceiling as their exclusive build limit. CI and local candidate
+builds consume that same contract; helper, JavaScript bundle, archive extraction,
+and expanded archive limits remain enforced. Size is still recorded in candidate
+receipts so a later optimization budget can be based on measured artifacts.
 
 The required manually dispatched protected-performance, nightly, and release
 headless gates enforce the platform ceilings above at p99 over 500 fresh
@@ -348,6 +373,10 @@ the engine owner settles.
 
 The required pull-request and `main` TUI smoke measures input dispatch through
 native frame capture with wall time, requiring every trial's median below 16ms.
+Its frame-compute fixtures (streaming, tool-output bursts, Tools workspace)
+likewise screen the median process-CPU frame cost against the platform p95
+budget; the p95 and p99.9 frame budgets are enforced by the protected, nightly,
+and release runs on fixed images. Every tier reports each sample and percentile.
 Input reports retain every wall/CPU sample and the selected statistic.
 The same-process UDS transport harness uses wall-clock median below 2ms for
 shared-runner smoke and wall-clock p99 below 2ms for controlled qualification.

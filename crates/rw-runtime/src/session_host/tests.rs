@@ -24,6 +24,7 @@ async fn editable_setting_keys_round_trip_through_one_grammar() {
         "ui.theme",
         "models.thinking.fast",
         "compaction.auto",
+        "agents.wake_on_completion",
         "permissions.default",
         "budget.session_cost_cap_micros_usd",
         "budget.daily_cost_cap_micros_usd",
@@ -71,6 +72,7 @@ async fn setting_descriptors_render_keys_from_the_editable_contract() {
         model: ModelAlias("fast".to_owned()),
         driver_client_id: None,
         shell_active: false,
+        activity: None,
     };
     let settings = RuntimeSessionFactory::setting_descriptors(
         &loaded,
@@ -80,6 +82,13 @@ async fn setting_descriptors_render_keys_from_the_editable_contract() {
         &[("docs".to_owned(), true)],
     );
 
+    let wake = settings
+        .iter()
+        .find(|descriptor| descriptor.key == "agents.wake_on_completion")
+        .expect("child-completion wake is a settings row");
+    assert_eq!(wake.value, "true");
+    assert_eq!(wake.choices, ["true", "false"]);
+    assert!(!wake.applies_immediately);
     for descriptor in settings {
         let parsed = EditableSettingKey::parse(&descriptor.key)
             .unwrap_or_else(|| panic!("descriptor key should parse: {}", descriptor.key));
@@ -239,14 +248,17 @@ fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
             std::thread::sleep(Duration::from_millis(250));
         });
         running.await.expect("blocking worker started");
+        let listed = factory
+            .persisted_sessions()
+            .await
+            .expect("session list after scheduling delay");
+        assert_eq!(listed.len(), 1);
+        let activity = listed[0].activity.as_ref().expect("indexed activity");
         assert_eq!(
-            factory
-                .persisted_sessions()
-                .await
-                .expect("session list after scheduling delay")
-                .len(),
-            1
+            (activity.turn_count, activity.first_prompt.as_deref()),
+            (0, None)
         );
+        assert_eq!(activity.cost_micros_usd, None, "nothing was charged");
         blocker.await.expect("first blocker");
 
         let (started, running) = tokio::sync::oneshot::channel();
@@ -256,13 +268,21 @@ fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
         });
         running.await.expect("blocking worker started");
         let (sessions, truncated) = factory
-            .search_persisted_sessions("New session", 10)
+            .search_persisted_sessions("Untitled", 10)
             .await
             .expect("session search after scheduling delay");
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             sessions[0].session.session_id,
             SessionId("scheduling-delay".into())
+        );
+        assert_eq!(
+            sessions[0]
+                .session
+                .activity
+                .as_ref()
+                .map(|activity| activity.turn_count),
+            Some(0)
         );
         assert!(!truncated);
         blocker.await.expect("second blocker");
@@ -309,7 +329,7 @@ async fn hosted_create_and_rename_are_immediately_searchable() {
         CommandOutcome::Accepted {}
     );
     let (created, truncated) = factory
-        .search_persisted_sessions("New session", 10)
+        .search_persisted_sessions("Untitled", 10)
         .await
         .expect("search created session");
     assert!(!truncated);
@@ -370,6 +390,7 @@ async fn session_export_uses_cli_renderer_redaction_and_atomic_force_semantics()
         model: ModelAlias("fast".to_owned()),
         driver_client_id: Some(rw_core::ClientId("driver".to_owned())),
         shell_active: false,
+        activity: None,
     };
     let mut log =
         SessionEventLog::open(&factory.options.storage_root, "golden").expect("session event log");
@@ -541,7 +562,7 @@ async fn hosted_add_dir_enforces_allowed_roots_before_generation_or_tool_access(
     let handle = hosted.handle();
 
     let denied = handle
-        .send_message(format!("/add-dir {}", outside.display()))
+        .send_message(format!("/dirs {}", outside.display()))
         .await
         .expect_err("outside root must be denied");
     assert!(denied.to_string().contains("authorization policy"));
@@ -574,7 +595,7 @@ async fn hosted_add_dir_enforces_allowed_roots_before_generation_or_tool_access(
         .expect("create allowed-root session");
     let allowed_handle = allowed_hosted.handle();
     allowed_handle
-        .send_message(format!("/add-dir {}", allowed.display()))
+        .send_message(format!("/dirs {}", allowed.display()))
         .await
         .expect("configured allowed root");
     let changed = allowed_handle.snapshot().await.expect("changed snapshot");
@@ -612,6 +633,7 @@ async fn thinking_setting_uses_configured_alias_after_concrete_model_selection()
         model: ModelAlias("openai/gpt-5-mini".to_owned()),
         driver_client_id: None,
         shell_active: false,
+        activity: None,
     };
 
     let settings =
@@ -646,6 +668,7 @@ async fn theme_setting_leaves_choices_to_the_tui_theme_catalog() {
         model: ModelAlias("fast".to_owned()),
         driver_client_id: None,
         shell_active: false,
+        activity: None,
     };
 
     let settings =
@@ -678,6 +701,7 @@ async fn budget_setting_descriptors_format_human_values_without_choices() {
         model: ModelAlias("fast".to_owned()),
         driver_client_id: None,
         shell_active: false,
+        activity: None,
     };
 
     let settings =

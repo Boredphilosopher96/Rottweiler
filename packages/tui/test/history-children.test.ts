@@ -1,3 +1,4 @@
+import { enterSelectedAgent } from "./fixtures/agents"
 import { retainedChildReader } from "./fixtures/family"
 import type { RottweilerApp } from "../src/app"
 import { expect, test } from "bun:test"
@@ -41,7 +42,7 @@ async function childHarness(activity: "running" | "idle", sourceReader?: import(
     meta: { protocol_version: PROTOCOL_VERSION, client_id: "tui-client", request_id: request.meta.request_id, emitted_at: "2026-09-04T00:00:00Z" },
     subagents: [{ subagent_id: "child", child_session_id: "child-session", task: "Inspect child history", agent: "reviewer", model: "fast", isolation: "worktree", activity }],
   })
-  app.picker.select.selectCurrent()
+  enterSelectedAgent(app)
   await Bun.sleep(0)
   await harness.renderOnce()
   return { harness, app, commands, sessions }
@@ -53,11 +54,11 @@ test("child inspection pages its own session and preserves parent draft and muta
     expect(app.activeSubagentId).toBe("child")
     expect(sessions).toContain("child-session")
     expect(app.transcript.mountedCards.size).toBeLessThanOrEqual(16)
-    expect(app.composer.value).toBe("")
-    app.composer.value = "child follow-up"
+    // An idle child is viewed read-only; follow-ups are explicit Agents screen actions.
+    expect(app.composer.visible).toBe(false)
     harness.mockInput.pressEnter()
     await Bun.sleep(0)
-    expect(commands).toContainEqual(expect.objectContaining({ type: "continue_subagent", session_id: "parent", subagent_id: "child", content: "child follow-up" }))
+    expect(commands.some(command => command.type === "continue_subagent" || command.type === "send_message")).toBe(false)
     expect(commands.some(command => command.type === "attach_session" || command.type === "resume_session")).toBe(false)
     harness.mockInput.pressEscape()
     await Bun.sleep(0)

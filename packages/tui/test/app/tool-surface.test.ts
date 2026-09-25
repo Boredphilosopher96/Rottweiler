@@ -29,8 +29,8 @@ test("native tool surface opens from canonical row and survives retheming withou
     if (row === undefined) throw new Error("row missing")
     row.toggle()
     await setup.renderOnce()
-    expect(row.presentationFooter.visible).toBeTrue()
-    await setup.mockMouse.click(row.presentationFooter.x + 2, row.presentationFooter.y)
+    expect(row.footer.visible).toBeTrue()
+    await setup.mockMouse.click(row.footer.x + 2, row.footer.y)
     await setup.flush()
     await setup.renderOnce()
     const oldViewer = app.outputViewer

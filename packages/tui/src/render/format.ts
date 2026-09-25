@@ -35,8 +35,13 @@ export function formatCost(cost: Cost | null | undefined, usage?: Usage | null):
           : `${usageTokens(usage)} tokens`
         : `${cost.used}${cost.unit === undefined || cost.unit === null ? "" : ` ${cost.unit}`}`
     case "unavailable":
-      return "unpriced"
+      return "—"
   }
+}
+
+/** A cost worth showing next to a label, or `null` when the price is unknown. */
+export function formatKnownCost(cost: Cost | null | undefined, usage?: Usage | null): string | null {
+  return cost === null || cost === undefined || cost.kind === "unavailable" ? null : formatCost(cost, usage)
 }
 
 export function formatSessionCost(
@@ -67,41 +72,66 @@ export function formatStatusContext<T extends Pick<ContextSnapshot, "context_win
   return `ctx ${formatTokenCount(snapshot.used_tokens)}/${formatTokenCount(snapshot.usable_tokens)} (${formatPercent(snapshot.used_tokens, snapshot.usable_tokens)})`
 }
 
-/** Resolves a role alias back to the catalog's stable provider-qualified route. */
-export function formatStatusModel(
-  model: string,
-  provider: string | null,
+/**
+ * User-facing name for a selected model: the catalog display name, or the
+ * model part of a concrete provider/model route before the catalog arrives.
+ * An unresolved alias has no name; it is never presented as an active model.
+ */
+export function modelDisplayLabel(
+  model: string | null,
   choices: readonly ModelChoice[],
-): string {
-  if (model.includes("/")) return model
-  const concrete = choices.find((choice) =>
-    choice.id === model || choice.aliases.includes(model),
-  )
-  if (concrete !== undefined) return concrete.id
-  return provider === null ? model : `${provider}/${model}`
+): string | null {
+  if (model === null) return null
+  const concrete = choices.find((choice) => choice.id === model)
+    ?? choices.find((choice) => choice.aliases.includes(model))
+  if (concrete !== undefined) return concrete.displayName
+  const separator = model.indexOf("/")
+  return separator > 0 && separator < model.length - 1 ? model.slice(separator + 1) : null
 }
 
-/** Uses the active non-monetary route when the accounting snapshot has no priced turn yet. */
-export function formatStatusSessionCost(
-  snapshot: CostSnapshot | null,
-  provider: string | null,
-  fallbackTokens: string | null,
-): string {
-  if (provider === "openai_codex") {
-    if (
-      snapshot === null ||
-      (decimal(snapshot.session_subscription_quota_entries) === 0 &&
-        decimal(snapshot.session_ai_credit_micros) === 0 &&
-        decimal(snapshot.session_cost_micros_usd) === 0)
-    ) return "quota —"
+/**
+ * Session spend only when it is known and non-zero. Subscription routes without
+ * a reported quota and incompletely priced sessions show nothing rather than a
+ * placeholder or a misleading zero.
+ */
+export function formatKnownSessionCost(snapshot: CostSnapshot | null): string | null {
+  if (snapshot === null) return null
+  if (decimal(snapshot.session_subscription_quota_entries) > 0) return subscriptionQuota(snapshot)
+  if (decimal(snapshot.session_ai_credit_micros) > 0) {
+    return `${(decimal(snapshot.session_ai_credit_micros) / 1_000_000).toFixed(3)} credits`
   }
-  if (
-    provider === "github_copilot" &&
-    (snapshot === null ||
-      (decimal(snapshot.session_ai_credit_micros) === 0 &&
-        decimal(snapshot.session_cost_micros_usd) === 0))
-  ) return "credits —"
-  return formatSessionCost(snapshot, fallbackTokens)
+  if (!snapshot.session_monetary_accounting_complete) return null
+  const micros = decimal(snapshot.session_cost_micros_usd)
+  if (micros <= 0) return null
+  return formatUsdMicros(micros)
+}
+
+/** Whole-cent USD from micro-dollars; sub-cent spend keeps a third digit. */
+export function formatUsdMicros(micros: number): string {
+  return `$${(micros / 1_000_000).toFixed(micros < 10_000 ? 3 : 2)}`
+}
+
+const MINUTE_MS = 60_000
+const HOUR_MS = 60 * MINUTE_MS
+const DAY_MS = 24 * HOUR_MS
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const
+
+/** Compact age of a past instant: "just now", "5m ago", "3h ago", "2d ago", then a UTC date. */
+export function formatRelativeTime(unixMs: number, nowMs: number): string {
+  const age = nowMs - unixMs
+  if (!Number.isFinite(age) || age < MINUTE_MS) return "just now"
+  if (age < HOUR_MS) return `${Math.floor(age / MINUTE_MS)}m ago`
+  if (age < DAY_MS) return `${Math.floor(age / HOUR_MS)}h ago`
+  if (age < 7 * DAY_MS) return `${Math.floor(age / DAY_MS)}d ago`
+  const date = new Date(unixMs)
+  const day = `${MONTHS[date.getUTCMonth()]} ${date.getUTCDate()}`
+  return date.getUTCFullYear() === new Date(nowMs).getUTCFullYear() ? day : `${day} ${date.getUTCFullYear()}`
+}
+
+/** Context capacity as a percentage when the window is known, tokens otherwise. */
+export function contextPercent<T extends Pick<ContextSnapshot, "context_window_known" | "used_tokens" | "usable_tokens">>(snapshot: T): number | null {
+  if (!snapshot.context_window_known || decimal(snapshot.usable_tokens) <= 0) return null
+  return Math.min(999, Math.round(decimal(snapshot.used_tokens) / decimal(snapshot.usable_tokens) * 100))
 }
 
 function subscriptionQuota(snapshot: CostSnapshot): string | null {

@@ -368,6 +368,15 @@ pub trait HostQueryService: Send + Sync + 'static {
     }
 
     async fn command_descriptors(&self) -> Result<Vec<CommandDescriptor>, HostError>;
+    /// Declarative extension inventory for the session's live workspace roots.
+    async fn extension_inventory(
+        &self,
+        _session: &SessionDescriptor,
+    ) -> Result<rw_types::ExtensionInventory, HostError> {
+        Err(HostError::Query(
+            "the extension inventory is unavailable".to_owned(),
+        ))
+    }
     async fn model_catalog(
         &self,
         refresh: bool,
@@ -404,6 +413,14 @@ pub trait HostQueryService: Send + Sync + 'static {
     async fn begin_provider_auth(&self, _provider: &str) -> Result<ProviderAuthAttempt, HostError> {
         Err(HostError::Query(
             "provider authentication is unavailable on this host".to_owned(),
+        ))
+    }
+    async fn configure_compatible_provider(
+        &self,
+        _configuration: &rw_types::CompatibleProviderSetup,
+    ) -> Result<(), HostError> {
+        Err(HostError::Query(
+            "compatible provider setup is unavailable on this host".into(),
         ))
     }
     async fn configure_builtin_provider(
@@ -534,6 +551,14 @@ pub trait HostSubagentService: Send + Sync + 'static {
     ) -> Result<(), HostError>;
 
     async fn interrupt(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+    ) -> Result<(), HostError>;
+
+    /// Releases the parent tool call waiting on a running child; the child's
+    /// result is then delivered to the parent like any background completion.
+    async fn move_to_background(
         &self,
         parent_session_id: &SessionId,
         subagent_id: &SubagentId,

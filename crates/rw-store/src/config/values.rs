@@ -66,6 +66,10 @@ impl LoadedConfig {
             }
         }
 
+        lines.push(self.render_leaf(
+            "agents.wake_on_completion",
+            &self.config.agents.wake_on_completion.to_string(),
+        ));
         lines.push(self.render_leaf("compaction.auto", &self.config.compaction.auto.to_string()));
         lines.push(self.render_leaf(
             "compaction.reserved",

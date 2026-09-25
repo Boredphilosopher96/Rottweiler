@@ -2,6 +2,7 @@
 #![allow(clippy::expect_used)]
 
 mod attachments;
+mod background_children;
 mod budget;
 mod cancellation;
 mod close;
@@ -16,6 +17,7 @@ mod context_reads;
 mod context_source_commit;
 mod control_admission;
 mod deferred_children;
+mod deferred_controls;
 mod diff_approval;
 mod doom_loop;
 mod event_batches;
@@ -23,6 +25,7 @@ pub(crate) mod fixtures;
 mod generation_lifetime;
 mod history_compaction;
 mod hooks;
+mod model_admission;
 mod model_preparation;
 mod model_selection;
 mod modes;
@@ -50,6 +53,7 @@ mod subscription;
 mod titles;
 mod todos;
 mod tool_admission;
+mod tool_completion;
 mod tool_order;
 mod tool_result_admission;
 mod ui_actions;

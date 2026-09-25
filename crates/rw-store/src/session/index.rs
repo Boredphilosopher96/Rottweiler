@@ -20,8 +20,8 @@ pub struct SessionSummary {
     pub title: String,
     /// Caller-supplied deterministic update time in Unix milliseconds.
     pub updated_unix_ms: i64,
-    /// Accumulated ordinary micro-dollar equivalent, when applicable.
-    pub cost_micros: i64,
+    /// Bounded preview of the first accepted user prompt, when one exists.
+    pub first_prompt: Option<String>,
     /// Number of accepted user turns represented by this projection.
     pub turn_count: i64,
 }
@@ -196,7 +196,7 @@ impl SessionIndex {
         let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions \
+            "SELECT id,title,updated_unix_ms,first_prompt,turn_count FROM sessions \
              WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], summary_from_row)?;
@@ -291,7 +291,7 @@ impl SessionIndex {
         read_index(root, &SessionIndexReadControl::new(), |connection| {
             sqlite_schema::validate_sessions(connection)?;
             let mut statement = connection.prepare(
-                "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
+                "SELECT id,title,updated_unix_ms,first_prompt,turn_count FROM sessions WHERE search_complete=1 ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
             )?;
             let rows = statement.query_map([limit], summary_from_row)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -308,7 +308,7 @@ impl SessionIndex {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions WHERE id=?1",
+                "SELECT id,title,updated_unix_ms,first_prompt,turn_count FROM sessions WHERE id=?1",
                 [id],
                 summary_from_row,
             )
@@ -406,7 +406,7 @@ fn search_sql(term_count: usize) -> String {
     // earliest body source. Length-prefixed decimal keys preserve full u64 order.
     let postings = (1..=term_count).map(|number| format!("SELECT d.session_id,{number} AS term,d.kind,d.sequence_id FROM sessions_fts JOIN search_documents d ON d.rowid=sessions_fts.rowid WHERE sessions_fts MATCH ?{number}")).collect::<Vec<_>>().join(" UNION ALL ");
     format!(
-        "WITH postings AS ({postings}), matching AS (SELECT session_id,MIN(CASE WHEN kind=1 THEN printf('%02d',length(sequence_id))||sequence_id END) AS body_source FROM postings GROUP BY session_id HAVING count(DISTINCT term)={}) SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,s.turn_count,s.next_sequence,s.source_digest,substr(matching.body_source,3) FROM sessions s JOIN matching ON matching.session_id=s.id WHERE s.search_complete=1 ORDER BY s.updated_unix_ms DESC,s.id ASC LIMIT ?{}",
+        "WITH postings AS ({postings}), matching AS (SELECT session_id,MIN(CASE WHEN kind=1 THEN printf('%02d',length(sequence_id))||sequence_id END) AS body_source FROM postings GROUP BY session_id HAVING count(DISTINCT term)={}) SELECT s.id,s.title,s.updated_unix_ms,s.first_prompt,s.turn_count,s.next_sequence,s.source_digest,substr(matching.body_source,3) FROM sessions s JOIN matching ON matching.session_id=s.id WHERE s.search_complete=1 ORDER BY s.updated_unix_ms DESC,s.id ASC LIMIT ?{}",
         term_count,
         term_count + 1
     )
@@ -431,7 +431,7 @@ fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary>
         id: row.get(0)?,
         title: row.get(1)?,
         updated_unix_ms: row.get(2)?,
-        cost_micros: row.get(3)?,
+        first_prompt: row.get(3)?,
         turn_count: row.get(4)?,
     })
 }
@@ -441,7 +441,13 @@ pub(super) fn upsert_projection(
     projection: &SessionProjection,
 ) -> Result<(), SessionStoreError> {
     validate_session_id(&projection.summary.id)?;
-    if projection.summary.title.len() > 4096 {
+    if projection.summary.title.len() > 4096
+        || projection
+            .summary
+            .first_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.len() > 4096)
+    {
         return Err(SessionStoreError::SearchDocumentTooLarge { max_bytes: 4096 });
     }
     let claims = &projection.input_claims;
@@ -451,7 +457,7 @@ pub(super) fn upsert_projection(
             "input claim checkpoint bytes",
         ));
     }
-    connection.execute("INSERT INTO sessions(id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest,input_claims) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET title=excluded.title,updated_unix_ms=excluded.updated_unix_ms,cost_micros=excluded.cost_micros,turn_count=excluded.turn_count,explicit_title=excluded.explicit_title,search_complete=excluded.search_complete,next_sequence=excluded.next_sequence,source_digest=excluded.source_digest,input_claims=excluded.input_claims", params![projection.summary.id,projection.summary.title,projection.summary.updated_unix_ms,projection.summary.cost_micros,projection.summary.turn_count,projection.explicit_title,projection.complete,projection.source.next_sequence.to_string(),projection.source.digest.as_slice(),claims])?;
+    connection.execute("INSERT INTO sessions(id,title,updated_unix_ms,first_prompt,turn_count,explicit_title,search_complete,next_sequence,source_digest,input_claims) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET title=excluded.title,updated_unix_ms=excluded.updated_unix_ms,first_prompt=excluded.first_prompt,turn_count=excluded.turn_count,explicit_title=excluded.explicit_title,search_complete=excluded.search_complete,next_sequence=excluded.next_sequence,source_digest=excluded.source_digest,input_claims=excluded.input_claims", params![projection.summary.id,projection.summary.title,projection.summary.updated_unix_ms,projection.summary.first_prompt,projection.summary.turn_count,projection.explicit_title,projection.complete,projection.source.next_sequence.to_string(),projection.source.digest.as_slice(),claims])?;
     connection.execute("INSERT INTO search_documents(session_id,kind,agent_turn,sequence_id,part,body) VALUES(?1,0,'0','0',0,?2) ON CONFLICT(session_id,kind,sequence_id,part) DO UPDATE SET body=excluded.body WHERE body<>excluded.body", params![projection.summary.id,projection.summary.title])?;
     Ok(())
 }
@@ -460,7 +466,7 @@ fn read_projection(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<SessionProjection>, SessionStoreError> {
-    let row = connection.query_row("SELECT id,title,updated_unix_ms,cost_micros,turn_count,explicit_title,search_complete,next_sequence,source_digest,input_claims FROM sessions WHERE id=?1", [id], |row| {
+    let row = connection.query_row("SELECT id,title,updated_unix_ms,first_prompt,turn_count,explicit_title,search_complete,next_sequence,source_digest,input_claims FROM sessions WHERE id=?1", [id], |row| {
         Ok((summary_from_row(row)?, row.get::<_,bool>(5)?, row.get::<_,bool>(6)?, row.get::<_,String>(7)?, row.get::<_,Vec<u8>>(8)?, bounded_claim_checkpoint(row)?))
     }).optional()?;
     row.map(

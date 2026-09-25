@@ -164,18 +164,7 @@ async fn failed_startup_cleanup_reports_error_without_releasing_its_capacity() {
             .to_string()
             .contains("unproven")
     );
-    let next = orchestrator
-        .start(
-            SessionId("parent".to_owned()),
-            request("no capacity"),
-            Arc::new(RecordingObserver::default()),
-            CancellationToken::default(),
-        )
-        .await;
-    assert!(matches!(
-        next,
-        Err(OrchestrationError::ConcurrencyExceeded { .. })
-    ));
+    assert_capacity_retained(&orchestrator, request("no capacity")).await;
 }
 
 #[tokio::test]
@@ -248,16 +237,6 @@ async fn factory_failure_without_a_returned_session_keeps_startup_ownership() {
                 .expect("settlement must return"),
             Err(OrchestrationError::EffectsUnsettled(_))
         ));
-        assert!(matches!(
-            orchestrator
-                .start(
-                    SessionId("parent".to_owned()),
-                    request("capacity remains owned"),
-                    Arc::new(RecordingObserver::default()),
-                    CancellationToken::default(),
-                )
-                .await,
-            Err(OrchestrationError::ConcurrencyExceeded { .. })
-        ));
+        assert_capacity_retained(&orchestrator, request("capacity remains owned")).await;
     }
 }

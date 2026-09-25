@@ -46,28 +46,27 @@ pub(crate) fn register_workflow_command(
         return Ok(());
     }
     registry.register(
-        CommandDescriptor::new("workflow", "Run a discovered declarative workflow")
-            .with_argument_hint("<name> [run-id]")
-            .with_source(CommandSource::Workflow),
+        CommandDescriptor::new(
+            "workflow",
+            "Run a discovered workflow or inspect one of its runs",
+        )
+        .with_argument_hint("<name> [run-id] | status <run-id>")
+        .with_source(CommandSource::Workflow),
         WorkflowCommand {
             names: catalog
                 .workflows()
                 .map(|workflow| workflow.name().to_owned())
                 .collect(),
-        },
-    )?;
-    registry.register(
-        CommandDescriptor::new("workflow-status", "Inspect a durable workflow run")
-            .with_argument_hint("<run-id>")
-            .with_source(CommandSource::Workflow),
-        status::WorkflowStatusCommand {
-            storage_root: storage_root.to_owned(),
+            status: status::WorkflowStatusCommand {
+                storage_root: storage_root.to_owned(),
+            },
         },
     )
 }
 
 struct WorkflowCommand {
     names: Vec<String>,
+    status: status::WorkflowStatusCommand,
 }
 
 #[async_trait]
@@ -77,14 +76,23 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for WorkflowCom
         context: &mut SessionCommandContext,
         invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        let mut arguments = invocation.arguments().split_whitespace();
+        let name = arguments.next().unwrap_or("");
+        if name == "status" {
+            let (Some(run_id), None) = (arguments.next(), arguments.next()) else {
+                return Err(CommandExecutionError::new(
+                    "invalid_workflow_arguments",
+                    "usage: /workflow status <run-id>",
+                ));
+            };
+            return self.status.report(context, run_id).await;
+        }
         if context.running() {
             return Err(CommandExecutionError::new(
                 "turn_running",
                 "workflows require an idle session",
             ));
         }
-        let mut arguments = invocation.arguments().split_whitespace();
-        let name = arguments.next().unwrap_or("");
         let requested_run = arguments.next();
         if arguments.next().is_some() {
             return Err(CommandExecutionError::new(
@@ -120,7 +128,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for WorkflowCom
                 ),
                 model_alias: None,
                 allowed_tools: Some(Vec::new()),
-                permission_patterns: Vec::new(),
+                pre_approvals: Vec::new(),
                 tool_calls: vec![CommandToolCall {
                     placeholder: WORKFLOW_RESULT_PLACEHOLDER.to_owned(),
                     name: "workflow".to_owned(),

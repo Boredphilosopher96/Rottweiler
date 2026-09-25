@@ -175,7 +175,7 @@ async fn verify_root_recomposition(
     std::fs::create_dir(&added).expect("new workspace root");
     runtime
         .handle
-        .send_message(format!("/add-dir {}", added.display()))
+        .send_message(format!("/dirs {}", added.display()))
         .await
         .expect("publish complete root generation");
     assert_eq!(

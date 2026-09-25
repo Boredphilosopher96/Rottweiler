@@ -111,7 +111,7 @@ pub(super) struct CrossProcessApprovalLock {
 }
 
 impl CrossProcessApprovalLock {
-    fn acquire(path: &Path) -> Result<Self, std::io::Error> {
+    pub(super) fn acquire(path: &Path) -> Result<Self, std::io::Error> {
         #[cfg(not(unix))]
         {
             let _ = path;
@@ -143,14 +143,23 @@ impl CrossProcessApprovalLock {
 pub(super) fn load_project_approvals(
     path: &Path,
 ) -> Result<BTreeSet<RememberedApproval>, std::io::Error> {
+    load_private_ledger(path, "project approval ledger")
+}
+
+/// Loads one private JSON ledger. A missing file is empty; a file that is not
+/// a regular, owner-only file fails closed.
+pub(super) fn load_private_ledger<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+    label: &str,
+) -> Result<T, std::io::Error> {
     if !path.exists() {
-        return Ok(BTreeSet::new());
+        return Ok(T::default());
     }
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "project approval ledger is not a regular file",
+            format!("{label} is not a regular file"),
         ));
     }
     #[cfg(unix)]
@@ -159,14 +168,14 @@ pub(super) fn load_project_approvals(
         if metadata.permissions().mode() & 0o077 != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "project approval ledger is not private",
+                format!("{label} is not private"),
             ));
         }
     }
     serde_json::from_slice(&fs::read(path)?).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("project approval ledger is malformed: {error}"),
+            format!("{label} is malformed: {error}"),
         )
     })
 }
@@ -175,11 +184,19 @@ pub(super) fn persist_project_approvals(
     path: &Path,
     approvals: &BTreeSet<RememberedApproval>,
 ) -> Result<(), std::io::Error> {
+    persist_private_ledger(path, approvals)
+}
+
+/// Atomically replaces one private JSON ledger (0600 file, 0700 directory).
+pub(super) fn persist_private_ledger<T: serde::Serialize>(
+    path: &Path,
+    records: &T,
+) -> Result<(), std::io::Error> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     set_private_directory(parent)?;
-    let encoded = serde_json::to_vec(approvals)
-        .map_err(|error| std::io::Error::other(format!("approval encoding failed: {error}")))?;
+    let encoded = serde_json::to_vec(records)
+        .map_err(|error| std::io::Error::other(format!("ledger encoding failed: {error}")))?;
     let temporary = unique_temporary_path(path)?;
     let result = (|| {
         let mut options = fs::OpenOptions::new();

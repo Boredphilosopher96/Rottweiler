@@ -63,6 +63,7 @@
                   "command_descriptors_listed",
                   "context_snapshot_ready",
                   "cost_snapshot_ready",
+                  "extensions_listed",
                   "family_controls_ready",
                   "host_shutdown",
                   "mcp_server_approval_reviewed",

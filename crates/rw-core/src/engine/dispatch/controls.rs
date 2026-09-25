@@ -83,7 +83,7 @@ pub(super) fn snapshot(state: &ActorState) -> Result<SessionControlsSnapshot, Ag
                 name: request.tool_name.clone(),
                 args: request.arguments.clone(),
                 capabilities: request.capabilities.clone(),
-                rationale: request.rationale(),
+                rationale: request.prompt_reason.clone(),
                 diff: request.approval_diff.clone(),
             }
         })

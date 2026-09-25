@@ -12,7 +12,7 @@ fn fixture() -> tempfile::TempDir {
             id: "many".into(),
             title: "needle".into(),
             updated_unix_ms: 1,
-            cost_micros: 0,
+            first_prompt: None,
             turn_count: 1,
         },
         explicit_title: true,

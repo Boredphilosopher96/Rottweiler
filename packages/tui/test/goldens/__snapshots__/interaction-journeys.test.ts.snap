@@ -1,0 +1,129 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`approval and plan keep a usable composer at 110x32: approval 1`] = `
+"                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+  rottweiler                                                                                                  
+  Rottweiler                                                                                                  
+  Loading models…                                                                                             
+  Describe a task, or press / for commands.                                                                   
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+╭─ Edit src/main.rs? ────────────────────────────────────────────────────────────────────────────────────────╮
+│ Apply the reviewed correction                                                                              │
+│  ▶ y  Yes                                                                                                  │
+│    p  Always allow in this project…                                                                        │
+│    n  No, and tell the agent what to do differently                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ Please keep the public API compatible.                                                                   │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                                                     │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M  ctx —  approval · Edit file                                               
+"
+`;
+
+exports[`approval and plan keep a usable composer at 110x32: plan 1`] = `
+"                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+  rottweiler                                                                                                  
+  Rottweiler                                                                                                  
+  Loading models…                                                                                             
+  Describe a task, or press / for commands.                                                                   
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+╭─ Plan approval required ───────────────────────────────────────────────────────────────────────────────────╮
+│ Fix the request boundary · PgUp/PgDn to review                                                             │
+│ Keep the public API compatible.                                                                            │
+│ 1. Validate request inputs                                                                                 │
+│    Files: src/main.rs                                                                                      │
+│    Verify: cargo test                                                                                      │
+│ Open questions                                                                                             │
+│ • Should empty requests be rejected?                                                                       │
+│  ▶ Approve plan                                                                                            │
+│    Pin this artifact and enter Execute                                                                     │
+│    Reject plan                                                                                             │
+│    Stay in Plan mode                                                                                       │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ Please keep the public API compatible.                                                                   │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                                                     │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  PLAN   loading models · Alt+M                                                                               
+"
+`;
+
+exports[`approval and plan keep a usable composer at 80x24: approval 1`] = `
+"                                                                                
+                                                                                
+                                                                                
+                                                                                
+  rottweiler                                                                    
+  Rottweiler                                                                    
+  Loading models…                                                               
+  Describe a task, or press / for commands.                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+╭─ Edit src/main.rs? ──────────────────────────────────────────────────────────╮
+│ Apply the reviewed correction                                                │
+│  ▶ y  Yes                                                                    │
+│    p  Always allow in this project…                                          │
+│    n  No, and tell the agent what to do differently                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ Please keep the public API compatible.                                     │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                       │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   loading models · Alt+M  ctx —  approval · Edit file                 
+"
+`;
+
+exports[`approval and plan keep a usable composer at 80x24: plan 1`] = `
+"                                                                                
+  rottweiler                                                                    
+  Rottweiler                                                                    
+  Loading models…                                                               
+  Describe a task, or press / for commands.                                     
+                                                                                
+╭─ Plan approval required ─────────────────────────────────────────────────────╮
+│ Fix the request boundary · PgUp/PgDn to review                               │
+│ Keep the public API compatible.                                              │
+│ 1. Validate request inputs                                                   │
+│    Files: src/main.rs                                                        │
+│    Verify: cargo test                                                        │
+│ Open questions                                                               │
+│ • Should empty requests be rejected?                                         │
+│  ▶ Approve plan                                                              │
+│    Pin this artifact and enter Execute                                       │
+│    Reject plan                                                               │
+│    Stay in Plan mode                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ Please keep the public API compatible.                                     │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                       │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+  PLAN   loading models · Alt+M                                                 
+"
+`;

@@ -24,6 +24,7 @@ use super::session_selection::checkpoint_root;
 use super::tool_composition::BuildToolsInput;
 use super::tool_composition::BuiltTools;
 use super::tool_composition::build_tools;
+use super::tool_composition::register_child_skill_tool;
 use super::tool_composition::trusted_lsp_roots;
 use super::toolchain::ToolchainRuntime;
 use super::wasm_hooks::NamedWasmHook;
@@ -220,12 +221,14 @@ impl RuntimeWorkspaceRootController {
             built.read_only_hook_scratch.clone(),
             &roots,
         ));
-        let catalog = discover_runtime_extensions_derived(
+        let catalog = Arc::new(discover_runtime_extensions_derived(
             workspace_root,
             &self.extension_user_home,
             &self.extension_user_rottweiler,
             child_project_trusted,
-        );
+        ));
+        register_child_skill_tool(&mut built, &catalog)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let instruction_roots = Arc::new(RwLock::new(roots.clone()));
         let active_sources = Arc::new(RwLock::new(BTreeSet::new()));
         let mut hooks = compose_runtime_hooks_with_extensions(
@@ -354,6 +357,7 @@ impl RuntimeWorkspaceRootController {
             root_authorization: WorkspaceRootAuthorization::Hosted(roots.clone()),
         });
         Ok(SessionActorConfig {
+            model_preferences: None,
             ui: plugins.runtime.ui.clone(),
             ui_tool_source: Arc::new(crate::extension_runtime::ui::source::ToolSource {
                 reader: Arc::clone(&self.transcripts),
@@ -476,6 +480,7 @@ impl RuntimeWorkspaceRootController {
             ));
         }
         FolderTrustStore::new(self.trust_store_path.clone())
+            .with_user_home(&self.extension_user_home)
             .assess(&canonical)
             .map_err(|_error| {
                 AgentLoopError::InvalidConfiguration(
@@ -576,6 +581,7 @@ impl RuntimeWorkspaceRootController {
         })?;
         let trusted = self.dangerously_trust
             || FolderTrustStore::new(self.trust_store_path.clone())
+                .with_user_home(&self.extension_user_home)
                 .assess(primary)
                 .map_err(|_| {
                     AgentLoopError::InvalidConfiguration(

@@ -1,8 +1,16 @@
 //! Authenticated client commands, event lifetimes, and shared wire values.
 
+mod actions;
 mod commands;
+mod provider_setup;
+pub use provider_setup::*;
 mod events;
+mod extension_inventory;
+pub use extension_inventory::*;
+mod session_descriptor;
+pub use session_descriptor::*;
 mod shared;
+pub use actions::*;
 pub use commands::*;
 pub use events::*;
 pub(crate) use shared::decimal_u64;

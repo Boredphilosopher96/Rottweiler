@@ -74,10 +74,13 @@ impl SessionActor {
             config.recovered.driver_client_id.clone(),
             Arc::clone(&config.event_clock),
         )));
+        let signals = mpsc::unbounded_channel();
+        let background_children =
+            super::background_children::BackgroundChildren::shared(signals.0.clone());
         let handle = SessionHandle {
+            background_children,
             shutdown: shutdown.clone(),
             commands: command_tx,
-            child_progress: super::child_progress::HostedChildProgress::new(),
             events: event_tx.clone(),
             active_turn: active_turn.clone(),
             session_id: config.session_id.clone(),
@@ -89,6 +92,8 @@ impl SessionActor {
             mode_registry: Arc::clone(&mode_registry),
             model: Arc::clone(&config.model),
         };
+        let tool_context = tool_context
+            .with_background_subagent_event_sink(handle.background_subagent_event_sink());
         config.resources.bind_session(handle.plugin_binding())?;
         // Transfer the admitted bootstrap to the actor before sharing route configuration.
         let recovered = std::mem::take(&mut config.recovered);
@@ -105,6 +110,7 @@ impl SessionActor {
                 command_rx,
                 event_tx,
                 shutdown::ActorControl {
+                    signals,
                     active_turn,
                     command_descriptors: Arc::clone(&command_descriptors),
                     mode_registry,
@@ -234,6 +240,7 @@ pub(super) async fn run_actor(
     control: shutdown::ActorControl,
 ) {
     let shutdown::ActorControl {
+        signals: (turn_signals, mut signals),
         active_turn,
         command_descriptors,
         mode_registry,
@@ -253,7 +260,6 @@ pub(super) async fn run_actor(
         Arc::clone(&shutdown.control),
     );
     let mut config = config;
-    let (turn_signals, mut signals) = mpsc::unbounded_channel();
     'startup: {
         if !config.startup_notifications.is_empty() {
             let startup_events = config.startup_notifications.iter().flat_map(|notice| {
@@ -401,6 +407,7 @@ pub(super) async fn run_actor(
             && state.tasks.idle()
             && state.pending_command.is_none()
             && state.pending_model_preparation.is_none()
+            && state.deferred_controls.is_empty()
             && signals.is_empty()
             && state.pending_context_read.is_none()
             && cleanup.is_none()
@@ -411,6 +418,26 @@ pub(super) async fn run_actor(
                 state.unsettled.clone(),
             ));
         }
+        match crate::engine::dispatch::deferred_controls::pump(
+            crate::engine::dispatch::DispatchContext {
+                state: &mut state,
+                config: &mut config,
+                tool_context: &mut tool_context,
+                turn_signals: &turn_signals,
+                events: &events,
+                active_turn: &active_turn,
+                command_descriptors: &command_descriptors,
+                mode_registry: &mode_registry,
+            },
+        )
+        .await
+        {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                state.unsettled.get_or_insert_with(|| error.to_string());
+            }
+        }
         if !state.closing
             && !state.recovery_requested
             && state.suspended_inputs.is_none()
@@ -419,6 +446,8 @@ pub(super) async fn run_actor(
             && state.active_shell.is_none()
             && state.pending_command.is_none()
             && state.pending_model_preparation.is_none()
+            && state.deferred_controls.is_empty()
+            && state.pending_model_switches.is_empty()
             && !state.queued.is_empty()
         {
             state.queued_positions.clear();
@@ -442,6 +471,52 @@ pub(super) async fn run_actor(
                 continue;
             }
         }
+        // A background child finished while the parent was idle: start a turn
+        // whose first provider call receives the undelivered results.
+        if !state.closing
+            && !state.recovery_requested
+            && state.suspended_inputs.is_none()
+            && state.running.is_none()
+            && !state.initialization_running
+            && state.active_shell.is_none()
+            && state.pending_command.is_none()
+            && state.pending_model_preparation.is_none()
+            && state.deferred_controls.is_empty()
+            && state.pending_model_switches.is_empty()
+            && state.queued.is_empty()
+            && state.child_results.take()
+        {
+            match start_turn(
+                &mut state,
+                &config,
+                &tool_context,
+                &turn_signals,
+                &events,
+                Vec::new(),
+                &active_turn,
+            )
+            .await
+            {
+                Ok(()) => {}
+                // The results stay undelivered and join the next turn.
+                Err(AgentLoopError::InvalidConfiguration(message)) => {
+                    let notice = PendingEvent::Error {
+                        message: format!(
+                            "A child agent finished, but no turn could start to receive its result: {message}"
+                        ),
+                    };
+                    if let Err(error) = emit(&mut state, &events, &config.event_sink, notice).await
+                    {
+                        state.unsettled.get_or_insert_with(|| error.to_string());
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    state.unsettled.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+            }
+        }
         let tasks = state.tasks.clone();
         tokio::select! {
             result = crate::engine::dispatch::context_job::wait(&mut state.pending_context_read) => {
@@ -460,6 +535,9 @@ pub(super) async fn run_actor(
                     turn_signals: &turn_signals, events: &events, active_turn: &active_turn,
                     command_descriptors: &command_descriptors, mode_registry: &mode_registry,
                 }).await;
+            }
+            result = crate::engine::dispatch::deferred_controls::wait(&mut state.deferred_active) => {
+                crate::engine::dispatch::deferred_controls::completed(&mut state, &result);
             }
             () = shutdown.cancelled(), if !state.closing => {},
             () = tasks.changed() => {},

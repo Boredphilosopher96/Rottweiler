@@ -64,6 +64,8 @@ pub(in crate::engine::tests) struct ScopedPromptCommand;
 
 pub(in crate::engine::tests) struct PreludePromptCommand {
     pub(in crate::engine::tests) command: String,
+    /// `allowed-tools` pre-approvals submitted with the prompt.
+    pub(in crate::engine::tests) pre_approvals: Vec<String>,
 }
 
 pub(in crate::engine::tests) struct InitActionCommand(pub(in crate::engine::tests) InitDepth);
@@ -312,7 +314,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ScopedPromp
                 content: "scoped prompt".to_owned(),
                 model_alias: Some("slow".to_owned()),
                 allowed_tools: Some(vec!["read".to_owned()]),
-                permission_patterns: Vec::new(),
+                pre_approvals: Vec::new(),
                 tool_calls: Vec::new(),
             },
         })
@@ -332,8 +334,8 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for PreludeProm
             action: SessionCommandAction::SubmitPrompt {
                 content: format!("prelude result: {placeholder}"),
                 model_alias: None,
-                allowed_tools: Some(vec!["bash".to_owned()]),
-                permission_patterns: vec![format!("bash({})", self.command)],
+                allowed_tools: None,
+                pre_approvals: self.pre_approvals.clone(),
                 tool_calls: vec![CommandToolCall {
                     placeholder,
                     name: "bash".to_owned(),
@@ -371,8 +373,8 @@ impl Tool for SessionResourceFixture {
         Ok(())
     }
 
-    fn session_activity(&self, _session_id: &SessionId) -> Option<String> {
-        Some("fixture background resource".to_owned())
+    fn session_activity(&self, _session_id: &SessionId) -> Option<rw_tools::SessionActivity> {
+        Some(rw_tools::SessionActivity::BackgroundShell)
     }
 
     fn observes_session_resources(&self) -> bool {

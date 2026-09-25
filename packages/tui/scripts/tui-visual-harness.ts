@@ -1,3 +1,4 @@
+import { readyCatalog } from "../test/fixtures/catalog"
 import { conversationItem, sessionReaderFor } from "../test/fixtures/history"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -36,6 +37,7 @@ try {
   await treeSitter.initialize()
   const app = createRottweilerApp(setup.renderer, { sessionReader: sessionReaderFor([conversationItem(1, "user", "Add reconnect-safe streaming. The cursor double-advances after a dropped SSE connection.")]),
     initialState: scenarioState(scenarioInput),
+    onCommand: readyCatalog(() => app),
     requestId: () => "visual-proof-request",
     treeSitterClient: treeSitter,
     ...(scenarioInput === "tools" ? { nowMs: () => TOOLS_FIXTURE_NOW_MS } : {}),
@@ -52,31 +54,29 @@ try {
     await setup.mockInput.typeText("context")
     await setup.flush()
   } else if (scenarioInput === "tools") {
-    actions.push("pressed Ctrl+P through the renderer input path")
-    setup.mockInput.pressKey("p", { ctrl: true })
-    actions.push("typed view tools into the focused production query input")
-    await setup.mockInput.typeText("view tools")
-    await setup.flush()
-    actions.push("pressed Enter to activate the selected View tools action")
-    setup.mockInput.pressEnter()
+    actions.push("pressed Ctrl+T through the renderer input path")
+    setup.mockInput.pressKey("t", { ctrl: true })
     await setup.flush()
   } else if (scenarioInput === "theme-browser") {
     actions.push("typed /the into the production composer input")
-    await setup.mockInput.typeText("/the")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("theme")
     actions.push("pressed Enter to activate the /theme slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     await setup.flush()
   } else if (scenarioInput === "settings-browser") {
     actions.push("typed /sett into the production composer input")
-    await setup.mockInput.typeText("/sett")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("settings")
     actions.push("pressed Enter to activate the /settings slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
     await setup.flush()
   } else if (scenarioInput === "mcp-browser") {
     actions.push("typed /mc into the production composer input")
-    await setup.mockInput.typeText("/mc")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("mcp")
     actions.push("pressed Enter to activate the /mcp slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
@@ -87,7 +87,8 @@ try {
     await setup.flush()
   } else if (scenarioInput === "session-review") {
     actions.push("typed /rev into the production composer input")
-    await setup.mockInput.typeText("/rev")
+    await setup.mockInput.typeText("/")
+    await setup.mockInput.typeText("review")
     actions.push("pressed Enter to activate the /review slash completion")
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
@@ -112,7 +113,20 @@ try {
   await writeEvidence(outputDirectory, scenarioInput, styledFrame, characterFrame, actions, assertions)
 
   const failed = [...assertions.filter((assertion) => !assertion.passed)]
-  if (scenarioInput === "settings-browser") {
+  if (scenarioInput === "command-palette") {
+    actions.push("resized the production renderer to 80 by 24 columns")
+    setup.resize(80, 24)
+    await setup.flush()
+    const frame = setup.captureCharFrame()
+    const assertions = [
+      exactValueAssertion("narrow palette fills primary width", app.commandPalette.width, 80),
+      exactValueAssertion("narrow palette reaches composer", app.commandPalette.height, app.composer.y),
+      { name: "narrow details collapse", passed: !app.commandPalette.detailPane.visible, expected: "collapsed", actual: String(app.commandPalette.detailPane.visible) },
+      { name: "narrow palette hides prior conversation", passed: !frame.includes("› Add reconnect-safe") && !frame.includes("● Edit core/cursor.rs"), expected: "occluded", actual: frame },
+    ]
+    await writeEvidence(outputDirectory, "command-palette-narrow", setup.captureSpans(), frame, actions, assertions)
+    failed.push(...assertions.filter(assertion => !assertion.passed))
+  } else if (scenarioInput === "settings-browser") {
     actions.push("resized the production renderer to 72 by 18 columns")
     setup.resize(72, 18)
     await setup.flush()
@@ -187,11 +201,11 @@ function isVisualScenario(value: string): value is VisualScenario {
 function scenarioAssertions(scenario: VisualScenario): readonly string[] {
   switch (scenario) {
     case "conversation":
-      return ["you", "● rottweiler", "reasoning", "AGENTS", "TASKS", "CHANGED", "SESSION"]
+      return ["› Add reconnect-safe streaming", "● Edit core/cursor.rs", "reasoning", "AGENTS", "TASKS", "CHANGED", "SESSION"]
     case "command-palette":
-      return ["COMMAND PALETTE", "context", "Compact context", "Manage context"]
+      return ["COMMANDS", "context", "Context", "Compact"]
     case "approval":
-      return ["Permission required", "Terminal command", "Allow once"]
+      return ["Permission · y once / a session / n deny", "Terminal command", "Allow once"]
     case "tools":
       return [
         "● rottweiler  running tools",
@@ -266,22 +280,22 @@ function visualAssertions(
     const lines = characterFrame.split("\n")
     return [
       ...assertions,
-      positionAssertion(lines, "query starts at the design column", 3, 3, "context"),
+      positionAssertion(lines, "query starts at the design column", 1, 1, "context"),
       positionAssertion(lines, "list/detail divider is fixed at column 55", 5, 55, "│"),
-      positionAssertion(lines, "filtered count and source counts are derived", 25, 3, "4 of 30 commands · 30 built-in · 0 extensions"),
+      positionAssertion(lines, "filtered count is derived", 25, 1, "2 of 19 commands"),
       frameWidthAssertion(lines),
       {
         name: "selected description appears only in detail",
-        passed: occurrenceCount(characterFrame, "Inspect assembled context") === 1,
+        passed: occurrenceCount(characterFrame, "Inspect, pin, or evict context items") === 1,
         expected: "1 occurrence",
-        actual: `${occurrenceCount(characterFrame, "Inspect assembled context")} occurrences`,
+        actual: `${occurrenceCount(characterFrame, "Inspect, pin, or evict context items")} occurrences`,
       },
-      colorAssertion(styledFrame, "query uses normal text", 3, 3, kennelTheme.text),
-      colorAssertion(styledFrame, "selection marker uses primary", 5, 3, kennelTheme.primary, kennelTheme.backgroundPanel),
-      colorAssertion(styledFrame, "unmatched title text stays readable", 5, 5, kennelTheme.text, kennelTheme.backgroundPanel),
-      colorAssertion(styledFrame, "matched title text uses primary", 5, 6, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "query uses normal text", 1, 1, kennelTheme.text),
+      colorAssertion(styledFrame, "selection marker uses primary", 3, 1, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "matched title text uses primary", 3, 3, kennelTheme.primary, kennelTheme.backgroundPanel),
+      colorAssertion(styledFrame, "unmatched title text stays readable", 4, 3, kennelTheme.text),
       colorAssertion(styledFrame, "divider uses subtle border", 5, 55, kennelTheme.borderSubtle),
-      colorAssertion(styledFrame, "detail metadata is muted", 6, 57, kennelTheme.textMuted),
+      colorAssertion(styledFrame, "detail metadata is muted", 1, 57, kennelTheme.textMuted),
     ]
   }
   if (scenario === "tools") {
@@ -348,11 +362,11 @@ function visualAssertions(
       {
         name: "theme surface fully occludes the prior conversation and context rail",
         passed: !characterFrame.includes("AGENTS") &&
-          !characterFrame.includes("▌ you") &&
-          !characterFrame.includes("● rottweiler") &&
+          !characterFrame.includes("› Add reconnect-safe") &&
+          !characterFrame.includes("● Edit core/cursor.rs") &&
           !characterFrame.includes("\n╎"),
         expected: "no prior screen labels or gutter glyphs",
-        actual: ["AGENTS", "▌ you", "● rottweiler", "\n╎"].filter((text) => characterFrame.includes(text)).join(",") || "occluded",
+        actual: ["AGENTS", "› Add reconnect-safe", "● Edit core/cursor.rs", "\n╎"].filter((text) => characterFrame.includes(text)).join(",") || "occluded",
       },
       colorAssertion(styledFrame, "selection marker uses primary", 24, 1, kennelTheme.primary, kennelTheme.backgroundPanel),
       colorAssertion(styledFrame, "background swatch uses the selected theme", 24, 19, kennelTheme.background, kennelTheme.backgroundPanel),
@@ -468,17 +482,16 @@ function visualAssertions(
 
   const lines = characterFrame.split("\n")
   const positioned = [
-    positionAssertion(lines, "user gutter begins at column 0", 0, 0, "▌ you"),
-    positionAssertion(lines, "assistant marker begins at column 0", 4, 0, "● rottweiler"),
-    positionAssertion(lines, "reasoning rail begins at column 0", 6, 0, "╎ reasoning"),
-    positionAssertion(lines, "assistant prose uses two-cell indent", 12, 2, "What changed"),
+    positionAssertion(lines, "user prompt marker begins at column 0", 0, 0, "› Add reconnect-safe"),
+    positionAssertion(lines, "reasoning rail begins at column 0", 3, 0, "╎ reasoning"),
+    positionAssertion(lines, "assistant prose uses two-cell indent", 9, 2, "What changed"),
     positionAssertion(lines, "context divider is fixed at column 73", 0, 73, "│"),
     positionAssertion(lines, "composer is inset one column", 27, 1, "╭"),
     positionAssertion(lines, "status is inset one column", 31, 1, " EXECUTE "),
     positionAssertion(lines, "context rows align with their headings", 1, 75, "◌"),
-    positionAssertion(lines, "tool rows use the two-cell assistant indent", 21, 2, "▸ edit"),
+    positionAssertion(lines, "tool rows begin with a status bullet at column 0", 18, 0, "● Edit core/cursor.rs"),
     positionAssertion(lines, "agents heading and count are not truncated", 0, 73, "│ AGENTS                   2 running "),
-    positionAssertion(lines, "agent activity keeps its right padding", 1, 73, "│ ◌ explore  reading transport code  "),
+    positionAssertion(lines, "agent activity keeps its right padding", 1, 73, "│ ◌ agent · Map the reconnect path  "),
     positionAssertion(lines, "tasks heading and count are not truncated", 4, 73, "│ TASKS                          1/3 "),
     positionAssertion(lines, "changed heading and count are not truncated", 9, 73, "│ CHANGED                          3 "),
     positionAssertion(lines, "session values are not truncated", 15, 73, "│ ctx    13k/32k (41%)               "),
@@ -496,16 +509,16 @@ function visualAssertions(
     },
   ]
   const colors = [
-    colorAssertion(styledFrame, "user gutter uses primary", 0, 0, kennelTheme.primary),
-    colorAssertion(styledFrame, "assistant marker uses accent", 4, 0, kennelTheme.accent),
-    colorAssertion(styledFrame, "reasoning label is muted", 6, 2, kennelTheme.textMuted),
-    colorAssertion(styledFrame, "reasoning prose stays muted", 7, 2, kennelTheme.textMuted),
-    colorAssertion(styledFrame, "reasoning line 2 stays muted", 8, 2, kennelTheme.textMuted),
-    colorAssertion(styledFrame, "reasoning line 3 stays muted", 9, 2, kennelTheme.textMuted),
-    colorAssertion(styledFrame, "reasoning line 4 stays muted", 10, 2, kennelTheme.textMuted),
+    colorAssertion(styledFrame, "user prompt marker uses primary", 0, 0, kennelTheme.primary, kennelTheme.backgroundPanel),
+    colorAssertion(styledFrame, "reasoning label is muted", 3, 2, kennelTheme.textMuted),
+    colorAssertion(styledFrame, "reasoning prose stays muted", 4, 2, kennelTheme.textMuted),
+    colorAssertion(styledFrame, "reasoning line 2 stays muted", 5, 2, kennelTheme.textMuted),
+    colorAssertion(styledFrame, "reasoning line 3 stays muted", 6, 2, kennelTheme.textMuted),
+    colorAssertion(styledFrame, "reasoning line 4 stays muted", 7, 2, kennelTheme.textMuted),
     colorAssertion(styledFrame, "context heading uses info", 0, 75, kennelTheme.info),
-    colorAssertion(styledFrame, "tool name uses secondary", 21, 4, kennelTheme.secondary),
-    colorAssertion(styledFrame, "tool outcome uses success", 21, 62, kennelTheme.success),
+    colorAssertion(styledFrame, "tool bullet uses success", 18, 0, kennelTheme.success),
+    colorAssertion(styledFrame, "tool verb uses text", 18, 2, kennelTheme.text),
+    colorAssertion(styledFrame, "tool outcome uses success", 18, 71, kennelTheme.success),
     colorAssertion(styledFrame, "mode pill uses primary background", 31, 2, kennelTheme.background, kennelTheme.primary),
   ]
   return [...assertions, ...positioned, ...colors]
@@ -516,13 +529,13 @@ function commandPaletteLayoutAssertions(
 ): readonly VisualAssertion[] {
   const palette = app.commandPalette
   return [
-    exactValueAssertion("modal begins at column 1", palette.x, 1),
-    exactValueAssertion("modal begins at row 2", palette.y, 2),
-    exactValueAssertion("modal is 108 cells wide", palette.width, 108),
-    exactValueAssertion("modal is 25 rows tall", palette.height, 25),
-    exactValueAssertion("list pane is 52 cells wide", palette.listPane.width, 52),
+    exactValueAssertion("palette begins at column 0", palette.x, 0),
+    exactValueAssertion("palette begins at row 0", palette.y, 0),
+    exactValueAssertion("palette fills primary width", palette.width, 110),
+    exactValueAssertion("palette reaches composer", palette.height, app.composer.y),
+    exactValueAssertion("list pane is 54 cells wide", palette.listPane.width, 54),
     exactValueAssertion("divider is one cell wide", palette.divider.width, 1),
-    exactValueAssertion("detail pane is 51 cells wide", palette.detailPane.width, 51),
+    exactValueAssertion("detail pane is 53 cells wide", palette.detailPane.width, 53),
     {
       name: "query value remains intact",
       passed: palette.input.value === "context",
@@ -787,7 +800,7 @@ function sessionReviewNarrowAssertions(
 }
 
 function mcpOcclusionAssertion(characterFrame: string): VisualAssertion {
-  const leaked = ["AGENTS", "▌ you", "● rottweiler", "\n╎"].filter((text) => characterFrame.includes(text))
+  const leaked = ["AGENTS", "› Add reconnect-safe", "● Edit core/cursor.rs", "\n╎"].filter((text) => characterFrame.includes(text))
   return {
     name: "MCP surface fully occludes prior conversation and context",
     passed: leaked.length === 0,
@@ -817,7 +830,7 @@ function unsupportedMcpClaimsAssertion(characterFrame: string): VisualAssertion 
 }
 
 function settingsOcclusionAssertion(characterFrame: string): VisualAssertion {
-  const leaked = ["AGENTS", "▌ you", "● rottweiler", "\n╎"].filter((text) => characterFrame.includes(text))
+  const leaked = ["AGENTS", "› Add reconnect-safe", "● Edit core/cursor.rs", "\n╎"].filter((text) => characterFrame.includes(text))
   return {
     name: "settings surface fully occludes prior conversation and context",
     passed: leaked.length === 0,

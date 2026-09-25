@@ -13,7 +13,6 @@ pub(super) async fn dispatch_message(
     command_meta: CommandMeta,
     content: String,
     attachments: Vec<Attachment>,
-    observed_turn: u64,
     respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
     context: DispatchContext<'_>,
 ) {
@@ -38,7 +37,6 @@ pub(super) async fn dispatch_message(
         super::command_job::start(
             command_meta,
             bound,
-            observed_turn,
             super::command_job::CommandReply::Direct(respond),
             DispatchContext {
                 state,
@@ -59,6 +57,7 @@ pub(super) async fn dispatch_message(
     } else if state.running.is_some()
         || state.pending_command.is_some()
         || state.pending_model_preparation.is_some()
+        || !state.deferred_controls.is_empty()
     {
         if state.queued.len() >= rw_types::session_state::MAX_SESSION_QUEUE_ITEMS {
             let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(

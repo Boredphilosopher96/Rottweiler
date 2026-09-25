@@ -94,9 +94,9 @@ pub use projection::{
 };
 use session::ActorState;
 pub use session::{
-    InitialSessionContext, PluginSessionBinding, PluginSessionCapability, SessionActor,
-    SessionActorConfig, SessionActorRecovery, SessionHandle, SessionSubscription,
-    StartupNotification,
+    InitialSessionContext, ModelSelectionPreferences, PluginSessionBinding,
+    PluginSessionCapability, SessionActor, SessionActorConfig, SessionActorRecovery, SessionHandle,
+    SessionSubscription, StartupNotification,
 };
 pub use session_extension::{
     NoopSessionExtensionController, SessionExtensionController, SessionExtensionSnapshot,
@@ -204,6 +204,25 @@ impl PreparedUserMessage {
     }
 }
 
+/// A real line diff with three lines of context. Unchanged lines stay context,
+/// hunk headers carry true line numbers, and a trailing newline never becomes
+/// a phantom removed or added line.
+pub(super) fn approval_unified_diff(
+    before_label: &str,
+    after_label: &str,
+    before: &str,
+    after: &str,
+) -> String {
+    let mut config = similar::TextDiff::configure();
+    config.timeout(std::time::Duration::from_millis(50));
+    config
+        .diff_lines(before, after)
+        .unified_diff()
+        .context_radius(3)
+        .header(before_label, after_label)
+        .to_string()
+}
+
 fn approval_diff(request: &PermissionRequest, preview: &ApprovalPreview) -> Option<UnifiedDiff> {
     let path = preview.path.to_str()?.to_owned();
     let before = match &preview.before {
@@ -216,11 +235,7 @@ fn approval_diff(request: &PermissionRequest, preview: &ApprovalPreview) -> Opti
     } else {
         "/dev/null".to_owned()
     };
-    let full_diff = format!(
-        "--- {before_label}\n+++ b/{path}\n@@ approved full-file change @@\n-{}\n+{}\n",
-        before.replace('\n', "\n-"),
-        after.replace('\n', "\n+")
-    );
+    let full_diff = approval_unified_diff(&before_label, &format!("b/{path}"), before, after);
     let arguments = serde_json::to_vec(&request.arguments).ok()?;
     let arguments_hash = blake3::hash(&arguments).to_hex().to_string();
     let mut base_hasher = blake3::Hasher::new();
@@ -516,6 +531,7 @@ pub enum MessageDisposition {
 /// Read-only actor state for tests and future persistence adapters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionSnapshot {
+    pub available_actions: Vec<rw_types::SessionActionAvailability>,
     pub conversation_turns: u64,
     pub resolved_model: Option<String>,
     pub queued_messages: Vec<String>,

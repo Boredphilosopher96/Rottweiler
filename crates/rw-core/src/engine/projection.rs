@@ -411,7 +411,8 @@ impl SessionProjector {
                 | PendingEvent::ConversationContextCommitted { .. } => {
                     return Err(SessionProjectionError::InvalidInput("unresolved input"));
                 }
-                PendingEvent::ProviderCallAccounted { .. } => {}
+                PendingEvent::ProviderCallAccounted { .. }
+                | PendingEvent::SessionControlQueueChanged { .. } => {}
                 PendingEvent::TurnStarted { turn } => {
                     active_tool_starts.clear();
                     active_turn = Some(*turn);

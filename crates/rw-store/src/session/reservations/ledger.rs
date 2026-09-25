@@ -101,8 +101,8 @@ pub struct BudgetLedger {
 }
 
 impl BudgetLedger {
-    /// Opens the current accounting authority. Turn-only history cannot
-    /// establish exact provider receipts and is refused without modification.
+    /// Opens the accounting authority, retaining turn-only history as dated
+    /// uncertainty for strict caps without preventing startup or uncapped calls.
     ///
     /// # Errors
     /// Returns storage, schema, or unresolved-history errors without deleting history.
@@ -411,6 +411,11 @@ fn admit(
                 )?,
             )?
         };
+        if matches!(plan.charge, BudgetChargeBound::Bounded(_))
+            && totals.0[projection::UNKNOWN] != 0
+        {
+            return Err(Error::UnresolvedCharge);
+        }
         let unit = projection::unit_index(charge);
         let used = totals.0[unit];
         let reserved = pending.0[unit];

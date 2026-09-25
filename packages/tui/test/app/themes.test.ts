@@ -96,7 +96,7 @@ describe("Rottweiler themes", () => {
     await setup.renderOnce()
     expect(app.picker.visible).toBeTrue()
     expectCoherentTheme(app, previewTheme)
-    expect(setup.captureCharFrame()).toContain("Modes")
+    expect(setup.captureCharFrame()).toContain("MODE")
   })
 
   test("keeps the active System theme and its picker preview synchronized with terminal mode", async () => {

@@ -141,6 +141,12 @@ fn resolve_context(
     use rw_types::conversation_input::ContextSelection;
     match selection {
         ContextSelection::Continuation {} => Ok(rw_context::auto_continue_turn()),
+        ContextSelection::ChildResult { source: finished } => {
+            let event = read_source(source, *finished, meta)?;
+            Ok(super::completions::child_result_turn(
+                super::completions::child_result_text(&event)?,
+            ))
+        }
         ContextSelection::PlanReview { source: review } => {
             if review.0.checked_add(1) != Some(meta.sequence_id.0) {
                 return Err(RecoveryError::Invalid(

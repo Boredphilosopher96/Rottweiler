@@ -148,11 +148,10 @@ async fn navigation_waits_for_command_settlement_and_is_revoked_by_driver_takeov
 }
 
 #[tokio::test]
-async fn builtin_navigation_uses_the_control_contract_and_rejects_unowned_or_future_requests() {
+async fn navigation_control_rejects_requests_without_an_active_command() {
     let root = tempfile::tempdir().expect("root");
     let callback = Arc::new(NavigateCallback::default());
     let handle = actor(root.path(), &callback).await;
-    let mut events = handle.subscribe().expect("events");
     assert!(
         callback
             .capability
@@ -169,29 +168,5 @@ async fn builtin_navigation_uses_the_control_contract_and_rejects_unowned_or_fut
             .await
             .is_err()
     );
-    handle
-        .send_message("/goto session selected-session")
-        .await
-        .expect("builtin session");
-    let mut found = false;
-    while let Ok(event) = events.receiver.try_recv() {
-        if let EngineEvent::SessionNavigationRequested { target, .. } = event.as_ref().clone() {
-            assert_eq!(
-                target,
-                SessionNavigationTarget::Session {
-                    session_id: rw_types::SessionId("selected-session".into())
-                }
-            );
-            found = true;
-        }
-    }
-    assert!(found);
-    for input in [
-        "/goto sequence 18446744073709551615",
-        "/goto sequence 00",
-        "/goto session ../foreign",
-    ] {
-        assert!(handle.send_message(input).await.is_err(), "reject {input}");
-    }
     handle.close().await.expect("close");
 }

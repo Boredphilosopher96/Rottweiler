@@ -12,7 +12,7 @@ use rw_providers::{
     OAuthAuthorizationCode, OAuthAuthorizationCodeConfig, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
     ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, Secret as ProviderSecret,
     default_models_path, guarded_http_fetch, openai_subscription_oauth_flow,
-    refresh_models_dev_with_proxy_auth,
+    refresh_models_dev_with_download_timeout,
 };
 use rw_store::{
     config::ConfigLoader,
@@ -139,16 +139,7 @@ impl ResolvedProviderApiKey {
 /// Returns a sanitized error when the provider name cannot safely form a
 /// credential identifier.
 pub fn default_provider_api_key_credential_id(provider_name: &str) -> Result<String, AdminError> {
-    if provider_name.is_empty()
-        || !provider_name.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-    {
-        return Err(AdminError::new(
-            "provider name must contain only ASCII letters, digits, '.', '-', or '_'",
-        ));
-    }
-    Ok(format!("providers.{provider_name}.api_key"))
+    rw_types::default_provider_api_key_credential_id(provider_name).map_err(AdminError::new)
 }
 
 /// Stores a provider API key in the configured credential identifier or the
@@ -245,6 +236,19 @@ pub async fn refresh_model_catalog(
     source: &str,
     output: Option<PathBuf>,
 ) -> Result<ModelCatalogRefresh, AdminError> {
+    refresh_model_catalog_with_download_timeout(source, output, None).await
+}
+
+/// Refreshes model metadata with an optional HTTP download deadline.
+/// The deadline never interrupts validation or publication of a completed download.
+///
+/// # Errors
+/// Returns configuration, transport, metadata, or installation errors.
+pub async fn refresh_model_catalog_with_download_timeout(
+    source: &str,
+    output: Option<PathBuf>,
+    download_timeout: Option<Duration>,
+) -> Result<ModelCatalogRefresh, AdminError> {
     let loader = ConfigLoader::from_environment().map_err(AdminError::from_display)?;
     let credentials_path = loader.credentials_path();
     let effective = loader.load().map_err(AdminError::from_display)?;
@@ -281,11 +285,12 @@ pub async fn refresh_model_catalog(
         (None, Vec::new())
     };
     warnings.extend(credential_warnings);
-    let report = refresh_models_dev_with_proxy_auth(
+    let report = refresh_models_dev_with_download_timeout(
         source,
         &output,
         &proxies,
         proxy_authentication.as_ref(),
+        download_timeout,
     )
     .await
     .map_err(AdminError::from_display)?;

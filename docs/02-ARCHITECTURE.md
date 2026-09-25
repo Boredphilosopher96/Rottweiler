@@ -361,8 +361,8 @@ Live model/provider discovery is the narrow display exception to provider-blind
 execution (ADR-019). The engine may project bounded concrete model ids and
 display names, capabilities, alias membership, availability/current selection,
 and provider rows containing only a display name, sanitized auth interaction
-kind, boolean auth/reachability state, and model count. This lets `/models`,
-`/providers`, and quick-connect flows work without teaching the TUI provider
+kind, boolean auth/reachability state, and model count. This lets `/model`
+selection, provider connection, and quick-connect flows work without teaching the TUI provider
 wire formats. Provider configuration, configured inference/token/discovery
 endpoints, proxy settings, credential references or values, account identifiers,
 raw transport errors, and route implementation details remain inside Rust.
@@ -434,7 +434,7 @@ Single-writer actor per session (tokio task owning session state; commands in vi
 
 1. Assemble context (`rw-context`): **prune runs here, deterministically** — the ADR-010 backward walk executes at the start of assembly (before the overflow check), and each erasure is persisted as a `ToolOutputPruned` event, so live context, `--resume`, `rw replay`, and golden transcripts always agree. User pins join the prune-protected set; user-evicted items count as already-pruned stop markers. Then: stable prefix → conversation → pending queued messages.
 2. Stream from router; forward deltas as events.
-3. On tool calls: permission check → hook `pre_tool` → (parallel where tools are read-only) execute → hook `post_tool` → results into next iteration. **Determinism rule**: regardless of completion order, tool events are *emitted and logged in tool-call index order* — parallelism is an execution detail, never visible in the event log, so golden-transcript replay stays byte-stable.
+3. On tool calls: permission check → hook `pre_tool` → (parallel where tools are read-only) execute → hook `post_tool` → results into next iteration. Calls are prepared (hooks, approval) one at a time in call order, and each launches as soon as scheduling allows, so an approval prompt for a later call never holds back earlier calls; no preparation starts while a mutation executes. **Determinism rule**: regardless of completion order, durable tool results are *logged in tool-call index order* — parallelism is an execution detail, never visible in the durable log, so golden-transcript replay stays byte-stable. The transient `tool_execution_finished` event reports each execution's end (outcome and time) immediately, so clients stop that row's clock before the ordered result arrives.
 4. Loop until no tool calls; fire `turn_end` hooks; reconcile usage/cost; check compaction threshold.
 
 Interrupt = cooperative cancellation token checked at every await point; partial output committed to the log with an `interrupted` marker.
@@ -470,7 +470,7 @@ evidence that a mode is usable in local or hosted production composition.
 
 ### Subagent orchestrator (`rw-core`)
 
-Subagent = a full child session with its own event log, restricted tool registry, its own context budget. Parent holds a handle; child events are re-broadcast to the parent's *client* tagged with the child id (TUI shows nested progress) — **display-only, never persisted in the parent's log**. The parent log contains exactly: the `spawn_agent` tool call, `SubagentSpawned`, and `SubagentFinished` + tool result, all in tool-call index order per the determinism rule — parallel children completing in any order cannot perturb it. `rw replay` re-derives nested progress only from child ids authenticated by those durable spawn events; child logs use the same no-symlink event-log boundary and replay has explicit depth, session-count, event-count, per-event, and aggregate-byte ceilings. Worktree isolation delegates to `git worktree` via `rw-sandbox` path rules.
+Subagent = a full child session with its own event log, restricted tool registry, its own context budget. Parent holds a handle; child events are re-broadcast to the parent's *client* tagged with the child id (TUI shows nested progress) — **display-only, never persisted in the parent's log**. Child lifecycle records always flow through the session-owned sink, independently of the originating tool call or turn: startup commits `SubagentSpawned` before the tool returns, and completion commits `SubagentFinished` through a bounded actor queue with one outstanding durable acknowledgement that remains available through cleanup after the last client handle is dropped. The journal sequence records observed asynchronous completion order for replay. A spawn beyond the concurrency limit is queued in FIFO order and starts when a slot frees; `list` reports queued, running, and idle children. Canonical recovery tracks each finished child spawned in the current model context as undelivered. Before every provider call, including later iterations of the running turn, the parent commits up to eight undelivered results as `ConversationContextCommitted { child_result }` selections of their `SubagentFinished` source; each becomes a user-role `<child-agent-result>` conversation turn rendered identically live and on recovery (report bounded to 12 KiB, changed files, diff artifact id). That commit is the delivery record, so a result reaches the model exactly once and a restart never repeats it; a second commit of one source is rejected as corrupt history. Foreground calls (`background: false`, `wait`) return only status and never carry the report themselves. A background completion wakes an idle parent that has nothing queued: the actor starts a turn with no user input, whose first provider call receives the results; the live wake state starts empty after recovery, so restarts never start unsolicited turns. An interrupt clears a pending wake. Moving a foreground child to the background releases every tool call waiting on it; its later completion wakes the parent. Context clearing drops undelivered results, and rewind drops results of children spawned in discarded turns. Completion remains associated with its spawning invocation across unrelated parent-turn rewinds. Only a running Execute-mode child sharing the parent workspace holds the workspace lock; worktree and read-only children never block parent mutations or idle-only commands. Session cleanup cancels every running retained child, waits for durable completion, then stops live child actors while preserving continuation metadata and worktree leases. Only explicit child close permanently removes continuation identity. `rw replay` re-derives nested progress only from child ids authenticated by those durable spawn events; child logs use the same no-symlink event-log boundary and replay has explicit depth, session-count, event-count, per-event, and aggregate-byte ceilings. Worktree isolation delegates to `git worktree` via `rw-sandbox` path rules.
 
 ### Router (`rw-providers`)
 
@@ -887,3 +887,43 @@ startup and writes never scan or materialize lifetime request metadata. Profile
 JSON is admitted at 4 MiB encoded and 16 MiB decoded before typed allocation.
 Direct profile decoding charges actual object/array structure and typed fields;
 scalar values do not each receive an unrelated map allocation charge.
+
+### Session action availability and deferred controls
+
+The command catalog includes a bounded `available_actions` projection for model
+selection, agent mode selection, manual compaction, rewind, review, fork,
+workspace-root additions, and context mutations. Only the first three controls
+queue; idle-only actions report active turns, shells, children, and pending
+selection/control ownership. Context inspection remains available while pin and
+eviction controls use the mutation projection. The actor computes these
+entries from its readiness policy; the host adds the requesting client's driver
+restriction for mutations; read-only review remains available to observers when idle. A non-null `unavailable_reason` disables an action while retaining
+its details. `queued` identifies controls that will wait for the current work.
+The palette refreshes this advisory projection on opening and session control
+changes; admission always rechecks authority and inputs. Missing metadata in an
+older reply means unknown availability, never implicit permission.
+
+A separate queue owns at most eight typed controls, preserving their original
+request and client identities. It is not part of the prompt-message queue.
+Compaction instructions are redacted and bounded to 4 KiB; model, provider, and
+mode identities have explicit bounds. A durable `session_control_queue_changed`
+event records the bounded queue and any correlated applied, failed, or cancelled
+settlement. The session snapshot exposes pending controls for reconnect.
+
+At an idle boundary, the actor processes controls in order before queued prompt
+messages. Each control passes the normal admission and model preparation path
+again. Model switches retain ownership through a context-transfer question and
+its resulting preparation or compaction. Manual compaction settles only after
+its actual completion result. Hosted model controls save their project and user
+defaults through an actor-owned preference sink before reporting applied. A
+save failure reports that the active model changed but its default was not saved.
+Losing the driver lease or closing the session
+cancels pending controls. Cancellation of a model switch also retires its own
+context-transfer question through the same durable settlement.
+
+Recovery selects the last authoritative queue snapshot. A control that was
+already marked running is cancelled rather than executed again: a crash may
+have occurred after its effect committed but before its settlement. Pending
+controls revalidate their owner and live state before execution. Recovery pauses
+and unfinished model-transfer questions prevent both control draining and
+queued prompt execution.

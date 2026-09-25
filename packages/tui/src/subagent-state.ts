@@ -99,3 +99,35 @@ export function childPassiveInteractionState(state: RottweilerState): Rottweiler
     pendingPlan: null,
   }
 }
+
+/**
+ * Child that a running foreground `spawn_agent` call is blocked on: the
+ * first still-running id of a `wait`, or the child a `background: false`
+ * spawn started in the same turn. Only this child can be moved to the
+ * background, so clients offer that action exactly when this is non-null.
+ */
+export function foregroundSubagentId(state: RottweilerState): string | null {
+  for (const tool of Object.values(state.tools)) {
+    if (tool.name !== "spawn_agent" || tool.status !== "running") continue
+    const args = tool.args
+    if (typeof args !== "object" || args === null || Array.isArray(args)) continue
+    const action = (args as Record<string, unknown>).action
+    if (action === "wait") {
+      const ids = (args as Record<string, unknown>).ids
+      if (!Array.isArray(ids)) continue
+      const id = ids.find((candidate): candidate is string =>
+        typeof candidate === "string" && state.subagents[candidate]?.status === "running")
+      if (id !== undefined) return id
+    } else if (action === "spawn" && (args as Record<string, unknown>).background === false) {
+      const startedAtMs = tool.timing.kind === "unknown" ? null : tool.timing.startedAtMs
+      const key = state.subagentOrder.findLast((candidate) => {
+        const subagent = state.subagents[candidate]
+        return subagent !== undefined && subagent.projectionId === subagent.subagentId &&
+          subagent.status === "running" && subagent.parentTurnId === tool.turnId &&
+          (startedAtMs === null || subagent.spawnedAtMs === null || subagent.spawnedAtMs >= startedAtMs)
+      })
+      if (key !== undefined) return key
+    }
+  }
+  return null
+}

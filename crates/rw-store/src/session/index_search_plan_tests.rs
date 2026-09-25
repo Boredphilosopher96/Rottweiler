@@ -46,7 +46,7 @@ fn rejected_candidates_stop_at_the_budget_without_returning_false_truncation() {
                     id: format!("candidate-{ordinal}"),
                     title: "needle".into(),
                     updated_unix_ms: 1,
-                    cost_micros: 0,
+                    first_prompt: None,
                     turn_count: 0,
                 },
                 explicit_title: true,

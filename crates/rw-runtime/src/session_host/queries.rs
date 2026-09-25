@@ -160,8 +160,33 @@ impl HostQueryService for RuntimeSessionFactory {
                 description: descriptor.description().to_owned(),
                 usage: descriptor.argument_hint().unwrap_or_default().to_owned(),
                 source: rw_core::CommandSource::default(),
+                scope: None,
             })
             .collect())
+    }
+
+    async fn extension_inventory(
+        &self,
+        session: &SessionDescriptor,
+    ) -> Result<rw_types::ExtensionInventory, HostError> {
+        let roots = self.workspace_roots_for_session(session).await?;
+        let trust_path = self.options.storage_root.join("trust.json");
+        let (user_home, user_rottweiler) =
+            crate::session_runtime::extension_user_roots(&self.options.credentials_path);
+        let dangerously_trust = self.options.dangerously_trust;
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            crate::session_runtime::discover_runtime_extensions(
+                &roots,
+                &trust_path,
+                &user_home,
+                &user_rottweiler,
+                dangerously_trust,
+            )
+            .map(|catalog| crate::session_runtime::extension_inventory(&catalog, None))
+        })
+        .await
+        .map_err(|_| HostError::Query("extension inventory worker failed".to_owned()))?
+        .map_err(|error| HostError::Query(error.to_string()))
     }
 
     async fn model_catalog(
@@ -386,6 +411,20 @@ impl HostQueryService for RuntimeSessionFactory {
         }
     }
 
+    async fn configure_compatible_provider(
+        &self,
+        configuration: &rw_types::CompatibleProviderSetup,
+    ) -> Result<(), HostError> {
+        let loader = self.settings_loader();
+        let configuration = configuration.clone();
+        rw_resources::run_blocking(rw_resources::ResourceClass::Blocking, move || {
+            loader.configure_compatible_provider(&configuration)
+        })
+        .await
+        .map_err(|_| HostError::Persistence("provider setup worker failed".into()))?
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
+        Ok(())
+    }
     async fn configure_builtin_provider(
         &self,
         profile: rw_core::BuiltinProviderProfile,

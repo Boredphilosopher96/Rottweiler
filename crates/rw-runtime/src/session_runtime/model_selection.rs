@@ -1,8 +1,11 @@
+mod context_limits;
+
 use super::model_effects;
 use super::provider_activation::ActivatedHostedProvider;
 use super::provider_activation::HostedProviderActivator;
 use super::provider_activation::HostedRuntimeInitializer;
 use async_trait::async_trait;
+use context_limits::CatalogContextLimits;
 use miette::Result;
 use rw_core::AgentLoopError;
 use rw_core::ModelCatalogError;
@@ -39,6 +42,7 @@ pub(super) struct RecomposableHostedModel {
     pub(super) activation: tokio::sync::Mutex<()>,
     pub(super) activation_deadline: Duration,
     pub(super) activation_inflight: Arc<AtomicBool>,
+    pub(super) context_limits: CatalogContextLimits,
 }
 
 #[derive(Clone)]
@@ -109,6 +113,13 @@ impl RecomposableHostedModel {
         )
     }
 
+    /// Seeds context limits from the private durable catalog cache on first use.
+    #[must_use]
+    pub(super) fn with_catalog_cache(mut self, catalog_cache: std::path::PathBuf) -> Self {
+        self.context_limits = CatalogContextLimits::new(Some(catalog_cache));
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn with_deadline(
         inner: Arc<dyn ModelDriver>,
@@ -152,6 +163,7 @@ impl RecomposableHostedModel {
             activation: tokio::sync::Mutex::new(()),
             activation_deadline,
             activation_inflight: Arc::new(AtomicBool::new(false)),
+            context_limits: CatalogContextLimits::new(None),
         }
     }
 
@@ -321,14 +333,18 @@ impl ModelCatalogSource for RecomposableHostedModel {
     }
 
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
-        self.catalog.discover().await
+        let snapshot = self.catalog.discover().await?;
+        self.context_limits.record(&snapshot);
+        Ok(snapshot)
     }
 
     async fn discover_provider(
         &self,
         provider: &str,
     ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
-        self.catalog.discover_provider(provider).await
+        let snapshot = self.catalog.discover_provider(provider).await?;
+        self.context_limits.record(&snapshot);
+        Ok(snapshot)
     }
 }
 
@@ -370,7 +386,18 @@ impl ModelDriver for RecomposableHostedModel {
     }
 
     fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
-        self.current().context_metadata(alias)
+        // The selected model's window is catalog metadata, not a property of
+        // whether its lazy runtime has been built yet. Resolve it the same way
+        // before, during, and after a provider request; see
+        // `context_limits::authoritative` for the order.
+        context_limits::authoritative(
+            self.context_limits.resolve(alias),
+            self.current().context_metadata(alias),
+        )
+    }
+
+    fn needs_initial_preparation(&self) -> bool {
+        self.initial_load_pending.load(Ordering::Acquire)
     }
 
     fn has_model_alias(&self, alias: &str) -> bool {
@@ -485,6 +512,9 @@ impl ModelDriver for RecomposableHostedModel {
         _selected_model: Option<&str>,
     ) -> std::result::Result<(), AgentLoopError> {
         let _activation = self.activation.lock().await;
+        // Discovery refreshes metadata before the private generation captures it.
+        // Failure leaves offline metadata usable; activation still owns readiness.
+        let _ = self.catalog.discover_provider(provider).await;
         let activate = Arc::clone(&self.activate);
         let provider = provider.to_owned();
         let activation_provider = provider.clone();

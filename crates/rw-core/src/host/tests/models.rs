@@ -110,7 +110,7 @@ async fn model_switch_persistence_failure_is_visible_after_the_session_commit() 
     );
     assert!(matches!(
         host.dispatch(
-            driver,
+            driver.clone(),
             ClientCommand::SwitchModel {
                 meta: meta("spoofed", "switch"),
                 session_id: session_id.clone(),
@@ -140,6 +140,15 @@ async fn model_switch_persistence_failure_is_visible_after_the_session_commit() 
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
+    );
+    assert!(
+        matches!(host.dispatch(driver, ClientCommand::SwitchModel {
+        meta: meta("spoofed", "retry-same-model"),
+        session_id,
+        model: ModelAlias("big".into()),
+        provider: None,
+    }).await.outcome, CommandOutcome::Rejected { error } if error.code == "host_query_failure"),
+        "selecting the already active model must retry the failed preference write"
     );
 }
 

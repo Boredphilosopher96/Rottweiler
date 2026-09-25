@@ -204,17 +204,11 @@ pub(super) async fn execute_prepared_tool(
         PreparedToolCall::Complete(execution) => return (execution, false),
     };
     if !matches!(mutation_scope, MutationScope::None)
-        && runtime
-            .tools
-            .session_activity(&runtime.session_id)
-            .is_some()
         && !background_control_call(&semantics, &arguments)
+        && let Some(activity) = runtime.tools.session_activity(&runtime.session_id)
     {
         return (
-            failed_execution(
-                call,
-                "workspace mutation is blocked while a background shell process is running",
-            ),
+            failed_execution(call, activity.blocked("workspace mutation")),
             false,
         );
     }
@@ -293,6 +287,7 @@ pub(super) async fn execute_prepared_tool(
         Ok(())
     };
     let execution_request = PermissionRequest {
+        prompt_reason: None,
         id: call.id.clone(),
         invocation_id: call.invocation_id.clone(),
         tool_name: call.name.clone(),

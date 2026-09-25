@@ -186,6 +186,20 @@ impl Drop for CallerCancellation {
 struct StartupReply {
     result: Result<SubagentHandle, OrchestrationError>,
     claim: Option<oneshot::Sender<()>>,
+    /// A failed startup whose parent lifecycle was never published.
+    unpublished: bool,
+}
+
+/// Running-turn permit plus startup admission for one child.
+pub(super) struct Slots {
+    permit: OwnedSemaphorePermit,
+    admission: OwnedSemaphorePermit,
+}
+
+/// A startup failure and whether the parent never saw its lifecycle.
+pub(super) struct StartFailure {
+    pub(super) error: OrchestrationError,
+    pub(super) unpublished: bool,
 }
 
 impl SubagentOrchestrator {
@@ -198,6 +212,7 @@ impl SubagentOrchestrator {
     }
 
     /// Starts a child while retaining ownership through cancellation and receipt delivery.
+    /// When every concurrency slot is busy, waits for one to free.
     ///
     /// # Errors
     /// Returns validation, admission, factory, observer or cleanup failures.
@@ -208,21 +223,59 @@ impl SubagentOrchestrator {
         observer: Arc<dyn SubagentObserver>,
         cancellation: CancellationToken,
     ) -> Result<SubagentHandle, OrchestrationError> {
-        let admission = Arc::clone(&self.inner.startups.admission)
-            .try_acquire_owned()
-            .map_err(|_| OrchestrationError::ConcurrencyExceeded {
-                maximum: self.inner.limits.max_concurrency,
-            })?;
-        let permit = Arc::clone(&self.inner.permits)
-            .try_acquire_owned()
-            .map_err(|_| OrchestrationError::ConcurrencyExceeded {
-                maximum: self.inner.limits.max_concurrency,
-            })?;
-        let retained = Arc::clone(&self.inner.retained)
+        let launch = self.prepare_launch(parent_session_id, request, cancellation.clone())?;
+        let retained = self.retain()?;
+        let slots = self
+            .acquire_slots(&cancellation)
+            .await
+            .ok_or_else(|| OrchestrationError::Session("child startup cancelled".to_owned()))?;
+        self.start_admitted(launch, observer, cancellation, slots, retained)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(super) fn retain(&self) -> Result<OwnedSemaphorePermit, OrchestrationError> {
+        Arc::clone(&self.inner.retained)
             .try_acquire_owned()
             .map_err(|_| OrchestrationError::RetainedCapacityExceeded {
                 maximum: super::MAX_RETAINED_SUBAGENTS,
-            })?;
+            })
+    }
+
+    /// Claims a free running slot without waiting.
+    pub(super) fn try_slots(&self) -> Option<Slots> {
+        let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok()?;
+        let admission = Arc::clone(&self.inner.startups.admission)
+            .try_acquire_owned()
+            .ok()?;
+        Some(Slots { permit, admission })
+    }
+
+    /// Waits in FIFO order for a running slot; `None` when cancelled first.
+    pub(super) async fn acquire_slots(&self, cancellation: &CancellationToken) -> Option<Slots> {
+        let acquire = async {
+            let permit = Arc::clone(&self.inner.permits).acquire_owned().await.ok()?;
+            let admission = Arc::clone(&self.inner.startups.admission)
+                .acquire_owned()
+                .await
+                .ok()?;
+            Some(Slots { permit, admission })
+        };
+        tokio::select! {
+            slots = acquire => slots,
+            () = cancellation.cancelled() => None,
+        }
+    }
+
+    pub(super) async fn start_admitted(
+        &self,
+        launch: SubagentLaunch,
+        observer: Arc<dyn SubagentObserver>,
+        cancellation: CancellationToken,
+        slots: Slots,
+        retained: OwnedSemaphorePermit,
+    ) -> Result<SubagentHandle, StartFailure> {
+        let Slots { permit, admission } = slots;
         let metadata = self
             .inner
             .metadata
@@ -244,38 +297,34 @@ impl SubagentOrchestrator {
         let (send, receive) = oneshot::channel();
         tokio::spawn(async move {
             owner
-                .own_startup(
-                    parent_session_id,
-                    request,
-                    cancellation,
-                    child,
-                    admission,
-                    send,
-                )
+                .own_startup(launch, cancellation, child, admission, send)
                 .await;
         });
-        let mut response = receive
-            .await
-            .map_err(|_| OrchestrationError::Session("child startup owner stopped".to_owned()))?;
+        let mut response = receive.await.map_err(|_| StartFailure {
+            error: OrchestrationError::Session("child startup owner stopped".to_owned()),
+            unpublished: false,
+        })?;
         if let Some(claim) = response.claim.take() {
             let _ = claim.send(());
         }
         caller.0 = None;
-        response.result
+        let unpublished = response.unpublished;
+        response
+            .result
+            .map_err(|error| StartFailure { error, unpublished })
     }
 
     async fn own_startup(
         &self,
-        parent: SessionId,
-        request: SubagentRequest,
+        launch: SubagentLaunch,
         cancellation: CancellationToken,
         mut child: ChildStartup,
         admission: OwnedSemaphorePermit,
         send: oneshot::Sender<StartupReply>,
     ) {
+        let parent = launch.parent_session_id.clone();
         let result = AssertUnwindSafe(self.start_owned(
-            parent.clone(),
-            request,
+            launch,
             Arc::clone(&child.observer),
             cancellation.clone(),
             &mut child,
@@ -293,6 +342,7 @@ impl SubagentOrchestrator {
                 let _ = send.send(StartupReply {
                     result: Ok(handle.clone()),
                     claim: Some(claim),
+                    unpublished: false,
                 });
                 if claimed.await.is_ok() {
                     Ok(())
@@ -312,6 +362,7 @@ impl SubagentOrchestrator {
                 }
             }
             Err(error) => {
+                let unpublished = matches!(child.publication, SpawnPublication::Unattempted);
                 let settled =
                     AssertUnwindSafe(child.cleanup(self.inner.limits, &error.to_string()))
                         .catch_unwind()
@@ -333,6 +384,7 @@ impl SubagentOrchestrator {
                 let _ = send.send(StartupReply {
                     result: Err(response),
                     claim: None,
+                    unpublished,
                 });
                 settled
             }

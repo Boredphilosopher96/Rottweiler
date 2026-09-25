@@ -1,4 +1,5 @@
 import { TextRenderable } from "./text"
+import { boundedSubagents, orderedSubagents } from "./agents-strip"
 import { statusContext } from "../state/context-usage"
 import {
   BoxRenderable,
@@ -10,9 +11,12 @@ import {
   type RenderContext
 } from "@opentui/core"
 import {
+  formatKnownCost,
   formatStatusContext,
-  formatStatusSessionCost
+  formatKnownSessionCost
 } from "../render"
+import { shortTask } from "../render/child-result"
+import type { WorkspaceChangeKind } from "../protocol"
 import type { RottweilerState } from "../state"
 import type { RottweilerTheme } from "../theme"
 
@@ -24,9 +28,9 @@ export interface ContextPanelCallbacks {
 
 const MAX_SIDEBAR_CHANGED_FILES = 128
 
-function contextPanelInputs(state: RottweilerState) {
+function contextPanelInputs(state: RottweilerState, agentNames: string): readonly unknown[] {
   return [state.subagentOrder, state.subagents, state.todos, state.mcpServers,
-  state.runtimeServices, state.review, state.workspaceStatus, state.context, state.contextUsage, state.cost, state.provider]
+  state.runtimeServices, state.review, state.workspaceStatus, state.context, state.contextUsage, state.cost, state.provider, agentNames]
 }
 
 export class ContextPanelRenderable extends BoxRenderable {
@@ -46,12 +50,12 @@ export class ContextPanelRenderable extends BoxRenderable {
   readonly #theme: RottweilerTheme
   #agentIds: readonly string[] = []
   #changedPaths: readonly string[] = []
-  #activeAgentCount = 0
+  #agentCount = 0
   #activeMcpCount = 0
   #activeServiceCount = 0
   #retryTodos = false
   #showSession = false
-  #previousInputs: ReturnType<typeof contextPanelInputs> | null = null
+  #previousInputs: readonly unknown[] | null = null
 
   override destroy(): void {
     this.#previousInputs = null; this.#agentIds = []; this.#changedPaths = []
@@ -242,24 +246,26 @@ export class ContextPanelRenderable extends BoxRenderable {
     this.add(this.runtimeServices)
   }
 
-  update(state: RottweilerState): void {
-    const inputs = contextPanelInputs(state)
+  /** `agentName` resolves a child's agent definition name from the session catalog. */
+  update(state: RottweilerState, agentName: (subagentId: string) => string | null = () => null): void {
+    const agents = boundedSubagents(orderedSubagents(state))
+    const names = agents.map(agent => agentName(agent.subagentId) ?? "agent")
+    const inputs = contextPanelInputs(state, names.join("\n"))
     const previous = this.#previousInputs
     if (previous !== null && inputs.every((value, index) => value === previous[index])) return
     this.#previousInputs = inputs
-    const activeAgents = state.subagentOrder
-      .map((subagentId) => state.subagents[subagentId])
-      .filter((subagent): subagent is NonNullable<typeof subagent> =>
-        subagent !== undefined && subagent.status === "running")
-    this.#agentIds = activeAgents.map((subagent) => subagent.subagentId)
-    this.#activeAgentCount = activeAgents.length
+    const running = agents.filter(agent => agent.status === "running").length
+    this.#agentIds = agents.map(agent => agent.subagentId)
+    this.#agentCount = agents.length
     this.agentsTitle.content = panelHeading(
-      this.#theme,
-      "AGENTS",
-      activeAgents.length === 0 ? "" : `${activeAgents.length} running`,
+      this.#theme, "AGENTS", agents.length === 0 ? "" : `${running} running${agents.length > running ? ` · ${agents.length - running} finished` : ""}`,
     )
-    this.agents.options = activeAgents.map((subagent) => ({
-      name: `${subagentStatusGlyph(subagent.status)} ${subagent.subagentId}  ${subagent.activity ?? subagent.task}`,
+    this.agents.options = agents.map((subagent, index) => ({
+      name: [
+        `${subagentStatusGlyph(subagent.status)} ${names[index]}`,
+        shortTask(subagent.task),
+        ...optional(formatKnownCost(subagent.cost)),
+      ].join(" · "),
       description: "",
       value: subagent.subagentId,
     }))
@@ -309,12 +315,14 @@ export class ContextPanelRenderable extends BoxRenderable {
     this.#activeServiceCount = activeServices.length
 
     const reviewPaths = state.review?.files.map((file) => file.path) ?? []
-    const statusPaths = state.workspaceStatus?.changedPaths
-    const changed = statusPaths === undefined ? null : new Set(statusPaths)
+    const changes = state.workspaceStatus?.changes
+    const kinds = new Map(changes?.map((change) => [change.path, change.kind]))
+    // Session edits lead, but once Git has answered only paths it still
+    // reports as changed are listed; ignored files never are.
     const candidates =
-      statusPaths === undefined
+      changes === undefined
         ? reviewPaths
-        : [...reviewPaths.filter((path) => changed?.has(path) === true), ...statusPaths]
+        : [...reviewPaths.filter((path) => kinds.has(path)), ...changes.map((change) => change.path)]
     const seen = new Set<string>()
     this.#changedPaths = candidates
       .filter((path) => {
@@ -326,7 +334,7 @@ export class ContextPanelRenderable extends BoxRenderable {
     this.changedFiles.options =
       this.#changedPaths.length === 0
         ? [{ name: "○ No changed files", description: "", value: "" }]
-        : this.#changedPaths.map((path) => ({ name: `M ${path}`, description: "", value: path }))
+        : this.#changedPaths.map((path) => ({ name: `${changeLetter(kinds.get(path))} ${path}`, description: "", value: path }))
     this.changedTitle.content = panelHeading(
       this.#theme,
       "CHANGED",
@@ -339,9 +347,7 @@ export class ContextPanelRenderable extends BoxRenderable {
     const cache = state.cost === null
       ? "—"
       : `${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
-    const cost = state.cost === null
-      ? "—"
-      : formatStatusSessionCost(state.cost, state.provider, statusContext(state)?.used_tokens ?? null)
+    const cost = formatKnownSessionCost(state.cost) ?? "—"
     this.session.content = t`${fg(this.#theme.textMuted)("ctx    ")}${fg(this.#theme.text)(context.replace(/^ctx\s*/i, ""))}\n${fg(this.#theme.textMuted)("cache  ")}${fg(this.#theme.success)(cache)}\n${fg(this.#theme.textMuted)("spend  ")}${fg(this.#theme.text)(cost)}`
     this.#layoutSectionHeights()
   }
@@ -353,11 +359,11 @@ export class ContextPanelRenderable extends BoxRenderable {
   #layoutSectionHeights(): void {
     const rows = Math.max(1, this.height || this.ctx.height)
     this.gap = 0
-    let showAgents = this.#activeAgentCount > 0
+    let showAgents = this.#agentCount > 0
     let showSession = this.#showSession
     let showMcp = this.#activeMcpCount > 0
     let showServices = this.#activeServiceCount > 0
-    let agentRows = showAgents ? Math.min(3, this.#activeAgentCount) : 0
+    let agentRows = showAgents ? Math.min(3, this.#agentCount) : 0
     let todoRows = Math.max(1, Math.min(4, this.todos.options.length))
     let changedRows = Math.max(1, Math.min(4, this.changedFiles.options.length))
     let sessionRows = showSession ? 3 : 0
@@ -473,5 +479,21 @@ function todoGlyph(status: RottweilerState["todos"]["snapshot"]["items"][number]
       return "✓"
     case "blocked":
       return "!"
+  }
+}
+
+function optional(value: string | null): string[] {
+  return value === null ? [] : [value]
+}
+
+/** Git's one-letter status; session edits known before Git answers are `M`. */
+function changeLetter(kind: WorkspaceChangeKind | undefined): string {
+  switch (kind) {
+    case "added": return "A"
+    case "deleted": return "D"
+    case "renamed": return "R"
+    case "untracked": return "?"
+    case "conflicted": return "U"
+    case "modified": case undefined: return "M"
   }
 }

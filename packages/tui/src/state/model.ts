@@ -1,4 +1,5 @@
 import { emptyRecovery, type RecoveryProjection } from "./recovery"
+import type { ExtensionArtifactScope } from "../../../../protocol/types"
 import { emptyControlFence, type ControlFence } from "./controls"
 import { citationBytes } from "./live-admission"
 import type { ToolDisplay } from "./tool-display"
@@ -34,6 +35,7 @@ import type {
   TurnStatus,
   UnifiedDiff,
   Usage,
+  WorkspaceChange,
 } from "../protocol"
 
 export type ContextUsageProjection = Pick<ContextSnapshot, "through" | "turn_id" | "stable_prefix_hash" | "used_tokens" | "usable_tokens" | "reserved_tokens" | "context_window_known" | "context_window_reason">
@@ -130,7 +132,11 @@ export interface TurnProjection {
   readonly timing: ActivityTimingProjection
 }
 
-export type ToolStatus = "running" | "awaiting_approval" | "finished"
+/**
+ * `completed`: execution ended (outcome and duration known) but the durable
+ * result, which parallel batches commit in call order, has not arrived yet.
+ */
+export type ToolStatus = "running" | "awaiting_approval" | "completed" | "finished"
 
 export interface ToolProjection {
   /** Provider correlation is absent from source-backed running previews until a lifecycle/control payload supplies it. */
@@ -166,6 +172,7 @@ export interface SubagentProjection {
   readonly activity: string | null
   readonly summary: string | null
   readonly touchedFileCount: number
+  readonly cost?: Cost
   readonly diffArtifactId: string | null
 }
 
@@ -225,6 +232,16 @@ export interface SessionChoice {
   readonly model: string
   readonly driverClientId: string | null
   readonly shellActive: boolean
+  /** Recorded history; null until the engine's session index has projected it. */
+  readonly activity: SessionActivityProjection | null
+}
+
+export interface SessionActivityProjection {
+  readonly updatedUnixMs: number
+  readonly turnCount: number
+  readonly firstPrompt: string | null
+  /** Lifetime USD spend in micro-dollars, when every entry is priced. */
+  readonly costMicrosUsd: number | null
 }
 
 export type ReviewFileStatus = "pending" | "accepted" | "reverted"
@@ -261,6 +278,8 @@ export interface CommandChoice {
   readonly description: string
   readonly usage: string
   readonly source?: CommandSource
+  /** Discovery scope of a declarative command or skill. */
+  readonly scope?: ExtensionArtifactScope | null
 }
 
 export interface ModeChoice {
@@ -280,6 +299,8 @@ export interface ModelChoice {
   readonly vision: boolean
   readonly thinking: boolean
   readonly toolCalling: boolean
+  /** Provider-reported context window; null when the provider does not publish one. */
+  readonly contextTokens: string | null
 }
 
 export interface ModelAliasChoice {
@@ -339,7 +360,8 @@ export interface WorkspacePreviewProjection {
 export interface WorkspaceStatusProjection {
   readonly workspaceName: string
   readonly branch: string | null
-  readonly changedPaths: readonly string[]
+  /** Git changes, untracked files included and ignored files omitted. */
+  readonly changes: readonly WorkspaceChange[]
   readonly truncated: boolean
 }
 
@@ -397,11 +419,17 @@ export interface RottweilerState {
   readonly compaction: CompactionProjection
   readonly budgets: readonly BudgetProjection[]
   readonly errors: readonly EngineError[]
+  readonly errorHistory: readonly import("./errors").ErrorHistoryEntry[]
+  readonly commandCatalogLoaded: boolean
+  readonly mcpCatalogLoaded: boolean
   readonly protocol: ProtocolProjection
   readonly sessions: readonly SessionChoice[]
   readonly sessionSearch: SessionSearchProjection | null
   readonly review: SessionReviewProjection | null
   readonly lastFork: SessionForkProjection | null
+  readonly queuedControls: readonly import("../protocol").QueuedSessionControl[]
+  readonly lastControlSettlement: import("../protocol").SessionControlSettlement | null
+  readonly availableActions: readonly import("../protocol").SessionActionAvailability[]
   readonly commands: readonly CommandChoice[]
   readonly commandsTruncated: boolean
   readonly modes: readonly ModeChoice[]
@@ -471,6 +499,9 @@ export function createInitialState(): RottweilerState {
     },
     budgets: [],
     errors: [],
+    errorHistory: [],
+    commandCatalogLoaded: false,
+    mcpCatalogLoaded: false,
     protocol: {
       duplicateEvents: 0,
       invalidEvents: 0,
@@ -479,6 +510,9 @@ export function createInitialState(): RottweilerState {
     sessionSearch: null,
     review: null,
     lastFork: null,
+    queuedControls: [],
+    lastControlSettlement: null,
+    availableActions: [],
     commands: [],
     commandsTruncated: false,
     modes: [],

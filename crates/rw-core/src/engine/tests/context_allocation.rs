@@ -164,7 +164,7 @@ async fn checked_working_growth_precedes_normalization_and_retains_cache_high_wa
         large < 64 * 1024 * 1024,
         "small work must not reserve the128MiB ceiling"
     );
-    assert_eq!(requests.lock().expect("requests")[0], 64 * 1024 + 512);
+    assert_eq!(requests.lock().expect("requests")[0], 320 * 1024 + 512);
     assert_eq!(
         working.normalizations(),
         0,

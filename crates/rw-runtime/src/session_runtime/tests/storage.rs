@@ -255,6 +255,11 @@ fn durable_generated_title_overrides_prompt_fallback_in_the_session_index() {
     std::fs::write(&path, b"fixture").expect("event file");
     let projection = project_session(session_id, &events, &path);
     assert_eq!(projection.summary.title, "Repository Architecture Review");
+    assert_eq!(
+        projection.summary.first_prompt.as_deref(),
+        Some("please inspect everything in this repo"),
+        "an explicit title keeps the first prompt available for details"
+    );
 
     SessionIndex::open(&storage)
         .expect("index")
@@ -269,6 +274,55 @@ fn durable_generated_title_overrides_prompt_fallback_in_the_session_index() {
             .title,
         "Repository Architecture Review"
     );
+}
+
+#[test]
+fn session_index_first_prompt_is_bounded_and_cleared_by_a_full_rewind() {
+    let session_id = "session-first-prompt";
+    let event_meta = |sequence| EventMeta {
+        protocol_version: SESSION_EVENT_VERSION,
+        session_id: SessionId(session_id.to_owned()),
+        sequence_id: SequenceId(sequence),
+        emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+        caused_by: None,
+    };
+    let accepted = |sequence, agent_turn, content: String| EngineEvent::UserMessageAccepted {
+        meta: event_meta(sequence),
+        agent_turn,
+        content,
+        attachments: Vec::new(),
+    };
+    let fixture = tempdir().expect("fixture");
+    let path = fixture.path().join("projection-fixture");
+    std::fs::write(&path, b"fixture").expect("event file");
+    let long = format!("  fix\n\n{}", "x".repeat(600));
+    let projection = project_session(
+        session_id,
+        &[
+            accepted(0, 1, long),
+            accepted(1, 2, "second prompt".to_owned()),
+        ],
+        &path,
+    );
+    let first = projection.summary.first_prompt.expect("first prompt");
+    assert!(first.starts_with("fix x"));
+    assert!(first.ends_with('…'));
+    assert_eq!(first.chars().count(), 481);
+    assert_eq!(projection.summary.turn_count, 2);
+
+    let mut rewound = project_session(session_id, &[accepted(0, 1, "discarded".to_owned())], &path);
+    for event in [
+        EngineEvent::ConversationRewound {
+            meta: event_meta(1),
+            to_agent_turn: 0,
+            operation_id: "rewind".to_owned(),
+            unrestorable_paths: Vec::new(),
+        },
+        accepted(2, 1, "kept".to_owned()),
+    ] {
+        crate::session_runtime::search_projection::metadata(&mut rewound, &event);
+    }
+    assert_eq!(rewound.summary.first_prompt.as_deref(), Some("kept"));
 }
 
 #[tokio::test]

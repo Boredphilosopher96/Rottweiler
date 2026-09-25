@@ -134,7 +134,7 @@ describe("projection request correlation", () => {
     expect(broker.accepts("settings", null)).toBeFalse()
     const settings = broker.command({ type: "list_settings" })!
     expect(broker.acceptsEvent(settingsCatalog(settings))).toBeTrue()
-    const permissions = broker.command({ type: "add_session_permission_rule", pattern: "read", action: "allow" })!
+    const permissions = broker.command({ type: "add_permission_rule", scope: "project", pattern: "read", action: "allow" })!
     expect(broker.accepts("permissions", permissions)).toBeTrue()
   })
 

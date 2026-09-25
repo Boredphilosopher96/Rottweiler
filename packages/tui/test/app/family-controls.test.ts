@@ -1,3 +1,4 @@
+import { enterSelectedAgent } from "../fixtures/agents"
 import { expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 import { createRottweilerApp } from "../../src/app"
@@ -52,8 +53,8 @@ for (const kind of ["question", "approval"] as const) {
       expect(app.banner.plainText).toContain("child agent needs a response")
       expect(Object.keys(app.state.questions)).toHaveLength(0)
       app.openSubagentPicker()
-      expect(app.picker.select.options[0]?.name).toContain("Response needed")
-      app.picker.select.selectCurrent()
+      expect(app.agentsBrowser.sectionLabels[0]).toBe("Needs response")
+      enterSelectedAgent(app)
       await flush(); await setup.renderOnce()
       expect(app.activeSubagentId).toBe("agent")
       expect(app.interactionPanel.visible).toBe(true)
@@ -65,14 +66,14 @@ for (const kind of ["question", "approval"] as const) {
         app.composer.value = "!literal child answer"
         expect(await app.composer.submit()).toBe(true)
       } else {
-        expect(app.interactionPanel.select.options.map(option => option.value)).not.toContain("allow_tool_session")
+        expect(app.interactionPanel.select.options.map(option => option.value)).not.toContain("review_permission_rule")
         expect(app.interactionPanel.select.options.map(option => option.value)).not.toContain("auto_safe_mode")
         app.interactionPanel.select.selectCurrent()
       }
       await flush()
       const action = emitted.find(command => command.type === "resolve_child_control")
       expect(action).toMatchObject({ session_id: "root", target, expected_revision: "7", response: { type: kind } })
-      expect(emitted.some(command => ["answer_question", "approve_tool", "user_shell_started", "add_session_permission_rule"].includes(command.type))).toBe(false)
+      expect(emitted.some(command => ["answer_question", "approve_tool", "user_shell_started", "add_permission_rule"].includes(command.type))).toBe(false)
       expect(app.interactionPanel.visible).toBe(false)
       expect(Object.keys(app.state.questions)).toHaveLength(0)
       // A new host may begin at a lower live revision after reconnect.
@@ -113,7 +114,7 @@ test("leaving a child preserves its unsettled response owner and defers renderer
   setup.renderer.root.add(app)
   try {
     app.setState({ ...app.state, connection: { ...app.state.connection, phase: "connected" } })
-    await flush(); app.openSubagentPicker(); app.picker.select.selectCurrent()
+    await flush(); app.openSubagentPicker(); enterSelectedAgent(app)
     await flush(); app.interactionPanel.select.selectCurrent(); await dispatched.promise
     setup.mockInput.pressEscape(); await Bun.sleep(30)
     expect(app.activeSubagentId).toBeNull()
@@ -154,12 +155,13 @@ for (const discovery of ["error", "pending"] as const) {
       app.setState(readControls({ ...initial, connection: { ...initial.connection, phase: "connected" } }, snapshot("approval")))
       await flush()
       expect(app.interactionPanel.visible).toBe(true)
-      expect(app.banner.plainText).toContain("Waiting for approval · Write file")
+      expect(app.statusLine.plainText).toContain("approval · Write file")
       if (discovery === "error") update.reject(new Error("family read temporarily unavailable"))
       else update.resolve({ revision: "1", children: [{ target, controls: { revision: "1", through: "12", questions: 1, approvals: 0, pending_plan: false, available: true } }] })
       await flush(); await setup.renderOnce()
-      expect(app.interactionPanel.prompt.plainText).toContain("child.txt")
-      expect(app.banner.plainText).toContain("Waiting for approval · Write file")
+      expect(app.interactionPanel.title).toContain("child.txt")
+      expect(app.statusLine.plainText).toContain("approval · Write file")
+      expect(app.banner.plainText).not.toContain("Waiting for approval")
       app.setState({ ...app.state, tools: {} })
       expect(app.banner.plainText).toContain(discovery === "error" ? "Child controls unavailable" : "child agent needs a response")
     } finally { app.destroy(); setup.renderer.destroy(); await flush() }

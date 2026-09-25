@@ -117,9 +117,9 @@ fn empty(session: &str) -> Result<SessionProjection> {
             .into_diagnostic()?,
         summary: SessionSummary {
             id: session.into(),
-            title: "New session".into(),
+            title: "Untitled".into(),
             updated_unix_ms: 0,
-            cost_micros: 0,
+            first_prompt: None,
             turn_count: 0,
         },
         explicit_title: false,
@@ -139,19 +139,44 @@ pub(super) fn metadata(projection: &mut SessionProjection, event: &EngineEvent) 
             agent_turn,
             ..
         } => {
-            if projection.summary.turn_count == 0 && !projection.explicit_title {
-                projection.summary.title = compact_title(content);
+            if projection.summary.turn_count == 0 {
+                if !projection.explicit_title {
+                    projection.summary.title = compact_title(content);
+                }
+                projection.summary.first_prompt =
+                    Some(prompt_preview(content)).filter(|prompt| !prompt.is_empty());
             }
             projection.summary.turn_count = i64::try_from(*agent_turn).unwrap_or(i64::MAX);
         }
         EngineEvent::ConversationRewound { to_agent_turn, .. } => {
             projection.summary.turn_count = i64::try_from(*to_agent_turn).unwrap_or(i64::MAX);
-            if *to_agent_turn == 0 && !projection.explicit_title {
-                "New session".clone_into(&mut projection.summary.title);
+            if *to_agent_turn == 0 {
+                projection.summary.first_prompt = None;
+                if !projection.explicit_title {
+                    "Untitled".clone_into(&mut projection.summary.title);
+                }
             }
         }
         _ => {}
     }
+}
+
+/// Whitespace-collapsed first prompt, bounded for the listing row and its
+/// detail pane. The full prompt remains in the transcript and search documents.
+fn prompt_preview(content: &str) -> String {
+    const MAX_PROMPT_PREVIEW_CHARS: usize = 480;
+    let mut characters = content
+        .split_whitespace()
+        .flat_map(|word| std::iter::once(' ').chain(word.chars()))
+        .skip(1);
+    let mut preview = characters
+        .by_ref()
+        .take(MAX_PROMPT_PREVIEW_CHARS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        preview.push('…');
+    }
+    preview
 }
 
 fn documents(

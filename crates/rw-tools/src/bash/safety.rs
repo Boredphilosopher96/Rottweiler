@@ -1,3 +1,7 @@
+mod git;
+mod search;
+pub(super) use git::{hardened_git_subcommand, safe_git_arguments};
+pub(super) use search::{audited_rg, safe_search_arguments};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -66,8 +70,8 @@ impl CommandSafetyClassifier {
 /// Classifies a canonical shell command for the built-in no-prompt safe-list.
 ///
 /// This list is intentionally small.  Shell interpolation and control syntax
-/// are rejected before tokenization, and only the real `git status` built-in
-/// (with ordinary option/path arguments) is accepted.  A user may extend the
+/// are rejected before tokenization; each `&&`/`||`/`;` segment must be an
+/// audited read-only command, such as a read-only `git` form (see `git.rs`).  A user may extend the
 /// safe-list through user-scoped permission configuration; project content
 /// never calls this function with additional rules.
 #[must_use]
@@ -80,13 +84,15 @@ pub(super) fn built_in_safe_segment(command: &str) -> bool {
         return false;
     };
     match argv.first().map(String::as_str) {
-        Some("git") if audited_system_git().is_some() => match argv.get(1).map(String::as_str) {
-            Some("status") => safe_git_status_arguments(&argv[2..]),
-            Some("diff") => safe_git_diff_arguments(&argv[2..]),
-            _ => false,
-        },
+        Some("git") if audited_system_git().is_some() => argv
+            .get(1)
+            .is_some_and(|subcommand| safe_git_arguments(subcommand, &argv[2..])),
         Some("cat") => audited_system_read_command("cat").is_some(),
         Some("ls") => audited_system_read_command("ls").is_some(),
+        Some(name @ ("grep" | "find")) => {
+            audited_system_read_command(name).is_some() && safe_search_arguments(name, &argv[1..])
+        }
+        Some("rg") => audited_rg().is_some() && safe_search_arguments("rg", &argv[1..]),
         Some("bat") => audited_bat().is_some() && safe_bat_arguments(&argv[1..]),
         _ => false,
     }
@@ -145,7 +151,7 @@ pub(super) fn safe_command_segments(command: &str) -> Option<Vec<(String, Option
             };
             if let Some((delimiter_len, operator)) = delimiter {
                 let segment = command.get(start..offset)?.trim();
-                let canonical = shell_words::split(segment).ok()?.join(" ");
+                let canonical = canonical_segment(segment)?;
                 if canonical.is_empty() {
                     return None;
                 }
@@ -160,9 +166,7 @@ pub(super) fn safe_command_segments(command: &str) -> Option<Vec<(String, Option
     if single || double || escaped {
         return None;
     }
-    let canonical = shell_words::split(command.get(start..)?.trim())
-        .ok()?
-        .join(" ");
+    let canonical = canonical_segment(command.get(start..)?.trim())?;
     if canonical.is_empty() {
         return None;
     }
@@ -170,61 +174,27 @@ pub(super) fn safe_command_segments(command: &str) -> Option<Vec<(String, Option
     Some(segments)
 }
 
-pub(super) fn safe_git_status_arguments(arguments: &[String]) -> bool {
-    let mut pathspecs = false;
-    for argument in arguments {
-        if pathspecs {
-            continue;
-        }
-        if argument == "--" {
-            pathspecs = true;
-            continue;
-        }
-        if !matches!(
-            argument.as_str(),
-            "--short"
-                | "-s"
-                | "--branch"
-                | "-b"
-                | "--show-stash"
-                | "--porcelain"
-                | "--porcelain=v1"
-                | "--porcelain=v2"
-                | "--untracked-files=no"
-                | "--untracked-files=normal"
-                | "--untracked-files=all"
-                | "-uno"
-                | "-unormal"
-                | "-uall"
-                | "--ignored=no"
-                | "--ignored=matching"
-                | "--ignored=traditional"
-                | "--renames"
-                | "--no-renames"
-                | "--ahead-behind"
-                | "--no-ahead-behind"
-        ) {
-            return false;
-        }
-    }
-    true
-}
-
-pub(super) fn safe_git_diff_arguments(arguments: &[String]) -> bool {
-    !arguments.iter().any(|argument| {
-        matches!(
-            argument.as_str(),
-            "--ext-diff" | "--textconv" | "--no-index" | "--output"
-        ) || argument.starts_with("--output=")
-    })
+fn canonical_segment(segment: &str) -> Option<String> {
+    Some(
+        shell_words::split(segment)
+            .ok()?
+            .iter()
+            .map(|argument| shell_words::quote(argument).into_owned())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 pub(super) fn audited_system_read_command(name: &str) -> Option<&'static PathBuf> {
     static CAT: OnceLock<Option<PathBuf>> = OnceLock::new();
     static LS: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static GREP: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static FIND: OnceLock<Option<PathBuf>> = OnceLock::new();
     let (slot, candidates): (&OnceLock<Option<PathBuf>>, &[&str]) = match name {
         "cat" => (&CAT, &["/bin/cat", "/usr/bin/cat"]),
         "ls" => (&LS, &["/bin/ls", "/usr/bin/ls"]),
+        "grep" => (&GREP, &["/usr/bin/grep", "/bin/grep"]),
+        "find" => (&FIND, &["/usr/bin/find", "/bin/find"]),
         _ => return None,
     };
     slot.get_or_init(|| resolve_audited_system_binary(candidates))
@@ -245,6 +215,10 @@ pub(super) fn audited_bat() -> Option<&'static PathBuf> {
 }
 
 pub(super) fn resolve_audited_local_binary(candidates: &[&str]) -> Option<PathBuf> {
+    resolve_audited_package_binary(candidates, "bat")
+}
+
+fn resolve_audited_package_binary(candidates: &[&str], package: &str) -> Option<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
@@ -256,8 +230,8 @@ pub(super) fn resolve_audited_local_binary(candidates: &[&str]) -> Option<PathBu
             };
             let trusted_prefix = canonical.starts_with("/usr/bin")
                 || canonical.starts_with("/bin")
-                || canonical.starts_with("/opt/homebrew/Cellar/bat/")
-                || canonical.starts_with("/usr/local/Cellar/bat/");
+                || canonical.starts_with(format!("/opt/homebrew/Cellar/{package}/"))
+                || canonical.starts_with(format!("/usr/local/Cellar/{package}/"));
             let Ok(metadata) = canonical.metadata() else {
                 continue;
             };

@@ -129,6 +129,7 @@ impl EngineMcpBridge for CliMcpBridge {
             .map_err(|_| BridgeError::safe("tool input could not be authorized"))?;
         let request_id = self.next_meta().request_id.0;
         let request = PermissionRequest {
+            prompt_reason: None,
             invocation_id: rw_types::ToolInvocationId(request_id.clone()),
             id: request_id,
             tool_name: name.to_owned(),

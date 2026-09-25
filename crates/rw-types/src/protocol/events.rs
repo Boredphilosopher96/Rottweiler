@@ -1,15 +1,15 @@
 use super::{
     Answer, BudgetLevel, BudgetScope, BudgetUnit, ClientId, CommandAckMeta, CommandDescriptor,
     CommandOutcome, CompactionReason, ContextItemId, ContextSnapshot, Cost, CostSnapshot,
-    EngineError, EventMeta, McpApprovalReview, McpServerDescriptor, ModeDescriptor, ModeId,
-    ModelAlias, ModelAliasDescriptor, ModelContextTransfer, ModelDescriptor,
-    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, ProviderAuthAttemptId,
-    ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, Question, QuestionId,
-    ReviewFileDecision, RuntimeServiceDescriptor, SequenceId, SessionDescriptor, SessionId,
-    SessionReview, ShellId, StoredAttachment, SubagentDescriptor, SubagentId, SubagentResult,
-    ToolCapability, ToolOutputStream, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
+    EngineError, EventMeta, ExtensionInventoryEntry, McpApprovalReview, McpServerDescriptor,
+    ModeDescriptor, ModeId, ModelAlias, ModelAliasDescriptor, ModelContextTransfer,
+    ModelDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump,
+    ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, Question,
+    QuestionId, ReviewFileDecision, RuntimeServiceDescriptor, SequenceId, SessionDescriptor,
+    SessionId, SessionReview, ShellId, StoredAttachment, SubagentDescriptor, SubagentId,
+    SubagentResult, ToolCapability, ToolOutputStream, TurnId, TurnStatus, UnifiedDiff,
+    UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus, decimal_u64,
 };
 use crate::{ProviderCallActuals, ProviderCallIdentity, ToolCallId, ToolInvocationId, ToolOutput};
 use rw_memory_derive::PrepareAllocation as Allocation;
@@ -32,6 +32,7 @@ pub enum EngineEventDelivery {
 /// Non-durable event tags that still belong to a live session stream.
 pub const TRANSIENT_ENGINE_EVENT_TYPES: &[&str] = &[
     "tool_progress",
+    "tool_execution_finished",
     "subagent_progress",
     "compaction_attempt_started",
     "compaction_text_delta",
@@ -195,6 +196,10 @@ pub enum EngineEvent {
         meta: CommandAckMeta,
         session_id: SessionId,
         commands: Vec<CommandDescriptor>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<_>", optional)]
+        #[schemars(length(max = 8))]
+        available_actions: Vec<crate::SessionActionAvailability>,
         truncated: bool,
     },
     ModesListed {
@@ -206,7 +211,7 @@ pub enum EngineEvent {
     ModelsListed {
         meta: CommandAckMeta,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         session_id: Option<SessionId>,
         models: Vec<ModelDescriptor>,
         aliases: Vec<ModelAliasDescriptor>,
@@ -218,6 +223,15 @@ pub enum EngineEvent {
         meta: CommandAckMeta,
         session_id: SessionId,
         settings: Vec<UserSettingDescriptor>,
+    },
+    /// Declarative extension inventory for one session.
+    ExtensionsListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        #[schemars(length(max = 512))]
+        entries: Vec<ExtensionInventoryEntry>,
+        /// More entries existed than the inventory bound.
+        truncated: bool,
     },
     McpServersListed {
         meta: CommandAckMeta,
@@ -313,6 +327,12 @@ pub enum EngineEvent {
         meta: EventMeta,
         driver_client_id: ClientId,
     },
+    SessionControlQueueChanged {
+        meta: EventMeta,
+        #[schemars(length(max = 8))]
+        controls: Vec<crate::QueuedSessionControl>,
+        settlement: Option<crate::SessionControlSettlement>,
+    },
     MessageQueued {
         meta: EventMeta,
         #[serde(with = "decimal_u64")]
@@ -351,10 +371,10 @@ pub enum EngineEvent {
         meta: EventMeta,
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         usage: Option<Usage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         cost: Option<Cost>,
     },
     /// A plugin-originated user message was admitted through the bounded
@@ -457,6 +477,17 @@ pub enum EngineEvent {
         invocation_id: ToolInvocationId,
         progress: rw_operation_contract::ToolProgress,
     },
+    /// Transient: this invocation's execution ended. Parallel results are
+    /// journaled in call order, so the durable `ToolCallFinished` carrying the
+    /// output can follow later; clients use this to stop the row's clock.
+    ToolExecutionFinished {
+        session_id: SessionId,
+        turn_id: TurnId,
+        tool_call_id: ToolCallId,
+        invocation_id: ToolInvocationId,
+        is_error: bool,
+        finished_at: String,
+    },
     ToolCallStarted {
         meta: EventMeta,
         turn_id: TurnId,
@@ -481,7 +512,9 @@ pub enum EngineEvent {
         name: String,
         args: Value,
         capabilities: Vec<ToolCapability>,
-        rationale: String,
+        /// Short user-facing reason for the prompt; `None` when the action
+        /// itself is the explanation.
+        rationale: Option<String>,
         diff: Option<UnifiedDiff>,
     },
     /// Redacted mutation preview retained independently of whether the active
@@ -563,7 +596,7 @@ pub enum EngineEvent {
         /// False when zero capacity means unknown rather than exhausted.
         context_window_known: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         context_window_reason: Option<String>,
         stable_prefix_hash: String,
         cache_hit_basis_points: u16,
@@ -719,7 +752,7 @@ pub enum EngineEvent {
         /// Durable per-session effort applied to this selection, including
         /// concrete provider/model routes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
+        #[ts(as = "Option<_>", optional)]
         thinking: Option<crate::config::ThinkingLevel>,
     },
     /// The user explicitly chose to start the selected model without prior
@@ -817,6 +850,7 @@ impl EngineEvent {
             | Self::ModesListed { meta, .. }
             | Self::ModelsListed { meta, .. }
             | Self::SettingsListed { meta, .. }
+            | Self::ExtensionsListed { meta, .. }
             | Self::McpServersListed { meta, .. }
             | Self::RuntimeServicesListed { meta, .. }
             | Self::McpServerApprovalReviewed { meta, .. }
@@ -834,6 +868,7 @@ impl EngineEvent {
             | Self::SessionCreated { .. }
             | Self::WorkspaceRootsChanged { .. }
             | Self::DriverChanged { .. }
+            | Self::SessionControlQueueChanged { .. }
             | Self::MessageQueued { .. }
             | Self::QueuedMessageRemoved { .. }
             | Self::QueuedMessagesCleared { .. }
@@ -854,6 +889,7 @@ impl EngineEvent {
             | Self::ThinkingDelta { .. }
             | Self::CitationDelta { .. }
             | Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::ToolCallStarted { .. }
             | Self::ToolApprovalResolved { .. }
             | Self::ToolApprovalNeeded { .. }
@@ -898,6 +934,7 @@ impl EngineEvent {
     pub fn delivery(&self) -> EngineEventDelivery {
         match self {
             Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::SubagentProgress { .. }
             | Self::CompactionAttemptStarted { .. }
             | Self::CompactionTextDelta { .. }
@@ -930,6 +967,7 @@ impl EngineEvent {
             | Self::SessionChildrenReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
@@ -947,6 +985,7 @@ impl EngineEvent {
             | Self::ModesListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
+            | Self::ExtensionsListed { .. }
             | Self::McpServersListed { .. }
             | Self::RuntimeServicesListed { .. }
             | Self::McpServerApprovalReviewed { .. }
@@ -967,6 +1006,7 @@ impl EngineEvent {
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
+            | Self::SessionControlQueueChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::QueuedMessageRemoved { meta, .. }
             | Self::QueuedMessagesCleared { meta, .. }
@@ -1046,6 +1086,7 @@ impl EngineEvent {
             | Self::SessionChildrenReady { .. }
             | Self::TodosRead { .. }
             | Self::ToolProgress { .. }
+            | Self::ToolExecutionFinished { .. }
             | Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
@@ -1063,6 +1104,7 @@ impl EngineEvent {
             | Self::ModesListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
+            | Self::ExtensionsListed { .. }
             | Self::McpServersListed { .. }
             | Self::RuntimeServicesListed { .. }
             | Self::McpServerApprovalReviewed { .. }
@@ -1083,6 +1125,7 @@ impl EngineEvent {
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
+            | Self::SessionControlQueueChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::QueuedMessageRemoved { meta, .. }
             | Self::QueuedMessagesCleared { meta, .. }

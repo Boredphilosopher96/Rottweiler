@@ -247,6 +247,26 @@ pub(super) fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
     })
 }
 
+/// Registers the child session's own `skill` tool from the child's
+/// discovery generation, under the same rule as the parent: only when at
+/// least one skill exists. The child's agent allow-list is applied when the
+/// orchestrator binds approved tools against this root-bound registry, so an
+/// agent that does not list `skill` never receives it.
+///
+/// # Errors
+///
+/// Fails only when a tool named `skill` is already registered.
+pub(super) fn register_child_skill_tool(
+    built: &mut BuiltTools,
+    catalog: &Arc<rw_ext::ExtensionCatalog>,
+) -> Result<()> {
+    if catalog.skills().len() == 0 {
+        return Ok(());
+    }
+    super::skill_library::register_skill_tool(Arc::make_mut(&mut built.registry), catalog)
+        .map_err(|error| miette!("skill tool could not register: {error}"))
+}
+
 pub(super) fn command_mode_can_open_proxy(mode: &CommandFixtureMode) -> bool {
     matches!(
         mode,

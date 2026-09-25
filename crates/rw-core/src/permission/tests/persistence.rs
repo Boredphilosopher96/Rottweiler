@@ -49,6 +49,7 @@ async fn exact_bash_session_and_project_approvals_do_not_collide() {
 #[tokio::test]
 async fn unavailable_project_approval_persistence_degrades_to_allow_once() {
     let invocation = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "write".to_owned(),
         tool_name: "write".to_owned(),
@@ -107,6 +108,7 @@ async fn project_approval_without_portable_file_lock_degrades_to_allow_once() {
         .with_workspace_roots([root.path()])
         .with_project_approval_file(root.path().join("approvals.json"));
     let request = PermissionRequest {
+        prompt_reason: None,
         id: "write".to_owned(),
         tool_name: "write".to_owned(),
         arguments: json!({"path": "file.txt", "content": "content"}),
@@ -126,6 +128,7 @@ async fn remembered_glob_approval_applies_without_reprompt_and_survives_reload()
     let root = tempfile::tempdir().expect("tempdir");
     let approval_file = root.path().join("approvals.json");
     let request = PermissionRequest {
+        prompt_reason: None,
         invocation_id: rw_types::ToolInvocationId("fixture-invocation".to_owned()),
         id: "glob-first".to_owned(),
         tool_name: "glob".to_owned(),

@@ -15,6 +15,7 @@ export type KeybindingContext =
 
 export type KeybindingAction =
   | "append_insert"
+  | "background_subagent"
   | "block_next"
   | "block_previous"
   | "block_toggle"
@@ -34,7 +35,6 @@ export type KeybindingAction =
   | "new_session"
   | "open_command_picker"
   | "open_external_editor"
-  | "open_mode_picker"
   | "open_model_picker"
   | "open_review"
   | "open_session_picker"
@@ -43,6 +43,7 @@ export type KeybindingAction =
   | "page_up"
   | "paste_image"
   | "select_current"
+  | "toggle_tools_view"
   | "view_bottom"
   | "view_top"
   | "word_backward"
@@ -99,6 +100,7 @@ const CONTEXTS: readonly KeybindingContext[] = [
 
 const ACTIONS: readonly KeybindingAction[] = [
   "append_insert",
+  "background_subagent",
   "block_next",
   "block_previous",
   "block_toggle",
@@ -118,7 +120,6 @@ const ACTIONS: readonly KeybindingAction[] = [
   "new_session",
   "open_command_picker",
   "open_external_editor",
-  "open_mode_picker",
   "open_model_picker",
   "open_review",
   "open_session_picker",
@@ -127,15 +128,21 @@ const ACTIONS: readonly KeybindingAction[] = [
   "page_up",
   "paste_image",
   "select_current",
+  "toggle_tools_view",
   "view_bottom",
   "view_top",
   "word_backward",
   "word_forward",
 ]
 
+export function isKeybindingAction(value: string): value is KeybindingAction {
+  return (ACTIONS as readonly string[]).includes(value)
+}
+
 /** Short, user-facing descriptions for every configurable action. */
 export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
   append_insert: "Enter insert mode after the cursor",
+  background_subagent: "Move the agent the parent is waiting on to the background",
   block_next: "Select next block",
   block_previous: "Select previous block",
   block_toggle: "Expand or collapse block",
@@ -153,9 +160,8 @@ export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
   move_right: "Move right",
   move_up: "Move up",
   new_session: "Start a new session",
-  open_command_picker: "Open command palette",
+  open_command_picker: "Open or close the command palette",
   open_external_editor: "Open external editor",
-  open_mode_picker: "Switch mode",
   open_model_picker: "Switch model",
   open_review: "Review changes",
   open_session_picker: "Switch session",
@@ -164,6 +170,7 @@ export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
   page_up: "Scroll transcript up",
   paste_image: "Paste image",
   select_current: "Select current item",
+  toggle_tools_view: "Switch between conversation and tools",
   view_bottom: "Jump to transcript bottom",
   view_top: "Jump to transcript top",
   word_backward: "Move word backward",
@@ -179,10 +186,11 @@ const STANDARD_DEFAULTS = {
     // Ctrl+M is carriage return in legacy terminal input and collides with
     // submit. Alt+M remains distinguishable without enhanced-key protocols.
     open_model_picker: ["alt+m"],
-    open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
     open_subagent_picker: ["ctrl+g"],
+    background_subagent: ["ctrl+b"],
     paste_image: ["ctrl+v"],
+    toggle_tools_view: ["ctrl+t"],
   },
   standard: {
     block_previous: ["ctrl+up"],
@@ -210,10 +218,11 @@ const VIM_DEFAULTS = {
     cycle_agent_mode: ["shift+tab"],
     open_command_picker: ["ctrl+p"],
     open_model_picker: ["alt+m"],
-    open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
     open_subagent_picker: ["ctrl+g"],
+    background_subagent: ["ctrl+b"],
     paste_image: ["ctrl+v"],
+    toggle_tools_view: ["ctrl+t"],
   },
   vim_insert: {
     enter_normal: ["escape", "ctrl+["],

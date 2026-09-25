@@ -129,7 +129,7 @@ export class PresentationController<T> {
 
 /** Only state-only updates can replace a pending frame; all control/read effects present immediately. */
 const DISPLAY_ONLY_EVENTS = new Set<EngineEvent["type"]>([
-  "text_delta", "thinking_delta", "citation_delta", "tool_output_delta", "tool_progress",
+  "text_delta", "thinking_delta", "citation_delta", "tool_output_delta", "tool_progress", "tool_execution_finished",
   "compaction_text_delta", "compaction_thinking_delta", "subagent_progress", "context_usage_updated",
 ])
 

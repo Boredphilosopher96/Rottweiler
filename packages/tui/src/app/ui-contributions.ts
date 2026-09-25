@@ -77,14 +77,16 @@ export class UiContributionController {
     const snapshot = this.#catalog.snapshot
     const panels = snapshot.entries.filter(entry => entry.descriptor.surface.surface === "panel")
     if (snapshot.loading && panels.length === 0) {
-      this.#host.picker.showLoading("Extension panels", "Loading approved panels")
+      this.#host.picker.showLoading("EXTENSION PANELS", "Loading approved panels")
     } else if (snapshot.error !== null) {
-      this.#host.picker.show("Extension panels", [{ id: "retry", label: "Retry loading panels", description: snapshot.error, value: null }], () => this.#catalog.refresh())
+      this.#host.picker.show("EXTENSION PANELS", [{ id: "retry", label: "Retry loading panels", tone: "error", primary: "retry",
+        description: snapshot.error, value: null }], () => this.#catalog.refresh())
     } else if (panels.length === 0) {
-      this.#host.picker.showStatus("Extension panels", "No panels", "Approved extensions can provide declarative panels.")
+      this.#host.picker.showStatus("EXTENSION PANELS", "No panels", "Approved extensions can provide declarative panels.")
     } else {
-      this.#host.picker.show("Extension panels", panels.map(entry => ({
-        id: uiIdentity(entry), label: entry.descriptor.title, description: entry.owner.extension, value: uiIdentity(entry),
+      this.#host.picker.show("EXTENSION PANELS", panels.map(entry => ({
+        id: uiIdentity(entry), label: entry.descriptor.title, hint: entry.owner.extension,
+        description: `Provided by ${entry.owner.extension}`, primary: "open", value: uiIdentity(entry),
       })), item => {
         this.#selected = item.value
         this.#host.closePicker()

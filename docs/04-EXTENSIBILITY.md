@@ -10,7 +10,15 @@ stated below.
 
 ## Tier 1 — Declarative (no code)
 
-Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.rottweiler/` (project) → `~/.agents/` (user) → `~/.rottweiler/` (user). The open `.agents` location is primary so your config stays portable across harnesses; project-level artifacts are inert until their project extension inventory is trusted (05-SECURITY Layer 0).
+Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.rottweiler/` (project) → `.claude/` (project) → `~/.agents/` (user) → `~/.rottweiler/` (user) → `~/.claude/` (user). The open `.agents` location is primary so your config stays portable across harnesses; project-level artifacts, including project `.claude/`, are inert until their project extension inventory is trusted (05-SECURITY Layer 0). That inventory fingerprints every file under project `.agents/` and `.rottweiler/` plus `.claude/skills/` and `.claude/commands/`; other `.claude/` files, such as Claude Code settings, are not read and do not affect trust. Symbolic links inside a `skills/` tree that satisfy the project link rule (Skills, below) are fingerprinted through their targets under the link's project path; any other link, an out-of-bounds link, or a link cycle leaves the project untrustable.
+
+`.claude/` is read in place so an existing Claude Code library works without
+import. Only the formats shared with Claude Code are read there: `skills/` and
+`commands/`. Claude Code agent definitions use a different schema (no model
+alias or permission mode) and are not read; workflows, modes, and hooks are
+Rottweiler-specific. Commands under `.claude/commands` use Claude Code's
+zero-based positional arguments (`$0`, `$ARGUMENTS[0]`); the other locations
+use `$1..$n`.
 
 > **Durable discovery contract:** malformed, unreadable, or unsafe declarative
 > artifacts are skipped and reported as diagnostics. They must never prevent
@@ -22,14 +30,85 @@ Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.
 
 | Kind | Location | Format |
 |---|---|---|
-| Commands | `commands/*.md` | frontmatter: `description`, `model` (alias), `allowed-tools`, `argument-hint`; body = prompt template (`$ARGUMENTS`, `$1..$n`, `` !`cmd` `` interpolation, `@file` inclusion) |
-| Skills | `skills/<name>/SKILL.md` | SKILL.md standard: frontmatter `name`, `description`, optional `allowed-tools`; directory may bundle scripts/resources; lazily loaded |
+| Commands | `commands/*.md` | optional frontmatter: `description` (defaults to the first body line), `model` (alias), `allowed-tools`, `argument-hint`; body = prompt template (`$ARGUMENTS`, `$1..$n`, `` !`cmd` `` interpolation, `@file` inclusion) |
+| Skills | `skills/<name>/SKILL.md` | SKILL.md standard: required `description`, optional `allowed-tools`; the directory name is the skill name; the directory may bundle scripts and reference files, read on demand (see Skills below) |
 | Agents | `agents/*.md` | frontmatter: `name`, `description`, `model`, `tools`, `permission-mode`, `max-turns`; body = system prompt |
 | Modes | `modes/*.toml` | tool filter + permission overlay + prompt fragment (built-in discuss/plan/execute live in this format, embedded) |
 | Workflows | `workflows/*.toml` | DAG of steps: `agent`/`command` refs, `parallel = true`, `on-fail`, artifact passing between steps |
 | Shell hooks | `hooks.toml` | one-liner hooks without writing a plugin: `[[hook]] event = "post_tool" class = "transform" failure_policy = "fail-closed" matcher = "edit(*.rs)" run = "cargo fmt --check {file}"` — the command's exit code/stdout map onto the hook response (nonzero for a policy hook blocks with its diagnostic). Registered on the same internal dispatcher; trust-gated at project level; this is what Claude Code settings-hooks import onto |
 | Toolchain | `toolchain.toml` (or `[toolchain]` in config) | per-language/glob `formatter` and `linters`, plus one workspace `test` command; after edit/write, the matching formatter and linters run on the touched file. After every otherwise-successful turn, the test command runs once and its failure is appended to durable context. Sugar over the public hook API (dogfooding rule) |
 | Themes/keybindings | `themes/*.toml`, `keybindings.toml` | TUI only |
+
+### Frontmatter
+
+Markdown artifacts share one YAML frontmatter subset: plain, single-quoted, and
+double-quoted scalars; multi-line plain scalars; literal (`|`) and folded (`>`)
+block scalars with `-`/`+` chomping and indentation indicators; block (`- a`)
+and inline (`[a, b]`) sequences; and `#` comments. Keys Rottweiler does not
+interpret are ignored, including nested maps and lists such as Claude Code
+`hooks:`. Duplicate keys, stray indentation, unterminated quotes or lists, and
+under-indented block scalars reject the artifact with a diagnostic.
+
+### Skills
+
+A skill is `skills/<name>/SKILL.md`; `<name>` must be a portable lowercase name
+and is the skill's identity. A differing frontmatter `name` does not rename it.
+
+- **Links.** A skill directory, a `SKILL.md`, or the `skills/` directory itself
+  may be a symbolic link. The link is resolved once and the canonical target
+  directory becomes the skill root for every later read. A user-scope link may
+  resolve to any directory or file owned by the current user; a project-scope
+  link must also resolve inside the project root or the user's home directory.
+  Links inside a skill's bundle are never followed; they are listed as skipped.
+- **Index.** Each session carries a bounded (64 KiB) index of skill names and
+  descriptions, marked as untrusted metadata. It tells the model to call the
+  built-in `skill` tool when a task matches a description, and states how many
+  skills were omitted when the index is full.
+- **Invocation.** `/<name> [arguments]` from the user and the `skill` tool from
+  the model deliver the same content: the current `SKILL.md` body (re-read at
+  invocation, with `${CLAUDE_SKILL_DIR}` replaced by the skill root), the
+  absolute skill root, and a listing of at most 64 bundled files. Hidden
+  directories and `node_modules` are not listed. Bundled files are not inlined;
+  the model loads one with `skill {"name": "<name>", "path": "<relative>"}`
+  (UTF-8, at most 256 KiB, no links). Bundle size never makes a skill fail.
+- **`skill` tool.** Registered whenever at least one skill is discovered. It is
+  read-only (`ReadFilesystem` capability) and reads only discovered skill
+  roots, never the workspace. Child agents receive their own `skill`
+  tool under the same rule, from the child workspace's discovery, when their
+  agent tool allow-list includes `skill`; a child whose
+  workspace discovered no skill uses the parent's `skill` tool.
+- **`allowed-tools`.** Listed tools are pre-approved, as in Claude Code:
+  while a user-invoked command or skill's turn runs, a matching invocation
+  runs without an approval prompt. The list never narrows the tools
+  available to that turn; unlisted tools follow normal permission policy. A
+  bare name pre-approves every invocation of that tool, and
+  `Tool(pattern)` pre-approves only invocations whose permission target
+  matches the glob: `Bash(git status:*)` becomes `bash(git status*)` and
+  covers `git status --short` but not `git push`, and every command of a
+  compound shell invocation must match. Claude Code names map to Rottweiler
+  tools (`Bash`→`bash`, `Read`→`read`, `Edit`→`edit`,
+  `MultiEdit`→`multi_edit`, `Write`→`write`, `Grep`→`grep`, `Glob`→`glob`,
+  `LS`→`ls`, `WebFetch`→`webfetch`, `WebSearch`→`websearch`,
+  `TodoWrite`→`todo`, `AskUserQuestion`→`ask_user`, `Agent`/`Task`→
+  `spawn_agent`, `Skill`→`skill`). Unknown or malformed entries, including
+  `*`, are ignored with a note. Pre-approvals are turn-scoped allow rules in
+  the permission gate and only replace an approval prompt: deny rules,
+  permission hooks, Discuss and Plan read-only modes, unattended launch
+  policies that cannot prompt, unsandboxed execution, and network-domain
+  requests keep their normal decision. Approvals the user remembers during
+  the turn stay in the session.
+- **Name collisions.** A built-in or higher-precedence command keeps its slash
+  name. A skill that loses its slash name stays listed and model-invocable
+  through the `skill` tool; the inventory records the collision.
+
+### Extension inventory
+
+`rw_runtime::session::extension_inventory` projects one discovery generation
+into `ExtensionInventory` rows (`rw_types`): kind, name, description, scope,
+location, source path, status (`loaded`, `loaded_with_warnings`, `skipped`,
+`shadowed`, `untrusted`), and notes explaining every non-`loaded` status.
+`rw doctor` reports the same rows under its `extensions` checks, and session
+composition logs them.
 
 Configured formatter, linter, and test commands can declare
 `toolchain.runtime_read_roots`: at most 32 absolute UTF-8 paths, each at most
@@ -455,7 +534,7 @@ retains the guarded transport's 128-entry/64 KiB bound. Individual values are at
 most 8 KiB. Namespace/session identifiers have their separate protocol limits.
 
 
-`/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp.prompt <server> <prompt> [JSON object]`; catalog-derived namespaced aliases are conveniences and the stable command resolves the live server state at invocation.
+`/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp prompt <server> <prompt> [JSON object]`; catalog-derived namespaced commands (listed under Extensions as `mcp · <server>`) are conveniences and the stable subcommand resolves the live server state at invocation.
 
 Stdio activation copies the exact approved executable and attested interpreter inputs into private snapshots before starting the server. The physical process retains those snapshots through process and proxy settlement. The captured command also binds literal arguments, resolved environment, working directory, and sandbox grants; a different launch request cannot reuse it. Executables must support relocation without changing their approved bytes. macOS system executables with location-constrained signatures are unsupported by this snapshot path; launch refusal does not fall back to the installation path. Stdio keeps its declared workspace working directory and filesystem grants while file arguments point to their attested snapshots.
 
@@ -581,7 +660,7 @@ encoded line limit is not a claim about arbitrary JSON heap amplification.
 
 ### Driver-scoped navigation
 
-An active extension command can request `session.control({ action: "navigate", target })`. A target is either `{ kind: "session", session_id }` or `{ kind: "transcript", sequence }`. The host validates the target, retains at most one navigation request with the command, and emits `SessionNavigationRequested` only after successful handler settlement under the same driver and runtime generation. Background pushes cannot navigate. The built-in `/goto session <id>` and `/goto sequence <number>` commands use the same control owner.
+An active extension command can request `session.control({ action: "navigate", target })`. A target is either `{ kind: "session", session_id }` or `{ kind: "transcript", sequence }`. The host validates the target, retains at most one navigation request with the command, and emits `SessionNavigationRequested` only after successful handler settlement under the same driver and runtime generation. Background pushes cannot navigate.
 
 Navigation is a connection-scoped request to the initiating client. It grants no authority over the destination session and is neither journaled nor replayed. Clients use their ordinary session open and bounded transcript read paths. Transcript navigation rejects future sequences; a discarded source resolves to the nearest surviving row at or before the requested sequence and exposes that replacement to the client.
 

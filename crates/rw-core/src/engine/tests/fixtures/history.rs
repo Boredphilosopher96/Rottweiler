@@ -282,6 +282,18 @@ impl SessionHistoryView for View {
     fn conversation(&self) -> ConversationCut {
         self.cut
     }
+    async fn completion_notices(
+        &self,
+    ) -> Result<HistoryRead<Vec<crate::engine::recovery::CompletionNotice>>, AgentLoopError> {
+        Ok(HistoryRead::new(
+            self.history
+                .lock()
+                .map_err(failure)?
+                .completion_notices()
+                .map_err(failure)?,
+            Arc::clone(&self.root),
+        ))
+    }
     async fn conversation_sources(
         &self,
         range: Range<u64>,

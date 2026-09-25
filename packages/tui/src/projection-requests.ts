@@ -60,12 +60,13 @@ export type ProjectionCommand =
   | { readonly type: "approve_mcp_server"; readonly name: string; readonly fingerprint: string }
   | { readonly type: "set_mcp_server_enabled"; readonly name: string; readonly enabled: boolean }
   | { readonly type: "list_permissions" }
-  | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionDecision }
-  | { readonly type: "remove_session_permission_rule"; readonly ruleId: string }
+  | { readonly type: "add_permission_rule"; readonly scope: PermissionApprovalScope; readonly pattern: string; readonly action: PermissionDecision }
+  | { readonly type: "remove_permission_rule"; readonly ruleId: string }
   | { readonly type: "revoke_permission_approval"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
   | { readonly type: "remove_queued_message"; readonly position: string }
   | { readonly type: "clear_queued_messages" }
   | { readonly type: "begin_provider_auth"; readonly provider: string }
+  | { readonly type: "configure_compatible_provider"; readonly configuration: import("./protocol").CompatibleProviderSetup }
   | { readonly type: "configure_builtin_provider"; readonly provider: string }
   | { readonly type: "complete_provider_auth" | "cancel_provider_auth"; readonly provider: string; readonly attemptId: string }
   | { readonly type: "list_commands" | "list_sessions" }
@@ -440,8 +441,8 @@ export class ProjectionRequestBroker {
       case "list_permissions":
         this.#track("permissions", requestId)
         break
-      case "add_session_permission_rule":
-      case "remove_session_permission_rule":
+      case "add_permission_rule":
+      case "remove_permission_rule":
       case "revoke_permission_approval":
         this.#latestRequests.permissions = requestId
         break
@@ -602,11 +603,12 @@ function dispatchCommand(
     case "review_mcp_server":
     case "approve_mcp_server":
     case "set_mcp_server_enabled":
-    case "add_session_permission_rule":
+    case "add_permission_rule":
     case "begin_provider_auth":
+    case "configure_compatible_provider":
     case "configure_builtin_provider":
       return { ...command, meta, session_id: sessionId }
-    case "remove_session_permission_rule":
+    case "remove_permission_rule":
       return { type: command.type, meta, session_id: sessionId, rule_id: command.ruleId }
     case "remove_queued_message":
       return { type: command.type, meta, session_id: sessionId, position: command.position }

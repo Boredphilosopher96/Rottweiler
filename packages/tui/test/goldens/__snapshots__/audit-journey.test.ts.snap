@@ -1,0 +1,129 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`audit journey setup through resume at 110x32: approval 1`] = `
+"                                                                                                              
+● Edit src/main.rs                                                                        ? awaiting approval 
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+╭─ Edit src/main.rs? ────────────────────────────────────────────────────────────────────────────────────────╮
+│ Apply the reviewed correction                                                                              │
+│  ▶ y  Yes                                                                                                  │
+│    p  Always allow in this project…                                                                        │
+│    n  No, and tell the agent what to do differently                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ Describe a task…                                                                                         │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                                                     │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   coding  ctx —  approval · Edit file                                                               
+"
+`;
+
+exports[`audit journey setup through resume at 110x32: interrupted with child completion and compaction 1`] = `
+"                                                                                                              
+  The edit is ready for review.                                                                               
+                                                                                                              
+● Edit src/main.rs                                                                                          ✓ 
+● Bash cargo test                                                                                           ✓ 
+                                                                                                              
+Interrupted                                                                                                   
+                                                                                                              
+Context compacted · 12000 tokens reclaimed                                                                    
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+│ ✓ agent · Review the tests · completed                                                                      
+│ ╰ Ctrl+G agents · hidden after your next message                                                            
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │ Describe a task…                                                                                         │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model · Ctrl+E editor                            │ 
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   coding  ctx —                                                                                     
+"
+`;
+
+exports[`audit journey setup through resume at 80x24: approval 1`] = `
+"                                                                                
+● Edit src/main.rs                                          ? awaiting approval 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+╭─ Edit src/main.rs? ──────────────────────────────────────────────────────────╮
+│ Apply the reviewed correction                                                │
+│  ▶ y  Yes                                                                    │
+│    p  Always allow in this project…                                          │
+│    n  No, and tell the agent what to do differently                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ Describe a task…                                                           │ 
+ │ Tab decision/message · Enter choose · Ctrl+P palette                       │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   coding  ctx —  approval · Edit file                                 
+"
+`;
+
+exports[`audit journey setup through resume at 80x24: interrupted with child completion and compaction 1`] = `
+"                                                                                
+  The edit is ready for review.                                                 
+                                                                                
+● Edit src/main.rs                                                            ✓ 
+● Bash cargo test                                                             ✓ 
+                                                                                
+Interrupted                                                                     
+                                                                                
+Context compacted · 12000 tokens reclaimed                                      
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+│ ✓ agent · Review the tests · completed                                        
+│ ╰ Ctrl+G agents · hidden after your next message                              
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ Describe a task…                                                           │ 
+ │ / commands · @ files · ! shell · Ctrl+P palette · Alt+M model              │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+  EXECUTE   coding  ctx —                                                       
+"
+`;

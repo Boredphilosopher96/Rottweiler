@@ -8,6 +8,18 @@ sidebar:
 The engine addresses model aliases rather than spreading provider-specific IDs
 through sessions and clients.
 
+## Choose a model in the TUI
+
+Connecting a provider opens its models. If no model is selected, Rottweiler
+selects an available tool-capable model from that provider's catalog. Connecting
+another provider preserves your selection. `/model` changes it explicitly.
+The first concrete selection becomes your user default when none is configured;
+subsequent choices are remembered per workspace. Cached lists are labeled.
+
+Context limits have an offline models.dev fallback. Opening model discovery
+attempts a bounded refresh of missing or day-old metadata; a failed refresh keeps
+local metadata. Provider discovery still decides which models are available.
+
 ## Define an alias
 
 ```toml
@@ -48,3 +60,21 @@ whole-record: user configuration, then authenticated provider discovery, then
 models.dev. Fields are not blended from multiple sources. Subscription and
 Copilot routes use quota or credit accounting and reject dollar pricing rather
 than appearing as free API routes.
+
+### Compatible endpoints
+
+In `/model`, press `Ctrl+N` to connect a provider, then choose **Compatible
+endpoint…** under **Custom** to add a user-scoped Chat Completions or Responses
+endpoint. Supply its full inference URL, for
+example `https://gateway.example/v1/chat/completions`, and a unique local name.
+API keys are entered separately and stored through the credential manager;
+they never enter configuration commands or session history. Unauthenticated
+connections are restricted to explicit loopback endpoints.
+
+The optional initial model creates a `<provider>-model` alias without changing
+an existing default or active session. Local servers that return 404, 405, or
+501 for `/models` can use this configured route. A working live catalog remains
+authoritative: models it omits cannot be selected, and authentication/network
+failures do not enable the static fallback. Remote endpoints must expose their
+model catalog. After connecting, choose a model in the model picker to make it
+the active selection and save its default.

@@ -259,6 +259,24 @@ pub(super) async fn run_turn(
             status = AgentTurnStatus::BudgetExceeded;
             break;
         }
+        match super::child_results::deliver(&config, &signals, turn, &mut conversation).await {
+            // A turn started for child results that an earlier call already
+            // delivered has nothing new to answer.
+            Ok(0)
+                if iteration == 0
+                    && conversation
+                        .last()
+                        .is_some_and(|last| last.role == rw_types::Role::Assistant) =>
+            {
+                status = AgentTurnStatus::Completed;
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                status = super::provider_context::report_failure(&error, &signals);
+                break;
+            }
+        }
         let mut sources =
             match super::history_context::current_sources(&config, conversation.len()).await {
                 Ok(sources) => sources,

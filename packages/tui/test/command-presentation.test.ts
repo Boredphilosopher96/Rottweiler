@@ -28,7 +28,7 @@ describe("command result presentation", () => {
         rules: [{ scope: "Project", decision: "deny", target: "bash(rm *)", remembered: false }],
         omittedRuleCount: 2,
       }, [
-        "**Yolo permissions** · allow by default",
+        "**Approvals Off** · allow by default",
         "Remembered: 1 for this session, 0 for this project",
         "",
         "| Scope | Decision | Applies to |",

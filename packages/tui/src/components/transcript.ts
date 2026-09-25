@@ -1,3 +1,4 @@
+import { launchSummary } from "../render/launch"
 import { TextRenderable } from "./text"
 import type { HistorySnapshot, HistoryViewport } from "../history/controller"
 import { TranscriptRowRenderable } from "./transcript/row"
@@ -15,15 +16,13 @@ import {
   BoxRenderable,
   MarkdownRenderable,
   ScrollBarRenderable,
-  bold,
-  fg,
-  t,
   type RenderContext,
   type SyntaxStyle,
   type TreeSitterClient,
  } from "@opentui/core"
 
-import { formatCost, getScrollAcceleration, terminalMarkdown, truncateToCells } from "../render"
+import { getScrollAcceleration, terminalMarkdown, truncateToCells } from "../render"
+import { turnEndLine } from "../render/turn-end"
 import type { RottweilerState, ToolProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
 
@@ -33,37 +32,7 @@ import type { RottweilerTheme } from "../theme"
 // renderables per turn even after context compaction.
 const MAX_MOUNTED_TRANSCRIPT_ENTRIES = 16
 
-export function toolDisplayName(name: string): string {
-  return ({
-    read: "Read file",
-    write: "Write file",
-    edit: "Edit file",
-    multi_edit: "Edit files",
-    grep: "Search text",
-    search: "Search text",
-    glob: "Find files",
-    ls: "List directory",
-    bash: "Terminal command",
-    shell: "Terminal command",
-    background_status: "Check background process",
-    background_output: "Read background output",
-    background_kill: "Stop background process",
-    webfetch: "Fetch URL",
-    websearch: "Search web",
-    todo: "Update todos",
-    ask_user: "Ask user",
-    submit_plan: "Submit plan",
-    symbols: "Find symbols",
-    apply_worktree_diff: "Apply changes",
-    tool_search: "Find tools",
-    mcp_call: "MCP tool",
-    spawn_agent: "Start child agent",
-  } as Record<string, string>)[name] ?? name
-    .replace(/^mcp__/, "MCP · ")
-    .replaceAll("__", " · ")
-    .replaceAll("_", " ")
-    .replace(/^./, (letter) => letter.toUpperCase())
-}
+export { toolDisplayName } from "./panel-labels"
 
 export class TranscriptRenderable extends BoxRenderable {
   readonly scroller: TranscriptScrollWindow
@@ -77,7 +46,8 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly mountedCards = new Map<string, TranscriptRowRenderable>()
   readonly #tailReasoning: ReasoningBlockRenderable
   readonly #compactionReasoning: ReasoningBlockRenderable
-  readonly #tailHeader: TextRenderable
+  readonly #tailActivity: TextRenderable
+  readonly #tailEnd: TextRenderable
   readonly #compactionHeader: TextRenderable
   readonly #tailCitations: TextRenderable
   readonly #tailTools: BoxRenderable
@@ -189,7 +159,7 @@ export class TranscriptRenderable extends BoxRenderable {
       id: "transcript-empty-state-hint",
       content: "Describe a task, or press / for commands.",
       fg: theme.textMuted,
-      height: 3,
+      height: "auto",
       flexShrink: 0,
       wrapMode: "word",
       selectable: true,
@@ -200,7 +170,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.streamingCard = new BoxRenderable(ctx, {
       id: "streaming-tail",
       width: "100%",
-      minHeight: 2,
+      minHeight: 0,
       flexDirection: "column",
       flexShrink: 0,
       backgroundColor: theme.background,
@@ -209,11 +179,21 @@ export class TranscriptRenderable extends BoxRenderable {
       marginTop: 1,
       visible: false,
     })
-    this.#tailHeader = new TextRenderable(ctx, {
-      content: "● rottweiler  streaming",
-      fg: theme.text,
+    this.#tailActivity = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.textMuted,
       height: 1,
       flexShrink: 0,
+      marginLeft: 2,
+      visible: false,
+    })
+    this.#tailEnd = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.textMuted,
+      height: 1,
+      flexShrink: 0,
+      marginTop: 1,
+      visible: false,
     })
     this.#tailReasoning = new ReasoningBlockRenderable(ctx, theme, options.syntaxStyle, {
       blockId: "reasoning:tail",
@@ -227,6 +207,7 @@ export class TranscriptRenderable extends BoxRenderable {
       },
       ...(this.#onInteraction === undefined ? {} : { onInteraction: this.#onInteraction }),
     })
+    this.#tailReasoning.marginTop = 0
     this.streamingMarkdown = new MarkdownRenderable(ctx, {
       id: "streaming-markdown",
       content: "",
@@ -262,11 +243,12 @@ export class TranscriptRenderable extends BoxRenderable {
       flexDirection: "column",
       marginTop: 1,
     })
-    this.streamingCard.add(this.#tailHeader)
+    this.streamingCard.add(this.#tailActivity)
     this.streamingCard.add(this.#tailReasoning)
     this.streamingCard.add(this.streamingMarkdown)
     this.streamingCard.add(this.#tailTools)
     this.streamingCard.add(this.#tailCitations)
+    this.streamingCard.add(this.#tailEnd)
     this.scroller.add(this.streamingCard)
     this.compactionCard = new BoxRenderable(ctx, {
       id: "compaction-stream",
@@ -505,7 +487,7 @@ export class TranscriptRenderable extends BoxRenderable {
       && state.streamingTail === null && !state.compaction.active
     if (this.emptyState.visible) {
       this.emptyStateHint.content = this.#history?.error ?? (this.#history?.loading
-        ? "Loading transcript…" : "Describe a task, or press / for commands.")
+        ? "Loading transcript…" : launchSummary(state, this.width))
     }
   }
 
@@ -532,6 +514,7 @@ export class TranscriptRenderable extends BoxRenderable {
   protected override onResize(_width: number, _height: number): void {
     if (this.#history?.following === false && this.#pendingAnchor === null) this.#pendingAnchor = this.#settledAnchor
     if (this.#state !== null) {
+      this.#updateEmptyState(this.#state)
       this.#updateTail(this.#state)
       this.#updateCompaction(this.#state)
     }
@@ -562,6 +545,11 @@ export class TranscriptRenderable extends BoxRenderable {
           ...this.#historyOptions,
           onExpansionChange: (id, expanded) => rememberExpansion(this.#toolExpansion, id, expanded),
           onReasoningExpansion: (id, expanded) => rememberExpansion(this.#reasoningExpansion, id, expanded),
+          childLabel: id => {
+            const subagent = this.#state === null ? undefined
+              : this.#state.subagents[id] ?? Object.values(this.#state.subagents).find(value => value.subagentId === id)
+            return { name: this.#historyOptions.childAgentName?.(id) ?? null, task: subagent?.task ?? null }
+          },
           reasoningExpanded: this.#reasoningExpansion.get(item.id)
             ?? (item.agent_turn === this.#tailReasoningTurnId ? this.#tailReasoning.expanded : true),
         }, this.#toolExpansion.get(item.content.type === "tool" ? item.content.invocation_id : `history:${item.id}`))
@@ -569,7 +557,8 @@ export class TranscriptRenderable extends BoxRenderable {
         this.#clientStateRevision++
       }
       if (card.item.revision !== item.revision) this.#clientStateRevision++
-      card.update(item, Math.max(20, this.width || this.ctx.width))
+      const index = items.indexOf(item)
+      card.update(item, Math.max(20, this.width || this.ctx.width), items[index - 1]?.content.type ?? null)
       this.scroller.insertBefore(card, reference)
       reference = card
     }
@@ -654,7 +643,7 @@ export class TranscriptRenderable extends BoxRenderable {
     const liveInvocations = new Set(tools.map(tool => tool.invocationId))
     for (const card of this.mountedCards.values()) {
       const content = card.item.content
-      card.visible = !(content.type === "tool" && content.status.type === "running"
+      card.setShadowed(content.type === "tool" && content.status.type === "running"
         && liveInvocations.has(content.invocation_id))
     }
     this.streamingCard.visible = tail !== null
@@ -665,7 +654,8 @@ export class TranscriptRenderable extends BoxRenderable {
       this.streamingMarkdown.streaming = false
       this.streamingMarkdown.content = ""
       this.streamingMarkdown.visible = false
-      this.#tailHeader.content = `${this.#agentName} · delegating`
+      this.#tailActivity.visible = false
+      this.#tailEnd.visible = false
       this.#tailReasoning.update("", false, Math.max(20, this.width || this.ctx.width))
       this.#tailReasoningTurnId = null
       this.#tailCitations.visible = false
@@ -674,13 +664,6 @@ export class TranscriptRenderable extends BoxRenderable {
     }
     this.#tailReasoning.setBlockId(`reasoning:tail:${tail.turnId}`)
     const reasoning = presentableReasoning(tail.thinking + (tail.displayBudget.thinking.omittedBytes > 0 ? `\n${DISPLAY_TRUNCATION_MARKER}` : ""))
-    const activity = tools.some((tool) => tool.status === "awaiting_approval")
-      ? "Waiting for approval"
-      : tools.some((tool) => tool.status === "running")
-        ? "Running tools"
-        : reasoning !== ""
-          ? "Thinking"
-          : "Streaming"
     // Set the parser mode before appending content. Reversing this order makes
     // the new chunk take the non-streaming parse path for one frame, which is
     // the visible plain-text-then-Markdown flicker reported by users.
@@ -691,10 +674,14 @@ export class TranscriptRenderable extends BoxRenderable {
       Math.max(20, (this.width || this.ctx.width) - 4),
       tail.finished === null ? "streaming" : "complete",
     )
-    const detail = tail.finished === null
-      ? state.model ?? activity.toLowerCase()
-      : turnDetail(tail.finished.cost, tail.finished.usage)
-    this.#tailHeader.content = t`${fg(this.#theme.accent)("● ")}${bold(fg(this.#theme.text)(this.#agentName.toLowerCase()))}${fg(this.#theme.textMuted)(`  ${detail}`)}`
+    // Tool rows carry their own status; the activity line only fills the gap
+    // before the first visible output of a turn.
+    this.#tailActivity.visible = tail.finished === null && tail.text.length === 0 && tools.length === 0
+    this.#tailActivity.content = `◌ ${this.#agentName === "Rottweiler" ? "" : `${this.#agentName} · `}${reasoning === "" ? "Working…" : "Thinking…"}`
+    const end = tail.finished === null ? null : turnEndLine(tail.finished.status, tail.finished.cost, tail.finished.usage)
+    this.#tailEnd.visible = end !== null
+    this.#tailEnd.content = end?.text ?? ""
+    this.#tailEnd.fg = end?.tone === "error" ? this.#theme.error : end?.tone === "warning" ? this.#theme.warning : this.#theme.textMuted
     if (this.#tailReasoningTurnId !== tail.turnId) {
       this.#tailReasoning.expand(false)
       this.#tailReasoningTurnId = tail.turnId
@@ -718,12 +705,14 @@ export class TranscriptRenderable extends BoxRenderable {
 
   #updateCompaction(state: RottweilerState): void {
     const compaction = state.compaction
-    this.compactionCard.visible = compaction.active &&
-      (compaction.text !== "" || compaction.thinking !== "")
+    this.compactionCard.visible = compaction.active || compaction.reclaimedTokens !== null
     if (!compaction.active) {
+      this.#compactionHeader.content = compaction.reclaimedTokens === null
+        ? ""
+        : `Context compacted · ${compaction.reclaimedTokens} tokens reclaimed`
+      this.compactionMarkdown.visible = compaction.text !== ""
       this.compactionMarkdown.streaming = false
-      this.compactionMarkdown.content = ""
-      this.compactionMarkdown.visible = false
+      this.compactionMarkdown.content = terminalMarkdown(compaction.text, Math.max(20, (this.width || this.ctx.width) - 4), "complete")
       this.#compactionReasoning.update("", false, Math.max(20, this.width || this.ctx.width))
       this.#compactionAttempt = null
       return
@@ -821,7 +810,7 @@ export class TranscriptRenderable extends BoxRenderable {
       if (
         renderable instanceof ToolBlockRenderable ||
         renderable instanceof ReasoningBlockRenderable
-        || (renderable instanceof TranscriptRowRenderable && renderable.item.content.type === "tool")
+        || (renderable instanceof TranscriptRowRenderable && renderable.isChildResult)
       ) {
         blocks.push(renderable)
         return
@@ -845,17 +834,6 @@ export class TranscriptRenderable extends BoxRenderable {
     }
   }
 }
-
-function turnDetail(
-  cost: Parameters<typeof formatCost>[0],
-  usage: Parameters<typeof formatCost>[1],
-): string {
-  const detail = formatCost(cost, usage)
-  return cost?.kind === "subscription_quota" && (cost.used === null || cost.used === undefined)
-    ? `turn usage · ${detail}`
-    : detail
-}
-
 
 function rememberExpansion(values: Map<string, boolean>, key: string, expanded: boolean): void {
   values.delete(key)

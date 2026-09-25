@@ -354,3 +354,26 @@ async fn diff_approval_revalidates_current_base_before_mutation() {
         "concurrent user edit"
     );
 }
+
+#[test]
+fn approval_diff_is_a_minimal_line_diff_with_context() {
+    let before = "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n";
+    let after = "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n";
+    let diff = crate::engine::approval_unified_diff("a/calc.py", "b/calc.py", before, after);
+    let changed: Vec<&str> = diff
+        .lines()
+        .filter(|line| {
+            (line.starts_with('+') || line.starts_with('-'))
+                && !line.starts_with("+++")
+                && !line.starts_with("---")
+        })
+        .collect();
+    assert_eq!(
+        changed,
+        ["-    return a - b", "+    return a + b"],
+        "{diff}"
+    );
+    assert!(diff.contains("@@ -1,5 +1,5 @@"), "{diff}");
+    assert!(diff.contains("\n def add(a, b):\n"), "{diff}");
+    assert!(!diff.contains("\n-\n") && !diff.contains("\n+\n"), "{diff}");
+}

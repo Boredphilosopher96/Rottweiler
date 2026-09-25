@@ -1,80 +1,14 @@
-import { TextRenderable } from "./text"
-import {
-  BoxRenderable,
-  InputRenderable,
-  InputRenderableEvents,
-  SelectRenderable,
-  SelectRenderableEvents,
-  type KeyEvent,
-  type RenderContext,
-} from "@opentui/core"
+import { StyledText, fg, type KeyEvent, type RenderContext } from "@opentui/core"
 
+import { keyStrokeFromEvent } from "../keybindings"
 import type { RottweilerTheme } from "../theme"
-
-type Rgb = Readonly<{ r: number; g: number; b: number; a: number }>
-
-export function pickerSelectionColors(theme: RottweilerTheme): {
-  readonly background: string
-  readonly foreground: string
-} {
-  let background = theme.primary
-  if (parseHex(background).a !== 255) {
-    background = theme.mode === "light" ? "#555555" : "#BBBBBB"
-  }
-  const panelContrast = colorContrast(background, theme.backgroundElement)
-  if (panelContrast < 1.4) {
-    const target = theme.mode === "light" ? "#000000" : "#FFFFFF"
-    for (const amount of [0.15, 0.25, 0.35, 0.45, 0.55]) {
-      const candidate = mixHex(background, target, amount)
-      background = candidate
-      if (colorContrast(candidate, theme.backgroundElement) >= 1.4) break
-    }
-  }
-  const fallbacks = (theme.mode === "light"
-    ? [theme.selectedListItemText, "#000000", "#FFFFFF"]
-    : [theme.selectedListItemText, "#FFFFFF", "#000000"])
-    .filter((candidate) => parseHex(candidate).a === 255)
-  const foreground = fallbacks.find((candidate) => colorContrast(candidate, background) >= 4.5)
-    ?? fallbacks.reduce((best, candidate) =>
-      colorContrast(candidate, background) > colorContrast(best, background) ? candidate : best,
-    )
-  return { background, foreground }
-}
-
-export function colorContrast(left: string, right: string): number {
-  const first = relativeLuminance(parseHex(left))
-  const second = relativeLuminance(parseHex(right))
-  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
-}
-
-function parseHex(value: string): Rgb {
-  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(value)
-  if (match === null) return { r: 0, g: 0, b: 0, a: 0 }
-  return {
-    r: Number.parseInt(match[1]!, 16),
-    g: Number.parseInt(match[2]!, 16),
-    b: Number.parseInt(match[3]!, 16),
-    a: value.length >= 9 ? Number.parseInt(value.slice(7, 9), 16) : 255,
-  }
-}
-
-function relativeLuminance(color: Rgb): number {
-  const channel = (value: number) => {
-    const normalized = value / 255
-    return normalized <= 0.04045
-      ? normalized / 12.92
-      : ((normalized + 0.055) / 1.055) ** 2.4
-  }
-  return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
-}
-
-function mixHex(base: string, target: string, amount: number): string {
-  const from = parseHex(base)
-  const to = parseHex(target)
-  const channel = (left: number, right: number) =>
-    Math.round(left + (right - left) * amount).toString(16).padStart(2, "0")
-  return `#${channel(from.r, to.r)}${channel(from.g, to.g)}${channel(from.b, to.b)}`
-}
+import {
+  ListDetailRenderable,
+  type ListDetailItemRow,
+  type ListDetailPresentation,
+  type ListDetailRow,
+  type ListDetailTone,
+} from "./list-detail"
 
 export interface PickerItem<T> {
   readonly id: string
@@ -82,10 +16,46 @@ export interface PickerItem<T> {
   readonly description: string
   readonly value: T
   readonly searchText?: string
-  /** Render this row as status/context, but never focus or activate it. */
+  /** Render this row as status/context: it can be inspected but never activated. */
   readonly selectable?: boolean
   /** Empty-query grouping label; hidden as soon as fuzzy filtering starts. */
   readonly sectionHeader?: boolean
+  /** Right-aligned secondary text in the row, repeated as the detail meta line. */
+  readonly hint?: string
+  /** Status glyph before the label, such as `●` for the current choice. */
+  readonly marker?: string
+  readonly tone?: ListDetailTone
+  /** Detail pane body; defaults to `description`. */
+  readonly detail?: string
+  /** Enter's footer label on this row; `null` when Enter does nothing here. */
+  readonly primary?: string | null
+}
+
+/** One screen-specific chord, listed in the footer while it applies. */
+export interface PickerKey<T> {
+  /** Canonical stroke, e.g. `ctrl+r`. */
+  readonly stroke: string
+  readonly label: string
+  readonly run: (item: PickerItem<T> | null) => void
+  /** The chord is hidden and inert while this returns false for the selection. */
+  readonly available?: (item: PickerItem<T> | null) => boolean
+}
+
+export interface PickerScreenOptions<T> {
+  /** Replaces the title line, e.g. with an inline usage meter. */
+  readonly heading?: StyledText
+  /** Enter's footer label unless a row overrides it; defaults to `select`. */
+  readonly primary?: string
+  readonly keys?: readonly PickerKey<T>[]
+  /** Esc returns to the parent screen instead of closing. */
+  readonly back?: () => void
+  /** List copy when there are no rows. */
+  readonly emptyCopy?: string
+  readonly notice?: ListDetailPresentation<unknown>["notice"]
+  /** Initial selection for a newly presented list. */
+  readonly selectedId?: string | null
+  /** Distinguishes nested views that share one screen kind; a new view starts fresh. */
+  readonly view?: string
 }
 
 export interface TextPromptOptions {
@@ -94,495 +64,363 @@ export interface TextPromptOptions {
   readonly onSubmit: (value: string) => void
   readonly maxBytes: number
   readonly empty: "allow" | "reject"
+  /** Guidance shown below the field. */
+  readonly detail?: string
+  /** Editable starting value, e.g. a suggested pattern the user reviews. */
+  readonly initial?: string
 }
 
-export class FuzzyPickerRenderable<T> extends BoxRenderable {
-  readonly input: InputRenderable
-  readonly status: TextRenderable
-  readonly select: SelectRenderable
-  #items: readonly PickerItem<T>[] = []
-  #filtered: readonly PickerItem<T>[] = []
-  #clientStateRevision = 0
-  get clientStateRevision(): number { return this.#clientStateRevision }
-  #onSelect: ((item: PickerItem<T>) => void) | undefined
-  #onQuery: ((query: string) => void) | undefined
-  #query = ""
+type ScreenMode = "list" | "prompt" | "secret" | "status"
+
+/**
+ * Every generic navigation screen: the shared list-detail anatomy (title,
+ * filter, grouped list, detail, state-aware footer) plus the text-entry and
+ * status states a screen passes through. Anchored mode is the composer's `@`
+ * mention list: the same rows, directly above the composer, which keeps focus.
+ */
+export class PickerScreenRenderable<T> extends ListDetailRenderable<PickerItem<T>> {
+  #mode: ScreenMode = "list"
   #anchored = false
-  #compact = false
-  #desiredHeight = 12
-  #secretMode = false
-  #textMode = false
+  #screen: string | null = null
+  #title = ""
+  #items: readonly PickerItem<T>[] = []
+  #visible: readonly PickerItem<T>[] = []
+  #onPick: ((item: PickerItem<T>) => void) | undefined
+  #screenOptions: PickerScreenOptions<T> = {}
+  #query = ""
+  #desiredInlineRows = 3
   #secretValue = ""
-  #onSecretSubmit: ((secret: string) => void) | undefined
-  #onTextSubmit: ((value: string) => void) | undefined
-  readonly #queryMaxLength: number
   #textMaxBytes = 2048
   #textAllowsEmpty = false
-  #theme: RottweilerTheme
-  #onKey = (key: KeyEvent) => {
-    if (!this.visible) return
-
-    if (this.status.visible && !this.#anchored) {
-      // A status surface is deliberately not an action list. Keep all input
-      // except Escape from leaking into the composer behind the modal.
-      if (key.name === "escape") return
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-
-    if (this.#textMode && !key.ctrl && !key.meta && !key.option) {
-      if (key.name === "return" || key.name === "kpenter") {
-        const value = this.input.value.trim()
-        if (value.length > 0 || this.#textAllowsEmpty) {
-          const onSubmit = this.#onTextSubmit
-          this.#clearInputModes()
-          onSubmit?.(value)
-        }
-      } else if (key.name === "backspace" || key.name === "delete") {
-        this.input.value = Array.from(this.input.value).slice(0, -1).join("")
-      } else if (isPrintableInput(key.sequence)) {
-        const candidate = this.input.value + key.sequence
-        if (Buffer.byteLength(candidate) <= this.#textMaxBytes) {
-          this.input.value = candidate
-        }
-      } else {
-        return
-      }
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-
-    if (this.#secretMode) {
-      const plain = !key.ctrl && !key.meta && !key.option
-      if (plain && (key.name === "return" || key.name === "kpenter")) {
-        if (this.#secretValue.length > 0) {
-          const secret = this.#secretValue
-          const onSubmit = this.#onSecretSubmit
-          this.#clearInputModes()
-          onSubmit?.(secret)
-        }
-      } else if (plain && (key.name === "backspace" || key.name === "delete")) {
-        this.#secretValue = Array.from(this.#secretValue).slice(0, -1).join("")
-        this.#renderSecretMask()
-      } else if (plain && isPrintableInput(key.sequence)) {
-        if (Buffer.byteLength(this.#secretValue) + Buffer.byteLength(key.sequence) <= 8 * 1024) {
-          this.#secretValue += key.sequence
-          this.#renderSecretMask()
-        }
-      } else {
-        return
-      }
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-
-    const plain = !key.ctrl && !key.meta && !key.option && !key.shift
-    const controlOnly = key.ctrl && !key.meta && !key.option && !key.shift
-    let handled = true
-    if ((plain && key.name === "up") || (controlOnly && key.name === "p")) {
-      this.moveSelection(-1)
-    } else if ((plain && key.name === "down") || (controlOnly && key.name === "n")) {
-      this.moveSelection(1)
-    } else if (plain && key.name === "pageup") {
-      this.moveSelection(-10, false)
-    } else if (plain && key.name === "pagedown") {
-      this.moveSelection(10, false)
-    } else if (plain && key.name === "home") {
-      this.moveToBoundary(false)
-    } else if (plain && key.name === "end") {
-      this.moveToBoundary(true)
-    } else if (
-      this.select.options.length > 0 &&
-      ((plain && (key.name === "return" || key.name === "kpenter")) ||
-        (this.#anchored && plain && key.name === "tab"))
-    ) {
-      this.select.selectCurrent()
-    } else {
-      // Escape deliberately reaches RottweilerApp so its existing overlay
-      // lifecycle restores the correct composer/Vim focus.
-      handled = false
-    }
-    if (handled) {
-      key.preventDefault()
-      key.stopPropagation()
-    }
-  }
+  #onTextSubmit: ((value: string) => void) | undefined
+  readonly #queryMaxLength: number
+  readonly #chrome: RottweilerTheme
+  readonly #onQuery: ((query: string) => void) | undefined
+  /** Vim bindings need a second Esc: the first leaves insert mode. */
+  vim = false
   #onPaste = (event: { bytes: Uint8Array; preventDefault(): void; stopPropagation(): void }) => {
-    if (this.visible && this.status.visible && !this.#anchored) {
+    if (!this.visible || this.#anchored) return
+    if (this.#mode === "status") {
       event.preventDefault()
       event.stopPropagation()
       return
     }
-    if (!this.visible || (!this.#secretMode && !this.#textMode)) return
+    if (this.#mode !== "prompt" && this.#mode !== "secret") return
+    event.preventDefault()
+    event.stopPropagation()
     let pasted: string
     try {
       pasted = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes)
     } catch {
-      event.preventDefault()
-      event.stopPropagation()
       return
     }
-    if (!isPrintableInput(pasted)) {
-      event.preventDefault()
-      event.stopPropagation()
-      return
-    }
-    if (this.#textMode) {
+    if (!isPrintableInput(pasted)) return
+    if (this.#mode === "prompt") {
       const candidate = this.input.value + pasted
-      if (Buffer.byteLength(candidate) <= this.#textMaxBytes) {
-        this.input.value = candidate
-      }
-      event.preventDefault()
-      event.stopPropagation()
+      if (Buffer.byteLength(candidate) <= this.#textMaxBytes) this.input.value = candidate
       return
     }
-    const bytes = new TextEncoder().encode(this.#secretValue + pasted)
-    if (bytes.length <= 8 * 1024) this.#secretValue += pasted
+    if (Buffer.byteLength(this.#secretValue + pasted) <= 8 * 1024) this.#secretValue += pasted
     this.#renderSecretMask()
-    event.preventDefault()
-    event.stopPropagation()
   }
 
-  constructor(
-    ctx: RenderContext,
-    theme: RottweilerTheme,
-    onQuery?: (query: string) => void,
-  ) {
-    const selected = pickerSelectionColors(theme)
-    super(ctx, {
-      id: "fuzzy-picker",
-      width: "100%",
-      height: 12,
-      maxHeight: "80%",
-      flexDirection: "column",
-      border: true,
-      borderStyle: "rounded",
-      borderColor: theme.border,
-      focusedBorderColor: theme.borderActive,
-      backgroundColor: theme.backgroundElement,
-      padding: 1,
-      gap: 1,
-      visible: false,
-      zIndex: 20,
+  constructor(ctx: RenderContext, theme: RottweilerTheme, onQuery?: (query: string) => void) {
+    super(ctx, theme, {
+      surfaceLayout: "primary",
+      splitMinWidth: 90,
+      surfaceBackground: theme.background,
+      inputPlaceholder: "Type to filter…",
+      emptyInList: true,
+      fullWidthFooter: true,
     })
-    this.#theme = theme
+    this.#chrome = theme
     this.#onQuery = onQuery
-    this.input = new InputRenderable(ctx, {
-      id: "picker-query",
-      width: "100%",
-      placeholder: "type to filter…",
-      backgroundColor: theme.backgroundPanel,
-      textColor: theme.text,
-      focusedBackgroundColor: theme.backgroundElement,
-      focusedTextColor: theme.text,
-    })
     this.#queryMaxLength = this.input.maxLength
-    this.select = new SelectRenderable(ctx, {
-      id: "picker-results",
-      width: "100%",
-      flexGrow: 1,
-      options: [],
-      backgroundColor: theme.backgroundElement,
-      textColor: theme.text,
-      selectedBackgroundColor: selected.background,
-      selectedTextColor: selected.foreground,
-      descriptionColor: theme.textMuted,
-      selectedDescriptionColor: selected.foreground,
-      showScrollIndicator: true,
-      wrapSelection: true,
-      fastScrollStep: 10,
-    })
-    this.status = new TextRenderable(ctx, {
-      id: "picker-status",
-      width: "100%",
-      flexGrow: 1,
-      content: "",
-      fg: theme.textMuted,
-      visible: false,
-    })
-    this.add(this.input)
-    this.add(this.status)
-    this.add(this.select)
-    this.input.on(InputRenderableEvents.INPUT, (query: string) => {
-      this.#filter(query, false)
-      this.#onQuery?.(query)
-    })
-    this.input.on(InputRenderableEvents.ENTER, () => this.select.selectCurrent())
-    this.select.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
-      const item = this.#filtered[index]
-      if (item !== undefined && item.selectable !== false) {
-        this.#onSelect?.(item)
-      }
-    })
-    this.select.onMouseDown = (event) => {
-      if (event.button !== 0) return
-      const index = this.#mouseIndex(event.y)
-      if (index === null) return
-      if (this.#filtered[index]?.selectable === false) {
-        event.preventDefault()
-        event.stopPropagation()
-        return
-      }
-      this.#setSelectionAtEdge(index)
-      event.preventDefault()
-      event.stopPropagation()
-    }
-    this.select.onMouseUp = (event) => {
-      if (event.button !== 0) return
-      const index = this.#mouseIndex(event.y)
-      if (index === null) return
-      if (this.#filtered[index]?.selectable === false) {
-        event.preventDefault()
-        event.stopPropagation()
-        return
-      }
-      this.#setSelectionAtEdge(index)
-      this.select.selectCurrent()
-      event.preventDefault()
-      event.stopPropagation()
-    }
-    this.select.onMouseScroll = (event) => {
-      const direction = event.scroll?.direction
-      if (direction !== "up" && direction !== "down") return
-      this.#scrollViewport(direction === "up" ? -1 : 1)
-      event.preventDefault()
-      event.stopPropagation()
-    }
-    ctx.keyInput.on("keypress", this.#onKey)
     ctx.keyInput.on("paste", this.#onPaste)
   }
 
-  open(
+  get anchored(): boolean { return this.#anchored }
+  get mode(): ScreenMode { return this.#mode }
+  get screenTitle(): string { return this.#title }
+  /** Rows currently listed after filtering, excluding section headers. */
+  get items(): readonly PickerItem<T>[] { return this.#visible.filter(item => item.sectionHeader !== true) }
+  get selectedItem(): PickerItem<T> | null {
+    return this.#visible.find(item => item.id === this.selectedId && item.sectionHeader !== true) ?? null
+  }
+  /** Rows a composer-anchored list wants, before the terminal constrains it. */
+  get desiredInlineRows(): number { return this.#desiredInlineRows }
+
+  /** The next presentation starts a new screen: fresh query and selection. */
+  beginScreen(query: string): void {
+    this.#screen = null
+    this.#query = query
+    this.input.value = query
+  }
+
+  /** Present or refresh a list. Refreshing the same screen keeps query and selection. */
+  present(
+    screen: string,
     title: string,
     items: readonly PickerItem<T>[],
-    onSelect: (item: PickerItem<T>) => void,
-    compact = false,
+    onPick: (item: PickerItem<T>) => void,
+    options: PickerScreenOptions<T>,
+    anchored: boolean,
+    anchoredQuery: string,
   ): void {
+    const fresh = !this.visible || this.#mode !== "list" || this.#screen !== screen || this.#anchored !== anchored
     this.#clearInputModes()
-    this.status.visible = false
-    this.input.visible = true
-    this.select.visible = true
-    this.#configurePresentation(
-      false,
-      items.length,
-      compact,
-      items.some((item) => item.sectionHeader === true),
-    )
-    this.title = ` ${title} `
+    this.#mode = "list"
+    this.#screen = screen
+    this.#anchored = anchored
+    this.#title = title
     this.#items = items
-    this.#onSelect = onSelect
-    this.input.value = ""
-    this.#query = ""
-    this.#filter("", false)
-    this.visible = true
-    this.input.focus()
+    this.#onPick = onPick
+    this.#screenOptions = options
+    if (anchored) {
+      const queryChanged = anchoredQuery !== this.#query
+      this.#query = anchoredQuery
+      this.#show(fresh || queryChanged)
+      return
+    }
+    if (fresh) this.#query = this.input.value
+    this.#show(fresh)
+    if (fresh) this.input.focus()
   }
 
-  openSecret(title: string, onSubmit: (secret: string) => void): void {
-    this.#clearInputModes()
-    this.#secretMode = true
-    this.#onSecretSubmit = onSubmit
-    this.#configurePresentation(false, 0)
-    this.title = ` ${title} `
-    this.#items = []
-    this.#replaceFiltered([])
-    this.select.options = []
-    this.select.visible = false
-    this.status.visible = false
-    this.input.visible = true
-    this.input.placeholder = "API key (hidden)"
-    this.input.value = ""
-    this.visible = true
-    this.height = 5
-    this.input.focus()
-  }
-
-  openTextPrompt({ title, placeholder, onSubmit, maxBytes, empty }: TextPromptOptions): void {
-    this.#clearInputModes()
-    this.#textMode = true
+  openTextPrompt({ title, placeholder, onSubmit, maxBytes, empty, detail, initial }: TextPromptOptions, back?: () => void): void {
+    this.#enterInputMode("prompt", title, back)
+    if (initial !== undefined) this.input.value = initial
     this.#textAllowsEmpty = empty === "allow"
     this.#onTextSubmit = onSubmit
     this.#textMaxBytes = Math.max(1, Math.min(maxBytes, 8192))
     this.input.maxLength = this.#textMaxBytes
-    this.#configurePresentation(false, 0)
-    this.title = ` ${title} `
-    this.#items = []
-    this.#replaceFiltered([])
-    this.select.options = []
-    this.select.visible = false
-    this.status.visible = false
-    this.input.visible = true
     this.input.placeholder = placeholder
-    this.input.value = ""
-    this.visible = true
-    this.height = 5
+    this.#openEmpty(title, detail ?? "", `⏎ ${empty === "allow" ? "continue" : "save"} · ${this.#escape(back)}`)
     this.input.focus()
   }
 
-  /** Present transient or empty state without masquerading as a selectable row. */
+  openSecret(title: string, onSubmit: (secret: string) => void, back?: () => void): void {
+    this.#enterInputMode("secret", title, back)
+    this.#onTextSubmit = onSubmit
+    this.input.placeholder = "API key (hidden)"
+    this.#openEmpty(title, "The key is stored through the secure credential channel and never shown.", `⏎ save · ${this.#escape(back)}`)
+    this.input.focus()
+  }
+
+  /** Transient or empty state; never presented as a selectable row. */
   showStatus(title: string, message: string, description = "", anchored = false): void {
     this.#clearInputModes()
+    this.#mode = "status"
+    this.#screen = null
     this.#anchored = anchored
-    this.title = ` ${title} `
+    this.#title = title
     this.#items = []
-    this.#replaceFiltered([])
-    this.#onSelect = undefined
+    this.#visible = []
+    this.#onPick = undefined
+    this.#screenOptions = {}
+    this.#desiredInlineRows = description.length === 0 ? 2 : 3
+    this.#openEmpty(title, description.length === 0 ? message : `${message}\n${description}`, this.#escape(undefined))
     this.input.blur()
-    this.select.options = []
     this.input.visible = false
-    this.select.visible = false
-    this.status.content = description.length === 0 ? message : `${message}\n${description}`
-    this.status.visible = true
-    this.visible = true
-    this.#desiredHeight = description.length === 0 ? 5 : 6
-    this.height = this.#desiredHeight
   }
 
   showLoading(title: string, message: string, anchored = false): void {
-    this.showStatus(title, `◌ ${message}`, "This panel will update automatically.", anchored)
+    this.showStatus(title, `◌ ${message}`, "This screen updates automatically.", anchored)
   }
 
-  /** Replace remote results without clearing the query or moving focus. */
-  refresh(
-    title: string,
-    items: readonly PickerItem<T>[],
-    onSelect: (item: PickerItem<T>) => void,
-    compact = false,
-  ): void {
-    if (!this.visible) {
-      this.open(title, items, onSelect, compact)
-      return
-    }
-    const resumed = this.status.visible
-    this.#configurePresentation(
-      false,
-      items.length,
-      compact,
-      items.some((item) => item.sectionHeader === true),
-    )
-    this.status.visible = false
-    this.input.visible = true
-    this.select.visible = true
-    this.title = ` ${title} `
-    this.#items = items
-    this.#onSelect = onSelect
-    this.#query = this.input.value
-    this.#filter(this.input.value, true)
-    if (resumed) this.input.focus()
-  }
+  /** Escape handler for the current screen, when it returns to a parent. */
+  get back(): (() => void) | undefined { return this.#screenOptions.back }
 
-  /** Composer-anchored autocomplete keeps editing focus in the textarea. */
-  openAnchored(
-    title: string,
-    items: readonly PickerItem<T>[],
-    query: string,
-    onSelect: (item: PickerItem<T>) => void,
-  ): void {
-    this.#configurePresentation(true, items.length)
-    this.status.visible = false
-    this.select.visible = true
-    this.title = ` ${title} `
-    this.#items = items
-    this.#onSelect = onSelect
-    this.#query = query
-    this.#filter(query, false)
-    this.visible = true
-  }
-
-  /** Refresh composer autocomplete without stealing focus. A new query selects its best match. */
-  refreshAnchored(
-    title: string,
-    items: readonly PickerItem<T>[],
-    query: string,
-    onSelect: (item: PickerItem<T>) => void,
-  ): void {
-    if (!this.visible || !this.#anchored) {
-      this.openAnchored(title, items, query, onSelect)
-      return
-    }
-    this.#configurePresentation(true, items.length)
-    this.status.visible = false
-    this.select.visible = true
-    this.title = ` ${title} `
-    this.#items = items
-    this.#onSelect = onSelect
-    const queryChanged = query !== this.#query
-    this.#query = query
-    this.#filter(query, !queryChanged)
-  }
-
-  get anchored(): boolean {
-    return this.#anchored
-  }
-
-  constrainAnchoredHeight(availableRows: number): number {
-    const height = Math.max(1, Math.min(this.#desiredHeight, Math.floor(availableRows)))
-    if (this.#anchored) this.height = height
-    return height
-  }
-
-  constrainModalHeight(availableRows: number): number {
-    const height = Math.max(1, Math.min(this.#desiredHeight, Math.floor(availableRows)))
-    if (!this.#anchored) this.height = height
-    return height
-  }
-
-  /** OpenCode-style keyboard navigation keeps the active result centered. */
-  moveSelection(delta: number, wrap = true): void {
-    const selectable = this.#selectableIndices()
-    if (selectable.length === 0) return
-    const current = this.select.getSelectedIndex()
-    const currentPosition = selectable.indexOf(current)
-    const origin = currentPosition >= 0 ? currentPosition : 0
-    let target = origin + delta
-    if (wrap) target = ((target % selectable.length) + selectable.length) % selectable.length
-    else target = Math.min(Math.max(target, 0), selectable.length - 1)
-    this.#setKeyboardSelection(selectable[target]!)
-  }
-
-  moveToBoundary(end: boolean): void {
-    const selectable = this.#selectableIndices()
-    if (selectable.length === 0) return
-    this.#setKeyboardSelection(
-      end ? selectable.at(-1)! : selectable[0]!,
-      end ? "end" : "start",
-    )
-  }
-
-  close(): void {
-    this.visible = false
-    this.input.blur()
-    this.input.visible = true
-    this.select.visible = true
-    this.status.visible = false
-    this.status.content = ""
-    this.input.placeholder = "type to filter…"
-    this.#anchored = false
-    this.#onSelect = undefined
+  override close(): void {
     this.#clearInputModes()
+    this.#mode = "list"
+    this.#screen = null
+    this.#anchored = false
     this.#items = []
-    this.#replaceFiltered([])
+    this.#visible = []
+    this.#onPick = undefined
+    this.#screenOptions = {}
     this.#query = ""
-    this.select.options = []
-    this.input.value = ""
-  }
-
-  override destroyRecursively(): void {
-    if (!this.isDestroyed) this.close()
-    super.destroyRecursively()
+    this.input.placeholder = "Type to filter…"
+    super.close()
+    this.input.visible = true
   }
 
   override destroy(): void {
-    if (this.isDestroyed) return
-    if (!this.select.isDestroyed) this.close()
-    this.#items = []; this.#replaceFiltered([]); this.#onSelect = undefined
-    this.#onQuery = undefined; this.#onSecretSubmit = undefined; this.#onTextSubmit = undefined
-    this.ctx.keyInput.off("keypress", this.#onKey)
     this.ctx.keyInput.off("paste", this.#onPaste)
+    this.#onPick = undefined
+    this.#onTextSubmit = undefined
     super.destroy()
+  }
+
+  /** An anchored status line leaves Enter and arrows to the composer that owns focus. */
+  protected override get navigable(): boolean { return !(this.#anchored && this.#mode === "status") }
+
+  protected override interceptKey(key: KeyEvent): boolean {
+    const plain = !key.ctrl && !key.meta && !key.option
+    if (this.#mode === "status" && !this.#anchored) {
+      // A status surface is not an action list; only Esc and global chords pass.
+      return key.name !== "escape" && plain
+    }
+    if (this.#mode === "prompt" && plain) return this.#promptKey(key)
+    if (this.#mode === "secret" && plain) return this.#secretKey(key)
+    if (this.#mode !== "list") return false
+    if (this.#anchored && plain && !key.shift && key.name === "tab") return this.activateSelected()
+    const stroke = keyStrokeFromEvent(key)
+    const selected = this.selectedItem
+    const chord = this.#screenOptions.keys?.find(candidate =>
+      candidate.stroke === stroke && (candidate.available?.(selected) ?? true))
+    if (chord === undefined) return false
+    chord.run(selected)
+    return true
+  }
+
+  #promptKey(key: KeyEvent): boolean {
+    if (key.name === "return" || key.name === "kpenter") {
+      const value = this.input.value.trim()
+      if (value.length > 0 || this.#textAllowsEmpty) {
+        const submit = this.#onTextSubmit
+        this.#clearInputModes()
+        submit?.(value)
+      }
+    } else if (key.name === "backspace" || key.name === "delete") {
+      this.input.value = Array.from(this.input.value).slice(0, -1).join("")
+    } else if (isPrintableInput(key.sequence)) {
+      const candidate = this.input.value + key.sequence
+      if (Buffer.byteLength(candidate) <= this.#textMaxBytes) this.input.value = candidate
+    } else {
+      return false
+    }
+    return true
+  }
+
+  #secretKey(key: KeyEvent): boolean {
+    if (key.name === "return" || key.name === "kpenter") {
+      if (this.#secretValue.length > 0) {
+        const secret = this.#secretValue
+        const submit = this.#onTextSubmit
+        this.#clearInputModes()
+        submit?.(secret)
+      }
+    } else if (key.name === "backspace" || key.name === "delete") {
+      this.#secretValue = Array.from(this.#secretValue).slice(0, -1).join("")
+      this.#renderSecretMask()
+    } else if (isPrintableInput(key.sequence)) {
+      if (Buffer.byteLength(this.#secretValue + key.sequence) <= 8 * 1024) {
+        this.#secretValue += key.sequence
+        this.#renderSecretMask()
+      }
+    } else {
+      return false
+    }
+    return true
+  }
+
+  #enterInputMode(mode: "prompt" | "secret", title: string, back: (() => void) | undefined): void {
+    this.#clearInputModes()
+    this.#mode = mode
+    this.#screen = null
+    this.#anchored = false
+    this.#title = title
+    this.#items = []
+    this.#visible = []
+    this.#onPick = undefined
+    this.#screenOptions = back === undefined ? {} : { back }
+  }
+
+  #openEmpty(title: string, copy: string, status: string): void {
+    const presentation: ListDetailPresentation<PickerItem<T>> = {
+      title: this.#anchored ? this.#inlineHeading(title, status) : title,
+      query: this.input.value,
+      rows: [],
+      selectedId: null,
+      status,
+      emptyCopy: copy,
+    }
+    this.#present(presentation)
+    this.input.visible = !this.#anchored
+  }
+
+  #present(presentation: ListDetailPresentation<PickerItem<T>>): void {
+    if (this.visible) {
+      this.refresh(presentation)
+      return
+    }
+    this.open(presentation, item => this.#activate(item), {
+      onQuery: query => {
+        if (this.#mode !== "list" || this.#anchored) return
+        this.#show(false)
+        this.#onQuery?.(query)
+      },
+      onSelection: () => {
+        if (this.#mode === "list") this.footer.content = this.#footerWithNotice(this.#footer(this.selectedId))
+      },
+    })
+  }
+
+  #show(fresh: boolean): void {
+    const query = this.#anchored ? this.#query : this.input.value
+    this.#visible = filterItems(this.#items, query)
+    const listed = this.#visible.filter(item => item.sectionHeader !== true)
+    const firstActive = listed.find(item => item.selectable !== false)?.id ?? listed[0]?.id ?? null
+    const requested = fresh || query !== this.#query
+      ? (listed.some(item => item.id === this.#screenOptions.selectedId) && query.length === 0
+          ? this.#screenOptions.selectedId! : firstActive)
+      : this.selectedId ?? firstActive
+    this.#query = query
+    this.#desiredInlineRows = Math.min(12, Math.max(2, this.#visible.length + 1))
+    const rows = this.#visible.map((item): ListDetailRow<PickerItem<T>> => item.sectionHeader === true
+      ? { kind: "section", id: item.id, label: item.label }
+      : itemRow(item, query))
+    const status = this.#footer(requested)
+    const presentation: ListDetailPresentation<PickerItem<T>> = {
+      title: this.#anchored ? this.#inlineHeading(this.#title, status) : this.#screenOptions.heading ?? this.#title,
+      query: this.#anchored ? "" : query,
+      rows,
+      selectedId: requested,
+      status,
+      emptyCopy: this.#screenOptions.emptyCopy
+        ?? (query.trim().length > 0 ? `No matches for “${query.trim()}”` : "Nothing to show"),
+      notice: this.#screenOptions.notice ?? null,
+    }
+    this.#present(presentation)
+    this.input.visible = !this.#anchored
+  }
+
+  #activate(item: PickerItem<T>): void {
+    if (this.#mode !== "list" || item.selectable === false || item.primary === null) return
+    this.#onPick?.(item)
+  }
+
+  #footerWithNotice(status: string): string {
+    const notice = this.#screenOptions.notice
+    return notice === null || notice === undefined ? status : `${status} · ${notice.message}`
+  }
+
+  #footer(selectedId: string | null): string {
+    const selected = this.#visible.find(item => item.id === selectedId && item.sectionHeader !== true) ?? null
+    const primary = selected === null || selected.selectable === false
+      ? null
+      : selected.primary === undefined ? this.#screenOptions.primary ?? "select" : selected.primary
+    const keys = (this.#screenOptions.keys ?? [])
+      .filter(key => key.available?.(selected) ?? true)
+      .map(key => `${key.stroke} ${key.label}`)
+    return [
+      ...(primary === null ? [] : [`${this.#anchored ? "⏎/tab" : "⏎"} ${primary}`]),
+      ...keys,
+      this.#escape(this.#screenOptions.back),
+    ].join(" · ")
+  }
+
+  #escape(back: (() => void) | undefined): string {
+    return `${this.vim && !this.#anchored ? "esc×2" : "esc"} ${back === undefined ? "close" : "back"}`
+  }
+
+  #inlineHeading(title: string, status: string): StyledText {
+    return new StyledText([
+      fg(this.#chrome.text)(title),
+      fg(this.#chrome.textMuted)(`  ${status}`),
+    ])
   }
 
   #renderSecretMask(): void {
@@ -591,180 +429,58 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   }
 
   #clearInputModes(): void {
+    const wasInput = this.#mode === "prompt" || this.#mode === "secret"
     this.#secretValue = ""
-    this.#secretMode = false
-    this.#onSecretSubmit = undefined
-    this.#textMode = false
     this.#textAllowsEmpty = false
     this.#onTextSubmit = undefined
     this.#textMaxBytes = 2048
-    this.input.value = ""
     this.input.maxLength = this.#queryMaxLength
-  }
-
-  #configurePresentation(
-    anchored: boolean,
-    itemCount: number,
-    compact = false,
-    grouped = false,
-  ): void {
-    this.#anchored = anchored
-    this.#compact = !anchored && compact
-    this.input.visible = !anchored
-    this.select.showDescription = !this.#compact
-    this.paddingTop = anchored ? 0 : 1
-    this.paddingBottom = anchored ? 0 : 1
-    this.gap = anchored ? 0 : 1
-    const compactLimit = Math.max(5, Math.floor(this.ctx.height / 2))
-    this.#desiredHeight = anchored
-      ? Math.min(12, Math.max(3, itemCount + 2))
-      : this.#compact
-        ? Math.min(14, compactLimit, Math.max(5, itemCount + 3))
-        : grouped
-          ? Math.min(
-              Math.max(12, itemCount * 2 + 3),
-              Math.max(12, Math.floor(this.ctx.height * 0.8)),
-            )
-          : 12
-    this.height = this.#desiredHeight
-  }
-
-  #replaceFiltered(items: readonly PickerItem<T>[]): void {
-    if (items.length !== this.#filtered.length || items.some((item, index) => {
-      const before = this.#filtered[index]
-      return item.id !== before?.id || item.selectable !== before.selectable
-    })) this.#clientStateRevision++
-    this.#filtered = items
-  }
-
-  #filter(query: string, preserveSelection = false): void {
-    const selectedId = preserveSelection ? this.select.getSelectedOption()?.value : undefined
-    const selectedIndex = preserveSelection ? this.select.getSelectedIndex() : 0
-    const scrollOffset = preserveSelection ? this.#scrollOffset() : 0
-    const filtering = query.trim().length > 0
-    const ranked = this.#items
-      .filter((item) => !filtering || item.sectionHeader !== true)
-      .map((item, index) => ({
-        item,
-        index,
-        score: pickerItemScore(query, item),
-      }))
-      .filter((entry) => entry.score !== null)
-      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.index - right.index)
-    const noMatches = query.trim().length > 0 && ranked.length === 0
-    this.#replaceFiltered(noMatches
-      ? [{
-          id: "picker.no-matches",
-          label: `No matches for “${query.trim()}”`,
-          description: "",
-          value: null as T,
-          selectable: false,
-        }]
-      : ranked.map((entry) => entry.item))
-    const selected = pickerSelectionColors(this.#theme)
-    this.select.textColor = noMatches ? this.#theme.textMuted : this.#theme.text
-    this.select.selectedTextColor = noMatches ? this.#theme.textMuted : selected.foreground
-    this.select.selectedBackgroundColor = noMatches ? this.#theme.backgroundElement : selected.background
-    this.select.showSelectionIndicator = !noMatches
-    this.select.options = this.#filtered.map((item) => ({
-      // SelectRenderable has one color for all labels and a separate muted
-      // description color. Put section text on the description line so headers
-      // are visibly muted without making them selectable.
-      name: item.sectionHeader === true ? "" : item.label,
-      description: item.sectionHeader === true ? item.label : item.description,
-      value: item.id,
-    }))
-    if (this.#filtered.length === 0) return
-    const retainedIndex = this.#filtered.findIndex((item) => item.id === selectedId)
-    const candidateIndex =
-      retainedIndex >= 0
-        ? retainedIndex
-        : Math.min(Math.max(selectedIndex, 0), this.#filtered.length - 1)
-    const nextIndex = this.#nearestSelectableIndex(candidateIndex)
-    if (nextIndex === null) return
-    this.select.setSelectedIndex(nextIndex)
-    if (preserveSelection) {
-      this.#setScrollOffset(
-        Math.min(scrollOffset, Math.max(0, this.#filtered.length - this.#visibleItemCount())),
-      )
+    if (wasInput) {
+      this.input.value = ""
+      this.input.placeholder = "Type to filter…"
     }
   }
+}
 
-  #setSelectionAtEdge(target: number, boundary?: "start" | "end"): void {
-    if (this.#filtered[target]?.selectable === false) return
-    const previousOffset = this.#scrollOffset()
-    const visible = this.#visibleItemCount()
-    this.select.setSelectedIndex(target)
-    const nextOffset =
-      boundary === "start"
-        ? 0
-        : boundary === "end"
-          ? Math.max(0, this.select.options.length - visible)
-          : target < previousOffset
-            ? target
-            : target >= previousOffset + visible
-              ? target - visible + 1
-              : previousOffset
-    this.#setScrollOffset(nextOffset)
+function itemRow<T>(item: PickerItem<T>, query: string): ListDetailItemRow<PickerItem<T>> {
+  return {
+    kind: "item",
+    id: item.id,
+    label: item.label,
+    disabled: item.selectable === false,
+    ...(item.hint === undefined ? {} : { hint: item.hint }),
+    ...(item.marker === undefined ? {} : { marker: item.marker }),
+    ...(item.tone === undefined ? {} : { tone: item.tone }),
+    matchSpans: matchSpans(fuzzyMatch(query, item.label)),
+    detail: {
+      title: item.label,
+      meta: item.hint ?? "",
+      description: item.detail ?? item.description,
+    },
+    action: item,
   }
+}
 
-  #setKeyboardSelection(target: number, boundary?: "start" | "end"): void {
-    if (this.#filtered[target]?.selectable === false) return
-    const visible = this.#visibleItemCount()
-    this.select.setSelectedIndex(target)
-    const maximum = Math.max(0, this.select.options.length - visible)
-    const nextOffset =
-      boundary === "start"
-        ? 0
-        : boundary === "end"
-          ? maximum
-          : Math.min(maximum, Math.max(0, target - Math.floor(visible / 2)))
-    this.#setScrollOffset(nextOffset)
-  }
+/** Empty queries keep screen order and sections; a query ranks matching rows. */
+function filterItems<T>(items: readonly PickerItem<T>[], query: string): readonly PickerItem<T>[] {
+  if (query.trim().length === 0) return items
+  return items
+    .filter(item => item.sectionHeader !== true)
+    .map((item, index) => ({ item, index, score: pickerItemScore(query, item) }))
+    .filter(entry => entry.score !== null)
+    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.index - right.index)
+    .map(entry => entry.item)
+}
 
-  #scrollViewport(delta: number): void {
-    const maximum = Math.max(0, this.select.options.length - this.#visibleItemCount())
-    this.#setScrollOffset(Math.min(maximum, Math.max(0, this.#scrollOffset() + delta)))
+function matchSpans(match: FuzzyMatch | null): readonly (readonly [number, number])[] {
+  if (match === null) return []
+  const spans: Array<readonly [number, number]> = []
+  for (const position of match.positions) {
+    const previous = spans.at(-1)
+    if (previous !== undefined && previous[1] === position) spans[spans.length - 1] = [previous[0], position + 1]
+    else spans.push([position, position + 1])
   }
-
-  #visibleItemCount(): number {
-    return Math.max(1, Math.floor(this.select.height / (this.#compact ? 1 : 2)))
-  }
-
-  #scrollOffset(): number {
-    return (this.select as unknown as { scrollOffset: number }).scrollOffset
-  }
-
-  #setScrollOffset(value: number): void {
-    ;(this.select as unknown as { scrollOffset: number }).scrollOffset = Math.max(0, value)
-    this.select.requestRender()
-  }
-
-  #mouseIndex(mouseY: number): number | null {
-    const localRow = Math.floor(mouseY - this.select.y)
-    if (localRow < 0 || localRow >= this.select.height) return null
-    const index = this.#scrollOffset() + Math.floor(localRow / (this.#compact ? 1 : 2))
-    return index >= 0 && index < this.select.options.length ? index : null
-  }
-
-  #selectableIndices(): number[] {
-    const selectable: number[] = []
-    for (let index = 0; index < this.#filtered.length; index += 1) {
-      if (this.#filtered[index]?.selectable !== false) selectable.push(index)
-    }
-    return selectable
-  }
-
-  #nearestSelectableIndex(origin: number): number | null {
-    if (this.#filtered[origin]?.selectable !== false) return origin
-    for (let distance = 1; distance < this.#filtered.length; distance += 1) {
-      const after = origin + distance
-      if (after < this.#filtered.length && this.#filtered[after]?.selectable !== false) return after
-      const before = origin - distance
-      if (before >= 0 && this.#filtered[before]?.selectable !== false) return before
-    }
-    return null
-  }
+  return spans
 }
 
 function pickerItemScore<T>(query: string, item: PickerItem<T>): number | null {

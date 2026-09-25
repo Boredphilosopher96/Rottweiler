@@ -12,6 +12,7 @@ export const referenceSources = Object.freeze({
   "docs/guides/extensions": ["crates/rw-ext/src/discovery.rs", "crates/rw-plugin-protocol/src/lib.rs"],
   "docs/guides/troubleshooting": ["crates/rw-cli/src/doctor.rs", "crates/rw-cli/src/main.rs"],
   "docs/reference/cli": ["crates/rw-cli/src/main.rs"],
+  "docs/reference/commands": ["crates/rw-types/src/client_navigation.rs", "packages/tui/src/keybindings.ts", "packages/tui/src/app/agents-screen.ts"],
   "docs/reference/configuration": ["crates/rw-types/src/config.rs", "crates/rw-store/src/config.rs"],
   "docs/reference/plugin-sdk": ["packages/plugin-sdk/src/index.ts", "packages/plugin-sdk/package.json", "packages/plugin-host/src/index.ts", "crates/rw-cli/src/plugin_dev.rs"],
   "docs/reference/plugin-api": ["crates/rw-plugin-protocol/src/lib.rs", "packages/plugin-sdk/PROTOCOL.md"],

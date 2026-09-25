@@ -1,3 +1,4 @@
+import { readyCatalog } from "../fixtures/catalog"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { afterEach, describe, expect, test } from "bun:test"
 import { PROTOCOL_VERSION } from "../../../../protocol/types"
@@ -6,6 +7,7 @@ import type { ClientCommand, EngineEvent, TranscriptItem } from "../../src/proto
 import type { SessionReader } from "../../src/session-reader"
 import { createInitialState } from "../../src/state"
 import { conversationItem, emptySessionReader, sessionReaderFor, waitForHistory } from "../fixtures/history"
+import { options, select, selectedOption, statusText } from "../picker-screen"
 
 function history(text: string, attachments = false, source = 10): SessionReader {
   const item = conversationItem(source, "user", text.slice(0, 50))
@@ -40,18 +42,18 @@ describe("Rottweiler semantic timeline", () => {
     let request = 0
     const app = createRottweilerApp(renderer, {
       sessionReader: reader, requestId: () => `timeline-${request++}`,
-      onCommand(command) { commands.push(command); return { type: "accepted" } }, ...options,
+      onCommand(command) { commands.push(command); return readyCatalog(() => app)(command) }, ...options,
     })
     renderer.root.add(app)
     return { app, commands, ...testRenderer }
   }
-  async function selectAction(result: Awaited<ReturnType<typeof setup>>, action: "edit" | "retry" | "rewind") {
+  async function selectAction(result: Awaited<ReturnType<typeof setup>>, action: "edit" | "retry" | "rewind" | "fork") {
     result.app.openTimelinePicker()
-    await waitForHistory(result, () => result.app.picker.select.options.some(option => option.value === "timeline.turn.10"))
-    result.app.picker.select.selectCurrent()
-    const index = result.app.picker.select.options.findIndex(option => option.value === `timeline.action.${action}`)
-    result.app.picker.select.setSelectedIndex(index)
-    result.app.picker.select.selectCurrent()
+    await waitForHistory(result, () => options(result.app.picker).some(option => option.value === "timeline.turn.10"))
+    result.app.picker.activateSelected()
+    const index = options(result.app.picker).findIndex(option => option.value === `timeline.action.${action}`)
+    select(result.app.picker, index)
+    result.app.picker.activateSelected()
     await Bun.sleep(0)
   }
 
@@ -61,9 +63,9 @@ describe("Rottweiler semantic timeline", () => {
     } })
     await result.mockInput.typeText("/rew")
     result.mockInput.pressEnter()
-    await waitForHistory(result, () => result.app.picker.status.plainText.includes("No user turns"))
+    await waitForHistory(result, () => statusText(result.app.picker).includes("No messages yet"))
     expect(result.app.composer.value).toBe("")
-    expect(result.app.picker.title).toContain("Conversation timeline")
+    expect(result.app.picker.screenTitle).toContain("REWIND")
     expect(result.commands.some(command => command.type === "send_message")).toBe(false)
   })
 
@@ -72,16 +74,16 @@ describe("Rottweiler semantic timeline", () => {
     const result = await setup(sessionReaderFor(items))
     expect("transcript" in result.app.state).toBe(false)
     result.app.openTimelinePicker()
-    await waitForHistory(result, () => result.app.picker.select.options.some(option => option.value === "timeline.turn.399"))
-    expect(result.app.picker.select.options.filter(option => String(option.value).startsWith("timeline.turn.")).map(option => option.name))
+    await waitForHistory(result, () => options(result.app.picker).some(option => option.value === "timeline.turn.399"))
+    expect(options(result.app.picker).filter(option => String(option.value).startsWith("timeline.turn.")).map(option => option.name))
       .toEqual(Array.from({ length: 32 }, (_, index) => `Request ${399 - index}`))
     for (let page = 0; page < 10; page++) {
-      const older = result.app.picker.select.options.findIndex(option => option.value === "timeline.older")
-      result.app.picker.select.setSelectedIndex(older)
-      result.app.picker.select.selectCurrent()
+      const older = options(result.app.picker).findIndex(option => option.value === "timeline.older")
+      select(result.app.picker, older)
+      result.app.picker.activateSelected()
       await Bun.sleep(0)
     }
-    expect(result.app.picker.select.options.some(option => option.value === "timeline.turn.79")).toBe(true)
+    expect(options(result.app.picker).some(option => option.value === "timeline.turn.79")).toBe(true)
   })
 
   test("renderer handoff restores the selected historical timeline source", async () => {
@@ -89,16 +91,16 @@ describe("Rottweiler semantic timeline", () => {
     const reader = sessionReaderFor(items)
     const result = await setup(reader)
     result.app.openTimelinePicker()
-    await waitForHistory(result, () => result.app.picker.select.options.some(option => option.value === "timeline.turn.399"))
+    await waitForHistory(result, () => options(result.app.picker).some(option => option.value === "timeline.turn.399"))
     for (let page = 0; page < 10; page++) {
-      const older = result.app.picker.select.options.findIndex(option => option.value === "timeline.older")
-      result.app.picker.select.setSelectedIndex(older)
-      result.app.picker.select.selectCurrent()
+      const older = options(result.app.picker).findIndex(option => option.value === "timeline.older")
+      select(result.app.picker, older)
+      result.app.picker.activateSelected()
       await Bun.sleep(0)
     }
     expect(result.app.recycleState()).toBeNull()
-    const selected = result.app.picker.select.options.findIndex(option => option.value === "timeline.turn.70")
-    result.app.picker.select.setSelectedIndex(selected)
+    const selected = options(result.app.picker).findIndex(option => option.value === "timeline.turn.70")
+    select(result.app.picker, selected)
     const state = result.app.recycleState()
     expect(state).not.toBeNull()
     result.app.destroyRecursively()
@@ -107,10 +109,10 @@ describe("Rottweiler semantic timeline", () => {
     restored.restoreRecycleState(state!)
     await waitForHistory(result, () => {
       restored.applyPendingRecycleScroll()
-      return restored.picker.select.getSelectedOption()?.value === "timeline.turn.70"
+      return selectedOption(restored.picker)?.value === "timeline.turn.70"
     })
-    expect(restored.picker.title).toContain("Conversation timeline")
-    expect(restored.picker.select.getSelectedOption()?.value).toBe("timeline.turn.70")
+    expect(restored.picker.screenTitle).toContain("REWIND")
+    expect(selectedOption(restored.picker)?.value).toBe("timeline.turn.70")
   })
 
   test("edit reads exact content, sends a source precondition and preserves concurrent composer text", async () => {
@@ -178,13 +180,21 @@ describe("Rottweiler semantic timeline", () => {
     })
   })
 
+  test("fork from a timeline turn branches at that turn without rewinding", async () => {
+    const result = await setup(history("body"))
+    await selectAction(result, "fork")
+    expect(result.commands.find(command => command.type === "fork")).toMatchObject({ at_turn: "10" })
+    expect(result.commands.some(command => command.type === "rewind")).toBe(false)
+  })
+
   test("replay timelines remain browsable without mutation actions", async () => {
     const result = await setup(history("Historical request"), { replaySessionId: "historical-timeline" })
     result.app.openTimelinePicker()
-    await waitForHistory(result, () => result.app.picker.select.options.some(option => option.name === "Historical request"))
-    expect(result.app.picker.select.options.map(option => option.name)).toEqual(["read-only session", "Historical request"])
-    result.app.picker.select.selectCurrent()
-    expect(result.app.picker.title).toContain("Conversation timeline")
+    await waitForHistory(result, () => options(result.app.picker).some(option => option.name === "Historical request"))
+    expect(options(result.app.picker).map(option => option.name)).toEqual(["Historical request"])
+    expect(result.app.picker.footer.plainText).toBe("esc close · read-only session")
+    result.app.picker.activateSelected()
+    expect(result.app.picker.screenTitle).toContain("REWIND")
     expect(result.commands.filter(command => command.type === "rewind")).toHaveLength(0)
   })
 })

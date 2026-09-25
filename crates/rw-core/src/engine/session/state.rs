@@ -30,7 +30,6 @@ use rw_types::RequestId;
 use rw_types::SessionId;
 use rw_types::SessionMode;
 use rw_types::ShellId;
-use rw_types::SubagentId;
 use rw_types::Turn;
 use rw_types::UnrestorablePath;
 use rw_types::config::ThinkingLevel;
@@ -78,17 +77,6 @@ pub(in crate::engine) enum ActorCommand {
         captured_output: Option<String>,
         respond: oneshot::Sender<Result<(), AgentLoopError>>,
     },
-    RecordSubagentSpawned {
-        subagent_id: SubagentId,
-        child_session_id: SessionId,
-        task: String,
-        respond: oneshot::Sender<Result<(), AgentLoopError>>,
-    },
-    RecordSubagentFinished {
-        result: rw_types::SubagentResult,
-        respond: oneshot::Sender<Result<(), AgentLoopError>>,
-    },
-    PublishSubagentProgress(Arc<crate::engine::turn::child_progress::ChildProgressSlot>),
     PluginInjectMessage {
         plugin_id: String,
         content: String,
@@ -151,7 +139,6 @@ pub(in crate::engine) enum ActorCommand {
         command_meta: CommandMeta,
         content: String,
         attachments: Vec<Attachment>,
-        observed_turn: u64,
         respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
     },
     #[cfg(test)]
@@ -165,6 +152,7 @@ pub(in crate::engine) enum ActorCommand {
 }
 
 pub(in crate::engine) enum ProtocolCompletion {
+    DeferredControl,
     Message(MessageDisposition),
     Rewind(Vec<UnrestorablePath>),
     Context(crate::recovery::HistoryRead<ContextSnapshot>),
@@ -175,6 +163,10 @@ pub(in crate::engine) enum ProtocolCompletion {
 
 #[allow(clippy::struct_excessive_bools)]
 pub(in crate::engine) struct ActorState {
+    pub(in crate::engine) deferred_controls: Vec<rw_types::QueuedSessionControl>,
+    pub(in crate::engine) deferred_active:
+        Option<crate::engine::dispatch::deferred_controls::ActiveControl>,
+
     pub(in crate::engine) pending_context_read:
         Option<crate::engine::dispatch::context_job::PendingRead>,
     pub(in crate::engine) live: super::live_state::LiveState,
@@ -201,6 +193,7 @@ pub(in crate::engine) struct ActorState {
     pub(in crate::engine) suspended_inputs: Option<Vec<crate::recovery::RecoveredMessage>>,
     pub(in crate::engine) queued: VecDeque<String>,
     pub(in crate::engine) queued_positions: VecDeque<u64>,
+    pub(in crate::engine) child_results: super::ChildResultWake,
     pub(in crate::engine) running: Option<RunningTurn>,
     pub(in crate::engine) pending_approvals: BTreeMap<String, PendingApproval>,
     pub(in crate::engine) next_turn: u64,
@@ -312,6 +305,8 @@ impl ActorState {
             .get(&mode_id.0)
             .map_or(recovered.mode, mode_permission_base);
         Self {
+            deferred_controls: recovered.deferred_controls,
+            deferred_active: None,
             live: super::live_state::LiveState {
                 controls_source: None,
                 budget: recovered.latest_budget,
@@ -333,6 +328,7 @@ impl ActorState {
             suspended_inputs: None,
             queued: recovered.queued_messages.into_iter().collect(),
             queued_positions,
+            child_results: super::ChildResultWake::default(),
             running: None,
             pending_command: None,
             pending_context_read: None,

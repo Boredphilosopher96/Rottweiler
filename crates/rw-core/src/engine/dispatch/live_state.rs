@@ -25,6 +25,7 @@ pub(in crate::engine) fn snapshot(
         state.provider.prepared_bytes(),
         state.mode_id.prepared_bytes(),
         state.live.budget.prepared_bytes(),
+        state.deferred_controls.prepared_bytes(),
         state.live.compaction.prepared_bytes(),
         state.live.plugin_statuses.prepared_bytes(),
     ];
@@ -89,6 +90,7 @@ pub(in crate::engine) fn snapshot(
         shell,
         compaction: state.live.compaction.clone(),
         queued_messages,
+        queued_controls: state.deferred_controls.clone(),
         plugin_statuses: state.live.plugin_statuses.clone(),
         budget: state.live.budget.clone(),
     };
