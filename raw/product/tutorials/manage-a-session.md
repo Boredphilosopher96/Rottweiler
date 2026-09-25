@@ -3,15 +3,18 @@ work.
 
 ## Start a clean conversation
 
-Press `Ctrl+N`, choose **New session** from the command or session picker, or
-enter:
+Press `Ctrl+N` (from the composer or the Sessions screen), or enter:
 
 ```text
 /new
 ```
 
 The engine creates the session and returns its identity before the TUI switches.
-The previous conversation remains durable and available from **Switch session**.
+The previous conversation remains durable. Press `Ctrl+S` (or enter `/resume`)
+to open the Sessions screen. Each row shows when the session was last active and
+how many turns it has; the detail pane shows its first prompt, workspace, model,
+and USD cost when every charge was priced. Enter resumes the selected session
+directly, and the footer lists `Ctrl+R` rename, `Ctrl+X` export, and `Ctrl+N` new.
 
 ## Find the session
 

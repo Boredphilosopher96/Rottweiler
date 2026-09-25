@@ -30,6 +30,7 @@ telemetry, and update channel remain user-scoped.
 The configuration model covers:
 
 - `engine` for session and subagent concurrency;
+- `agents` for child-agent orchestration (see [Child agents](#child-agents));
 - `models` and `models.aliases` for provider-neutral routing;
 - `compaction` and `budget` for context and spend guardrails;
 - `providers` for typed provider adapters and credential references;
@@ -67,6 +68,23 @@ api_key_credential = "providers.anthropic.api_key"
 ```
 
 Store the referenced value with `rw auth set-key anthropic`.
+
+## Child agents
+
+```toml
+[agents]
+wake_on_completion = true
+```
+
+A background child agent's final report reaches its parent exactly once. With
+`wake_on_completion = true` (the default), a child that finishes while the
+parent is idle and has nothing queued starts a parent turn that receives the
+result. With `false`, the result waits for the next turn you start. Project
+configuration may set this value after project trust.
+
+`rw -p` does not exit while any child is running or queued: it waits for them
+and prints each parent turn their results wake. Concurrency and depth limits
+are `engine.subagent_max_concurrency` and `engine.subagent_max_depth`.
 
 ## Budget guardrails
 

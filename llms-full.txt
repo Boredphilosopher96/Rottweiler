@@ -283,9 +283,11 @@ rw -p "Map this repository and identify its three riskiest boundaries" \
   --max-turns 12
 ```
 
-Inside the TUI, `/help` lists live commands and keybindings. `/models`,
-`/permissions`, `/context`, `/agents`, `/mcp`, `/rewind`, and `/review` are good
-starting points.
+Inside the TUI, type `/` for inline command completion or press Ctrl+P for the
+full command palette; `/help` (or `?` on an empty composer) lists every command
+and keybinding. `/model`, `/permissions`, `/context`, `/mcp`, `/rewind`, and
+`/review` are good starting points. The [commands reference](./reference/commands.md)
+lists the full catalog.
 
 ## 4. Continue the work
 
@@ -322,6 +324,56 @@ Project extension files use `.agents/` directories and participate in the
 trust inventory. Plugin and MCP execution also require their own fingerprint-
 bound approvals.
 
+## Skills
+
+A skill is a directory with a `SKILL.md` file. Rottweiler reads skills from
+`.agents/skills`, `.rottweiler/skills`, and `.claude/skills` in the project and
+in your home directory, in that order; the first skill with a given name wins.
+Project skills load only after you trust the project.
+
+Existing Claude Code skills and commands work in place: there is nothing to
+import. Skill directories and `SKILL.md` files may be symbolic links, for
+example into a shared checkout. A link in your home directory may point
+anywhere you own; a project link must stay inside the project or your home
+directory.
+
+```markdown
+---
+description: |
+  Review a pull request for correctness and safety.
+  Use when asked to "review this PR".
+allowed-tools:
+  - Bash
+  - Read
+---
+Review instructions…
+```
+
+The directory name is the skill name. `description` is required; YAML block
+scalars (`|`, `>`) and keys Rottweiler does not use (such as `hooks:`) are fine.
+
+Run a skill yourself with `/<name> [arguments]`. The model sees every skill's
+name and description and loads a matching skill with the built-in `skill` tool.
+Either way it receives the `SKILL.md` instructions, the skill's directory, and a
+list of bundled files, which it opens on demand. Large bundles never prevent a
+skill from loading.
+
+`allowed-tools` pre-approves tools while your `/<name>` invocation runs, the
+same meaning it has in Claude Code: matching calls run without an approval
+prompt. It does **not** restrict the skill. Every other tool stays available
+and follows your normal approval policy, so a skill can still ask to edit
+files, run commands, or reach the network. Only list tools you are comfortable
+running unprompted, and prefer narrow patterns such as `Bash(git status:*)` over
+a bare `Bash`. Deny rules, Discuss and Plan read-only modes, sandbox bypass, and
+network access are still checked separately. Claude Code tool names such as
+`Read` or `AskUserQuestion` are translated; names Rottweiler does not have are
+ignored.
+
+In the TUI, `/skills` lists every discovered skill, command, and agent with its
+source and load status. `rw doctor` lists every skill, command, or agent that
+was skipped, hidden by a higher-precedence one of the same name, or waiting for
+project trust, with the reason.
+
 RPC plugins communicate through bounded JSON-RPC frames on stdio. The host
 validates the manifest before executing the process and checks every call
 against declared capabilities.
@@ -342,6 +394,18 @@ Source owners: crates/rw-core/src/provider_factory.rs, crates/rw-types/src/confi
 
 The engine addresses model aliases rather than spreading provider-specific IDs
 through sessions and clients.
+
+## Choose a model in the TUI
+
+Connecting a provider opens its models. If no model is selected, Rottweiler
+selects an available tool-capable model from that provider's catalog. Connecting
+another provider preserves your selection. `/model` changes it explicitly.
+The first concrete selection becomes your user default when none is configured;
+subsequent choices are remembered per workspace. Cached lists are labeled.
+
+Context limits have an offline models.dev fallback. Opening model discovery
+attempts a bounded refresh of missing or day-old metadata; a failed refresh keeps
+local metadata. Provider discovery still decides which models are available.
 
 ## Define an alias
 
@@ -383,6 +447,24 @@ whole-record: user configuration, then authenticated provider discovery, then
 models.dev. Fields are not blended from multiple sources. Subscription and
 Copilot routes use quota or credit accounting and reject dollar pricing rather
 than appearing as free API routes.
+
+### Compatible endpoints
+
+In `/model`, press `Ctrl+N` to connect a provider, then choose **Compatible
+endpoint…** under **Custom** to add a user-scoped Chat Completions or Responses
+endpoint. Supply its full inference URL, for
+example `https://gateway.example/v1/chat/completions`, and a unique local name.
+API keys are entered separately and stored through the credential manager;
+they never enter configuration commands or session history. Unauthenticated
+connections are restricted to explicit loopback endpoints.
+
+The optional initial model creates a `<provider>-model` alias without changing
+an existing default or active session. Local servers that return 404, 405, or
+501 for `/models` can use this configured route. A working live catalog remains
+authoritative: models it omits cannot be selected, and authentication/network
+failures do not enable the static fallback. Remote endpoints must expose their
+model catalog. After connecting, choose a model in the model picker to make it
+the active selection and save its default.
 
 ---
 
@@ -778,6 +860,97 @@ fixtures used for cross-language contract tests.
 
 ---
 
+# Commands reference
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/commands/
+Source owners: crates/rw-types/src/client_navigation.rs, packages/tui/src/keybindings.ts, packages/tui/src/app/agents-screen.ts
+
+The engine owns one catalog of built-in commands. Slash completion, the Ctrl+P
+command palette, and `/help` all show this catalog, grouped by section in the
+order below. Type `/` in an empty composer for completion; `?` on an empty
+composer opens `/help`.
+
+Aliases resolve to the canonical command before it runs. Keys are the default
+standard bindings; `/help` shows your effective bindings.
+
+## Conversation
+
+| Command | Aliases | Arguments | Key | Purpose |
+|---|---|---|---|---|
+| `/new` | | | Ctrl+N | Start a clean conversation. |
+| `/resume` | `/sessions` | | Ctrl+S | Resume, rename, or export a session. |
+| `/rewind` | | `[turn]` | | Restore or fork from a completed turn. |
+| `/compact` | | `[instructions]` | | Summarize older context to free space. |
+| `/queue` | | | | Review, remove, or clear queued messages. Listed only while messages are queued. |
+
+## Models and agents
+
+| Command | Aliases | Arguments | Key | Purpose |
+|---|---|---|---|---|
+| `/model` | `/models`, `/providers` | | Alt+M | Choose a model or connect a provider. |
+| `/mode` | | `[discuss\|plan\|execute]` | Shift+Tab | Switch between discuss, plan, and execute. |
+| `/agents` | | | Ctrl+G | Inspect, continue, or stop child agents. Listed only once the session has child agents. |
+
+## Context and usage
+
+| Command | Aliases | Arguments | Key | Purpose |
+|---|---|---|---|---|
+| `/context` | | `[pin\|evict <item-id>]` | | Inspect, pin, or evict context items. |
+| `/usage` | `/cost`, `/budget` | | | Tokens, cost, and budget limits. |
+
+## Workspace
+
+| Command | Aliases | Arguments | Key | Purpose |
+|---|---|---|---|---|
+| `/review` | | | Ctrl+R | Accept or revert this session's file changes. |
+| `/dirs` | `/add-dir` | `[path]` | | List workspace roots or add one. |
+| `/mcp` | | `[status\|enable\|disable\|approve\|prompt]` | | Manage servers, prompts, and panels. |
+| `/init` | | `[--deep]` | | Write AGENTS.md for this repository. |
+| `/memory` | | `[list\|read <id>\|write <text>\|clear]` | | Read or update private project memory. |
+
+## Safety
+
+| Command | Aliases | Arguments | Key | Purpose |
+|---|---|---|---|---|
+| `/permissions` | `/trust` | `[mode\|approvals\|add\|remove\|trust\|…]` | | Approval policy, rules, and folder trust. |
+
+## Settings and help
+
+| Command | Aliases | Arguments | Key | Purpose |
+|---|---|---|---|---|
+| `/settings` | | | | Change saved user settings. |
+| `/skills` | | | | Skills, commands, and agents with their load status. |
+| `/theme` | | | | Preview and choose an interface theme. |
+| `/help` | `/keys` | | `?` | Commands and keyboard shortcuts. |
+| `/errors` | | | | Recent failures and recovery steps. Listed only when errors exist. |
+| `/exit` | | | | Close Rottweiler. |
+
+## Extension commands
+
+Skills, user and project commands, plugin commands, `/workflow`, and MCP
+prompts follow the built-in sections. Each is labelled with its source, such as
+`skill`, `project command`, or `mcp · github`. See
+[Extensions](../guides/extensions.md).
+
+## Agents
+
+While a session has child agents, an Agents strip above the composer lists
+them with their state. Ctrl+G or `/agents` opens the Agents screen:
+
+| Action | Effect |
+|---|---|
+| View | Watch the child's transcript over the parent view; the parent keeps running and Escape returns. |
+| Message | Send a follow-up to a child that is not running; it keeps the context of its earlier work. |
+| Stop | Interrupt a running child; its partial report is delivered to the parent. |
+| Background | For the child the parent is waiting on: the parent continues and the result arrives when the child finishes. |
+| Close | Release the child and its worktree; its result stays in the parent transcript. |
+
+Ctrl+B moves the running foreground child to the background without opening
+the screen. A child view is read-only unless the child is waiting for a typed
+answer.
+
+---
+
 # Configuration reference
 Section: product
 Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/configuration/
@@ -815,6 +988,7 @@ telemetry, and update channel remain user-scoped.
 The configuration model covers:
 
 - `engine` for session and subagent concurrency;
+- `agents` for child-agent orchestration (see [Child agents](#child-agents));
 - `models` and `models.aliases` for provider-neutral routing;
 - `compaction` and `budget` for context and spend guardrails;
 - `providers` for typed provider adapters and credential references;
@@ -852,6 +1026,23 @@ api_key_credential = "providers.anthropic.api_key"
 ```
 
 Store the referenced value with `rw auth set-key anthropic`.
+
+## Child agents
+
+```toml
+[agents]
+wake_on_completion = true
+```
+
+A background child agent's final report reaches its parent exactly once. With
+`wake_on_completion = true` (the default), a child that finishes while the
+parent is idle and has nothing queued starts a parent turn that receives the
+result. With `false`, the result waits for the next turn you start. Project
+configuration may set this value after project trust.
+
+`rw -p` does not exit while any child is running or queued: it waits for them
+and prints each parent turn their results wake. Concurrency and depth limits
+are `engine.subagent_max_concurrency` and `engine.subagent_max_depth`.
 
 ## Budget guardrails
 
@@ -1224,15 +1415,18 @@ work.
 
 ## Start a clean conversation
 
-Press `Ctrl+N`, choose **New session** from the command or session picker, or
-enter:
+Press `Ctrl+N` (from the composer or the Sessions screen), or enter:
 
 ```text
 /new
 ```
 
 The engine creates the session and returns its identity before the TUI switches.
-The previous conversation remains durable and available from **Switch session**.
+The previous conversation remains durable. Press `Ctrl+S` (or enter `/resume`)
+to open the Sessions screen. Each row shows when the session was last active and
+how many turns it has; the detail pane shows its first prompt, workspace, model,
+and USD cost when every charge was priced. Enter resumes the selected session
+directly, and the footer lists `Ctrl+R` rename, `Ctrl+X` export, and `Ctrl+N` new.
 
 ## Find the session
 

@@ -56,9 +56,11 @@ rw -p "Map this repository and identify its three riskiest boundaries" \
   --max-turns 12
 ```
 
-Inside the TUI, `/help` lists live commands and keybindings. `/models`,
-`/permissions`, `/context`, `/agents`, `/mcp`, `/rewind`, and `/review` are good
-starting points.
+Inside the TUI, type `/` for inline command completion or press Ctrl+P for the
+full command palette; `/help` (or `?` on an empty composer) lists every command
+and keybinding. `/model`, `/permissions`, `/context`, `/mcp`, `/rewind`, and
+`/review` are good starting points. The [commands reference](./reference/commands.md)
+lists the full catalog.
 
 ## 4. Continue the work
 
